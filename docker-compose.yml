@@ -1,0 +1,23 @@
+services:
+  dev:
+    build:
+      context: .
+      args:
+        # Match these to your host user so mounted files keep your ownership.
+        USER_UID: "1000"
+        USER_GID: "1000"
+    image: rust-claude
+    # Keep STDIN open + allocate a TTY so you can `docker compose exec dev claude`.
+    stdin_open: true
+    tty: true
+    working_dir: /workspace
+    volumes:
+      - .:/workspace
+      # Persist Claude auth/config and the cargo cache across containers.
+      - claude-config:/home/dev/.claude
+      - cargo-cache:/home/dev/.cargo/registry
+    command: sleep infinity
+
+volumes:
+  claude-config:
+  cargo-cache:

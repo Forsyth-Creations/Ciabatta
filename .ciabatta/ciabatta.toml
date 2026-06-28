@@ -1,0 +1,45 @@
+# Ciabatta configuration
+# Run `ciabatta config reference` for full documentation.
+
+[system]
+# ci = "github"  # Uncomment and set: gitlab | github | jenkins | circleci | azure | bitbucket
+containers = "docker"
+
+# ─── Registries ────────────────────────────────────────────────────────────────
+# Define each registry you publish to. The section name is used as the registry
+# identifier in recipes. Supported types (auto-detected from name):
+#   nexus, artifactory → HTTP PUT/GET
+#   s3                 → aws s3 cp
+#   docker             → docker push/pull
+#   ecr                → AWS ECR (auto-login)
+#
+# [registries.nexus]
+# url          = "https://nexus.example.com/repository/releases/"
+# tls_verify   = true
+# needs_auth   = true
+# login_script = ".ciabatta/nexus_login.sh"
+#
+# [registries.ecr]
+# url        = "123456789.dkr.ecr.us-east-1.amazonaws.com"
+# needs_auth = false   # ciabatta auto-fetches the ECR token
+
+# ─── Recipes ───────────────────────────────────────────────────────────────────
+# Each recipe describes how to push (and optionally pull) one artifact.
+# Variables available in publish_path: {CIABATTA_BRANCH}, {CIABATTA_COMMIT},
+#                                      {CIABATTA_TAG}, {CIABATTA_BUILD_NUMBER}
+#
+# Registry-based recipe (HTTP or S3 upload):
+# [recipies.my_artifact]
+# registry            = "nexus"
+# local_artifact_path = "dist/app.tar.gz"
+# publish_path        = "myteam/app/{CIABATTA_BRANCH}/{CIABATTA_COMMIT}/app.tar.gz"
+#
+# Bash script recipe (full control):
+# [recipies.my_script]
+# bash_script = "scripts/publish.sh"
+#
+# Push/pull pair (different actions for each direction):
+# [recipies.my_docker.push]
+# bash_script = "scripts/docker_push.sh"
+# [recipies.my_docker.pull]
+# bash_script = "scripts/docker_pull.sh"

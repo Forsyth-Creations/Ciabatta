@@ -1,0 +1,26 @@
+[package]
+name = "ciabatta"
+version = "0.1.0"
+edition = "2024"
+description = "A command line tool for publishing artifacts to various registries"
+license = "MIT"
+
+[[bin]]
+name = "ciabatta"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive", "env"] }
+ratatui = "0.29"
+crossterm = { version = "0.28", features = ["event-stream"] }
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+reqwest = { version = "0.12", features = ["json", "default-tls"] }
+futures = "0.3"
+regex = "1"
+chrono = { version = "0.4", features = ["serde"] }
+serde_json = "1"

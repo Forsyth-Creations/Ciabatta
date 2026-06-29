@@ -1,7 +1,7 @@
 import { defineConfig } from "vite";
 
 export default defineConfig({
-  base: "/ciabatta/",
+  base: "/Ciabatta/",
   build: {
     outDir: "dist",
   },

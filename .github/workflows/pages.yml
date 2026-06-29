@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
   pages: write
   id-token: write
 
@@ -21,10 +21,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: Swatinem/rust-cache@v2
-
       - name: Enable Corepack
         run: corepack enable
 
@@ -36,20 +32,13 @@ jobs:
 
       - run: yarn install --immutable
 
-      - run: yarn build
+      - run: yarn turbo run build --filter=ciabatta-frontend
 
-      - name: Upload frontend artifact
+      - name: Upload pages artifact
         if: startsWith(github.ref, 'refs/tags/')
         uses: actions/upload-pages-artifact@v3
         with:
           path: frontend/dist
-
-      - name: Upload binary artifact
-        if: startsWith(github.ref, 'refs/tags/')
-        uses: actions/upload-artifact@v4
-        with:
-          name: ciabatta-linux-x86_64
-          path: target/release/ciabatta
 
   deploy:
     needs: build
@@ -65,19 +54,3 @@ jobs:
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
-
-  release:
-    needs: build
-    if: startsWith(github.ref, 'refs/tags/')
-    runs-on: ubuntu-latest
-    steps:
-      - name: Download binary
-        uses: actions/download-artifact@v4
-        with:
-          name: ciabatta-linux-x86_64
-
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: ciabatta
-          generate_release_notes: true

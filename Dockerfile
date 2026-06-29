@@ -46,6 +46,6 @@ RUN curl -fsSL https://claude.ai/install.sh | bash
 # Or run `claude` and authenticate interactively.
 
 # Add some rustup deps
-RUN rustup component add clippy cargo-watch rustfmt rust-src
+RUN rustup component add clippy rustfmt rust-src
 
 CMD ["bash"]

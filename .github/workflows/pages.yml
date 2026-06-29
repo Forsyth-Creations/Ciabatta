@@ -3,25 +3,16 @@ name: Build and Deploy
 on:
   push:
     branches: [main]
-    paths:
-      - "frontend/**"
-      - "src/**"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - "Dockerfile"
-      - "package.json"
-      - "turbo.json"
-      - "yarn.lock"
-      - ".github/workflows/pages.yml"
+    tags: ['v*']
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
   pages: write
   id-token: write
 
 concurrency:
-  group: pages
+  group: ${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
@@ -30,48 +21,31 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+      - uses: dtolnay/rust-toolchain@stable
 
-      - name: Build Docker image
-        uses: docker/build-push-action@v5
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Enable Corepack
+        run: corepack enable
+
+      - uses: actions/setup-node@v4
         with:
-          context: .
-          load: true
-          tags: ciabatta-builder:latest
-          # Match the runner's uid/gid so mounted workspace files are writable.
-          build-args: |
-            USER_UID=1001
-            USER_GID=1001
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          node-version: "20"
+          cache: yarn
+          cache-dependency-path: yarn.lock
 
-      - name: Cache Cargo registry
-        uses: actions/cache@v4
-        with:
-          path: ~/.cargo/registry
-          key: cargo-registry-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: cargo-registry-
+      - run: yarn install --immutable
 
-      - name: Build
-        run: |
-          mkdir -p "$HOME/.cargo/registry"
-          docker run --rm \
-            -v "$GITHUB_WORKSPACE":/workspace \
-            -v "$HOME/.cargo/registry":/home/dev/.cargo/registry \
-            -w /workspace \
-            ciabatta-builder \
-            bash -c "yarn install --immutable && yarn build"
-
-      - name: Setup Pages
-        uses: actions/configure-pages@v4
+      - run: yarn build
 
       - name: Upload frontend artifact
+        if: startsWith(github.ref, 'refs/tags/')
         uses: actions/upload-pages-artifact@v3
         with:
           path: frontend/dist
 
       - name: Upload binary artifact
+        if: startsWith(github.ref, 'refs/tags/')
         uses: actions/upload-artifact@v4
         with:
           name: ciabatta-linux-x86_64
@@ -79,11 +53,31 @@ jobs:
 
   deploy:
     needs: build
+    if: startsWith(github.ref, 'refs/tags/')
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     runs-on: ubuntu-latest
     steps:
+      - name: Setup Pages
+        uses: actions/configure-pages@v4
+
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download binary
+        uses: actions/download-artifact@v4
+        with:
+          name: ciabatta-linux-x86_64
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ciabatta
+          generate_release_notes: true

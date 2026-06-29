@@ -19,7 +19,7 @@ toml = "0.8"
 anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-reqwest = { version = "0.12", features = ["json", "default-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "charset", "http2"] }
 futures = "0.3"
 regex = "1"
 chrono = { version = "0.4", features = ["serde"] }

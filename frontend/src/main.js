@@ -59,7 +59,7 @@ bash_script = "scripts/pull.sh"`;
 
 function getReleaseBase() {
   // In a real deploy, point at GitHub releases.
-  return `https://github.com/YOUR_USERNAME/ciabatta/releases/download/v${VERSION}`;
+  return `https://github.com/forsyth-creations/ciabatta/releases/download/v${VERSION}`;
 }
 
 function render() {
@@ -98,7 +98,7 @@ function render() {
       </div>
       <p style="margin-top:1rem;color:#888;">
         Or install from source:
-        <code>cargo install --git https://github.com/YOUR_USERNAME/ciabatta</code>
+        <code>cargo install --git https://github.com/forsyth-creations/ciabatta</code>
       </p>
     </section>
 
@@ -189,7 +189,7 @@ function render() {
 
     <footer>
       <p>
-        <a href="https://github.com/YOUR_USERNAME/ciabatta">GitHub</a> ·
+        <a href="https://github.com/forsyth-creations/ciabatta">GitHub</a> ·
         MIT License
       </p>
     </footer>

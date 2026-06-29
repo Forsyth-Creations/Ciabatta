@@ -34,7 +34,7 @@ jobs:
       - run: yarn turbo run build --filter=ciabatta-frontend
 
       - name: Upload pages artifact
-        if: startsWith(github.ref, 'refs/tags/') || github.ref == 'refs/heads/main'
+        if: startsWith(github.ref, 'refs/tags/')
         uses: actions/upload-pages-artifact@v5
         with:
           path: frontend/dist
@@ -42,7 +42,7 @@ jobs:
   deploy:
     needs: build
     # Allow tags and master
-    if: startsWith(github.ref, 'refs/tags/') || github.ref == 'refs/heads/main'
+    if: startsWith(github.ref, 'refs/tags/')
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}

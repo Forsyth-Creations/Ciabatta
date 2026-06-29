@@ -1,12 +1,15 @@
-use anyhow::Result;
 use super::{RegistryOpOptions, run_command};
+use anyhow::Result;
 
 pub async fn push(opts: &RegistryOpOptions<'_>, log: &mut Vec<String>) -> Result<()> {
     let image = resolve_image(opts);
     log.push(format!("Docker push: {}", image));
 
     if opts.dry_run {
-        log.push(format!("[dry-run] would run: {} push {}", opts.container_cmd, image));
+        log.push(format!(
+            "[dry-run] would run: {} push {}",
+            opts.container_cmd, image
+        ));
         return Ok(());
     }
 
@@ -18,7 +21,10 @@ pub async fn pull(opts: &RegistryOpOptions<'_>, log: &mut Vec<String>) -> Result
     log.push(format!("Docker pull: {}", image));
 
     if opts.dry_run {
-        log.push(format!("[dry-run] would run: {} pull {}", opts.container_cmd, image));
+        log.push(format!(
+            "[dry-run] would run: {} pull {}",
+            opts.container_cmd, image
+        ));
         return Ok(());
     }
 

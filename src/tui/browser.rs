@@ -21,14 +21,14 @@ use futures::StreamExt;
 use ratatui::{
     Frame, Terminal,
     backend::CrosstermBackend,
-    layout::{Constraint, Direction, Layout, Rect},
+    layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
 };
 use tokio::sync::mpsc;
 
-use crate::config::{CiabattaConfig, RecipeEntry, RegistryConfig};
+use crate::config::{CiabattaConfig, RecipeEntry};
 use crate::runner::{self, ProgressUpdate, RunMode};
 
 // ─── State ───────────────────────────────────────────────────────────────────
@@ -84,9 +84,13 @@ impl BrowserApp {
         let recipes = build_recipe_rows(config, root, env_vars);
 
         let mut reg_state = ListState::default();
-        if !registries.is_empty() { reg_state.select(Some(0)); }
+        if !registries.is_empty() {
+            reg_state.select(Some(0));
+        }
         let mut rec_state = ListState::default();
-        if !recipes.is_empty() { rec_state.select(Some(0)); }
+        if !recipes.is_empty() {
+            rec_state.select(Some(0));
+        }
 
         BrowserApp {
             registries,
@@ -130,8 +134,12 @@ impl BrowserApp {
         self.log_scroll = 0;
     }
 
-    pub fn scroll_log_down(&mut self) { self.log_scroll = self.log_scroll.saturating_add(1); }
-    pub fn scroll_log_up(&mut self) { self.log_scroll = self.log_scroll.saturating_sub(1); }
+    pub fn scroll_log_down(&mut self) {
+        self.log_scroll = self.log_scroll.saturating_add(1);
+    }
+    pub fn scroll_log_up(&mut self) {
+        self.log_scroll = self.log_scroll.saturating_sub(1);
+    }
 
     pub fn apply_update(&mut self, update: ProgressUpdate) {
         match update {
@@ -164,7 +172,9 @@ impl BrowserApp {
 }
 
 fn list_next(state: &mut ListState, len: usize) {
-    if len == 0 { return; }
+    if len == 0 {
+        return;
+    }
     let next = state.selected().map(|i| (i + 1) % len).unwrap_or(0);
     state.select(Some(next));
 }
@@ -176,40 +186,52 @@ fn list_prev(state: &mut ListState) {
 }
 
 fn build_registry_rows(config: &CiabattaConfig) -> Vec<RegistryRow> {
-    let mut rows: Vec<_> = config.registries.iter().map(|(name, cfg)| {
-        let kind = crate::config::RegistryKind::from(name.as_str());
-        RegistryRow {
-            name: name.clone(),
-            url: cfg.url.clone(),
-            needs_auth: cfg.needs_auth,
-            has_login_script: cfg.login_script.is_some(),
-            kind: format!("{:?}", kind).to_lowercase(),
-        }
-    }).collect();
+    let mut rows: Vec<_> = config
+        .registries
+        .iter()
+        .map(|(name, cfg)| {
+            let kind = crate::config::RegistryKind::from(name.as_str());
+            RegistryRow {
+                name: name.clone(),
+                url: cfg.url.clone(),
+                needs_auth: cfg.needs_auth,
+                has_login_script: cfg.login_script.is_some(),
+                kind: format!("{:?}", kind).to_lowercase(),
+            }
+        })
+        .collect();
     rows.sort_by(|a, b| a.name.cmp(&b.name));
     rows
 }
 
-fn build_recipe_rows(config: &CiabattaConfig, root: &Path, _env: &HashMap<String, String>) -> Vec<RecipeRow> {
-    let mut rows: Vec<_> = config.recipes.iter().map(|(name, entry)| {
-        let push = entry.push_recipe();
-        let kind: &'static str = match entry {
-            RecipeEntry::PushPull(_) => "push/pull",
-            RecipeEntry::Simple(r) if r.bash_script.is_some() => "bash",
-            _ => "registry",
-        };
-        let local_path = push.local_artifact_path.as_deref();
-        let local_exists = local_path.map(|p| root.join(p).exists());
-        RecipeRow {
-            name: name.clone(),
-            registry: push.registry.clone(),
-            local_exists,
-            publish_path: push.publish_path.clone(),
-            kind,
-            run_status: RecipeRunStatus::Idle,
-            logs: Vec::new(),
-        }
-    }).collect();
+fn build_recipe_rows(
+    config: &CiabattaConfig,
+    root: &Path,
+    _env: &HashMap<String, String>,
+) -> Vec<RecipeRow> {
+    let mut rows: Vec<_> = config
+        .recipes
+        .iter()
+        .map(|(name, entry)| {
+            let push = entry.push_recipe();
+            let kind: &'static str = match entry {
+                RecipeEntry::PushPull(_) => "push/pull",
+                RecipeEntry::Simple(r) if r.bash_script.is_some() => "bash",
+                _ => "registry",
+            };
+            let local_path = push.local_artifact_path.as_deref();
+            let local_exists = local_path.map(|p| root.join(p).exists());
+            RecipeRow {
+                name: name.clone(),
+                registry: push.registry.clone(),
+                local_exists,
+                publish_path: push.publish_path.clone(),
+                kind,
+                run_status: RecipeRunStatus::Idle,
+                logs: Vec::new(),
+            }
+        })
+        .collect();
     rows.sort_by(|a, b| a.name.cmp(&b.name));
     rows
 }
@@ -247,17 +269,17 @@ pub fn render(f: &mut Frame, app: &BrowserApp) {
 }
 
 fn render_logo(f: &mut Frame, area: Rect) {
-    let p = Paragraph::new(LOGO)
-        .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD));
+    let p = Paragraph::new(LOGO).style(
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
+    );
     f.render_widget(p, area);
 }
 
 fn render_middle(f: &mut Frame, area: Rect, app: &BrowserApp) {
-    let cols = Layout::horizontal([
-        Constraint::Percentage(30),
-        Constraint::Percentage(70),
-    ])
-    .split(area);
+    let cols =
+        Layout::horizontal([Constraint::Percentage(30), Constraint::Percentage(70)]).split(area);
 
     render_registries(f, cols[0], app);
     render_recipes(f, cols[1], app);
@@ -268,19 +290,36 @@ fn render_registries(f: &mut Frame, area: Rect, app: &BrowserApp) {
     let border_style = pane_border_style(focused);
 
     let block = Block::default()
-        .title(Span::styled(" Registries ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)))
+        .title(Span::styled(
+            " Registries ",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ))
         .borders(Borders::ALL)
         .border_style(border_style);
 
-    let items: Vec<ListItem> = app.registries.iter().map(|r| {
-        let auth_icon = if r.needs_auth { "🔐" } else { "🔓" };
-        let line = Line::from(vec![
-            Span::styled(format!(" {:12} ", r.name), Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
-            Span::styled(format!("[{}] ", r.kind), Style::default().fg(Color::DarkGray)),
-            Span::raw(auth_icon),
-        ]);
-        ListItem::new(line)
-    }).collect();
+    let items: Vec<ListItem> = app
+        .registries
+        .iter()
+        .map(|r| {
+            let auth_icon = if r.needs_auth { "🔐" } else { "🔓" };
+            let line = Line::from(vec![
+                Span::styled(
+                    format!(" {:12} ", r.name),
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!("[{}] ", r.kind),
+                    Style::default().fg(Color::DarkGray),
+                ),
+                Span::raw(auth_icon),
+            ]);
+            ListItem::new(line)
+        })
+        .collect();
 
     let list = List::new(items)
         .block(block)
@@ -301,29 +340,49 @@ fn render_recipes(f: &mut Frame, area: Rect, app: &BrowserApp) {
     let border_style = pane_border_style(focused);
 
     let block = Block::default()
-        .title(Span::styled(" Recipes ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)))
+        .title(Span::styled(
+            " Recipes ",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ))
         .borders(Borders::ALL)
         .border_style(border_style);
 
-    let items: Vec<ListItem> = app.recipes.iter().map(|r| {
-        let (status_sym, status_color) = run_status_style(&r.run_status);
-        let local_sym = match r.local_exists {
-            Some(true) => Span::styled("✓ ", Style::default().fg(Color::Green)),
-            Some(false) => Span::styled("✗ ", Style::default().fg(Color::Red)),
-            None => Span::styled("? ", Style::default().fg(Color::DarkGray)),
-        };
-        let reg_label = r.registry.as_deref().unwrap_or("-");
+    let items: Vec<ListItem> = app
+        .recipes
+        .iter()
+        .map(|r| {
+            let (status_sym, status_color) = run_status_style(&r.run_status);
+            let local_sym = match r.local_exists {
+                Some(true) => Span::styled("✓ ", Style::default().fg(Color::Green)),
+                Some(false) => Span::styled("✗ ", Style::default().fg(Color::Red)),
+                None => Span::styled("? ", Style::default().fg(Color::DarkGray)),
+            };
+            let reg_label = r.registry.as_deref().unwrap_or("-");
 
-        let line = Line::from(vec![
-            Span::styled(format!(" {:28} ", r.name), Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
-            Span::styled(format!("[{:10}] ", reg_label), Style::default().fg(Color::Blue)),
-            Span::styled(format!("[{:9}] ", r.kind), Style::default().fg(Color::DarkGray)),
-            Span::raw("local:"),
-            local_sym,
-            Span::styled(status_sym, Style::default().fg(status_color)),
-        ]);
-        ListItem::new(line)
-    }).collect();
+            let line = Line::from(vec![
+                Span::styled(
+                    format!(" {:28} ", r.name),
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!("[{:10}] ", reg_label),
+                    Style::default().fg(Color::Blue),
+                ),
+                Span::styled(
+                    format!("[{:9}] ", r.kind),
+                    Style::default().fg(Color::DarkGray),
+                ),
+                Span::raw("local:"),
+                local_sym,
+                Span::styled(status_sym, Style::default().fg(status_color)),
+            ]);
+            ListItem::new(line)
+        })
+        .collect();
 
     let list = List::new(items)
         .block(block)
@@ -355,7 +414,11 @@ fn render_registry_detail(f: &mut Frame, area: Rect, app: &BrowserApp) {
     let text = if let Some(idx) = app.selected_registry_idx() {
         if let Some(reg) = app.registries.get(idx) {
             let auth_status = if reg.needs_auth {
-                if reg.has_login_script { "login script configured" } else { "needs auth — no login script!" }
+                if reg.has_login_script {
+                    "login script configured"
+                } else {
+                    "needs auth — no login script!"
+                }
             } else {
                 "no auth required"
             };
@@ -363,8 +426,12 @@ fn render_registry_detail(f: &mut Frame, area: Rect, app: &BrowserApp) {
                 "  Name:    {}\n  URL:     {}\n  Type:    {}\n  Auth:    {}\n",
                 reg.name, reg.url, reg.kind, auth_status
             )
-        } else { String::new() }
-    } else { "  No registry selected.".to_string() };
+        } else {
+            String::new()
+        }
+    } else {
+        "  No registry selected.".to_string()
+    };
 
     let p = Paragraph::new(text)
         .block(block)
@@ -376,8 +443,11 @@ fn render_recipe_detail(f: &mut Frame, area: Rect, app: &BrowserApp) {
     let idx = match app.selected_recipe_idx() {
         Some(i) => i,
         None => {
-            let p = Paragraph::new("  No recipe selected.")
-                .block(Block::default().title(" Recipe Detail ").borders(Borders::ALL));
+            let p = Paragraph::new("  No recipe selected.").block(
+                Block::default()
+                    .title(" Recipe Detail ")
+                    .borders(Borders::ALL),
+            );
             f.render_widget(p, area);
             return;
         }
@@ -389,10 +459,8 @@ fn render_recipe_detail(f: &mut Frame, area: Rect, app: &BrowserApp) {
     };
 
     let inner_area = area;
-    let chunks = Layout::horizontal([
-        Constraint::Percentage(40),
-        Constraint::Percentage(60),
-    ]).split(inner_area);
+    let chunks = Layout::horizontal([Constraint::Percentage(40), Constraint::Percentage(60)])
+        .split(inner_area);
 
     // Left: metadata
     let meta_block = Block::default()
@@ -401,9 +469,9 @@ fn render_recipe_detail(f: &mut Frame, area: Rect, app: &BrowserApp) {
         .border_style(Style::default().fg(Color::DarkGray));
 
     let local_status = match recipe.local_exists {
-        Some(true) => format!("✓ exists"),
-        Some(false) => format!("✗ missing"),
-        None => format!("(bash script)"),
+        Some(true) => "✓ exists".to_string(),
+        Some(false) => "✗ missing".to_string(),
+        None => "(bash script)".to_string(),
     };
     let publish = recipe.publish_path.as_deref().unwrap_or("(none)");
     let (status_sym, _) = run_status_style(&recipe.run_status);
@@ -433,18 +501,24 @@ fn render_recipe_detail(f: &mut Frame, area: Rect, app: &BrowserApp) {
     } else {
         0
     };
-    let skip = skip.saturating_add(app.log_scroll).min(logs.len().saturating_sub(1));
+    let skip = skip
+        .saturating_add(app.log_scroll)
+        .min(logs.len().saturating_sub(1));
 
-    let log_items: Vec<ListItem> = logs.iter().skip(skip).map(|line| {
-        let style = if line.starts_with("[stderr]") || line.to_lowercase().contains("error") {
-            Style::default().fg(Color::Red)
-        } else if line.starts_with("[dry-run]") || line.starts_with('+') {
-            Style::default().fg(Color::Yellow)
-        } else {
-            Style::default().fg(Color::Gray)
-        };
-        ListItem::new(Line::from(Span::styled(line.as_str(), style)))
-    }).collect();
+    let log_items: Vec<ListItem> = logs
+        .iter()
+        .skip(skip)
+        .map(|line| {
+            let style = if line.starts_with("[stderr]") || line.to_lowercase().contains("error") {
+                Style::default().fg(Color::Red)
+            } else if line.starts_with("[dry-run]") || line.starts_with('+') {
+                Style::default().fg(Color::Yellow)
+            } else {
+                Style::default().fg(Color::Gray)
+            };
+            ListItem::new(Line::from(Span::styled(line.as_str(), style)))
+        })
+        .collect();
 
     let log_list = List::new(log_items).block(log_block);
     f.render_widget(log_list, chunks[1]);
@@ -494,8 +568,11 @@ pub async fn run_browser(
     root: std::path::PathBuf,
     env_vars: HashMap<String, String>,
 ) -> Result<()> {
+    use crossterm::{
+        execute,
+        terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
+    };
     use std::io;
-    use crossterm::{execute, terminal::{EnterAlternateScreen, LeaveAlternateScreen, enable_raw_mode, disable_raw_mode}};
 
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -558,7 +635,7 @@ async fn browser_loop(
                         for recipe in &mut app.recipes {
                             if let Some(ref local) = {
                                 let cfg_recipe = config.recipes.get(&recipe.name);
-                                cfg_recipe.map(|e| e.push_recipe().local_artifact_path.clone()).flatten()
+                                cfg_recipe.and_then(|e| e.push_recipe().local_artifact_path.clone())
                             } {
                                 recipe.local_exists = Some(root.join(local).exists());
                             }
@@ -583,7 +660,10 @@ async fn browser_loop(
 }
 
 fn selected_recipe_name(app: &BrowserApp) -> Option<String> {
-    app.rec_state.selected().and_then(|i| app.recipes.get(i)).map(|r| r.name.clone())
+    app.rec_state
+        .selected()
+        .and_then(|i| app.recipes.get(i))
+        .map(|r| r.name.clone())
 }
 
 fn push_recipe(
@@ -600,6 +680,15 @@ fn push_recipe(
 
     tokio::spawn(async move {
         let names = vec![name];
-        let _ = runner::run_all(&config, &root, &names, &env_vars, dry_run, RunMode::Push, tx).await;
+        let _ = runner::run_all(
+            &config,
+            &root,
+            &names,
+            &env_vars,
+            dry_run,
+            RunMode::Push,
+            tx,
+        )
+        .await;
     });
 }

@@ -1,13 +1,25 @@
-use anyhow::{Context, Result};
 use super::RegistryOpOptions;
+use anyhow::{Context, Result};
 
 /// Artifactory uses the same HTTP PUT/GET pattern as Nexus.
 pub async fn push(opts: &RegistryOpOptions<'_>, log: &mut Vec<String>) -> Result<()> {
-    let url = format!("{}/{}", opts.registry_config.url.trim_end_matches('/'), opts.remote_path.trim_start_matches('/'));
-    log.push(format!("Artifactory push: {} -> {}", opts.local_path.display(), url));
+    let url = format!(
+        "{}/{}",
+        opts.registry_config.url.trim_end_matches('/'),
+        opts.remote_path.trim_start_matches('/')
+    );
+    log.push(format!(
+        "Artifactory push: {} -> {}",
+        opts.local_path.display(),
+        url
+    ));
 
     if opts.dry_run {
-        log.push(format!("[dry-run] would HTTP PUT {} to {}", opts.local_path.display(), url));
+        log.push(format!(
+            "[dry-run] would HTTP PUT {} to {}",
+            opts.local_path.display(),
+            url
+        ));
         return Ok(());
     }
 
@@ -33,11 +45,23 @@ pub async fn push(opts: &RegistryOpOptions<'_>, log: &mut Vec<String>) -> Result
 }
 
 pub async fn pull(opts: &RegistryOpOptions<'_>, log: &mut Vec<String>) -> Result<()> {
-    let url = format!("{}/{}", opts.registry_config.url.trim_end_matches('/'), opts.remote_path.trim_start_matches('/'));
-    log.push(format!("Artifactory pull: {} -> {}", url, opts.local_path.display()));
+    let url = format!(
+        "{}/{}",
+        opts.registry_config.url.trim_end_matches('/'),
+        opts.remote_path.trim_start_matches('/')
+    );
+    log.push(format!(
+        "Artifactory pull: {} -> {}",
+        url,
+        opts.local_path.display()
+    ));
 
     if opts.dry_run {
-        log.push(format!("[dry-run] would HTTP GET {} -> {}", url, opts.local_path.display()));
+        log.push(format!(
+            "[dry-run] would HTTP GET {} -> {}",
+            url,
+            opts.local_path.display()
+        ));
         return Ok(());
     }
 
@@ -58,7 +82,11 @@ pub async fn pull(opts: &RegistryOpOptions<'_>, log: &mut Vec<String>) -> Result
         tokio::fs::create_dir_all(parent).await?;
     }
     tokio::fs::write(opts.local_path, &bytes).await?;
-    log.push(format!("Downloaded {} bytes to {}", bytes.len(), opts.local_path.display()));
+    log.push(format!(
+        "Downloaded {} bytes to {}",
+        bytes.len(),
+        opts.local_path.display()
+    ));
     Ok(())
 }
 

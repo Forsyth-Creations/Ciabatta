@@ -34,7 +34,16 @@ pub async fn run(
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let result = tui_loop(&mut terminal, config, root, recipe_names, env_vars, dry_run, mode).await;
+    let result = tui_loop(
+        &mut terminal,
+        config,
+        root,
+        recipe_names,
+        env_vars,
+        dry_run,
+        mode,
+    )
+    .await;
 
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
@@ -88,10 +97,10 @@ async fn tui_loop(
         if app.all_done && done_at.is_none() {
             done_at = Some(tokio::time::Instant::now());
         }
-        if let Some(t) = done_at {
-            if t.elapsed() >= done_linger {
-                break;
-            }
+        if let Some(t) = done_at
+            && t.elapsed() >= done_linger
+        {
+            break;
         }
 
         let sleep = tokio::time::sleep(Duration::from_millis(50));
@@ -135,8 +144,9 @@ async fn tui_loop(
         }
     }
 
-    let success = app.recipes.iter().all(|r| {
-        matches!(r.status, crate::tui::app::RecipeStatus::Success)
-    });
+    let success = app
+        .recipes
+        .iter()
+        .all(|r| matches!(r.status, crate::tui::app::RecipeStatus::Success));
     Ok(success)
 }

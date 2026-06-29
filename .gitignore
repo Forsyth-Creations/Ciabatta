@@ -1,5 +1,18 @@
 /target
-frontend/node_modules
+node_modules
 frontend/dist
+dist
 .env
 *.local
+
+# Turbo
+.turbo
+
+# Yarn (Berry, node-modules linker)
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/sdks
+!.yarn/versions
+.pnp.*

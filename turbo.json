@@ -1,0 +1,33 @@
+{
+    "$schema": "https://turbo.build/schema.json",
+    "globalDependencies": ["Cargo.toml", "Cargo.lock", "rust-toolchain.toml"],
+    "globalEnv": ["RUST_VERSION", "RUSTUP_HOME"],
+    "tasks": {
+        "build": {
+            "dependsOn": ["^build"],
+            "outputs": ["dist/**"]
+        },
+        "dev": {
+            "cache": false,
+            "persistent": true
+        },
+        "preview": {
+            "dependsOn": ["build"],
+            "cache": false,
+            "persistent": true
+        },
+        "lint": {},
+        "format": {
+            "cache": false
+        },
+        "check": {
+            "dependsOn": ["^build"]
+        },
+        "test": {
+            "dependsOn": ["^build"]
+        },
+        "clean": {
+            "cache": false
+        }
+    }
+}

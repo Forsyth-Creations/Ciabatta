@@ -1,13 +1,13 @@
-pub mod nexus;
-pub mod s3;
 pub mod artifactory;
 pub mod docker;
 pub mod ecr;
+pub mod nexus;
+pub mod s3;
 
+use crate::config::{RegistryConfig, RegistryKind};
+use anyhow::Result;
 use std::collections::HashMap;
 use std::path::Path;
-use anyhow::Result;
-use crate::config::{RegistryConfig, RegistryKind};
 
 /// Shared options for a registry operation.
 pub struct RegistryOpOptions<'a> {
@@ -26,21 +26,11 @@ pub async fn push(opts: RegistryOpOptions<'_>, log: &mut Vec<String>) -> Result<
 
     let kind = RegistryKind::from(opts.registry_name);
     match kind {
-        RegistryKind::Nexus | RegistryKind::Generic => {
-            nexus::push(&opts, log).await
-        }
-        RegistryKind::S3 => {
-            s3::push(&opts, log).await
-        }
-        RegistryKind::Artifactory => {
-            artifactory::push(&opts, log).await
-        }
-        RegistryKind::Docker => {
-            docker::push(&opts, log).await
-        }
-        RegistryKind::Ecr => {
-            ecr::push(&opts, log).await
-        }
+        RegistryKind::Nexus | RegistryKind::Generic => nexus::push(&opts, log).await,
+        RegistryKind::S3 => s3::push(&opts, log).await,
+        RegistryKind::Artifactory => artifactory::push(&opts, log).await,
+        RegistryKind::Docker => docker::push(&opts, log).await,
+        RegistryKind::Ecr => ecr::push(&opts, log).await,
     }
 }
 
@@ -50,21 +40,11 @@ pub async fn pull(opts: RegistryOpOptions<'_>, log: &mut Vec<String>) -> Result<
 
     let kind = RegistryKind::from(opts.registry_name);
     match kind {
-        RegistryKind::Nexus | RegistryKind::Generic => {
-            nexus::pull(&opts, log).await
-        }
-        RegistryKind::S3 => {
-            s3::pull(&opts, log).await
-        }
-        RegistryKind::Artifactory => {
-            artifactory::pull(&opts, log).await
-        }
-        RegistryKind::Docker => {
-            docker::pull(&opts, log).await
-        }
-        RegistryKind::Ecr => {
-            ecr::pull(&opts, log).await
-        }
+        RegistryKind::Nexus | RegistryKind::Generic => nexus::pull(&opts, log).await,
+        RegistryKind::S3 => s3::pull(&opts, log).await,
+        RegistryKind::Artifactory => artifactory::pull(&opts, log).await,
+        RegistryKind::Docker => docker::pull(&opts, log).await,
+        RegistryKind::Ecr => ecr::pull(&opts, log).await,
     }
 }
 
@@ -87,8 +67,8 @@ pub async fn run_script(
     env_vars: &HashMap<String, String>,
     log: &mut Vec<String>,
 ) -> Result<()> {
-    use tokio::process::Command;
     use std::process::Stdio;
+    use tokio::process::Command;
 
     let mut cmd = Command::new("bash");
     cmd.arg(script)
@@ -124,8 +104,8 @@ pub async fn run_command(
     env_vars: &HashMap<String, String>,
     log: &mut Vec<String>,
 ) -> Result<()> {
-    use tokio::process::Command;
     use std::process::Stdio;
+    use tokio::process::Command;
 
     log.push(format!("+ {} {}", program, args.join(" ")));
 

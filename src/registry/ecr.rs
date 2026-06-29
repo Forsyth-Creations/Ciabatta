@@ -1,12 +1,15 @@
-use anyhow::Result;
 use super::{RegistryOpOptions, run_command};
+use anyhow::Result;
 
 pub async fn push(opts: &RegistryOpOptions<'_>, log: &mut Vec<String>) -> Result<()> {
     let image = resolve_image(opts);
     log.push(format!("ECR push: {}", image));
 
     if opts.dry_run {
-        log.push(format!("[dry-run] would ECR-login then {} push {}", opts.container_cmd, image));
+        log.push(format!(
+            "[dry-run] would ECR-login then {} push {}",
+            opts.container_cmd, image
+        ));
         return Ok(());
     }
 
@@ -19,7 +22,10 @@ pub async fn pull(opts: &RegistryOpOptions<'_>, log: &mut Vec<String>) -> Result
     log.push(format!("ECR pull: {}", image));
 
     if opts.dry_run {
-        log.push(format!("[dry-run] would ECR-login then {} pull {}", opts.container_cmd, image));
+        log.push(format!(
+            "[dry-run] would ECR-login then {} pull {}",
+            opts.container_cmd, image
+        ));
         return Ok(());
     }
 
@@ -43,8 +49,8 @@ async fn ecr_login(opts: &RegistryOpOptions<'_>, log: &mut Vec<String>) -> Resul
     log.push(format!("ECR auto-login for {}", registry));
 
     // aws ecr get-login-password | docker login --username AWS --password-stdin <registry>
-    use tokio::process::Command;
     use std::process::Stdio;
+    use tokio::process::Command;
 
     let token_output = Command::new("aws")
         .args(["ecr", "get-login-password"])

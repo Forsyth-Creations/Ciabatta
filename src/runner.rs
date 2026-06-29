@@ -1,7 +1,7 @@
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
-use tokio::sync::mpsc;
 use anyhow::Result;
+use std::collections::HashMap;
+use std::path::Path;
+use tokio::sync::mpsc;
 
 use crate::config::{CiabattaConfig, SimpleRecipe, substitute_vars, validate_publish_path};
 use crate::registry::{self, RegistryOpOptions};
@@ -81,7 +81,7 @@ pub async fn run_all(
 async fn run_one(
     name: String,
     config: &CiabattaConfig,
-    root: &PathBuf,
+    root: &Path,
     env_vars: &HashMap<String, String>,
     dry_run: bool,
     mode: &RunMode,
@@ -96,9 +96,7 @@ async fn run_one(
             let _ = tx.send(ProgressUpdate::Completed(name)).await;
         }
         Err(ref e) => {
-            let _ = tx
-                .send(ProgressUpdate::Failed(name, e.to_string()))
-                .await;
+            let _ = tx.send(ProgressUpdate::Failed(name, e.to_string())).await;
         }
     }
 
@@ -131,7 +129,10 @@ async fn execute_recipe(
     if let Some(ref script) = recipe.bash_script {
         run_bash_script(script, root, env_vars, dry_run, &mut log).await?;
     } else {
-        run_registry_action(name, recipe, config, root, env_vars, dry_run, mode, &mut log).await?;
+        run_registry_action(
+            name, recipe, config, root, env_vars, dry_run, mode, &mut log,
+        )
+        .await?;
     }
 
     // Flush logs to channel
@@ -153,13 +154,17 @@ async fn run_bash_script(
     log.push(format!("Running script: {}", script_path.display()));
 
     if dry_run {
-        log.push(format!("[dry-run] would run: bash {}", script_path.display()));
+        log.push(format!(
+            "[dry-run] would run: bash {}",
+            script_path.display()
+        ));
         return Ok(());
     }
 
     registry::run_script(&script_path.to_string_lossy(), env_vars, log).await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_registry_action(
     name: &str,
     recipe: &SimpleRecipe,
@@ -170,10 +175,9 @@ async fn run_registry_action(
     mode: &RunMode,
     log: &mut Vec<String>,
 ) -> Result<()> {
-    let registry_name = recipe
-        .registry
-        .as_deref()
-        .ok_or_else(|| anyhow::anyhow!("Recipe '{}' has no registry or bash_script defined", name))?;
+    let registry_name = recipe.registry.as_deref().ok_or_else(|| {
+        anyhow::anyhow!("Recipe '{}' has no registry or bash_script defined", name)
+    })?;
 
     let registry_config = config
         .registries
@@ -187,10 +191,7 @@ async fn run_registry_action(
 
     let resolved_path = substitute_vars(publish_path, env_vars)?;
 
-    let local_artifact = recipe
-        .local_artifact_path
-        .as_deref()
-        .unwrap_or(".");
+    let local_artifact = recipe.local_artifact_path.as_deref().unwrap_or(".");
     let local_path = root.join(local_artifact);
 
     let container_cmd = config

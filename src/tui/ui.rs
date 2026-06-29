@@ -26,9 +26,9 @@ pub fn render(f: &mut Frame, app: &App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(logo_lines),  // logo
-            Constraint::Min(8),              // recipe list + logs
-            Constraint::Length(1),           // help bar
+            Constraint::Length(logo_lines), // logo
+            Constraint::Min(8),             // recipe list + logs
+            Constraint::Length(1),          // help bar
         ])
         .split(area);
 
@@ -38,8 +38,11 @@ pub fn render(f: &mut Frame, app: &App) {
 }
 
 fn render_logo(f: &mut Frame, area: Rect, _app: &App) {
-    let logo = Paragraph::new(LOGO)
-        .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD));
+    let logo = Paragraph::new(LOGO).style(
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
+    );
     f.render_widget(logo, area);
 }
 
@@ -85,17 +88,36 @@ fn render_recipe_list(f: &mut Frame, area: Rect, app: &App) {
         };
 
         let title_line = Line::from(vec![
-            Span::styled(format!(" {} ", status_symbol), Style::default().fg(status_color)),
+            Span::styled(
+                format!(" {} ", status_symbol),
+                Style::default().fg(status_color),
+            ),
             Span::styled(&recipe.name, name_style),
         ]);
         let title = Paragraph::new(title_line);
-        f.render_widget(title, Rect { x: inner.x, y, width: inner.width, height: 1 });
+        f.render_widget(
+            title,
+            Rect {
+                x: inner.x,
+                y,
+                width: inner.width,
+                height: 1,
+            },
+        );
 
         let (ratio, gauge_color) = gauge_for(&recipe.status);
         let gauge = Gauge::default()
             .gauge_style(Style::default().fg(gauge_color).bg(Color::DarkGray))
             .ratio(ratio);
-        f.render_widget(gauge, Rect { x: inner.x + 2, y: y + 1, width: inner.width.saturating_sub(2), height: 1 });
+        f.render_widget(
+            gauge,
+            Rect {
+                x: inner.x + 2,
+                y: y + 1,
+                width: inner.width.saturating_sub(2),
+                height: 1,
+            },
+        );
 
         y += items_height;
     }
@@ -104,9 +126,16 @@ fn render_recipe_list(f: &mut Frame, area: Rect, app: &App) {
     if app.recipes.len() > visible {
         let indicator = format!(" {}/{} ", app.selected + 1, app.recipes.len());
         let x = inner.x + inner.width.saturating_sub(indicator.len() as u16);
-        let p = Paragraph::new(indicator)
-            .style(Style::default().fg(Color::DarkGray));
-        f.render_widget(p, Rect { x, y: inner.y, width: inner.width, height: 1 });
+        let p = Paragraph::new(indicator).style(Style::default().fg(Color::DarkGray));
+        f.render_widget(
+            p,
+            Rect {
+                x,
+                y: inner.y,
+                width: inner.width,
+                height: 1,
+            },
+        );
     }
 }
 
@@ -142,8 +171,7 @@ fn render_logs(f: &mut Frame, area: Rect, app: &App) {
         })
         .collect();
 
-    let list = List::new(items)
-        .block(block);
+    let list = List::new(items).block(block);
 
     let mut state = ListState::default();
     if !logs.is_empty() {
@@ -154,11 +182,14 @@ fn render_logs(f: &mut Frame, area: Rect, app: &App) {
 
 fn render_help(f: &mut Frame, area: Rect, app: &App) {
     let mode = if app.dry_run { " DRY-RUN " } else { "" };
-    let status = if app.all_done { "All done! " } else { "Running... " };
+    let status = if app.all_done {
+        "All done! "
+    } else {
+        "Running... "
+    };
 
     let help = format!("{}{}  [↑/↓] select  [q] quit", mode, status);
-    let p = Paragraph::new(help)
-        .style(Style::default().fg(Color::DarkGray));
+    let p = Paragraph::new(help).style(Style::default().fg(Color::DarkGray));
     f.render_widget(p, area);
 }
 

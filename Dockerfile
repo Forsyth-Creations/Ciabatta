@@ -16,6 +16,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN rustup component add clippy rustfmt rust-src \
     && cargo install cargo-watch cargo-edit
 
+# Node.js (for the Turbo monorepo frontend) + Yarn via Corepack.
+RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
+    && rm -rf /var/lib/apt/lists/* \
+    && corepack enable
+
 # Non-root user so files created in mounted volumes stay owned by you.
 ARG USERNAME=dev
 ARG USER_UID=1000
@@ -38,5 +44,8 @@ RUN curl -fsSL https://claude.ai/install.sh | bash
 # Provide your key at runtime, e.g.:
 #   docker run -it -e ANTHROPIC_API_KEY=sk-ant-... -v "$PWD":/workspace <image>
 # Or run `claude` and authenticate interactively.
+
+# Add some rustup deps
+RUN rustup component add clippy cargo-watch rustfmt rust-src
 
 CMD ["bash"]

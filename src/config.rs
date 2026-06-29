@@ -1,7 +1,7 @@
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
 pub const CIABATTA_DIR: &str = ".ciabatta";
 pub const CONFIG_FILE: &str = "ciabatta.toml";
@@ -100,8 +100,8 @@ pub fn load_config(root: &Path) -> Result<CiabattaConfig> {
     }
     let content = std::fs::read_to_string(&path)
         .with_context(|| format!("Failed to read {}", path.display()))?;
-    let config: CiabattaConfig = toml::from_str(&content)
-        .with_context(|| format!("Failed to parse {}", path.display()))?;
+    let config: CiabattaConfig =
+        toml::from_str(&content).with_context(|| format!("Failed to parse {}", path.display()))?;
     Ok(config)
 }
 

@@ -1,0 +1,13 @@
+{
+  "name": "ciabatta-rust",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "lint": "cargo clippy --all-targets --all-features -- -D warnings",
+    "format": "cargo fmt --all",
+    "check": "cargo fmt --all --check",
+    "build": "cargo build --release",
+    "test": "cargo test --all",
+    "clean": "cargo clean"
+  }
+}

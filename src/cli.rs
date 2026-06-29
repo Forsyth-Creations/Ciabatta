@@ -1,11 +1,7 @@
 use clap::{Parser, Subcommand};
 
 #[derive(Parser, Debug)]
-#[command(
-    name = "ciabatta",
-    about = "Artifact publishing made easy 🍞",
-    version
-)]
+#[command(name = "ciabatta", about = "Artifact publishing made easy 🍞", version)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Commands,
@@ -93,7 +89,9 @@ pub enum ConfigCommand {
 }
 
 /// Parse `-e KEY=VALUE` flags into a HashMap.
-pub fn parse_env_flags(flags: &[String]) -> anyhow::Result<std::collections::HashMap<String, String>> {
+pub fn parse_env_flags(
+    flags: &[String],
+) -> anyhow::Result<std::collections::HashMap<String, String>> {
     let mut map = std::collections::HashMap::new();
     for flag in flags {
         let (k, v) = flag

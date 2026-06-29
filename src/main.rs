@@ -1,5 +1,5 @@
-mod cli;
 mod ci;
+mod cli;
 mod config;
 mod registry;
 mod runner;
@@ -7,7 +7,7 @@ mod tui;
 
 use std::collections::HashMap;
 use std::env;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use clap::Parser;
@@ -21,14 +21,26 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Run { recipes, env, dry_run, no_tui, config } => {
+        Commands::Run {
+            recipes,
+            env,
+            dry_run,
+            no_tui,
+            config,
+        } => {
             let (root, cfg) = load_project(config.as_deref())?;
             let vars = build_env_vars(&cfg, &env)?;
             let names = resolve_recipe_names(&cfg, &recipes);
             execute_recipes(&cfg, &root, &names, &vars, dry_run, no_tui, RunMode::Push).await?;
         }
 
-        Commands::Pull { recipes, env, dry_run, no_tui, config } => {
+        Commands::Pull {
+            recipes,
+            env,
+            dry_run,
+            no_tui,
+            config,
+        } => {
             let (root, cfg) = load_project(config.as_deref())?;
             let vars = build_env_vars(&cfg, &env)?;
             let names = resolve_recipe_names(&cfg, &recipes);
@@ -40,7 +52,11 @@ async fn main() -> Result<()> {
             list_recipes(&cfg);
         }
 
-        Commands::Init { ci, containers, force } => {
+        Commands::Init {
+            ci,
+            containers,
+            force,
+        } => {
             cmd_init(ci.as_deref(), &containers, force)?;
         }
 
@@ -95,23 +111,23 @@ fn build_env_vars(cfg: &CiabattaConfig, cli_env: &[String]) -> Result<HashMap<St
     let mut vars: HashMap<String, String> = std::env::vars().collect();
 
     // Resolve CI variables and print them.
-    if let Some(ref system) = cfg.system {
-        if let Some(ref ci_name) = system.ci {
-            let ci_system = ci::CiSystem::from(ci_name.as_str());
-            let (ci_vars, resolved) = ci::resolve_ci_vars(&ci_system);
-            if !resolved.is_empty() {
-                eprintln!("CI variables resolved from {}:", ci_system);
-                for rv in &resolved {
-                    eprintln!(
-                        "  {} = {} (from {})",
-                        rv.ciabatta_name, rv.value, rv.source_name
-                    );
-                }
+    if let Some(ref system) = cfg.system
+        && let Some(ref ci_name) = system.ci
+    {
+        let ci_system = ci::CiSystem::from(ci_name.as_str());
+        let (ci_vars, resolved) = ci::resolve_ci_vars(&ci_system);
+        if !resolved.is_empty() {
+            eprintln!("CI variables resolved from {}:", ci_system);
+            for rv in &resolved {
+                eprintln!(
+                    "  {} = {} (from {})",
+                    rv.ciabatta_name, rv.value, rv.source_name
+                );
             }
-            // Merge CI vars; they DON'T override existing env vars set by the user.
-            for (k, v) in ci_vars {
-                vars.entry(k).or_insert(v);
-            }
+        }
+        // Merge CI vars; they DON'T override existing env vars set by the user.
+        for (k, v) in ci_vars {
+            vars.entry(k).or_insert(v);
         }
     }
 
@@ -132,7 +148,7 @@ fn resolve_recipe_names(cfg: &CiabattaConfig, requested: &[String]) -> Vec<Strin
 
 async fn execute_recipes(
     cfg: &CiabattaConfig,
-    root: &PathBuf,
+    root: &Path,
     names: &[String],
     vars: &HashMap<String, String>,
     dry_run: bool,
@@ -140,7 +156,9 @@ async fn execute_recipes(
     mode: RunMode,
 ) -> Result<()> {
     if names.is_empty() {
-        bail!("No recipes found. Run `ciabatta list` to see available recipes, or check your .ciabatta/ciabatta.toml.");
+        bail!(
+            "No recipes found. Run `ciabatta list` to see available recipes, or check your .ciabatta/ciabatta.toml."
+        );
     }
 
     // Validate that all publish-path variables are present before launching.
@@ -159,24 +177,33 @@ async fn execute_recipes(
 
 async fn run_plain(
     cfg: &CiabattaConfig,
-    root: &PathBuf,
+    root: &Path,
     names: &[String],
     vars: &HashMap<String, String>,
     dry_run: bool,
     mode: RunMode,
 ) -> Result<()> {
-    use tokio::sync::mpsc;
     use runner::ProgressUpdate;
+    use tokio::sync::mpsc;
 
     let (tx, mut rx) = mpsc::channel::<ProgressUpdate>(256);
 
     let cfg_clone = cfg.clone();
-    let root_clone = root.clone();
+    let root_clone = root.to_path_buf();
     let names_clone = names.to_vec();
     let vars_clone = vars.clone();
 
     tokio::spawn(async move {
-        let _ = runner::run_all(&cfg_clone, &root_clone, &names_clone, &vars_clone, dry_run, mode, tx).await;
+        let _ = runner::run_all(
+            &cfg_clone,
+            &root_clone,
+            &names_clone,
+            &vars_clone,
+            dry_run,
+            mode,
+            tx,
+        )
+        .await;
     });
 
     let mut any_failed = false;
@@ -199,8 +226,8 @@ async fn run_plain(
 }
 
 fn cmd_init(ci: Option<&str>, containers: &str, force: bool) -> Result<()> {
-    use std::fs;
     use config::{CIABATTA_DIR, CONFIG_FILE};
+    use std::fs;
 
     let cwd = env::current_dir().context("Failed to get current directory")?;
 
@@ -215,8 +242,7 @@ fn cmd_init(ci: Option<&str>, containers: &str, force: bool) -> Result<()> {
         );
     }
 
-    fs::create_dir_all(&dir)
-        .with_context(|| format!("Failed to create {}", dir.display()))?;
+    fs::create_dir_all(&dir).with_context(|| format!("Failed to create {}", dir.display()))?;
 
     let toml = build_starter_toml(ci, containers);
     fs::write(&config_path, &toml)
@@ -250,7 +276,8 @@ fn build_starter_toml(ci: Option<&str>, containers: &str) -> String {
         }
     };
 
-    format!(r#"# Ciabatta configuration
+    format!(
+        r#"# Ciabatta configuration
 # Run `ciabatta config reference` for full documentation.
 
 [system]
@@ -303,13 +330,27 @@ containers = {containers:?}
 
 fn detect_ci() -> Option<String> {
     // Check well-known CI environment markers.
-    if env::var("GITLAB_CI").is_ok() { return Some("gitlab".into()); }
-    if env::var("GITHUB_ACTIONS").is_ok() { return Some("github".into()); }
-    if env::var("JENKINS_URL").is_ok() || env::var("BUILD_NUMBER").is_ok() { return Some("jenkins".into()); }
-    if env::var("CIRCLECI").is_ok() { return Some("circleci".into()); }
-    if env::var("TRAVIS").is_ok() { return Some("travis".into()); }
-    if env::var("TF_BUILD").is_ok() { return Some("azure".into()); }
-    if env::var("BITBUCKET_BUILD_NUMBER").is_ok() { return Some("bitbucket".into()); }
+    if env::var("GITLAB_CI").is_ok() {
+        return Some("gitlab".into());
+    }
+    if env::var("GITHUB_ACTIONS").is_ok() {
+        return Some("github".into());
+    }
+    if env::var("JENKINS_URL").is_ok() || env::var("BUILD_NUMBER").is_ok() {
+        return Some("jenkins".into());
+    }
+    if env::var("CIRCLECI").is_ok() {
+        return Some("circleci".into());
+    }
+    if env::var("TRAVIS").is_ok() {
+        return Some("travis".into());
+    }
+    if env::var("TF_BUILD").is_ok() {
+        return Some("azure".into());
+    }
+    if env::var("BITBUCKET_BUILD_NUMBER").is_ok() {
+        return Some("bitbucket".into());
+    }
     None
 }
 
@@ -327,26 +368,37 @@ fn list_recipes(cfg: &CiabattaConfig) {
         let kind = match entry {
             config::RecipeEntry::PushPull(_) => "push/pull",
             config::RecipeEntry::Simple(r) => {
-                if r.bash_script.is_some() { "bash" } else { "registry" }
+                if r.bash_script.is_some() {
+                    "bash"
+                } else {
+                    "registry"
+                }
             }
         };
         println!("  {:<30} [{}]", name, kind);
     }
 }
 
-fn show_config(cfg: &CiabattaConfig, root: &PathBuf) {
+fn show_config(cfg: &CiabattaConfig, root: &Path) {
     println!("Project root: {}", root.display());
 
     if let Some(ref sys) = cfg.system {
         println!("\n[system]");
-        if let Some(ref ci) = sys.ci { println!("  ci = {}", ci); }
-        if let Some(ref c) = sys.containers { println!("  containers = {}", c); }
+        if let Some(ref ci) = sys.ci {
+            println!("  ci = {}", ci);
+        }
+        if let Some(ref c) = sys.containers {
+            println!("  containers = {}", c);
+        }
     }
 
     if !cfg.registries.is_empty() {
         println!("\nRegistries:");
         for (name, reg) in &cfg.registries {
-            println!("  {} -> {} (tls_verify: {}, needs_auth: {})", name, reg.url, reg.tls_verify, reg.needs_auth);
+            println!(
+                "  {} -> {} (tls_verify: {}, needs_auth: {})",
+                name, reg.url, reg.tls_verify, reg.needs_auth
+            );
         }
     }
 

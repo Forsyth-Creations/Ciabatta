@@ -1,12 +1,23 @@
-use anyhow::Result;
 use super::{RegistryOpOptions, run_command};
+use anyhow::Result;
 
 pub async fn push(opts: &RegistryOpOptions<'_>, log: &mut Vec<String>) -> Result<()> {
-    let dest = format_s3_url(opts.registry_config.url.trim_end_matches('/'), opts.remote_path);
-    log.push(format!("S3 push: {} -> {}", opts.local_path.display(), dest));
+    let dest = format_s3_url(
+        opts.registry_config.url.trim_end_matches('/'),
+        opts.remote_path,
+    );
+    log.push(format!(
+        "S3 push: {} -> {}",
+        opts.local_path.display(),
+        dest
+    ));
 
     if opts.dry_run {
-        log.push(format!("[dry-run] would run: aws s3 cp {} {}", opts.local_path.display(), dest));
+        log.push(format!(
+            "[dry-run] would run: aws s3 cp {} {}",
+            opts.local_path.display(),
+            dest
+        ));
         return Ok(());
     }
 
@@ -20,11 +31,18 @@ pub async fn push(opts: &RegistryOpOptions<'_>, log: &mut Vec<String>) -> Result
 }
 
 pub async fn pull(opts: &RegistryOpOptions<'_>, log: &mut Vec<String>) -> Result<()> {
-    let src = format_s3_url(opts.registry_config.url.trim_end_matches('/'), opts.remote_path);
+    let src = format_s3_url(
+        opts.registry_config.url.trim_end_matches('/'),
+        opts.remote_path,
+    );
     log.push(format!("S3 pull: {} -> {}", src, opts.local_path.display()));
 
     if opts.dry_run {
-        log.push(format!("[dry-run] would run: aws s3 cp {} {}", src, opts.local_path.display()));
+        log.push(format!(
+            "[dry-run] would run: aws s3 cp {} {}",
+            src,
+            opts.local_path.display()
+        ));
         return Ok(());
     }
 

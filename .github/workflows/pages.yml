@@ -1,10 +1,17 @@
-name: Deploy Frontend to GitHub Pages
+name: Build and Deploy
 
 on:
   push:
     branches: [main]
     paths:
       - "frontend/**"
+      - "src/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "Dockerfile"
+      - "package.json"
+      - "turbo.json"
+      - "yarn.lock"
       - ".github/workflows/pages.yml"
   workflow_dispatch:
 
@@ -23,28 +30,52 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-          cache: npm
-          cache-dependency-path: frontend/package-lock.json
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
 
-      - name: Install dependencies
-        working-directory: frontend
-        run: npm ci
+      - name: Build Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          load: true
+          tags: ciabatta-builder:latest
+          # Match the runner's uid/gid so mounted workspace files are writable.
+          build-args: |
+            USER_UID=1001
+            USER_GID=1001
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Cache Cargo registry
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/registry
+          key: cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: cargo-registry-
 
       - name: Build
-        working-directory: frontend
-        run: npm run build
+        run: |
+          mkdir -p "$HOME/.cargo/registry"
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE":/workspace \
+            -v "$HOME/.cargo/registry":/home/dev/.cargo/registry \
+            -w /workspace \
+            ciabatta-builder \
+            bash -c "yarn install --immutable && yarn build"
 
       - name: Setup Pages
         uses: actions/configure-pages@v4
 
-      - name: Upload artifact
+      - name: Upload frontend artifact
         uses: actions/upload-pages-artifact@v3
         with:
           path: frontend/dist
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ciabatta-linux-x86_64
+          path: target/release/ciabatta
 
   deploy:
     needs: build

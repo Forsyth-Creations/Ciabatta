@@ -1,4 +1,7 @@
-const VERSION = "0.1.0";
+// Injected at build time by vite.config.js (from the release tag or
+// package.json). Keeps the version label and download links matched to the
+// actual release.
+const VERSION = __APP_VERSION__;
 
 const PLATFORMS = [
   {
@@ -120,6 +123,7 @@ function render() {
           <tr><td><code>ciabatta run [RECIPES]</code></td><td>Push artifacts (all recipes if none specified)</td></tr>
           <tr><td><code>ciabatta pull [RECIPES]</code></td><td>Pull/download artifacts</td></tr>
           <tr><td><code>ciabatta list</code></td><td>List available recipes</td></tr>
+          <tr><td><code>ciabatta analyze</code></td><td>Map the dependency graph and serve an interactive view</td></tr>
           <tr><td><code>ciabatta config show</code></td><td>Show resolved configuration</td></tr>
           <tr><td><code>ciabatta config help</code></td><td>Show config file reference</td></tr>
         </tbody>
@@ -133,6 +137,33 @@ function render() {
           <tr><td><code>--no-tui</code></td><td>Plain text output instead of the TUI</td></tr>
         </tbody>
       </table>
+    </section>
+
+    <section>
+      <h2>🕸 Dependency Analysis</h2>
+      <p>
+        Run <code>ciabatta analyze</code> to map how your repository fits together
+        and explore it in an interactive, self-contained web view on
+        <code>localhost:8080</code>. Nodes lay out left&nbsp;→&nbsp;right across columns:
+      </p>
+      <table>
+        <thead><tr><th>Column</th><th>What's in it</th></tr></thead>
+        <tbody>
+          <tr><td>Requirements</td><td>Optional — from a requirements file + a trace CSV (<code>requirement,file</code>)</td></tr>
+          <tr><td>Dependencies</td><td>External deps from crates.io, npm, pip, Docker base images, and GitLab CI images</td></tr>
+          <tr><td>Internal</td><td>Your packages and modules, with workspaces detected and linked</td></tr>
+          <tr><td>Publish points</td><td>crates.io, your registries, and targets found in publish <code>.sh</code> scripts — ciabatta-managed ones are flagged 🍞</td></tr>
+        </tbody>
+      </table>
+      <p>
+        It detects workspaces (<code>Cargo.toml</code> <code>[workspace]</code>,
+        <code>package.json</code> <code>workspaces</code>,
+        <code>pyproject.toml</code> <code>[tool.uv.workspace]</code>), tracks every
+        scanned file, and lets you filter the graph by name, category, ecosystem,
+        and workspace. Parses are content-hashed into <code>.ciabatta/.cache</code>
+        so re-runs only re-scan what changed, and <code>--check-vulns</code> annotates
+        dependencies with known OSV vulnerabilities.
+      </p>
     </section>
 
     <section>

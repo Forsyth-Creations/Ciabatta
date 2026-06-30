@@ -7,13 +7,12 @@ pub async fn push(opts: &RegistryOpOptions<'_>, log: &mut Vec<String>) -> Result
 
     if opts.dry_run {
         log.push(format!(
-            "[dry-run] would ECR-login then {} push {}",
+            "[dry-run] would run: {} push {}",
             opts.container_cmd, image
         ));
         return Ok(());
     }
 
-    ecr_login(opts, log).await?;
     run_command(opts.container_cmd, &["push", &image], opts.env_vars, log).await
 }
 
@@ -23,19 +22,21 @@ pub async fn pull(opts: &RegistryOpOptions<'_>, log: &mut Vec<String>) -> Result
 
     if opts.dry_run {
         log.push(format!(
-            "[dry-run] would ECR-login then {} pull {}",
+            "[dry-run] would run: {} pull {}",
             opts.container_cmd, image
         ));
         return Ok(());
     }
 
-    ecr_login(opts, log).await?;
     run_command(opts.container_cmd, &["pull", &image], opts.env_vars, log).await
 }
 
-async fn ecr_login(opts: &RegistryOpOptions<'_>, log: &mut Vec<String>) -> Result<()> {
-    if opts.registry_config.login_script.is_some() {
-        // Login script already ran in the shared pre-login phase.
+/// ECR auto-login via `aws ecr get-login-password`. Used as the default `login`
+/// stage when the recipe has no `login` override and the registry has no
+/// `login_script`.
+pub(super) async fn ecr_login(opts: &RegistryOpOptions<'_>, log: &mut Vec<String>) -> Result<()> {
+    if opts.dry_run {
+        log.push("[dry-run] would run: aws ecr get-login-password | docker login".to_string());
         return Ok(());
     }
     // Derive registry hostname from URL for `aws ecr get-login-password`.

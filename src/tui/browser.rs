@@ -28,7 +28,7 @@ use ratatui::{
 };
 use tokio::sync::mpsc;
 
-use crate::config::{CiabattaConfig, RecipeEntry};
+use crate::config::CiabattaConfig;
 use crate::runner::{self, ProgressUpdate, RunMode};
 
 // ─── State ───────────────────────────────────────────────────────────────────
@@ -149,6 +149,10 @@ impl BrowserApp {
                     r.logs.clear();
                 }
             }
+            ProgressUpdate::StageStarted { ref recipe, stage } => {
+                self.status_msg = Some(format!("{} → {}", recipe, stage.label(RunMode::Push)));
+            }
+            ProgressUpdate::StageFinished { .. } => {}
             ProgressUpdate::Log(ref name, ref line) => {
                 if let Some(r) = self.recipes.iter_mut().find(|r| &r.name == name) {
                     r.logs.push(line.clone());
@@ -214,10 +218,12 @@ fn build_recipe_rows(
         .iter()
         .map(|(name, entry)| {
             let push = entry.push_recipe();
-            let kind: &'static str = match entry {
-                RecipeEntry::PushPull(_) => "push/pull",
-                RecipeEntry::Simple(r) if r.bash_script.is_some() => "bash",
-                _ => "registry",
+            let kind: &'static str = if entry.push.is_some() || entry.pull.is_some() {
+                "push/pull"
+            } else if push.main.is_some() || push.bash_script.is_some() {
+                "command"
+            } else {
+                "registry"
             };
             let local_path = push.local_artifact_path.as_deref();
             let local_exists = local_path.map(|p| root.join(p).exists());

@@ -27,9 +27,11 @@ pub async fn push(opts: &RegistryOpOptions<'_>, log: &mut Vec<String>) -> Result
         .with_context(|| format!("Failed to read {}", opts.local_path.display()))?;
 
     let client = build_client(opts.registry_config.tls_verify)?;
-    let resp = client
-        .put(&url)
-        .body(data)
+    let mut req = client.put(&url).body(data);
+    if let Some((user, pass)) = super::registry_credentials(opts.registry_name, opts.env_vars) {
+        req = req.basic_auth(user, Some(pass));
+    }
+    let resp = req
         .send()
         .await
         .with_context(|| format!("HTTP PUT to {} failed", url))?;
@@ -65,8 +67,11 @@ pub async fn pull(opts: &RegistryOpOptions<'_>, log: &mut Vec<String>) -> Result
     }
 
     let client = build_client(opts.registry_config.tls_verify)?;
-    let resp = client
-        .get(&url)
+    let mut req = client.get(&url);
+    if let Some((user, pass)) = super::registry_credentials(opts.registry_name, opts.env_vars) {
+        req = req.basic_auth(user, Some(pass));
+    }
+    let resp = req
         .send()
         .await
         .with_context(|| format!("HTTP GET from {} failed", url))?;

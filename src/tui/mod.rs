@@ -61,7 +61,7 @@ async fn tui_loop(
     dry_run: bool,
     mode: RunMode,
 ) -> Result<bool> {
-    let mut app = App::new(recipe_names, dry_run);
+    let mut app = App::new(recipe_names, dry_run, mode);
     let (tx, mut rx) = mpsc::channel::<ProgressUpdate>(256);
 
     // Spawn all recipe runners.

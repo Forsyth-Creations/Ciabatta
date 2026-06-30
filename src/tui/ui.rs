@@ -6,7 +6,7 @@ use ratatui::{
     widgets::{Block, Borders, Gauge, List, ListItem, ListState, Paragraph},
 };
 
-use super::app::{App, RecipeStatus};
+use super::app::{App, RecipeStatus, StageStatus};
 
 const LOGO: &str = r#"
   ██████╗██╗ █████╗ ██████╗  █████╗ ████████╗████████╗ █████╗
@@ -105,15 +105,39 @@ fn render_recipe_list(f: &mut Frame, area: Rect, app: &App) {
             },
         );
 
-        let (ratio, gauge_color) = gauge_for(&recipe.status);
+        // Stage strip: login · pre · push · post, each with a status symbol.
+        let labels = app.stage_labels();
+        let mut spans: Vec<Span> = Vec::new();
+        for (idx, label) in labels.iter().enumerate() {
+            let (sym, color) = stage_style(recipe.stages[idx]);
+            if idx > 0 {
+                spans.push(Span::raw(" "));
+            }
+            spans.push(Span::styled(
+                format!("{sym}{label}"),
+                Style::default().fg(color),
+            ));
+        }
+        let strip = Paragraph::new(Line::from(spans));
+        f.render_widget(
+            strip,
+            Rect {
+                x: inner.x + 2,
+                y: y + 1,
+                width: inner.width.saturating_sub(2),
+                height: 1,
+            },
+        );
+
+        let gauge_color = gauge_color_for(&recipe.status);
         let gauge = Gauge::default()
             .gauge_style(Style::default().fg(gauge_color).bg(Color::DarkGray))
-            .ratio(ratio);
+            .ratio(recipe.progress());
         f.render_widget(
             gauge,
             Rect {
                 x: inner.x + 2,
-                y: y + 1,
+                y: y + 2,
                 width: inner.width.saturating_sub(2),
                 height: 1,
             },
@@ -158,11 +182,15 @@ fn render_logs(f: &mut Frame, area: Rect, app: &App) {
         .take(area.height as usize)
         .rev()
         .map(|l| {
-            let style = if l.starts_with("[stderr]") || l.contains("error") || l.contains("Error") {
+            let style = if l.starts_with("[stderr]")
+                || l.starts_with("✗")
+                || l.contains("error")
+                || l.contains("Error")
+            {
                 Style::default().fg(Color::Red)
             } else if l.starts_with("[dry-run]") {
                 Style::default().fg(Color::Yellow)
-            } else if l.starts_with('+') {
+            } else if l.starts_with('+') || l.starts_with('$') {
                 Style::default().fg(Color::Cyan)
             } else {
                 Style::default().fg(Color::Gray)
@@ -202,11 +230,21 @@ fn status_style(status: &RecipeStatus) -> (&'static str, Color) {
     }
 }
 
-fn gauge_for(status: &RecipeStatus) -> (f64, Color) {
+fn stage_style(status: StageStatus) -> (&'static str, Color) {
     match status {
-        RecipeStatus::Pending => (0.0, Color::DarkGray),
-        RecipeStatus::Running => (0.5, Color::Yellow),
-        RecipeStatus::Success => (1.0, Color::Green),
-        RecipeStatus::Failed(_) => (1.0, Color::Red),
+        StageStatus::Pending => ("○", Color::DarkGray),
+        StageStatus::Running => ("◑", Color::Yellow),
+        StageStatus::Done => ("✓", Color::Green),
+        StageStatus::Skipped => ("·", Color::DarkGray),
+        StageStatus::Failed => ("✗", Color::Red),
+    }
+}
+
+fn gauge_color_for(status: &RecipeStatus) -> Color {
+    match status {
+        RecipeStatus::Pending => Color::DarkGray,
+        RecipeStatus::Running => Color::Yellow,
+        RecipeStatus::Success => Color::Green,
+        RecipeStatus::Failed(_) => Color::Red,
     }
 }

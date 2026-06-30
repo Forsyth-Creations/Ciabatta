@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Result, bail};
 use std::collections::HashMap;
 use std::path::Path;
 use tokio::sync::mpsc;
@@ -6,15 +6,79 @@ use tokio::sync::mpsc;
 use crate::config::{CiabattaConfig, SimpleRecipe, substitute_vars, validate_publish_path};
 use crate::registry::{self, RegistryOpOptions};
 
+/// The four ordered stages of a push or pull pipeline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StageKind {
+    Login,
+    Pre,
+    Main,
+    Post,
+}
+
+impl StageKind {
+    /// All stages in execution order.
+    pub const ALL: [StageKind; 4] = [
+        StageKind::Login,
+        StageKind::Pre,
+        StageKind::Main,
+        StageKind::Post,
+    ];
+
+    /// Position in the pipeline (0..4).
+    pub fn index(self) -> usize {
+        match self {
+            StageKind::Login => 0,
+            StageKind::Pre => 1,
+            StageKind::Main => 2,
+            StageKind::Post => 3,
+        }
+    }
+
+    /// Full, mode-aware label, e.g. "pre-push" / "post-pull".
+    pub fn label(self, mode: RunMode) -> &'static str {
+        match (self, mode) {
+            (StageKind::Login, _) => "login",
+            (StageKind::Pre, RunMode::Push) => "pre-push",
+            (StageKind::Pre, RunMode::Pull) => "pre-pull",
+            (StageKind::Main, RunMode::Push) => "push",
+            (StageKind::Main, RunMode::Pull) => "pull",
+            (StageKind::Post, RunMode::Push) => "post-push",
+            (StageKind::Post, RunMode::Pull) => "post-pull",
+        }
+    }
+
+    /// Compact label for cramped UI (drops the push/pull suffix on pre/post).
+    pub fn short(self, mode: RunMode) -> &'static str {
+        match (self, mode) {
+            (StageKind::Login, _) => "login",
+            (StageKind::Pre, _) => "pre",
+            (StageKind::Main, RunMode::Push) => "push",
+            (StageKind::Main, RunMode::Pull) => "pull",
+            (StageKind::Post, _) => "post",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum ProgressUpdate {
     Started(String),
+    StageStarted {
+        recipe: String,
+        stage: StageKind,
+    },
+    /// A stage finished successfully. `ran` is false when it fell through to a
+    /// default no-op (nothing to do), true when it actually executed something.
+    StageFinished {
+        recipe: String,
+        stage: StageKind,
+        ran: bool,
+    },
     Log(String, String),
     Completed(String),
     Failed(String, String),
 }
 
-#[derive(Clone)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum RunMode {
     Push,
     Pull,
@@ -40,7 +104,12 @@ pub fn validate_recipes(
                 .ok_or_else(|| anyhow::anyhow!("Recipe '{}' has no pull action defined", name))?,
         };
 
-        if let Some(ref path) = recipe.publish_path {
+        // Only the built-in main action consumes publish_path; if the user
+        // overrode `main` (or uses a bash_script) the placeholders are theirs.
+        if recipe.main.is_none()
+            && recipe.bash_script.is_none()
+            && let Some(ref path) = recipe.publish_path
+        {
             validate_publish_path(path, env_vars)?;
         }
     }
@@ -63,10 +132,9 @@ pub async fn run_all(
         let root = root.to_path_buf();
         let env_vars = env_vars.clone();
         let tx = tx.clone();
-        let mode = mode.clone();
 
         let handle = tokio::spawn(async move {
-            run_one(name, &config, &root, &env_vars, dry_run, &mode, tx).await
+            run_one(name, &config, &root, &env_vars, dry_run, mode, tx).await
         });
         handles.push(handle);
     }
@@ -84,7 +152,7 @@ async fn run_one(
     root: &Path,
     env_vars: &HashMap<String, String>,
     dry_run: bool,
-    mode: &RunMode,
+    mode: RunMode,
     tx: mpsc::Sender<ProgressUpdate>,
 ) -> Result<()> {
     let _ = tx.send(ProgressUpdate::Started(name.clone())).await;
@@ -103,13 +171,14 @@ async fn run_one(
     result
 }
 
+/// Drive a single recipe through its four-stage pipeline.
 async fn execute_recipe(
     name: &str,
     config: &CiabattaConfig,
     root: &Path,
     env_vars: &HashMap<String, String>,
     dry_run: bool,
-    mode: &RunMode,
+    mode: RunMode,
     tx: &mpsc::Sender<ProgressUpdate>,
 ) -> Result<()> {
     let entry = config
@@ -117,30 +186,180 @@ async fn execute_recipe(
         .get(name)
         .ok_or_else(|| anyhow::anyhow!("Recipe '{}' not found", name))?;
 
-    let recipe: &SimpleRecipe = match mode {
+    let recipe: SimpleRecipe = match mode {
         RunMode::Push => entry.push_recipe(),
         RunMode::Pull => entry
             .pull_recipe()
             .ok_or_else(|| anyhow::anyhow!("Recipe '{}' has no pull action", name))?,
     };
 
-    let mut log: Vec<String> = Vec::new();
+    // Resolve the registry (if any) and the artifact paths once up front, so the
+    // login and main stages share them.
+    let registry_config = match recipe.registry.as_deref() {
+        Some(rn) => Some(
+            config
+                .registries
+                .get(rn)
+                .ok_or_else(|| anyhow::anyhow!("Registry '{}' not found in config", rn))?,
+        ),
+        None => None,
+    };
 
-    if let Some(ref script) = recipe.bash_script {
-        run_bash_script(script, root, env_vars, dry_run, &mut log).await?;
-    } else {
-        run_registry_action(
-            name, recipe, config, root, env_vars, dry_run, mode, &mut log,
+    let container_cmd = config
+        .system
+        .as_ref()
+        .and_then(|s| s.containers.as_deref())
+        .unwrap_or("docker");
+
+    let resolved_remote = match recipe.publish_path.as_deref() {
+        Some(p) => substitute_vars(p, env_vars)?,
+        None => String::new(),
+    };
+    let local_path = root.join(recipe.local_artifact_path.as_deref().unwrap_or("."));
+
+    let opts = registry_config.map(|rc| RegistryOpOptions {
+        registry_name: recipe.registry.as_deref().unwrap_or_default(),
+        registry_config: rc,
+        local_path: &local_path,
+        remote_path: &resolved_remote,
+        env_vars,
+        dry_run,
+        container_cmd,
+    });
+
+    for stage in StageKind::ALL {
+        let _ = tx
+            .send(ProgressUpdate::StageStarted {
+                recipe: name.to_string(),
+                stage,
+            })
+            .await;
+
+        let mut log: Vec<String> = Vec::new();
+        let result = run_stage(
+            stage,
+            name,
+            &recipe,
+            opts.as_ref(),
+            root,
+            env_vars,
+            dry_run,
+            mode,
+            &mut log,
         )
-        .await?;
-    }
+        .await;
 
-    // Flush logs to channel
-    for line in log {
-        let _ = tx.send(ProgressUpdate::Log(name.to_string(), line)).await;
+        for line in &log {
+            let _ = tx
+                .send(ProgressUpdate::Log(name.to_string(), line.clone()))
+                .await;
+        }
+
+        match result {
+            Ok(ran) => {
+                let _ = tx
+                    .send(ProgressUpdate::StageFinished {
+                        recipe: name.to_string(),
+                        stage,
+                        ran,
+                    })
+                    .await;
+            }
+            // The Failed update (with the current stage) is emitted by run_one.
+            Err(e) => return Err(e),
+        }
     }
 
     Ok(())
+}
+
+/// Execute a single stage. Returns `Ok(true)` if it actually ran a command,
+/// `Ok(false)` if it fell through to a default no-op.
+#[allow(clippy::too_many_arguments)]
+async fn run_stage(
+    stage: StageKind,
+    name: &str,
+    recipe: &SimpleRecipe,
+    opts: Option<&RegistryOpOptions<'_>>,
+    root: &Path,
+    env_vars: &HashMap<String, String>,
+    dry_run: bool,
+    mode: RunMode,
+    log: &mut Vec<String>,
+) -> Result<bool> {
+    match stage {
+        StageKind::Login => {
+            if let Some(cmd) = recipe.login.as_deref() {
+                run_shell(cmd, root, env_vars, dry_run, log).await?;
+                Ok(true)
+            } else if let Some(opts) = opts {
+                if let Some(script) = opts.registry_config.login_script.as_deref() {
+                    run_login_script(script, root, env_vars, dry_run, log).await?;
+                    Ok(true)
+                } else {
+                    registry::default_login(opts, log).await
+                }
+            } else {
+                Ok(false)
+            }
+        }
+        StageKind::Pre => run_optional(recipe.pre.as_deref(), root, env_vars, dry_run, log).await,
+        StageKind::Main => {
+            if let Some(cmd) = recipe.main.as_deref() {
+                run_shell(cmd, root, env_vars, dry_run, log).await?;
+                Ok(true)
+            } else if let Some(script) = recipe.bash_script.as_deref() {
+                run_bash_script(script, root, env_vars, dry_run, log).await?;
+                Ok(true)
+            } else if let Some(opts) = opts {
+                match mode {
+                    RunMode::Push => registry::push(opts, log).await?,
+                    RunMode::Pull => registry::pull(opts, log).await?,
+                }
+                Ok(true)
+            } else {
+                bail!(
+                    "Recipe '{}' has no push/pull action. Define a registry + publish_path, \
+                     a bash_script, or a `main` command.",
+                    name
+                )
+            }
+        }
+        StageKind::Post => run_optional(recipe.post.as_deref(), root, env_vars, dry_run, log).await,
+    }
+}
+
+/// Run an optional stage override command; no-op (Ok(false)) when absent.
+async fn run_optional(
+    cmd: Option<&str>,
+    root: &Path,
+    env_vars: &HashMap<String, String>,
+    dry_run: bool,
+    log: &mut Vec<String>,
+) -> Result<bool> {
+    match cmd {
+        Some(c) => {
+            run_shell(c, root, env_vars, dry_run, log).await?;
+            Ok(true)
+        }
+        None => Ok(false),
+    }
+}
+
+/// Run an arbitrary shell command (the stage-override mechanism).
+async fn run_shell(
+    cmd: &str,
+    root: &Path,
+    env_vars: &HashMap<String, String>,
+    dry_run: bool,
+    log: &mut Vec<String>,
+) -> Result<()> {
+    log.push(format!("$ {cmd}"));
+    if dry_run {
+        log.push(format!("[dry-run] would run: {cmd}"));
+        return Ok(());
+    }
+    registry::run_shell_command(cmd, root, env_vars, log).await
 }
 
 async fn run_bash_script(
@@ -164,54 +383,76 @@ async fn run_bash_script(
     registry::run_script(&script_path.to_string_lossy(), env_vars, log).await
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn run_registry_action(
-    name: &str,
-    recipe: &SimpleRecipe,
-    config: &CiabattaConfig,
+async fn run_login_script(
+    script: &str,
     root: &Path,
     env_vars: &HashMap<String, String>,
     dry_run: bool,
-    mode: &RunMode,
     log: &mut Vec<String>,
 ) -> Result<()> {
-    let registry_name = recipe.registry.as_deref().ok_or_else(|| {
-        anyhow::anyhow!("Recipe '{}' has no registry or bash_script defined", name)
-    })?;
+    let script_path = root.join(script);
+    log.push(format!("Running login script: {}", script_path.display()));
 
-    let registry_config = config
-        .registries
-        .get(registry_name)
-        .ok_or_else(|| anyhow::anyhow!("Registry '{}' not found in config", registry_name))?;
+    if dry_run {
+        log.push(format!(
+            "[dry-run] would run: bash {}",
+            script_path.display()
+        ));
+        return Ok(());
+    }
 
-    let publish_path = recipe
-        .publish_path
-        .as_deref()
-        .ok_or_else(|| anyhow::anyhow!("Recipe '{}' has no publish_path", name))?;
+    registry::run_script(&script_path.to_string_lossy(), env_vars, log).await
+}
 
-    let resolved_path = substitute_vars(publish_path, env_vars)?;
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    let local_artifact = recipe.local_artifact_path.as_deref().unwrap_or(".");
-    let local_path = root.join(local_artifact);
+    #[test]
+    fn stage_order_and_indices() {
+        let idx: Vec<usize> = StageKind::ALL.iter().map(|s| s.index()).collect();
+        assert_eq!(idx, vec![0, 1, 2, 3]);
+    }
 
-    let container_cmd = config
-        .system
-        .as_ref()
-        .and_then(|s| s.containers.as_deref())
-        .unwrap_or("docker");
+    #[test]
+    fn stage_labels_are_mode_aware() {
+        assert_eq!(StageKind::Login.label(RunMode::Push), "login");
+        assert_eq!(StageKind::Pre.label(RunMode::Push), "pre-push");
+        assert_eq!(StageKind::Pre.label(RunMode::Pull), "pre-pull");
+        assert_eq!(StageKind::Main.label(RunMode::Push), "push");
+        assert_eq!(StageKind::Main.label(RunMode::Pull), "pull");
+        assert_eq!(StageKind::Post.label(RunMode::Pull), "post-pull");
+        // Compact forms drop the direction suffix on pre/post.
+        assert_eq!(StageKind::Pre.short(RunMode::Push), "pre");
+        assert_eq!(StageKind::Post.short(RunMode::Pull), "post");
+        assert_eq!(StageKind::Main.short(RunMode::Push), "push");
+    }
 
-    let opts = RegistryOpOptions {
-        registry_name,
-        registry_config,
-        local_path: &local_path,
-        remote_path: &resolved_path,
-        env_vars,
-        dry_run,
-        container_cmd,
-    };
+    #[test]
+    fn validate_skips_publish_path_when_main_overridden() {
+        let vars = HashMap::new();
 
-    match mode {
-        RunMode::Push => registry::push(opts, log).await,
-        RunMode::Pull => registry::pull(opts, log).await,
+        // main override: publish_path placeholders are the user's concern.
+        let cfg: CiabattaConfig = toml::from_str(
+            r#"
+[recipies.a]
+registry = "nexus"
+publish_path = "x/{MISSING_VAR}/y"
+main = "echo hi"
+"#,
+        )
+        .unwrap();
+        assert!(validate_recipes(&cfg, &["a".to_string()], &vars, &RunMode::Push).is_ok());
+
+        // built-in main: the missing variable must be caught up front.
+        let cfg2: CiabattaConfig = toml::from_str(
+            r#"
+[recipies.a]
+registry = "nexus"
+publish_path = "x/{MISSING_VAR}/y"
+"#,
+        )
+        .unwrap();
+        assert!(validate_recipes(&cfg2, &["a".to_string()], &vars, &RunMode::Push).is_err());
     }
 }

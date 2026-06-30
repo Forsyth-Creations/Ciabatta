@@ -1,3 +1,4 @@
+mod analyze;
 mod ci;
 mod cli;
 mod config;
@@ -62,6 +63,27 @@ async fn main() -> Result<()> {
 
         Commands::Tui => {
             run_tui_browser().await?;
+        }
+
+        Commands::Analyze {
+            output,
+            port,
+            no_serve,
+            check_vulns,
+            requirements,
+            trace,
+            config,
+        } => {
+            cmd_analyze(
+                config.as_deref(),
+                output,
+                port,
+                no_serve,
+                check_vulns,
+                requirements,
+                trace,
+            )
+            .await?;
         }
 
         Commands::Config { subcommand } => match subcommand {
@@ -210,6 +232,17 @@ async fn run_plain(
     while let Some(update) = rx.recv().await {
         match update {
             ProgressUpdate::Started(name) => println!("[{name}] started"),
+            ProgressUpdate::StageStarted { recipe, stage } => {
+                println!("[{recipe}] ▶ {}", stage.label(mode))
+            }
+            ProgressUpdate::StageFinished { recipe, stage, ran } => {
+                if !ran {
+                    println!(
+                        "[{recipe}]   {} (default, nothing to do)",
+                        stage.label(mode)
+                    );
+                }
+            }
             ProgressUpdate::Log(name, line) => println!("[{name}] {line}"),
             ProgressUpdate::Completed(name) => println!("[{name}] ✓ completed"),
             ProgressUpdate::Failed(name, err) => {
@@ -322,6 +355,25 @@ containers = {containers:?}
 # bash_script = "scripts/docker_push.sh"
 # [recipies.my_docker.pull]
 # bash_script = "scripts/docker_pull.sh"
+#
+# ─── Stages ────────────────────────────────────────────────────────────────────
+# Every push runs four stages: login → pre-push → push → post-push
+# Every pull runs four stages:  login → pre-pull → pull → post-pull
+# Override any stage with an arbitrary command (bash, python, a binary, …):
+#   login = "..."   pre = "..."   main = "..."   post = "..."
+# Unset stages use their defaults (login uses the registry login_script or
+# CIABATTA_<REGISTRY>_USER/PASS credentials; pre/post do nothing; main runs the
+# built-in registry action). Commands get all CIABATTA_* vars in their env.
+#
+# [recipies.frontend.push]
+# pre  = "python scripts/bundle.py"
+# post = "./scripts/notify.sh deployed"
+#
+# ─── Credentials ───────────────────────────────────────────────────────────────
+# When a registry has no login_script, ciabatta reads per-registry credentials:
+#   CIABATTA_<REGISTRY>_USER  /  CIABATTA_<REGISTRY>_PASS
+# e.g. for [registries.nexus]: CIABATTA_NEXUS_USER / CIABATTA_NEXUS_PASS.
+# Nexus/Artifactory use them for HTTP basic auth; docker runs `docker login`.
 "#,
         ci_line = ci_line,
         containers = containers,
@@ -365,15 +417,13 @@ fn list_recipes(cfg: &CiabattaConfig) {
     names.sort();
     for name in names {
         let entry = &cfg.recipes[name];
-        let kind = match entry {
-            config::RecipeEntry::PushPull(_) => "push/pull",
-            config::RecipeEntry::Simple(r) => {
-                if r.bash_script.is_some() {
-                    "bash"
-                } else {
-                    "registry"
-                }
-            }
+        let push = entry.push_recipe();
+        let kind = if entry.push.is_some() || entry.pull.is_some() {
+            "push/pull"
+        } else if push.main.is_some() || push.bash_script.is_some() {
+            "command"
+        } else {
+            "registry"
         };
         println!("  {:<30} [{}]", name, kind);
     }
@@ -435,6 +485,14 @@ All paths in recipes are relative to this root.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
+[analyze]                  # Optional inputs for `ciabatta analyze`
+  requirements = "reqs.txt"  # File of requirements: `id` or `id, description`
+  trace        = "trace.csv" # CSV of `requirement,file` connections
+                             # (paths are relative to the project root;
+                             #  --requirements / --trace override these)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
 [registries.<name>]
   url          = "https://..."    # Base URL of the registry (required)
   tls_verify   = true             # Verify TLS certificate (default: true)
@@ -462,6 +520,42 @@ All paths in recipes are relative to this root.
   bash_script = "scripts/push.sh"
 [recipies.<name>.pull]
   bash_script = "scripts/pull.sh"
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Stages (state machine)
+
+  Each push runs:  login → pre-push → push → post-push
+  Each pull runs:  login → pre-pull → pull → post-pull
+
+  Override any stage with an arbitrary command (bash, python, a compiled
+  binary, …). Unset stages fall back to their defaults.
+
+    login = "..."   # default: registry login_script, or CIABATTA_<REG>_USER/PASS
+    pre   = "..."   # default: nothing
+    main  = "..."   # default: the built-in registry push/pull (or bash_script)
+    post  = "..."   # default: nothing
+
+  Stage commands run via `sh -c` from the project root, with every CIABATTA_*
+  and CI variable available in their environment (use $CIABATTA_COMMIT, etc.).
+
+  [recipies.frontend.push]      # overrides only apply to the push direction
+    pre  = "python scripts/bundle.py"
+    post = "./scripts/notify.sh deployed"
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Credentials (when a registry has no login_script)
+
+  ciabatta reads per-registry credentials from the environment:
+    CIABATTA_<REGISTRY>_USER   CIABATTA_<REGISTRY>_PASS
+  where <REGISTRY> is the registry's section name, uppercased. For example,
+  [registries.nexus] → CIABATTA_NEXUS_USER / CIABATTA_NEXUS_PASS.
+
+    nexus / artifactory  → sent as HTTP basic auth
+    docker               → `docker login <host> -u $USER --password-stdin`
+    ecr                  → `aws ecr get-login-password` (credentials not needed)
+    s3                   → uses the standard AWS credential chain
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -503,4 +597,87 @@ async fn run_tui_browser() -> Result<()> {
     let (root, cfg) = load_project(None)?;
     let vars = build_env_vars(&cfg, &[])?;
     tui::browser::run_browser(cfg, root, vars).await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn cmd_analyze(
+    config_path: Option<&Path>,
+    output: Option<PathBuf>,
+    port: u16,
+    no_serve: bool,
+    check_vulns: bool,
+    requirements: Option<PathBuf>,
+    trace: Option<PathBuf>,
+) -> Result<()> {
+    let cwd = env::current_dir().context("Failed to get current directory")?;
+
+    // Analyze works with or without a .ciabatta project: resolve the root from
+    // an explicit config path, else the nearest .ciabatta, else the cwd.
+    let root = config_path
+        .and_then(|p| p.parent().and_then(|d| d.parent()).map(Path::to_path_buf))
+        .or_else(|| find_root(&cwd))
+        .unwrap_or_else(|| cwd.clone());
+    let cfg = load_config(&root)?;
+
+    // CLI flags win; otherwise fall back to [analyze] in the config (paths there
+    // are relative to the project root).
+    let requirements_path = requirements.or_else(|| {
+        cfg.analyze
+            .as_ref()
+            .and_then(|a| a.requirements.as_ref())
+            .map(|p| root.join(p))
+    });
+    let trace_path = trace.or_else(|| {
+        cfg.analyze
+            .as_ref()
+            .and_then(|a| a.trace.as_ref())
+            .map(|p| root.join(p))
+    });
+    let inputs = analyze::RequirementInputs {
+        requirements_file: requirements_path.as_deref(),
+        trace_file: trace_path.as_deref(),
+    };
+
+    let mut graph = analyze::analyze(&root, &cfg, &inputs)?;
+
+    if check_vulns {
+        println!("Querying OSV for known vulnerabilities…");
+        if let Err(e) = analyze::check_vulnerabilities(&mut graph).await {
+            eprintln!("warning: vulnerability check failed: {e}");
+        }
+    }
+
+    let json = serde_json::to_string_pretty(&graph)?;
+    let out = output.unwrap_or_else(|| cwd.join("ciabatta-analyze.json"));
+    std::fs::write(&out, &json).with_context(|| format!("Failed to write {}", out.display()))?;
+
+    let externals = graph
+        .nodes
+        .iter()
+        .filter(|n| n.category == analyze::Category::External)
+        .count();
+    let internals = graph
+        .nodes
+        .iter()
+        .filter(|n| n.category == analyze::Category::Internal)
+        .count();
+    let publishes = graph
+        .nodes
+        .iter()
+        .filter(|n| n.category == analyze::Category::Publish)
+        .count();
+
+    println!("Wrote {}", out.display());
+    println!(
+        "  {} external · {} internal · {} publish · {} edges",
+        externals,
+        internals,
+        publishes,
+        graph.edges.len()
+    );
+
+    if !no_serve {
+        analyze::server::serve(json, port).await?;
+    }
+    Ok(())
 }

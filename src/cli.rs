@@ -72,6 +72,37 @@ pub enum Commands {
     #[command(alias = "browse")]
     Tui,
 
+    /// Analyze the codebase dependency graph and serve an interactive view.
+    Analyze {
+        /// Write the analysis JSON to this path (default: ciabatta-analyze.json).
+        #[arg(short = 'o', long)]
+        output: Option<std::path::PathBuf>,
+
+        /// Port for the local web view.
+        #[arg(short = 'p', long, default_value_t = 8080)]
+        port: u16,
+
+        /// Only write the JSON; don't start the web server.
+        #[arg(long)]
+        no_serve: bool,
+
+        /// Query the OSV database for known vulnerabilities (requires network).
+        #[arg(long)]
+        check_vulns: bool,
+
+        /// Requirements file (adds a "Requirements" column). Overrides config.
+        #[arg(long)]
+        requirements: Option<std::path::PathBuf>,
+
+        /// Trace CSV (requirement,file) connecting requirements into the graph.
+        #[arg(long)]
+        trace: Option<std::path::PathBuf>,
+
+        /// Path to ciabatta.toml (overrides .ciabatta/ciabatta.toml discovery).
+        #[arg(short = 'c', long)]
+        config: Option<std::path::PathBuf>,
+    },
+
     /// Configuration helpers.
     Config {
         #[command(subcommand)]

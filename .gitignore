@@ -4,6 +4,8 @@ frontend/dist
 dist
 .env
 *.local
+ciabatta-analyze.json
+.ciabatta/.cache/
 
 # Turbo
 .turbo

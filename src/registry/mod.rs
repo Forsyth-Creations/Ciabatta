@@ -4,8 +4,8 @@ pub mod ecr;
 pub mod nexus;
 pub mod s3;
 
-use crate::config::{RegistryConfig, RegistryKind};
-use anyhow::Result;
+use crate::config::{RegistryConfig, RegistryKind, infer_registry_kind};
+use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -20,46 +20,151 @@ pub struct RegistryOpOptions<'a> {
     pub container_cmd: &'a str,
 }
 
-/// Perform a push (upload/publish) to a registry.
-pub async fn push(opts: RegistryOpOptions<'_>, log: &mut Vec<String>) -> Result<()> {
-    run_login_script(&opts, log).await?;
-
-    let kind = RegistryKind::from(opts.registry_name);
-    match kind {
-        RegistryKind::Nexus | RegistryKind::Generic => nexus::push(&opts, log).await,
-        RegistryKind::S3 => s3::push(&opts, log).await,
-        RegistryKind::Artifactory => artifactory::push(&opts, log).await,
-        RegistryKind::Docker => docker::push(&opts, log).await,
-        RegistryKind::Ecr => ecr::push(&opts, log).await,
+/// Perform the main push (upload/publish) action for a registry.
+///
+/// Authentication is handled separately by the pipeline's `login` stage, so
+/// this only performs the transfer itself.
+pub async fn push(opts: &RegistryOpOptions<'_>, log: &mut Vec<String>) -> Result<()> {
+    match infer_registry_kind(opts.registry_name, opts.registry_config) {
+        RegistryKind::Nexus | RegistryKind::Generic => nexus::push(opts, log).await,
+        RegistryKind::S3 => s3::push(opts, log).await,
+        RegistryKind::Artifactory => artifactory::push(opts, log).await,
+        RegistryKind::Docker => docker::push(opts, log).await,
+        RegistryKind::Ecr => ecr::push(opts, log).await,
     }
 }
 
-/// Perform a pull (download) from a registry.
-pub async fn pull(opts: RegistryOpOptions<'_>, log: &mut Vec<String>) -> Result<()> {
-    run_login_script(&opts, log).await?;
-
-    let kind = RegistryKind::from(opts.registry_name);
-    match kind {
-        RegistryKind::Nexus | RegistryKind::Generic => nexus::pull(&opts, log).await,
-        RegistryKind::S3 => s3::pull(&opts, log).await,
-        RegistryKind::Artifactory => artifactory::pull(&opts, log).await,
-        RegistryKind::Docker => docker::pull(&opts, log).await,
-        RegistryKind::Ecr => ecr::pull(&opts, log).await,
+/// Perform the main pull (download) action for a registry.
+pub async fn pull(opts: &RegistryOpOptions<'_>, log: &mut Vec<String>) -> Result<()> {
+    match infer_registry_kind(opts.registry_name, opts.registry_config) {
+        RegistryKind::Nexus | RegistryKind::Generic => nexus::pull(opts, log).await,
+        RegistryKind::S3 => s3::pull(opts, log).await,
+        RegistryKind::Artifactory => artifactory::pull(opts, log).await,
+        RegistryKind::Docker => docker::pull(opts, log).await,
+        RegistryKind::Ecr => ecr::pull(opts, log).await,
     }
 }
 
-async fn run_login_script(opts: &RegistryOpOptions<'_>, log: &mut Vec<String>) -> Result<()> {
-    let Some(ref script) = opts.registry_config.login_script else {
-        return Ok(());
+/// Environment-variable key suffix for a registry's credentials, e.g. the
+/// registry named `nexus` yields `NEXUS`, used in `CIABATTA_NEXUS_USER` /
+/// `CIABATTA_NEXUS_PASS`.
+fn cred_key(registry_name: &str) -> String {
+    registry_name
+        .to_uppercase()
+        .replace(|c: char| !c.is_ascii_alphanumeric(), "_")
+}
+
+/// Resolve `CIABATTA_<REGISTRY>_USER` / `CIABATTA_<REGISTRY>_PASS` for a
+/// registry, if both are present in the environment.
+pub fn registry_credentials(
+    registry_name: &str,
+    env_vars: &HashMap<String, String>,
+) -> Option<(String, String)> {
+    let key = cred_key(registry_name);
+    let user = env_vars.get(&format!("CIABATTA_{key}_USER"))?.clone();
+    let pass = env_vars.get(&format!("CIABATTA_{key}_PASS"))?.clone();
+    Some((user, pass))
+}
+
+/// The default `login` stage: used when a recipe defines neither a `login`
+/// override nor a registry `login_script`.
+///
+/// Credentials come from `CIABATTA_<REGISTRY>_USER` / `_PASS`:
+///   - Nexus / Artifactory: applied as HTTP basic auth at request time, so here
+///     we only report whether they're present.
+///   - Docker: `docker login` with the credentials.
+///   - ECR: `aws ecr get-login-password` auto-login.
+///   - S3: defers to the standard AWS credential chain.
+///
+/// Returns `Ok(true)` if it performed a login action, `Ok(false)` if there was
+/// nothing to do.
+pub async fn default_login(opts: &RegistryOpOptions<'_>, log: &mut Vec<String>) -> Result<bool> {
+    let key = cred_key(opts.registry_name);
+    match infer_registry_kind(opts.registry_name, opts.registry_config) {
+        RegistryKind::Nexus | RegistryKind::Artifactory | RegistryKind::Generic => {
+            if registry_credentials(opts.registry_name, opts.env_vars).is_some() {
+                log.push(format!(
+                    "Using CIABATTA_{key}_USER / CIABATTA_{key}_PASS for HTTP basic auth"
+                ));
+                Ok(true)
+            } else {
+                log.push(format!(
+                    "No credentials set (CIABATTA_{key}_USER / CIABATTA_{key}_PASS); \
+                     proceeding unauthenticated"
+                ));
+                Ok(false)
+            }
+        }
+        RegistryKind::Docker => docker_login(opts, log).await,
+        RegistryKind::Ecr => {
+            ecr::ecr_login(opts, log).await?;
+            Ok(true)
+        }
+        RegistryKind::S3 => {
+            log.push(
+                "S3 uses the standard AWS credential chain (AWS_ACCESS_KEY_ID, …); \
+                 no ciabatta login performed"
+                    .to_string(),
+            );
+            Ok(false)
+        }
+    }
+}
+
+/// `docker login <host> -u <user> --password-stdin` using the registry's
+/// `CIABATTA_<REGISTRY>_USER` / `_PASS` credentials.
+async fn docker_login(opts: &RegistryOpOptions<'_>, log: &mut Vec<String>) -> Result<bool> {
+    let key = cred_key(opts.registry_name);
+    let Some((user, pass)) = registry_credentials(opts.registry_name, opts.env_vars) else {
+        log.push(format!(
+            "No credentials set (CIABATTA_{key}_USER / CIABATTA_{key}_PASS); skipping docker login"
+        ));
+        return Ok(false);
     };
 
-    log.push(format!("Running login script: {}", script));
+    let host = opts
+        .registry_config
+        .url
+        .trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .trim_end_matches('/');
+
+    log.push(format!("docker login {host} as {user}"));
     if opts.dry_run {
-        log.push(format!("[dry-run] would run: {}", script));
-        return Ok(());
+        log.push(format!(
+            "[dry-run] would run: {} login {host} -u {user} --password-stdin",
+            opts.container_cmd
+        ));
+        return Ok(true);
     }
 
-    run_script(script, opts.env_vars, log).await
+    use std::process::Stdio;
+    use tokio::io::AsyncWriteExt;
+    use tokio::process::Command;
+
+    let mut child = Command::new(opts.container_cmd)
+        .args(["login", host, "-u", &user, "--password-stdin"])
+        .envs(opts.env_vars)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .with_context(|| format!("Failed to spawn {} login", opts.container_cmd))?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(pass.as_bytes()).await?;
+    }
+    let out = child.wait_with_output().await?;
+    for line in String::from_utf8_lossy(&out.stdout).lines() {
+        log.push(line.to_string());
+    }
+    if !out.status.success() {
+        anyhow::bail!(
+            "docker login to {host} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    Ok(true)
 }
 
 pub async fn run_script(
@@ -93,6 +198,41 @@ pub async fn run_script(
             script,
             output.status.code()
         );
+    }
+    Ok(())
+}
+
+/// Run an arbitrary shell command (`sh -c <cmd>`) from `cwd`, with the given
+/// environment variables injected. Used by the stage-override mechanism.
+pub async fn run_shell_command(
+    cmd: &str,
+    cwd: &Path,
+    env_vars: &HashMap<String, String>,
+    log: &mut Vec<String>,
+) -> Result<()> {
+    use std::process::Stdio;
+    use tokio::process::Command;
+
+    let output = Command::new("sh")
+        .arg("-c")
+        .arg(cmd)
+        .current_dir(cwd)
+        .envs(env_vars)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .await
+        .with_context(|| format!("Failed to spawn shell for command: {cmd}"))?;
+
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        log.push(line.to_string());
+    }
+    for line in String::from_utf8_lossy(&output.stderr).lines() {
+        log.push(format!("[stderr] {}", line));
+    }
+
+    if !output.status.success() {
+        anyhow::bail!("Command failed (exit {:?}): {}", output.status.code(), cmd);
     }
     Ok(())
 }
@@ -133,4 +273,37 @@ pub async fn run_command(
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cred_key_uppercases_and_sanitizes() {
+        assert_eq!(cred_key("nexus"), "NEXUS");
+        assert_eq!(cred_key("my-registry"), "MY_REGISTRY");
+        assert_eq!(cred_key("ecr.prod"), "ECR_PROD");
+    }
+
+    #[test]
+    fn credentials_resolved_by_registry_name() {
+        let mut env = HashMap::new();
+        env.insert("CIABATTA_NEXUS_USER".to_string(), "u".to_string());
+        env.insert("CIABATTA_NEXUS_PASS".to_string(), "p".to_string());
+
+        assert_eq!(
+            registry_credentials("nexus", &env),
+            Some(("u".to_string(), "p".to_string()))
+        );
+        // Different registry name → no credentials.
+        assert_eq!(registry_credentials("docker", &env), None);
+    }
+
+    #[test]
+    fn credentials_require_both_user_and_pass() {
+        let mut env = HashMap::new();
+        env.insert("CIABATTA_NEXUS_USER".to_string(), "u".to_string());
+        assert_eq!(registry_credentials("nexus", &env), None);
+    }
 }

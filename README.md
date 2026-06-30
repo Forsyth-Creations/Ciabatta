@@ -91,6 +91,8 @@ artifacts are published from.
 | `ciabatta pull [RECIPE...]` | Download artifacts for one or more recipes. |
 | `ciabatta list` | List all recipes defined in the config. |
 | `ciabatta init [--ci SYSTEM]` | Create a `.ciabatta/` directory with a starter `ciabatta.toml`. |
+| `ciabatta configure` | Interactively add a registry (and optionally a recipe) — no hand-editing TOML. |
+| `ciabatta configure auto` | Analyze the project and pick recipes from an interactive checklist (Docker → ECR/Nexus, Rust binaries → crates.io / S3 / Nexus). |
 | `ciabatta tui` (alias `browse`) | Interactive browser — inspect registries, check paths, push on demand. |
 | `ciabatta analyze` | Build the project's dependency graph and serve an interactive view. |
 | `ciabatta config show` | Print the resolved configuration. |
@@ -109,13 +111,21 @@ Useful flags on `run` / `pull`:
 Ciabatta reads `.ciabatta/ciabatta.toml`. Registries describe *where* things go;
 recipes describe *what* to publish and *how*.
 
+The fastest way to start is `ciabatta configure` (add a registry interactively)
+or `ciabatta configure auto` (let Ciabatta inspect the repo and suggest recipes).
+You can also edit the file by hand:
+
 ```toml
 [system]
 ci = "github"          # gitlab | github | jenkins | circleci | azure | bitbucket
-containers = "docker"  # docker | podman
+containers = "docker"  # docker | podman — when omitted, Ciabatta auto-detects what
+                       # is installed (prefers podman, then docker; asks you to
+                       # choose if both are present).
 
 [registries.nexus]
-url = "https://nexus.example.com/repository/maven-repository/"
+# url and login_script expand environment variables with bash-style defaults,
+# so one config can target different environments.
+url = "https://${NEXUS_HOST:-nexus.example.com}/repository/maven-repository/"
 tls_verify = true
 needs_auth = true
 login_script = "./nexus_login.sh"

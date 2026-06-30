@@ -16,9 +16,11 @@ pub struct CiabattaConfig {
     pub analyze: Option<AnalyzeConfig>,
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
 pub struct SystemConfig {
     pub ci: Option<String>,
+    /// Container runtime (`docker` or `podman`). When unset, ciabatta auto-detects
+    /// what's installed at run time (see [`resolve_container_cmd`]).
     pub containers: Option<String>,
 }
 
@@ -71,14 +73,46 @@ pub struct RecipeEntry {
     pub pull: Option<SimpleRecipe>,
 }
 
+/// Where a recipe publishes to. Either a single remote path (the classic form,
+/// supporting `{CIABATTA_*}` substitution) or a list of local file globs whose
+/// matched files are uploaded under `{CIABATTA_PATH}` preserving their relative
+/// path (with `strip_prefix` removed from the front).
+///
+/// ```toml
+/// publish_path = "team/app/{CIABATTA_COMMIT}/app.tar.gz"   # single
+/// publish_path = ["dist/*.tar.gz", "build/*.bin"]          # list of globs
+/// ```
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+#[serde(untagged)]
+pub enum PublishPath {
+    /// One remote destination path.
+    Single(String),
+    /// A list of local file globs, each uploaded under `{CIABATTA_PATH}`.
+    Many(Vec<String>),
+}
+
+impl PublishPath {
+    /// A human-readable rendering for display (TUI/config show).
+    pub fn display(&self) -> String {
+        match self {
+            PublishPath::Single(s) => s.clone(),
+            PublishPath::Many(v) => v.join(", "),
+        }
+    }
+}
+
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
 pub struct SimpleRecipe {
     /// Named registry from [registries] section.
     pub registry: Option<String>,
     /// Local filesystem path for the artifact.
     pub local_artifact_path: Option<String>,
-    /// Destination path in the registry; supports {CIABATTA_*} variable substitution.
-    pub publish_path: Option<String>,
+    /// Destination path in the registry; supports {CIABATTA_*} variable
+    /// substitution, or a list of local file globs (see [`PublishPath`]).
+    pub publish_path: Option<PublishPath>,
+    /// For list-form `publish_path`: a leading path fragment stripped from each
+    /// matched file's relative path before it's joined under `{CIABATTA_PATH}`.
+    pub strip_prefix: Option<String>,
     /// Path to a bash script to run instead of the built-in registry action.
     /// Legacy alias for the `main` stage (kept for backwards compatibility).
     pub bash_script: Option<String>,
@@ -111,6 +145,10 @@ impl SimpleRecipe {
                 .publish_path
                 .clone()
                 .or_else(|| self.publish_path.clone()),
+            strip_prefix: over
+                .strip_prefix
+                .clone()
+                .or_else(|| self.strip_prefix.clone()),
             bash_script: over
                 .bash_script
                 .clone()
@@ -166,9 +204,121 @@ pub fn load_config(root: &Path) -> Result<CiabattaConfig> {
     }
     let content = std::fs::read_to_string(&path)
         .with_context(|| format!("Failed to read {}", path.display()))?;
-    let config: CiabattaConfig =
+    let mut config: CiabattaConfig =
         toml::from_str(&content).with_context(|| format!("Failed to parse {}", path.display()))?;
+
+    // Registries may reference environment variables (with bash-style defaults)
+    // so the same config can target different endpoints per environment.
+    for reg in config.registries.values_mut() {
+        reg.url = expand_env(&reg.url);
+        if let Some(script) = reg.login_script.take() {
+            reg.login_script = Some(expand_env(&script));
+        }
+    }
+
     Ok(config)
+}
+
+/// Expand shell-style environment references in a config value, supporting the
+/// bash default syntax. Recognized forms (a leading `$` is optional):
+///
+/// ```text
+/// ${VAR}            → value of VAR, or empty if unset
+/// ${VAR:-default}   → value of VAR if set and non-empty, else `default`
+/// ${VAR-default}    → value of VAR if set (even if empty), else `default`
+/// {VAR:-default}    → same as ${VAR:-default} (matches the documented syntax)
+/// ```
+///
+/// A bare `{VAR}` with neither a `$` nor a default operator is left untouched, so
+/// ordinary braces in a URL are never clobbered.
+pub fn expand_env(input: &str) -> String {
+    let re = regex::Regex::new(r"(\$?)\{([A-Za-z_][A-Za-z0-9_]*)(?:(:?-)([^}]*))?\}").unwrap();
+    re.replace_all(input, |caps: &regex::Captures| {
+        let had_dollar = !caps[1].is_empty();
+        let name = &caps[2];
+        let op = caps.get(3).map(|m| m.as_str());
+
+        // Without a `$` and without a default operator this isn't an env
+        // reference — leave the original text in place.
+        if !had_dollar && op.is_none() {
+            return caps[0].to_string();
+        }
+
+        let value = std::env::var(name).ok();
+        match op {
+            Some(op) => {
+                let default = caps.get(4).map(|m| m.as_str()).unwrap_or("");
+                let use_default = if op == ":-" {
+                    // `:-` falls back when the variable is unset *or* empty.
+                    value.as_deref().map(str::is_empty).unwrap_or(true)
+                } else {
+                    // `-` falls back only when the variable is entirely unset.
+                    value.is_none()
+                };
+                if use_default {
+                    default.to_string()
+                } else {
+                    value.unwrap_or_default()
+                }
+            }
+            None => value.unwrap_or_default(),
+        }
+    })
+    .into_owned()
+}
+
+/// Resolve the container runtime command (`docker` or `podman`).
+///
+/// If `[system].containers` is set in the config, that always wins. Otherwise
+/// ciabatta auto-detects what's installed on `PATH`:
+///   - both available → ambiguous, the user must pick one (error)
+///   - only one       → use it
+///   - podman + docker preference order is podman first, then docker
+///   - neither        → error
+pub fn resolve_container_cmd(config: &CiabattaConfig) -> Result<String> {
+    if let Some(c) = config.system.as_ref().and_then(|s| s.containers.as_deref()) {
+        let c = c.trim();
+        if !c.is_empty() {
+            return Ok(c.to_string());
+        }
+    }
+
+    let podman = binary_on_path("podman");
+    let docker = binary_on_path("docker");
+    match (podman, docker) {
+        (true, true) => bail!(
+            "Both podman and docker are installed, so ciabatta can't pick one for you.\n\
+             Set the runtime explicitly in .ciabatta/ciabatta.toml:\n\n    \
+             [system]\n    containers = \"podman\"   # or \"docker\""
+        ),
+        (true, false) => Ok("podman".to_string()),
+        (false, true) => Ok("docker".to_string()),
+        (false, false) => bail!(
+            "Neither podman nor docker was found on PATH.\n\
+             Install one, or set [system] containers in .ciabatta/ciabatta.toml."
+        ),
+    }
+}
+
+/// Whether an executable named `name` exists on the `PATH`.
+fn binary_on_path(name: &str) -> bool {
+    let Some(path) = std::env::var_os("PATH") else {
+        return false;
+    };
+    std::env::split_paths(&path).any(|dir| is_executable(&dir.join(name)))
+}
+
+#[cfg(unix)]
+fn is_executable(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    path.metadata()
+        .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
+}
+
+#[cfg(not(unix))]
+fn is_executable(path: &Path) -> bool {
+    path.is_file()
 }
 
 /// Validate that all `{VAR}` placeholders in a publish path are present in `vars`.
@@ -293,8 +443,10 @@ post = "./notify.sh"
         // Shared base survives into the push direction.
         assert_eq!(push.registry.as_deref(), Some("nexus"));
         assert_eq!(
-            push.publish_path.as_deref(),
-            Some("front/{CIABATTA_COMMIT}/dist")
+            push.publish_path,
+            Some(PublishPath::Single(
+                "front/{CIABATTA_COMMIT}/dist".to_string()
+            ))
         );
         // Push-only overrides are applied.
         assert_eq!(push.pre.as_deref(), Some("python bundle.py"));
@@ -326,6 +478,41 @@ main = "make pull"
     }
 
     #[test]
+    fn publish_path_parses_single_and_list_forms() {
+        let single = parse(
+            r#"
+[recipies.a]
+registry = "nexus"
+publish_path = "team/app/{CIABATTA_COMMIT}/app.tar.gz"
+"#,
+        );
+        assert_eq!(
+            single.recipes["a"].push_recipe().publish_path,
+            Some(PublishPath::Single(
+                "team/app/{CIABATTA_COMMIT}/app.tar.gz".to_string()
+            ))
+        );
+
+        let list = parse(
+            r#"
+[recipies.b]
+registry = "nexus"
+publish_path = ["dist/*.tar.gz", "build/app.bin"]
+strip_prefix = "dist/"
+"#,
+        );
+        let r = list.recipes["b"].push_recipe();
+        assert_eq!(
+            r.publish_path,
+            Some(PublishPath::Many(vec![
+                "dist/*.tar.gz".to_string(),
+                "build/app.bin".to_string()
+            ]))
+        );
+        assert_eq!(r.strip_prefix.as_deref(), Some("dist/"));
+    }
+
+    #[test]
     fn validate_and_substitute_publish_path() {
         let mut vars = HashMap::new();
         assert!(validate_publish_path("a/{CIABATTA_COMMIT}/b", &vars).is_err());
@@ -335,6 +522,42 @@ main = "make pull"
             substitute_vars("a/{CIABATTA_COMMIT}", &vars).unwrap(),
             "a/abc"
         );
+    }
+
+    #[test]
+    fn expand_env_handles_defaults_and_presence() {
+        // SAFETY: single-threaded test; we set/unset our own scoped vars.
+        unsafe {
+            std::env::set_var("CIABATTA_TEST_HOST", "nexus.internal");
+            std::env::remove_var("CIABATTA_TEST_MISSING");
+            std::env::set_var("CIABATTA_TEST_EMPTY", "");
+        }
+
+        // Set variable wins over its default.
+        assert_eq!(
+            expand_env("https://${CIABATTA_TEST_HOST:-fallback}/repo"),
+            "https://nexus.internal/repo"
+        );
+        // Unset variable falls back to the default.
+        assert_eq!(
+            expand_env("https://${CIABATTA_TEST_MISSING:-fallback}/repo"),
+            "https://fallback/repo"
+        );
+        // `:-` treats empty as unset; plain `-` keeps the empty value.
+        assert_eq!(expand_env("${CIABATTA_TEST_EMPTY:-d}"), "d");
+        assert_eq!(expand_env("${CIABATTA_TEST_EMPTY-d}"), "");
+        // The `$`-less brace form is supported too.
+        assert_eq!(
+            expand_env("{CIABATTA_TEST_HOST:-fallback}"),
+            "nexus.internal"
+        );
+        // A bare `{VAR}` with no `$` and no default is left untouched.
+        assert_eq!(
+            expand_env("path/{CIABATTA_COMMIT}/x"),
+            "path/{CIABATTA_COMMIT}/x"
+        );
+        // `${VAR}` with no default expands to the value (empty if unset).
+        assert_eq!(expand_env("${CIABATTA_TEST_HOST}"), "nexus.internal");
     }
 
     #[test]

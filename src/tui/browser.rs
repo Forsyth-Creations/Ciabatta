@@ -231,7 +231,7 @@ fn build_recipe_rows(
                 name: name.clone(),
                 registry: push.registry.clone(),
                 local_exists,
-                publish_path: push.publish_path.clone(),
+                publish_path: push.publish_path.as_ref().map(|p| p.display()),
                 kind,
                 run_status: RecipeRunStatus::Idle,
                 logs: Vec::new(),

@@ -1,9 +1,11 @@
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use tokio::sync::mpsc;
 
-use crate::config::{CiabattaConfig, SimpleRecipe, substitute_vars, validate_publish_path};
+use crate::config::{
+    CiabattaConfig, PublishPath, SimpleRecipe, substitute_vars, validate_publish_path,
+};
 use crate::registry::{self, RegistryOpOptions};
 
 /// The four ordered stages of a push or pull pipeline.
@@ -106,11 +108,29 @@ pub fn validate_recipes(
 
         // Only the built-in main action consumes publish_path; if the user
         // overrode `main` (or uses a bash_script) the placeholders are theirs.
-        if recipe.main.is_none()
-            && recipe.bash_script.is_none()
-            && let Some(ref path) = recipe.publish_path
-        {
-            validate_publish_path(path, env_vars)?;
+        if recipe.main.is_none() && recipe.bash_script.is_none() {
+            match recipe.publish_path.as_ref() {
+                // A single remote path: every {VAR} must be resolvable.
+                Some(PublishPath::Single(path)) => validate_publish_path(path, env_vars)?,
+                // A list of globs publishes under {CIABATTA_PATH}, so that must
+                // be derivable (from CIABATTA_TAG, or BRANCH + COMMIT).
+                Some(PublishPath::Many(_))
+                    if env_vars
+                        .get("CIABATTA_PATH")
+                        .filter(|v| !v.is_empty())
+                        .is_none() =>
+                {
+                    bail!(
+                        "Recipe '{}' uses a list-form publish_path, which uploads under \
+                         CIABATTA_PATH, but CIABATTA_PATH is not set. It derives from \
+                         CIABATTA_TAG, or from CIABATTA_BRANCH + CIABATTA_COMMIT; \
+                         provide one via your CI system or with -e.",
+                        name
+                    );
+                }
+                Some(PublishPath::Many(_)) => {}
+                None => {}
+            }
         }
     }
     Ok(())
@@ -211,21 +231,26 @@ async fn execute_recipe(
         .and_then(|s| s.containers.as_deref())
         .unwrap_or("docker");
 
-    let resolved_remote = match recipe.publish_path.as_deref() {
-        Some(p) => substitute_vars(p, env_vars)?,
-        None => String::new(),
-    };
-    let local_path = root.join(recipe.local_artifact_path.as_deref().unwrap_or("."));
+    // Resolve the (local file, remote path) pairs this recipe transfers. A
+    // single publish_path yields one pair; a list of globs yields one per
+    // matched file. Owned here so the borrowed `opts` below can reference them.
+    let transfers = build_transfers(&recipe, root, env_vars)?;
 
-    let opts = registry_config.map(|rc| RegistryOpOptions {
-        registry_name: recipe.registry.as_deref().unwrap_or_default(),
-        registry_config: rc,
-        local_path: &local_path,
-        remote_path: &resolved_remote,
-        env_vars,
-        dry_run,
-        container_cmd,
-    });
+    let opts: Vec<RegistryOpOptions> = match registry_config {
+        Some(rc) => transfers
+            .iter()
+            .map(|(local, remote)| RegistryOpOptions {
+                registry_name: recipe.registry.as_deref().unwrap_or_default(),
+                registry_config: rc,
+                local_path: local.as_path(),
+                remote_path: remote.as_str(),
+                env_vars,
+                dry_run,
+                container_cmd,
+            })
+            .collect(),
+        None => Vec::new(),
+    };
 
     for stage in StageKind::ALL {
         let _ = tx
@@ -240,7 +265,7 @@ async fn execute_recipe(
             stage,
             name,
             &recipe,
-            opts.as_ref(),
+            opts.as_slice(),
             root,
             env_vars,
             dry_run,
@@ -280,7 +305,7 @@ async fn run_stage(
     stage: StageKind,
     name: &str,
     recipe: &SimpleRecipe,
-    opts: Option<&RegistryOpOptions<'_>>,
+    opts: &[RegistryOpOptions<'_>],
     root: &Path,
     env_vars: &HashMap<String, String>,
     dry_run: bool,
@@ -292,7 +317,9 @@ async fn run_stage(
             if let Some(cmd) = recipe.login.as_deref() {
                 run_shell(cmd, root, env_vars, dry_run, log).await?;
                 Ok(true)
-            } else if let Some(opts) = opts {
+            } else if let Some(opts) = opts.first() {
+                // Authentication is per-registry, so the first transfer's opts
+                // are representative of them all.
                 if let Some(script) = opts.registry_config.login_script.as_deref() {
                     run_login_script(script, root, env_vars, dry_run, log).await?;
                     Ok(true)
@@ -311,10 +338,13 @@ async fn run_stage(
             } else if let Some(script) = recipe.bash_script.as_deref() {
                 run_bash_script(script, root, env_vars, dry_run, log).await?;
                 Ok(true)
-            } else if let Some(opts) = opts {
-                match mode {
-                    RunMode::Push => registry::push(opts, log).await?,
-                    RunMode::Pull => registry::pull(opts, log).await?,
+            } else if !opts.is_empty() {
+                // One built-in transfer per resolved (local, remote) pair.
+                for o in opts {
+                    match mode {
+                        RunMode::Push => registry::push(o, log).await?,
+                        RunMode::Pull => registry::pull(o, log).await?,
+                    }
                 }
                 Ok(true)
             } else {
@@ -327,6 +357,92 @@ async fn run_stage(
         }
         StageKind::Post => run_optional(recipe.post.as_deref(), root, env_vars, dry_run, log).await,
     }
+}
+
+/// Resolve the (local file, remote path) pairs a recipe transfers in its main
+/// stage.
+///
+///   - `publish_path = "remote/path"` → one pair: `local_artifact_path` → the
+///     remote path (with `{VAR}` substitution).
+///   - `publish_path = ["glob", …]`   → one pair per matched file: the file →
+///     `{CIABATTA_PATH}/<file-relative-to-root, with strip_prefix removed>`.
+///   - no `publish_path`              → a single pair (so the login stage still
+///     has registry options) with an empty remote path.
+fn build_transfers(
+    recipe: &SimpleRecipe,
+    root: &Path,
+    env_vars: &HashMap<String, String>,
+) -> Result<Vec<(PathBuf, String)>> {
+    match recipe.publish_path.as_ref() {
+        Some(PublishPath::Single(path)) => {
+            let remote = substitute_vars(path, env_vars)?;
+            let local = root.join(recipe.local_artifact_path.as_deref().unwrap_or("."));
+            Ok(vec![(local, remote)])
+        }
+        Some(PublishPath::Many(patterns)) => {
+            let base = env_vars
+                .get("CIABATTA_PATH")
+                .filter(|v| !v.is_empty())
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "list-form publish_path uploads under CIABATTA_PATH, which is not set"
+                    )
+                })?;
+            let strip = recipe.strip_prefix.as_deref();
+            let mut transfers = Vec::new();
+            for pattern in patterns {
+                let matched = glob_files(root, pattern)?;
+                if matched.is_empty() {
+                    bail!("publish_path pattern '{}' matched no files", pattern);
+                }
+                for file in matched {
+                    let remote = remote_for_file(&file, root, base, strip);
+                    transfers.push((file, remote));
+                }
+            }
+            Ok(transfers)
+        }
+        None => {
+            let local = root.join(recipe.local_artifact_path.as_deref().unwrap_or("."));
+            Ok(vec![(local, String::new())])
+        }
+    }
+}
+
+/// Expand a glob `pattern` (relative to `root`) into the matching regular files.
+fn glob_files(root: &Path, pattern: &str) -> Result<Vec<PathBuf>> {
+    let full = root.join(pattern);
+    let entries = glob::glob(&full.to_string_lossy())
+        .with_context(|| format!("Invalid glob pattern '{}'", pattern))?;
+    let mut files = Vec::new();
+    for entry in entries {
+        let path = entry.with_context(|| format!("Failed to read glob match for '{}'", pattern))?;
+        if path.is_file() {
+            files.push(path);
+        }
+    }
+    files.sort();
+    Ok(files)
+}
+
+/// Build the remote path for a matched file: its path relative to `root`, with
+/// `strip` removed from the front, joined under `base` (`CIABATTA_PATH`).
+fn remote_for_file(file: &Path, root: &Path, base: &str, strip: Option<&str>) -> String {
+    let rel = file.strip_prefix(root).unwrap_or(file);
+    let rel = rel.to_string_lossy().replace('\\', "/");
+    let rel = rel.as_str();
+    let stripped = match strip {
+        Some(prefix) => {
+            let prefix = prefix.trim_start_matches('/');
+            rel.strip_prefix(prefix).unwrap_or(rel)
+        }
+        None => rel,
+    };
+    format!(
+        "{}/{}",
+        base.trim_end_matches('/'),
+        stripped.trim_start_matches('/')
+    )
 }
 
 /// Run an optional stage override command; no-op (Ok(false)) when absent.
@@ -426,6 +542,53 @@ mod tests {
         assert_eq!(StageKind::Pre.short(RunMode::Push), "pre");
         assert_eq!(StageKind::Post.short(RunMode::Pull), "post");
         assert_eq!(StageKind::Main.short(RunMode::Push), "push");
+    }
+
+    #[test]
+    fn remote_for_file_joins_under_base_and_strips_prefix() {
+        let root = Path::new("/proj");
+        let file = Path::new("/proj/dist/app.tar.gz");
+
+        // No strip_prefix: preserve the path relative to root.
+        assert_eq!(
+            remote_for_file(file, root, "/main/abc123", None),
+            "/main/abc123/dist/app.tar.gz"
+        );
+        // strip_prefix removes the leading fragment (with or without a slash).
+        assert_eq!(
+            remote_for_file(file, root, "/main/abc123/", Some("dist/")),
+            "/main/abc123/app.tar.gz"
+        );
+        assert_eq!(
+            remote_for_file(file, root, "/main/abc123", Some("dist")),
+            "/main/abc123/app.tar.gz"
+        );
+        // A tag-style base (trailing slash) joins cleanly.
+        assert_eq!(
+            remote_for_file(file, root, "/v1.2.3/", Some("dist")),
+            "/v1.2.3/app.tar.gz"
+        );
+    }
+
+    #[test]
+    fn validate_list_publish_path_requires_ciabatta_path() {
+        let cfg: CiabattaConfig = toml::from_str(
+            r#"
+[recipies.a]
+registry = "nexus"
+publish_path = ["dist/*.tar.gz"]
+"#,
+        )
+        .unwrap();
+
+        // Without CIABATTA_PATH the list form fails validation up front.
+        let empty = HashMap::new();
+        assert!(validate_recipes(&cfg, &["a".to_string()], &empty, &RunMode::Push).is_err());
+
+        // With CIABATTA_PATH set it passes.
+        let mut vars = HashMap::new();
+        vars.insert("CIABATTA_PATH".to_string(), "/main/abc".to_string());
+        assert!(validate_recipes(&cfg, &["a".to_string()], &vars, &RunMode::Push).is_ok());
     }
 
     #[test]

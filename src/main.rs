@@ -2,6 +2,8 @@ mod analyze;
 mod ci;
 mod cli;
 mod config;
+mod configure;
+mod git;
 mod registry;
 mod runner;
 mod tui;
@@ -13,9 +15,10 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use clap::Parser;
 
-use cli::{Cli, Commands, ConfigCommand};
+use cli::{Cli, Commands, ConfigCommand, ConfigureCommand};
 use config::{CiabattaConfig, find_root, load_config};
 use runner::RunMode;
+use std::collections::BTreeMap;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -27,10 +30,11 @@ async fn main() -> Result<()> {
             env,
             dry_run,
             no_tui,
+            local,
             config,
         } => {
             let (root, cfg) = load_project(config.as_deref())?;
-            let vars = build_env_vars(&cfg, &env)?;
+            let vars = build_env_vars(&cfg, &env, local, &root)?;
             let names = resolve_recipe_names(&cfg, &recipes);
             execute_recipes(&cfg, &root, &names, &vars, dry_run, no_tui, RunMode::Push).await?;
         }
@@ -40,12 +44,17 @@ async fn main() -> Result<()> {
             env,
             dry_run,
             no_tui,
+            local,
             config,
         } => {
             let (root, cfg) = load_project(config.as_deref())?;
-            let vars = build_env_vars(&cfg, &env)?;
+            let vars = build_env_vars(&cfg, &env, local, &root)?;
             let names = resolve_recipe_names(&cfg, &recipes);
             execute_recipes(&cfg, &root, &names, &vars, dry_run, no_tui, RunMode::Pull).await?;
+        }
+
+        Commands::Source { env } => {
+            cmd_source(&env)?;
         }
 
         Commands::List => {
@@ -58,7 +67,7 @@ async fn main() -> Result<()> {
             containers,
             force,
         } => {
-            cmd_init(ci.as_deref(), &containers, force)?;
+            cmd_init(ci.as_deref(), containers.as_deref(), force)?;
         }
 
         Commands::Tui => {
@@ -95,9 +104,28 @@ async fn main() -> Result<()> {
                 print_config_help();
             }
         },
+
+        Commands::Configure { subcommand } => {
+            cmd_configure(subcommand)?;
+        }
     }
 
     Ok(())
+}
+
+/// Dispatch `ciabatta configure` (interactive registry setup) and its `auto`
+/// subcommand (analyze the project and suggest recipes).
+fn cmd_configure(subcommand: Option<ConfigureCommand>) -> Result<()> {
+    let cwd = env::current_dir().context("Failed to get current directory")?;
+    // configure works whether or not the project is initialized yet: prefer an
+    // existing .ciabatta root, otherwise target the current directory.
+    let root = find_root(&cwd).unwrap_or(cwd);
+    let cfg = load_config(&root)?;
+
+    match subcommand {
+        Some(ConfigureCommand::Auto { yes }) => configure::run_auto(&root, &cfg, yes),
+        None => configure::run_interactive(&root, &cfg),
+    }
 }
 
 fn load_project(config_path: Option<&std::path::Path>) -> Result<(PathBuf, CiabattaConfig)> {
@@ -126,16 +154,33 @@ fn load_project(config_path: Option<&std::path::Path>) -> Result<(PathBuf, Ciaba
 }
 
 /// Build the final environment variable map:
-/// 1. Start with CI-derived vars
-/// 2. Merge current process env
+/// 1. Start with the current process env
+/// 2. Merge CIABATTA_* vars from local git (`--local`) or the configured CI
 /// 3. Override with CLI -e flags (highest priority)
-fn build_env_vars(cfg: &CiabattaConfig, cli_env: &[String]) -> Result<HashMap<String, String>> {
+/// 4. Derive CIABATTA_PATH
+fn build_env_vars(
+    cfg: &CiabattaConfig,
+    cli_env: &[String],
+    local: bool,
+    root: &Path,
+) -> Result<HashMap<String, String>> {
     let mut vars: HashMap<String, String> = std::env::vars().collect();
 
-    // Resolve CI variables and print them.
-    if let Some(ref system) = cfg.system
+    if local {
+        // Local development: resolve build variables from git history. These
+        // take precedence over any stale ambient CIABATTA_* in the environment.
+        let git_vars = git::local_git_vars(root)?;
+        if !git_vars.is_empty() {
+            eprintln!("CIABATTA variables resolved from local git:");
+            for (k, v) in sorted(&git_vars) {
+                eprintln!("  {k} = {v}");
+            }
+        }
+        vars.extend(git_vars);
+    } else if let Some(ref system) = cfg.system
         && let Some(ref ci_name) = system.ci
     {
+        // Resolve CI variables and print them.
         let ci_system = ci::CiSystem::from(ci_name.as_str());
         let (ci_vars, resolved) = ci::resolve_ci_vars(&ci_system);
         if !resolved.is_empty() {
@@ -157,7 +202,61 @@ fn build_env_vars(cfg: &CiabattaConfig, cli_env: &[String]) -> Result<HashMap<St
     let cli_map = cli::parse_env_flags(cli_env)?;
     vars.extend(cli_map);
 
+    // Derive CIABATTA_PATH from the now-fully-resolved variables, unless the
+    // user set it explicitly (via -e or the environment).
+    if let Some(path) = derive_ciabatta_path(&vars) {
+        vars.entry("CIABATTA_PATH".to_string()).or_insert(path);
+    }
+
     Ok(vars)
+}
+
+/// Compute the `CIABATTA_PATH` convenience variable:
+///   - a tag (CLI/env `CIABATTA_TAG`) wins → `/{CIABATTA_TAG}/`
+///   - otherwise → `/{CIABATTA_BRANCH}/{CIABATTA_COMMIT}`
+///
+/// Returns `None` when there isn't enough information to build it (no tag and no
+/// branch), so callers leave `CIABATTA_PATH` unset rather than emitting `//`.
+fn derive_ciabatta_path(vars: &HashMap<String, String>) -> Option<String> {
+    let non_empty = |key: &str| vars.get(key).filter(|v| !v.is_empty()).cloned();
+
+    if let Some(tag) = non_empty("CIABATTA_TAG") {
+        return Some(format!("/{tag}/"));
+    }
+    let branch = non_empty("CIABATTA_BRANCH")?;
+    let commit = non_empty("CIABATTA_COMMIT").unwrap_or_default();
+    Some(format!("/{branch}/{commit}"))
+}
+
+/// Return a map's entries sorted by key, for stable human-facing output.
+fn sorted(vars: &HashMap<String, String>) -> BTreeMap<&String, &String> {
+    vars.iter().collect()
+}
+
+/// `ciabatta source`: resolve the CIABATTA_* build variables from local git
+/// (plus the derived CIABATTA_PATH) and print them as shell `export` lines so a
+/// developer can load them with `eval "$(ciabatta source)"`.
+fn cmd_source(cli_env: &[String]) -> Result<()> {
+    let cwd = env::current_dir().context("Failed to get current directory")?;
+
+    let mut vars = git::local_git_vars(&cwd)?;
+
+    // CLI -e flags override the git-derived values, then derive CIABATTA_PATH.
+    vars.extend(cli::parse_env_flags(cli_env)?);
+    if let Some(path) = derive_ciabatta_path(&vars) {
+        vars.entry("CIABATTA_PATH".to_string()).or_insert(path);
+    }
+
+    println!("# ciabatta environment (eval \"$(ciabatta source)\" to load)");
+    for (k, v) in sorted(&vars) {
+        println!("export {k}={}", shell_quote(v));
+    }
+    Ok(())
+}
+
+/// Single-quote a value for safe inclusion in a shell `export`.
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', r"'\''"))
 }
 
 fn resolve_recipe_names(cfg: &CiabattaConfig, requested: &[String]) -> Vec<String> {
@@ -185,6 +284,13 @@ async fn execute_recipes(
 
     // Validate that all publish-path variables are present before launching.
     runner::validate_recipes(cfg, names, vars, &mode)?;
+
+    // Resolve the container runtime once up front so every recipe shares it and
+    // an ambiguous/missing runtime fails fast (before any work starts).
+    let mut cfg = cfg.clone();
+    let container_cmd = config::resolve_container_cmd(&cfg)?;
+    cfg.system.get_or_insert_with(Default::default).containers = Some(container_cmd);
+    let cfg = &cfg;
 
     if no_tui {
         run_plain(cfg, root, names, vars, dry_run, mode).await
@@ -258,7 +364,7 @@ async fn run_plain(
     Ok(())
 }
 
-fn cmd_init(ci: Option<&str>, containers: &str, force: bool) -> Result<()> {
+fn cmd_init(ci: Option<&str>, containers: Option<&str>, force: bool) -> Result<()> {
     use config::{CIABATTA_DIR, CONFIG_FILE};
     use std::fs;
 
@@ -295,7 +401,16 @@ fn cmd_init(ci: Option<&str>, containers: &str, force: bool) -> Result<()> {
     Ok(())
 }
 
-fn build_starter_toml(ci: Option<&str>, containers: &str) -> String {
+fn build_starter_toml(ci: Option<&str>, containers: Option<&str>) -> String {
+    // When the runtime isn't pinned, leave it commented out so ciabatta
+    // auto-detects podman/docker at run time.
+    let containers_line = match containers {
+        Some(c) => format!("containers = {c:?}"),
+        None => {
+            r#"# containers = "docker"  # docker | podman (auto-detected when unset)"#.to_string()
+        }
+    };
+
     let ci_line = match ci {
         Some(s) => format!("ci = {:?}", s),
         None => {
@@ -315,7 +430,7 @@ fn build_starter_toml(ci: Option<&str>, containers: &str) -> String {
 
 [system]
 {ci_line}
-containers = {containers:?}
+{containers_line}
 
 # ─── Registries ────────────────────────────────────────────────────────────────
 # Define each registry you publish to. The section name is used as the registry
@@ -376,7 +491,7 @@ containers = {containers:?}
 # Nexus/Artifactory use them for HTTP basic auth; docker runs `docker login`.
 "#,
         ci_line = ci_line,
-        containers = containers,
+        containers_line = containers_line,
     )
 }
 
@@ -481,7 +596,10 @@ All paths in recipes are relative to this root.
   ci         = "gitlab"    # CI/CD system for auto-resolving build variables.
                             # Options: gitlab, github, jenkins, circleci,
                             #          travis, azure, bitbucket
-  containers = "docker"    # Container runtime. Options: docker, podman
+  containers = "docker"    # Container runtime. Options: docker, podman.
+                            # When unset, ciabatta auto-detects what's installed:
+                            # it prefers podman, falls back to docker, and asks
+                            # you to choose if BOTH are present.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -500,6 +618,16 @@ All paths in recipes are relative to this root.
   login_script = "./login.sh"     # Optional: run this script before push/pull
   type         = "nexus"          # Override type detection. Options:
                                   # nexus, s3, artifactory, docker, ecr
+
+  The `url` and `login_script` fields expand environment variables, with
+  bash-style defaults, so one config can target different environments:
+
+    url = "https://${NEXUS_HOST:-nexus.example.com}/repository/releases/"
+
+    ${VAR}            value of VAR (empty if unset)
+    ${VAR:-default}   VAR if set & non-empty, otherwise `default`
+    ${VAR-default}    VAR if set (even if empty), otherwise `default`
+    {VAR:-default}    the leading `$` is optional
 
   Supported registry types:
     nexus       — HTTP PUT/GET to Sonatype Nexus
@@ -564,9 +692,31 @@ Available substitution variables in publish_path:
   {CIABATTA_COMMIT}        Current commit SHA
   {CIABATTA_TAG}           Current tag (if any)
   {CIABATTA_BUILD_NUMBER}  CI build number
+  {CIABATTA_PATH}          Convenience path, derived as:
+                             /{CIABATTA_TAG}/                      (when a tag is set)
+                             /{CIABATTA_BRANCH}/{CIABATTA_COMMIT}  (otherwise)
 
 These are populated automatically from the CI system defined in [system].
 You can override any of them with: ciabatta run -e CIABATTA_BRANCH=my-branch
+
+Working locally? `ciabatta run --local` derives CIABATTA_BRANCH / _COMMIT /
+_TAG / _BUILD_NUMBER from your local git history instead of CI. Run
+`ciabatta source` to print them as shell `export` lines for your own use:
+
+    eval "$(ciabatta source)"
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+publish_path: a single remote path, or a list of local file globs
+
+  # Single remote destination (supports {VAR} substitution):
+  publish_path = "team/app/{CIABATTA_COMMIT}/app.tar.gz"
+
+  # A list of local globs: each matched file uploads under {CIABATTA_PATH},
+  # preserving its path relative to the project root. `strip_prefix` trims a
+  # leading fragment from that relative path first.
+  publish_path = ["dist/*.tar.gz", "build/*.bin"]
+  strip_prefix = "dist/"        # dist/app.tar.gz -> {CIABATTA_PATH}/app.tar.gz
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -594,8 +744,15 @@ Example:
 "#;
 
 async fn run_tui_browser() -> Result<()> {
-    let (root, cfg) = load_project(None)?;
-    let vars = build_env_vars(&cfg, &[])?;
+    let (root, mut cfg) = load_project(None)?;
+    // Best-effort: resolve the container runtime so on-demand pushes use the
+    // right one. The browser is also useful for non-container registries, so an
+    // ambiguous/missing runtime shouldn't block opening it — the push itself
+    // will surface the error if a container action is actually invoked.
+    if let Ok(c) = config::resolve_container_cmd(&cfg) {
+        cfg.system.get_or_insert_with(Default::default).containers = Some(c);
+    }
+    let vars = build_env_vars(&cfg, &[], false, &root)?;
     tui::browser::run_browser(cfg, root, vars).await
 }
 

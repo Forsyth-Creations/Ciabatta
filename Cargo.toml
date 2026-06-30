@@ -27,6 +27,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "charset", "http2"] }
 futures = "0.3"
 regex = "1"
+glob = "0.3"
 chrono = { version = "0.4", features = ["serde"] }
 serde_json = "1"
 rustfmt = "0.10.0"

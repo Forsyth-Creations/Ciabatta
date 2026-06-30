@@ -27,6 +27,11 @@ pub enum Commands {
         #[arg(long)]
         no_tui: bool,
 
+        /// Derive CIABATTA_BRANCH/_COMMIT/_TAG/_BUILD_NUMBER from local git
+        /// history instead of the configured CI system.
+        #[arg(long)]
+        local: bool,
+
         /// Path to ciabatta.toml (overrides .ciabatta/ciabatta.toml discovery).
         #[arg(short = 'c', long)]
         config: Option<std::path::PathBuf>,
@@ -46,8 +51,21 @@ pub enum Commands {
         #[arg(long)]
         no_tui: bool,
 
+        /// Derive CIABATTA_BRANCH/_COMMIT/_TAG/_BUILD_NUMBER from local git
+        /// history instead of the configured CI system.
+        #[arg(long)]
+        local: bool,
+
         #[arg(short = 'c', long)]
         config: Option<std::path::PathBuf>,
+    },
+
+    /// Print CIABATTA_* variables (resolved from local git) as shell `export`
+    /// lines, so you can load them into your shell: eval "$(ciabatta source)"
+    Source {
+        /// Set/override a variable (KEY=VALUE) in the printed output.
+        #[arg(short = 'e', long = "env", value_name = "KEY=VALUE")]
+        env: Vec<String>,
     },
 
     /// List all available recipes defined in the config.
@@ -59,9 +77,10 @@ pub enum Commands {
         #[arg(long, value_name = "SYSTEM")]
         ci: Option<String>,
 
-        /// Container runtime to use (docker or podman).
-        #[arg(long, default_value = "docker")]
-        containers: String,
+        /// Container runtime to use (docker or podman). When omitted, ciabatta
+        /// auto-detects what's installed at run time.
+        #[arg(long, value_name = "RUNTIME")]
+        containers: Option<String>,
 
         /// Overwrite an existing .ciabatta/ciabatta.toml if one exists.
         #[arg(long)]
@@ -108,6 +127,12 @@ pub enum Commands {
         #[command(subcommand)]
         subcommand: ConfigCommand,
     },
+
+    /// Interactively set up your project: add registries, or auto-suggest recipes.
+    Configure {
+        #[command(subcommand)]
+        subcommand: Option<ConfigureCommand>,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -117,6 +142,16 @@ pub enum ConfigCommand {
     /// Show documentation on the config file format and available options.
     #[command(name = "reference", alias = "ref")]
     Reference,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ConfigureCommand {
+    /// Analyze the project and suggest recipes for pushing to registries.
+    Auto {
+        /// Apply every suggestion without prompting.
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 /// Parse `-e KEY=VALUE` flags into a HashMap.

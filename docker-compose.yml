@@ -17,7 +17,14 @@ services:
       - claude-config:/home/dev/.claude
       - cargo-cache:/home/dev/.cargo/registry
     command: sleep infinity
+  nexus:
+    image: sonatype/nexus3:latest
+    ports:
+      - "8527:8081"
+    volumes:
+      - nexus-data:/nexus-data
 
 volumes:
   claude-config:
   cargo-cache:
+  nexus-data:

@@ -3,6 +3,12 @@ use clap::{Parser, Subcommand};
 #[derive(Parser, Debug)]
 #[command(name = "ciabatta", about = "Artifact publishing made easy 🍞", version)]
 pub struct Cli {
+    /// Enable debug logging to stderr. Can also be enabled by setting the
+    /// CIABATTA_DEBUG environment variable (to any non-empty value other than
+    /// "0"/"false"). For finer control, set CIABATTA_LOG (e.g. `ciabatta=trace`).
+    #[arg(long, global = true)]
+    pub debug: bool,
+
     #[command(subcommand)]
     pub command: Commands,
 }

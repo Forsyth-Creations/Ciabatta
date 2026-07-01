@@ -106,6 +106,20 @@ Useful flags on `run` / `pull`:
 - `--no-tui` — disable the TUI and stream plain progress to stdout (ideal for CI).
 - `-c, --config PATH` — use a specific config file instead of discovery.
 
+Global flags (any command):
+
+- `--debug` — enable debug logging to stderr. You can also set `CIABATTA_DEBUG=1`,
+  or `CIABATTA_LOG=ciabatta=trace` for finer control.
+
+When a recipe's `local_artifact_path` is a **directory**, Ciabatta uploads each
+file in it individually, recreating the folder structure under the recipe's
+`publish_path` (creating sub-folders in the registry as needed) — so
+`local_artifact_path = "frontend/dist"` publishes the whole `dist` tree.
+
+In the `ciabatta tui` browser, press `e` on a registry to **explore** its remote
+contents — navigate folders and see which artifacts already exist, which is handy
+when deciding on a `publish_path`.
+
 ## Configuration
 
 Ciabatta reads `.ciabatta/ciabatta.toml`. Registries describe *where* things go;

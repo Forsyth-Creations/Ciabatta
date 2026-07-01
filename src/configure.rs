@@ -355,7 +355,8 @@ fn selector_loop(
 
     let len = suggestions.len();
     let mut cursor = 0usize;
-    let mut checked = vec![true; len];
+    // Nothing is selected by default; the user opts recipes in.
+    let mut checked = vec![false; len];
 
     loop {
         terminal.draw(|f| render_selector(f, suggestions, cursor, &checked))?;
@@ -372,10 +373,12 @@ fn selector_loop(
             KeyCode::Char('c') if ctrl => return Ok(None),
             KeyCode::Down | KeyCode::Char('j') => cursor = (cursor + 1) % len,
             KeyCode::Up | KeyCode::Char('k') => cursor = cursor.checked_sub(1).unwrap_or(len - 1),
-            KeyCode::Char(' ') => checked[cursor] = !checked[cursor],
+            // Enter toggles the highlighted suggestion.
+            KeyCode::Enter => checked[cursor] = !checked[cursor],
             KeyCode::Char('a') => checked.iter_mut().for_each(|c| *c = true),
             KeyCode::Char('n') => checked.iter_mut().for_each(|c| *c = false),
-            KeyCode::Enter => {
+            // 's' saves the current selection and applies it.
+            KeyCode::Char('s') => {
                 let chosen = checked
                     .iter()
                     .enumerate()
@@ -489,7 +492,7 @@ fn render_selector(
     f.render_widget(preview, cols[1]);
 
     let help =
-        " [↑↓/jk] move   [space] toggle   [a] all   [n] none   [enter] apply   [q/esc] cancel";
+        " [↑↓/jk] move   [enter] select   [a] all   [n] none   [s] save   [q/esc] cancel";
     f.render_widget(
         Paragraph::new(help).style(Style::default().fg(Color::DarkGray)),
         rows[2],

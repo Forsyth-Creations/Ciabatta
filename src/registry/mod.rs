@@ -1,4 +1,5 @@
 pub mod artifactory;
+pub mod browse;
 pub mod docker;
 pub mod ecr;
 pub mod nexus;

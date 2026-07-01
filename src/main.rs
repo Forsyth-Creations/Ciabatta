@@ -16,13 +16,16 @@ use anyhow::{Context, Result, bail};
 use clap::Parser;
 
 use cli::{Cli, Commands, ConfigCommand, ConfigureCommand};
-use config::{CiabattaConfig, find_root, load_config};
+use config::{CiabattaConfig, find_root, load_config, load_config_file};
 use runner::RunMode;
 use std::collections::BTreeMap;
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+
+    init_logging(cli.debug);
+    tracing::debug!("debug logging enabled");
 
     match cli.command {
         Commands::Run {
@@ -113,6 +116,36 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+/// Initialize the `tracing` subscriber for stderr logging.
+///
+/// Debug logging turns on when the `--debug` flag is passed OR the
+/// `CIABATTA_DEBUG` environment variable is set to any non-empty value other
+/// than `0`/`false`. For finer-grained control the `CIABATTA_LOG` environment
+/// variable is honored directly as a `tracing` env-filter (e.g.
+/// `CIABATTA_LOG=ciabatta=trace`), overriding the flag-derived default.
+fn init_logging(debug_flag: bool) {
+    use tracing_subscriber::{EnvFilter, fmt};
+
+    let debug = debug_flag
+        || env::var("CIABATTA_DEBUG")
+            .map(|v| {
+                let v = v.trim();
+                !v.is_empty() && v != "0" && !v.eq_ignore_ascii_case("false")
+            })
+            .unwrap_or(false);
+
+    let default_directive = if debug { "ciabatta=debug" } else { "ciabatta=warn" };
+    let filter = EnvFilter::try_from_env("CIABATTA_LOG")
+        .unwrap_or_else(|_| EnvFilter::new(default_directive));
+
+    // Best-effort: ignore the error if a subscriber is somehow already set.
+    let _ = fmt()
+        .with_env_filter(filter)
+        .with_target(false)
+        .with_writer(std::io::stderr)
+        .try_init();
+}
+
 /// Dispatch `ciabatta configure` (interactive registry setup) and its `auto`
 /// subcommand (analyze the project and suggest recipes).
 fn cmd_configure(subcommand: Option<ConfigureCommand>) -> Result<()> {
@@ -131,26 +164,46 @@ fn cmd_configure(subcommand: Option<ConfigureCommand>) -> Result<()> {
 fn load_project(config_path: Option<&std::path::Path>) -> Result<(PathBuf, CiabattaConfig)> {
     let cwd = env::current_dir().context("Failed to get current directory")?;
 
-    let root = if let Some(p) = config_path {
-        // Explicit path: <root>/.ciabatta/ciabatta.toml → root is two levels up.
-        p.parent()
-            .and_then(|d| d.parent())
-            .unwrap_or(&cwd)
-            .to_path_buf()
+    if let Some(p) = config_path {
+        // Explicit path: load exactly this file, and derive the project root
+        // (used to resolve relative recipe paths) from its location.
+        let cfg = load_config_file(p)?;
+        let root = resolve_root_for_config(p, &cwd);
+        Ok((root, cfg))
     } else {
         // Walk upward from cwd until a .ciabatta/ directory is found.
-        find_root(&cwd).ok_or_else(|| {
+        let root = find_root(&cwd).ok_or_else(|| {
             anyhow::anyhow!(
                 "No .ciabatta/ directory found in '{}' or any parent directory.\n\
                  Create one and add a ciabatta.toml to get started.\n\
                  Run `ciabatta config reference` for format documentation.",
                 cwd.display()
             )
-        })?
-    };
+        })?;
+        let cfg = load_config(&root)?;
+        Ok((root, cfg))
+    }
+}
 
-    let cfg = load_config(&root)?;
-    Ok((root, cfg))
+/// Determine the project root for an explicit `--config` file: normalize it to
+/// an absolute path, then apply [`root_from_config_path`]. Falls back to `cwd`
+/// when the file has no usable parent.
+fn resolve_root_for_config(config_path: &Path, cwd: &Path) -> PathBuf {
+    let abs = std::fs::canonicalize(config_path).unwrap_or_else(|_| cwd.join(config_path));
+    root_from_config_path(&abs).unwrap_or_else(|| cwd.to_path_buf())
+}
+
+/// Derive the project root from an absolute config-file path. When the file
+/// lives in a `.ciabatta/` directory (the standard layout) the root is the
+/// directory that contains `.ciabatta`; otherwise it's the file's own parent
+/// directory, so relative recipe paths resolve alongside the config.
+fn root_from_config_path(config_abs: &Path) -> Option<PathBuf> {
+    let parent = config_abs.parent()?;
+    if parent.file_name() == Some(std::ffi::OsStr::new(config::CIABATTA_DIR)) {
+        Some(parent.parent().unwrap_or(parent).to_path_buf())
+    } else {
+        Some(parent.to_path_buf())
+    }
 }
 
 /// Build the final environment variable map:
@@ -206,6 +259,14 @@ fn build_env_vars(
     // user set it explicitly (via -e or the environment).
     if let Some(path) = derive_ciabatta_path(&vars) {
         vars.entry("CIABATTA_PATH".to_string()).or_insert(path);
+    }
+
+    if tracing::enabled!(tracing::Level::DEBUG) {
+        for (k, v) in sorted(&vars) {
+            if k.starts_with("CIABATTA_") {
+                tracing::debug!(var = %k, value = %v, "resolved ciabatta variable");
+            }
+        }
     }
 
     Ok(vars)
@@ -768,13 +829,17 @@ async fn cmd_analyze(
 ) -> Result<()> {
     let cwd = env::current_dir().context("Failed to get current directory")?;
 
-    // Analyze works with or without a .ciabatta project: resolve the root from
-    // an explicit config path, else the nearest .ciabatta, else the cwd.
-    let root = config_path
-        .and_then(|p| p.parent().and_then(|d| d.parent()).map(Path::to_path_buf))
-        .or_else(|| find_root(&cwd))
-        .unwrap_or_else(|| cwd.clone());
-    let cfg = load_config(&root)?;
+    // Analyze works with or without a .ciabatta project: an explicit config
+    // path is loaded directly (root derived from its location); otherwise fall
+    // back to the nearest .ciabatta, else the cwd.
+    let (root, cfg) = match config_path {
+        Some(p) => (resolve_root_for_config(p, &cwd), load_config_file(p)?),
+        None => {
+            let root = find_root(&cwd).unwrap_or_else(|| cwd.clone());
+            let cfg = load_config(&root)?;
+            (root, cfg)
+        }
+    };
 
     // CLI flags win; otherwise fall back to [analyze] in the config (paths there
     // are relative to the project root).
@@ -837,4 +902,36 @@ async fn cmd_analyze(
         analyze::server::serve(json, port).await?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::root_from_config_path;
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn root_from_ciabatta_layout_is_two_levels_up() {
+        assert_eq!(
+            root_from_config_path(Path::new("/proj/.ciabatta/ciabatta.toml")),
+            Some(PathBuf::from("/proj"))
+        );
+        assert_eq!(
+            root_from_config_path(Path::new("/a/b/.ciabatta/custom.toml")),
+            Some(PathBuf::from("/a/b"))
+        );
+    }
+
+    #[test]
+    fn root_from_arbitrary_file_is_its_parent() {
+        // A config that isn't inside a `.ciabatta/` dir roots at its own folder,
+        // so relative recipe paths resolve alongside it.
+        assert_eq!(
+            root_from_config_path(Path::new("/proj/ciabatta.toml")),
+            Some(PathBuf::from("/proj"))
+        );
+        assert_eq!(
+            root_from_config_path(Path::new("/proj/configs/build.toml")),
+            Some(PathBuf::from("/proj/configs"))
+        );
+    }
 }

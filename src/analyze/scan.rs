@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use super::cache::{Cache, hash_content};
 use super::{Category, FileInfo, GraphBuilder, Node, ScanOutput};
-use crate::config::{CiabattaConfig, infer_registry_kind};
+use crate::config::{CiabattaConfig, RegistryKind, infer_registry_kind};
 
 /// Build a `FileInfo` skeleton; `bytes`/`hash` are filled in by `scan_manifests`.
 fn file_info(
@@ -799,29 +799,36 @@ fn url_host(line: &str, scheme: &str) -> Option<String> {
 
 // ─── Publish points from ciabatta config ────────────────────────────────────
 
-/// Each registry referenced by a recipe becomes a publish node; the recipe's
-/// artifact is linked from the internal package it lives under (or the repo).
+/// Turn the ciabatta config's registries and recipes into publish nodes.
+///
+/// Every configured registry becomes a publish node in its own right — so a
+/// registry you've set up shows up in the graph even before any recipe targets
+/// it. Each recipe that publishes to a registry then links the internal package
+/// owning its artifact to that registry's node (and tags the node with the
+/// recipe it came from).
 pub fn scan_publish_points(cfg: &CiabattaConfig, builder: &mut GraphBuilder) {
+    // 1. Every configured registry is a publish target, referenced or not.
+    for (reg_name, reg_cfg) in &cfg.registries {
+        let kind = infer_registry_kind(reg_name, reg_cfg);
+        builder.add_node(registry_publish_node(reg_name, kind, None));
+    }
+
+    // 2. Each recipe wires its artifact's owning package to its registry.
     for (recipe_name, entry) in &cfg.recipes {
         let recipe = entry.push_recipe();
         let Some(reg_name) = recipe.registry.as_deref() else {
             continue;
         };
-        let Some(reg_cfg) = cfg.registries.get(reg_name) else {
-            continue;
-        };
-        let kind = infer_registry_kind(reg_name, reg_cfg);
-        let pub_id = format!("pub:registry:{reg_name}");
-        builder.add_node(Node {
-            id: pub_id.clone(),
-            label: reg_name.to_string(),
-            category: Category::Publish,
-            ecosystem: Some(format!("{kind:?}").to_lowercase()),
-            source: Some(format!("recipe:{recipe_name}")),
-            // Publish points from ciabatta recipes are managed by ciabatta.
-            ciabatta_managed: true,
-            ..Default::default()
-        });
+        // Infer the kind from the registry config when it exists, otherwise from
+        // the name alone (a recipe may name a registry that isn't declared yet).
+        let kind = cfg
+            .registries
+            .get(reg_name)
+            .map(|c| infer_registry_kind(reg_name, c))
+            .unwrap_or_else(|| RegistryKind::from(reg_name));
+        let node = registry_publish_node(reg_name, kind, Some(recipe_name));
+        let pub_id = node.id.clone();
+        builder.add_node(node);
 
         let owner = recipe
             .local_artifact_path
@@ -829,6 +836,21 @@ pub fn scan_publish_points(cfg: &CiabattaConfig, builder: &mut GraphBuilder) {
             .and_then(|p| builder.owner_for_file(p))
             .unwrap_or_else(|| ROOT_NODE_ID.to_string());
         builder.add_edge(owner, pub_id);
+    }
+}
+
+/// Build a publish node for a ciabatta-managed registry. `recipe` names the
+/// recipe that targets it, when this node is contributed by one.
+fn registry_publish_node(reg_name: &str, kind: RegistryKind, recipe: Option<&str>) -> Node {
+    Node {
+        id: format!("pub:registry:{reg_name}"),
+        label: reg_name.to_string(),
+        category: Category::Publish,
+        ecosystem: Some(format!("{kind:?}").to_lowercase()),
+        source: recipe.map(|r| format!("recipe:{r}")),
+        // Publish points from the ciabatta config are managed by ciabatta.
+        ciabatta_managed: true,
+        ..Default::default()
     }
 }
 
@@ -921,6 +943,57 @@ clap = { version = "4.5", features = ["derive"] }
             .unwrap();
         });
         assert!(!g.nodes.iter().any(|n| n.id == "pub:crates.io"));
+    }
+
+    #[test]
+    fn publish_points_include_registries_and_recipes() {
+        // A registry with no recipe still appears; a recipe links its owner to
+        // the registry it targets and tags the node with the recipe name.
+        let cfg: CiabattaConfig = toml::from_str(
+            r#"
+[registries.nexus]
+url = "https://nexus.example.com/repository/raw/"
+
+[registries.unused_s3]
+url = "s3://my-bucket/"
+
+[recipies.publish_bin]
+registry = "nexus"
+local_artifact_path = "target/release/app"
+publish_path = "app/{CIABATTA_COMMIT}/app"
+"#,
+        )
+        .unwrap();
+
+        let mut b = root_builder();
+        scan_publish_points(&cfg, &mut b);
+        let g = b.finish(Path::new("/proj"));
+
+        // Both registries are publish nodes, even the unreferenced one.
+        let nexus = g
+            .nodes
+            .iter()
+            .find(|n| n.id == "pub:registry:nexus")
+            .expect("nexus publish node");
+        assert_eq!(nexus.category, Category::Publish);
+        assert!(nexus.ciabatta_managed);
+        assert_eq!(nexus.ecosystem.as_deref(), Some("nexus"));
+        assert_eq!(nexus.source.as_deref(), Some("recipe:publish_bin"));
+
+        let s3 = g
+            .nodes
+            .iter()
+            .find(|n| n.id == "pub:registry:unused_s3")
+            .expect("unreferenced registry still becomes a node");
+        assert_eq!(s3.ecosystem.as_deref(), Some("s3"));
+        assert!(s3.ciabatta_managed);
+
+        // The recipe links the repo (no matching package here) to nexus.
+        assert!(
+            g.edges
+                .iter()
+                .any(|e| e.to == "pub:registry:nexus" && e.from == ROOT_NODE_ID)
+        );
     }
 
     #[test]

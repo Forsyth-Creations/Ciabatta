@@ -176,6 +176,12 @@ async fn run_one(
     tx: mpsc::Sender<ProgressUpdate>,
 ) -> Result<()> {
     let _ = tx.send(ProgressUpdate::Started(name.clone())).await;
+    tracing::debug!(
+        recipe = %name,
+        mode = if mode == RunMode::Push { "push" } else { "pull" },
+        dry_run,
+        "starting recipe"
+    );
 
     let result = execute_recipe(&name, config, root, env_vars, dry_run, mode, &tx).await;
 
@@ -252,7 +258,15 @@ async fn execute_recipe(
         None => Vec::new(),
     };
 
+    tracing::debug!(
+        recipe = %name,
+        transfers = transfers.len(),
+        registry = recipe.registry.as_deref().unwrap_or("-"),
+        "resolved recipe transfers"
+    );
+
     for stage in StageKind::ALL {
+        tracing::debug!(recipe = %name, stage = stage.label(mode), "running stage");
         let _ = tx
             .send(ProgressUpdate::StageStarted {
                 recipe: name.to_string(),
@@ -377,7 +391,35 @@ fn build_transfers(
         Some(PublishPath::Single(path)) => {
             let remote = substitute_vars(path, env_vars)?;
             let local = root.join(recipe.local_artifact_path.as_deref().unwrap_or("."));
-            Ok(vec![(local, remote)])
+            if local.is_dir() {
+                // A directory artifact uploads each contained file individually,
+                // recreating its tree under the remote publish path (the
+                // registry creates sub-folders as needed). This is what the
+                // documented `local_artifact_path = "some/dir"` recipes rely on.
+                let files = walk_files(&local)?;
+                if files.is_empty() {
+                    bail!(
+                        "local_artifact_path '{}' is an empty directory; nothing to push",
+                        local.display()
+                    );
+                }
+                let base = remote.trim_end_matches('/');
+                let transfers = files
+                    .into_iter()
+                    .map(|file| {
+                        let rel = file
+                            .strip_prefix(&local)
+                            .unwrap_or(&file)
+                            .to_string_lossy()
+                            .replace('\\', "/");
+                        let remote = format!("{}/{}", base, rel.trim_start_matches('/'));
+                        (file, remote)
+                    })
+                    .collect();
+                Ok(transfers)
+            } else {
+                Ok(vec![(local, remote)])
+            }
         }
         Some(PublishPath::Many(patterns)) => {
             let base = env_vars
@@ -407,6 +449,27 @@ fn build_transfers(
             Ok(vec![(local, String::new())])
         }
     }
+}
+
+/// Recursively collect every regular file under `dir`, sorted for stable order.
+fn walk_files(dir: &Path) -> Result<Vec<PathBuf>> {
+    let mut files = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        let entries = std::fs::read_dir(&d)
+            .with_context(|| format!("Failed to read directory {}", d.display()))?;
+        for entry in entries {
+            let entry = entry?;
+            let file_type = entry.file_type()?;
+            if file_type.is_dir() {
+                stack.push(entry.path());
+            } else if file_type.is_file() {
+                files.push(entry.path());
+            }
+        }
+    }
+    files.sort();
+    Ok(files)
 }
 
 /// Expand a glob `pattern` (relative to `root`) into the matching regular files.
@@ -568,6 +631,40 @@ mod tests {
             remote_for_file(file, root, "/v1.2.3/", Some("dist")),
             "/v1.2.3/app.tar.gz"
         );
+    }
+
+    #[test]
+    fn build_transfers_expands_directory_into_per_file_uploads() {
+        use std::fs;
+        let tmp =
+            std::env::temp_dir().join(format!("ciabatta_dir_push_{}", std::process::id()));
+        let dist = tmp.join("dist");
+        fs::create_dir_all(dist.join("assets")).unwrap();
+        fs::write(dist.join("index.html"), b"x").unwrap();
+        fs::write(dist.join("assets").join("app.js"), b"y").unwrap();
+
+        let recipe = SimpleRecipe {
+            local_artifact_path: Some("dist".to_string()),
+            publish_path: Some(PublishPath::Single(
+                "team/app/{CIABATTA_COMMIT}/site".to_string(),
+            )),
+            ..Default::default()
+        };
+        let mut vars = HashMap::new();
+        vars.insert("CIABATTA_COMMIT".to_string(), "abc".to_string());
+
+        let transfers = build_transfers(&recipe, &tmp, &vars).unwrap();
+        let mut remotes: Vec<String> = transfers.iter().map(|(_, r)| r.clone()).collect();
+        remotes.sort();
+        assert_eq!(
+            remotes,
+            vec![
+                "team/app/abc/site/assets/app.js".to_string(),
+                "team/app/abc/site/index.html".to_string(),
+            ]
+        );
+
+        fs::remove_dir_all(&tmp).ok();
     }
 
     #[test]

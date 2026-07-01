@@ -197,12 +197,22 @@ pub fn find_root(start: &Path) -> Option<PathBuf> {
     }
 }
 
+/// Load the config discovered at `<root>/.ciabatta/ciabatta.toml`. Returns the
+/// default (empty) config when that file doesn't exist.
 pub fn load_config(root: &Path) -> Result<CiabattaConfig> {
     let path = root.join(CIABATTA_DIR).join(CONFIG_FILE);
     if !path.exists() {
         return Ok(CiabattaConfig::default());
     }
-    let content = std::fs::read_to_string(&path)
+    load_config_file(&path)
+}
+
+/// Load and parse a specific config file (used by the `--config` flag),
+/// expanding environment references in registry URLs and login scripts. Unlike
+/// [`load_config`], a missing or unparseable file is an error — the caller
+/// pointed at this file explicitly.
+pub fn load_config_file(path: &Path) -> Result<CiabattaConfig> {
+    let content = std::fs::read_to_string(path)
         .with_context(|| format!("Failed to read {}", path.display()))?;
     let mut config: CiabattaConfig =
         toml::from_str(&content).with_context(|| format!("Failed to parse {}", path.display()))?;

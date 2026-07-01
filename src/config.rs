@@ -44,10 +44,80 @@ pub struct RegistryConfig {
     /// Optional explicit type; inferred from registry name if absent.
     #[serde(rename = "type")]
     pub registry_type: Option<String>,
+    /// Nexus only: the repository to publish into (e.g. `raw-hosted`,
+    /// `npm-hosted`). When set, `url` is treated as the bare Nexus host and the
+    /// `/repository/<repository>` segment is appended automatically. When unset,
+    /// `url` is used as the full repository URL (backwards compatible).
+    pub repository: Option<String>,
+    /// Nexus raw only: an optional path prefix prepended to every recipe's
+    /// `publish_path`, so raw artifacts land under a common folder.
+    pub base_path: Option<String>,
+    /// Nexus only: the repository format, selecting how the main push happens.
+    /// One of `raw` (HTTP PUT, the default), `npm` (`npm publish`), or `pypi`
+    /// (`twine upload`).
+    pub format: Option<String>,
 }
 
 fn default_true() -> bool {
     true
+}
+
+/// The format of a Nexus repository, which determines the publish mechanism.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NexusFormat {
+    /// Plain file upload/download over HTTP PUT/GET (Nexus `raw` repositories).
+    Raw,
+    /// Native `npm publish` against a Nexus `npm` hosted repository.
+    Npm,
+    /// Native `twine upload` against a Nexus `pypi` hosted repository.
+    Pypi,
+}
+
+impl RegistryConfig {
+    /// The base URL of the target Nexus repository, without a trailing slash.
+    ///
+    /// If `repository` is set, it's `<url>/repository/<repository>`; otherwise
+    /// `url` is assumed to already point at the repository.
+    pub fn nexus_repo_url(&self) -> String {
+        let base = self.url.trim_end_matches('/');
+        match self.repository.as_deref() {
+            Some(repo) => format!("{base}/repository/{}", repo.trim_matches('/')),
+            None => base.to_string(),
+        }
+    }
+
+    /// The full object URL for a raw upload/download of `remote_path`, applying
+    /// the optional `base_path` prefix.
+    pub fn nexus_object_url(&self, remote_path: &str) -> String {
+        let base = self.nexus_repo_url();
+        let mut segments: Vec<&str> = Vec::new();
+        if let Some(bp) = self.base_path.as_deref() {
+            let bp = bp.trim_matches('/');
+            if !bp.is_empty() {
+                segments.push(bp);
+            }
+        }
+        let rp = remote_path.trim_matches('/');
+        if !rp.is_empty() {
+            segments.push(rp);
+        }
+        format!("{base}/{}", segments.join("/"))
+    }
+
+    /// Parse the configured Nexus repository format (defaults to `raw`).
+    pub fn nexus_format(&self) -> Result<NexusFormat> {
+        match self.format.as_deref() {
+            None => Ok(NexusFormat::Raw),
+            Some(s) => match s.trim().to_lowercase().as_str() {
+                "raw" => Ok(NexusFormat::Raw),
+                "npm" => Ok(NexusFormat::Npm),
+                "pypi" | "pip" => Ok(NexusFormat::Pypi),
+                other => bail!(
+                    "Unknown nexus format '{other}' for registry (expected: raw, npm, or pypi)"
+                ),
+            },
+        }
+    }
 }
 
 /// A recipe: shared fields at the top level, with optional `push` / `pull`
@@ -413,6 +483,79 @@ mod tests {
 
     fn parse(s: &str) -> CiabattaConfig {
         toml::from_str(s).expect("config should parse")
+    }
+
+    #[test]
+    fn nexus_repo_url_composes_from_host_and_repository() {
+        let cfg = parse(
+            r#"
+[registries.nexus]
+url = "http://localhost:8527"
+repository = "raw-hosted"
+"#,
+        );
+        let rc = &cfg.registries["nexus"];
+        assert_eq!(rc.nexus_repo_url(), "http://localhost:8527/repository/raw-hosted");
+        assert_eq!(
+            rc.nexus_object_url("group/app.bin"),
+            "http://localhost:8527/repository/raw-hosted/group/app.bin"
+        );
+    }
+
+    #[test]
+    fn nexus_object_url_applies_base_path() {
+        let cfg = parse(
+            r#"
+[registries.nexus]
+url = "http://localhost:8527/"
+repository = "raw-hosted"
+base_path = "/builds/"
+"#,
+        );
+        let rc = &cfg.registries["nexus"];
+        assert_eq!(
+            rc.nexus_object_url("/app.bin"),
+            "http://localhost:8527/repository/raw-hosted/builds/app.bin"
+        );
+    }
+
+    #[test]
+    fn nexus_url_without_repository_is_used_verbatim() {
+        // Backwards-compatible: the pre-existing full-repo-URL form still works.
+        let cfg = parse(
+            r#"
+[registries.nexus]
+url = "http://localhost:8527/repository/raw-hosted/"
+"#,
+        );
+        let rc = &cfg.registries["nexus"];
+        assert_eq!(
+            rc.nexus_object_url("a/b"),
+            "http://localhost:8527/repository/raw-hosted/a/b"
+        );
+    }
+
+    #[test]
+    fn nexus_format_parses_and_rejects_unknown() {
+        let cfg = parse(
+            r#"
+[registries.raw]
+url = "http://h"
+[registries.npm]
+url = "http://h"
+format = "npm"
+[registries.pypi]
+url = "http://h"
+format = "PyPI"
+[registries.bad]
+url = "http://h"
+format = "maven"
+"#,
+        );
+        assert_eq!(cfg.registries["raw"].nexus_format().unwrap(), NexusFormat::Raw);
+        assert_eq!(cfg.registries["npm"].nexus_format().unwrap(), NexusFormat::Npm);
+        assert_eq!(cfg.registries["pypi"].nexus_format().unwrap(), NexusFormat::Pypi);
+        assert!(cfg.registries["bad"].nexus_format().is_err());
     }
 
     #[test]

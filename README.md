@@ -7,10 +7,11 @@
 **Artifact publishing made easy.**
 
 Ciabatta is a fast, cross-platform CLI for publishing and pulling build
-artifacts to and from common registries — Nexus, S3, Artifactory, Docker, and
-ECR — driven by a single declarative TOML file. It picks up branch / commit /
-tag / build-number metadata from whatever CI system you run on, runs multiple
-publish jobs in parallel, and shows progress in a friendly terminal UI.
+artifacts to and from common registries — Nexus (raw, **npm**, and **PyPI**), S3,
+Artifactory, Docker, and ECR — driven by a single declarative TOML file. It picks
+up branch / commit / tag / build-number metadata from whatever CI system you run
+on, runs multiple publish jobs in parallel, and shows progress in a friendly
+terminal UI.
 
 ```
    _____ _       _           _   _
@@ -139,14 +140,16 @@ containers = "docker"  # docker | podman — when omitted, Ciabatta auto-detects
 [registries.nexus]
 # url and login_script expand environment variables with bash-style defaults,
 # so one config can target different environments.
-url = "https://${NEXUS_HOST:-nexus.example.com}/repository/maven-repository/"
+type       = "nexus"
+url        = "https://${NEXUS_HOST:-nexus.example.com}"  # bare Nexus host
+repository = "raw-hosted"   # which repo artifacts publish into
+format     = "raw"          # raw | npm | pypi
 tls_verify = true
 needs_auth = true
-login_script = "./nexus_login.sh"
 
 [registries.s3]
-url = "https://s3.example.com/"
-tls_verify = true
+type = "s3"
+url  = "s3://my-artifacts-bucket"   # the bucket, with the s3:// scheme
 
 # A simple recipe: copy a local artifact to a templated publish path.
 [recipies.release_frontend]
@@ -170,6 +173,68 @@ A few rules worth knowing:
   `CIABATTA_*` variable (plus anything you pass with `-e`) in their environment.
 
 Run `ciabatta config reference` for the full, always-up-to-date field listing.
+
+### Nexus repositories: raw, npm, and PyPI
+
+A Nexus registry picks its target repository and publish mechanism with three
+fields:
+
+- `repository` — the Nexus repo name (e.g. `raw-hosted`, `npm-hosted`). When set,
+  `url` is the bare Nexus host and `/repository/<repository>` is appended for you.
+  When omitted, `url` is used as the full repository URL (backwards compatible).
+- `format` — `raw` (default), `npm`, or `pypi`, selecting how the push happens.
+- `base_path` — *raw only*: an optional prefix prepended to every recipe's
+  `publish_path`, so raw artifacts land under a common folder.
+
+| `format` | How a push works | Requirements |
+| --- | --- | --- |
+| `raw` | HTTP `PUT` (pull is HTTP `GET`) | none |
+| `npm` | `npm publish <artifact> --registry <repo>` | `npm` on `PATH` |
+| `pypi` | `twine upload --repository-url <repo> <files>` | `twine` on `PATH` |
+
+For `npm` / `pypi` recipes, `local_artifact_path` is the package tarball or the
+`dist/` directory to publish, and `publish_path` is not used (the package name and
+version determine where it lands). Both read credentials from
+`CIABATTA_<NAME>_USER` / `_PASS`; npm also accepts a `CIABATTA_<NAME>_TOKEN`
+bearer token. `ciabatta pull` supports only `raw` repositories — pull npm/PyPI
+packages with their native clients.
+
+```toml
+# Publish an npm package straight to a Nexus npm repository.
+[registries.sdk]
+type       = "nexus"
+url        = "https://nexus.example.com"
+repository = "npm-hosted"
+format     = "npm"
+
+[recipies.sdk]
+registry            = "sdk"
+local_artifact_path = "packages/sdk"   # tarball or package directory
+```
+
+### S3
+
+An S3 registry drives the AWS CLI, so it's just a bucket URL: set `url` to
+`s3://<bucket>` and each recipe's `publish_path` becomes the object key.
+
+```toml
+[registries.s3]
+type = "s3"                        # inferred when the name contains "s3"
+url  = "s3://my-artifacts-bucket"
+
+[recipies.release]
+registry            = "s3"
+local_artifact_path = "target/release/app"
+publish_path        = "app/{CIABATTA_BRANCH}/{CIABATTA_COMMIT}/app"
+# uploads to s3://my-artifacts-bucket/app/<branch>/<commit>/app
+```
+
+- **Auth** uses the standard AWS credential chain — `AWS_ACCESS_KEY_ID` /
+  `AWS_SECRET_ACCESS_KEY`, `AWS_PROFILE`, or an instance/role profile — so no
+  `login_script` is needed. Set `AWS_REGION` if your bucket isn't in the CLI's
+  default region.
+- The `aws` CLI must be installed and configured on the machine or CI runner;
+  Ciabatta shells out to `aws s3 cp` for both push and pull.
 
 ## Stages
 
@@ -222,7 +287,10 @@ CIABATTA_<REGISTRY>_USER    CIABATTA_<REGISTRY>_PASS
 `<REGISTRY>` is the registry's section name, uppercased — so `[registries.nexus]`
 uses `CIABATTA_NEXUS_USER` / `CIABATTA_NEXUS_PASS`. They're applied per type:
 
-- **Nexus / Artifactory** — sent as HTTP basic auth on the upload/download.
+- **Nexus (raw) / Artifactory** — sent as HTTP basic auth on the upload/download.
+- **Nexus (npm)** — written to a throwaway npmrc for `npm publish`; prefers a
+  `CIABATTA_<REGISTRY>_TOKEN`, otherwise basic auth from `_USER` / `_PASS`.
+- **Nexus (PyPI)** — passed to `twine upload` as `-u` / `-p`.
 - **Docker** — `docker login <host> -u $USER --password-stdin`.
 - **ECR** — auto-login via `aws ecr get-login-password` (no credentials needed).
 - **S3** — uses the standard AWS credential chain (`AWS_ACCESS_KEY_ID`, …).

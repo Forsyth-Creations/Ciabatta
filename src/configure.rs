@@ -70,6 +70,24 @@ pub fn run_interactive(root: &Path, cfg: &CiabattaConfig) -> Result<()> {
         break u;
     };
 
+    // Nexus can target a specific repository and speak several repo formats;
+    // gather those so the generated block is complete.
+    let (nexus_repository, nexus_format, nexus_base_path) = if kind == "nexus" {
+        let repo = prompt("Nexus repository (e.g. raw-hosted, npm-hosted; blank if url includes it): ")?;
+        let fmt = {
+            let f = prompt("Format [raw|npm|pypi] (default: raw): ")?;
+            if f.is_empty() { "raw".to_string() } else { f }
+        };
+        let base = if fmt == "raw" {
+            prompt("Raw base path prefix (blank for none): ")?
+        } else {
+            String::new()
+        };
+        (repo, fmt, base)
+    } else {
+        (String::new(), String::new(), String::new())
+    };
+
     // ECR fetches its own login token, so auth defaults differ by type.
     let auth_default = !matches!(kind.as_str(), "ecr" | "s3");
     let needs_auth = prompt_yes_no("Needs authentication?", auth_default)?;
@@ -82,6 +100,16 @@ pub fn run_interactive(root: &Path, cfg: &CiabattaConfig) -> Result<()> {
     // keep the generated config tidy.
     if kind != inferred {
         snippet.push_str(&format!("type = {}\n", toml_basic(&kind)));
+    }
+    if !nexus_repository.is_empty() {
+        snippet.push_str(&format!("repository = {}\n", toml_basic(&nexus_repository)));
+    }
+    // `raw` is the default; only emit `format` when it differs.
+    if !nexus_format.is_empty() && nexus_format != "raw" {
+        snippet.push_str(&format!("format = {}\n", toml_basic(&nexus_format)));
+    }
+    if !nexus_base_path.is_empty() {
+        snippet.push_str(&format!("base_path = {}\n", toml_basic(&nexus_base_path)));
     }
     snippet.push_str("tls_verify = true\n");
     snippet.push_str(&format!("needs_auth = {needs_auth}\n"));

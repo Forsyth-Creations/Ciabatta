@@ -54,6 +54,13 @@ pub async fn pull(opts: &RegistryOpOptions<'_>, log: &mut Vec<String>) -> Result
 /// ECR, S3) — signalling the caller to skip any commit-fallback logic for them.
 pub async fn exists(opts: &RegistryOpOptions<'_>) -> Result<Option<bool>> {
     match infer_registry_kind(opts.registry_name, opts.registry_config) {
+        // Only raw Nexus repos expose a stable per-artifact URL to probe; npm and
+        // pypi resolve by package name+version, so we can't cheaply HEAD them.
+        RegistryKind::Nexus
+            if opts.registry_config.nexus_format()? != crate::config::NexusFormat::Raw =>
+        {
+            Ok(None)
+        }
         RegistryKind::Nexus | RegistryKind::Artifactory | RegistryKind::Generic => {
             Ok(Some(http_exists(opts).await?))
         }
@@ -63,11 +70,9 @@ pub async fn exists(opts: &RegistryOpOptions<'_>) -> Result<Option<bool>> {
 
 /// HEAD the artifact URL to see whether it exists (2xx → yes, 404 → no).
 async fn http_exists(opts: &RegistryOpOptions<'_>) -> Result<bool> {
-    let url = format!(
-        "{}/{}",
-        opts.registry_config.url.trim_end_matches('/'),
-        opts.remote_path.trim_start_matches('/')
-    );
+    // For plain Artifactory/Generic registries (no `repository`/`base_path`),
+    // this reduces to `<url>/<remote_path>`, matching the transfer URL.
+    let url = opts.registry_config.nexus_object_url(opts.remote_path);
     let client = reqwest::Client::builder()
         .danger_accept_invalid_certs(!opts.registry_config.tls_verify)
         .build()?;

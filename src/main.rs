@@ -695,6 +695,30 @@ All paths in recipes are relative to this root.
   type         = "nexus"          # Override type detection. Options:
                                   # nexus, s3, artifactory, docker, ecr
 
+  Nexus-only fields (select the target repository and format):
+  repository   = "raw-hosted"     # Nexus repo name. When set, `url` is the bare
+                                  # Nexus host and /repository/<repository> is
+                                  # appended automatically. When unset, `url` is
+                                  # used as the full repository URL.
+  base_path    = "builds"         # raw only: prefix prepended to every recipe's
+                                  # publish_path (where raw files land)
+  format       = "raw"            # Nexus repository format. Options:
+                                  #   raw  → HTTP PUT/GET      (default)
+                                  #   npm  → `npm publish`
+                                  #   pypi → `twine upload`
+
+  Example — publish an npm package to a Nexus npm repo:
+    [registries.npm]
+    type       = "nexus"
+    url        = "http://localhost:8527"
+    repository = "npm-hosted"
+    format     = "npm"
+
+  Auth for all formats uses CIABATTA_<NAME>_USER / _PASS (npm also accepts a
+  CIABATTA_<NAME>_TOKEN bearer token). npm requires `npm` on PATH; pypi requires
+  `twine`. For npm/pypi recipes, `local_artifact_path` is the package tarball or
+  the `dist/` directory to publish; `publish_path` is not used.
+
   The `url` and `login_script` fields expand environment variables, with
   bash-style defaults, so one config can target different environments:
 
@@ -706,7 +730,7 @@ All paths in recipes are relative to this root.
     {VAR:-default}    the leading `$` is optional
 
   Supported registry types:
-    nexus       — HTTP PUT/GET to Sonatype Nexus
+    nexus       — Sonatype Nexus (raw HTTP PUT/GET, or npm/pypi via `format`)
     s3          — AWS S3 via `aws s3 cp`
     artifactory — HTTP PUT/GET to JFrog Artifactory
     docker      — `docker push` / `docker pull`

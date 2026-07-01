@@ -7,7 +7,10 @@ containers = "docker"
 
 # ─── Registries ────────────────────────────────────────────────────────────────
 [registries.nexus]
-url        = "http://localhost:8527/repository/raw-hosted/"
+url        = "http://localhost:8527"   # bare Nexus host
+repository = "raw-hosted"              # which repo the artifacts go to
+format     = "raw"                     # raw | npm | pypi
+# base_path = "builds"                 # optional: prefix prepended to publish_path
 tls_verify = false
 needs_auth = true
 

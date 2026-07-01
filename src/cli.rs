@@ -15,9 +15,9 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub enum Commands {
-    /// Run (push) one or more recipes in parallel.
-    Run {
-        /// Recipe names to execute. Runs all if omitted.
+    /// Push one or more recipes in parallel (all if none named).
+    Push {
+        /// Recipe names to execute. Pushes all if omitted.
         #[arg(name = "RECIPE")]
         recipes: Vec<String>,
 

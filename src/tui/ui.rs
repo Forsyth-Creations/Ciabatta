@@ -210,7 +210,9 @@ fn render_logs(f: &mut Frame, area: Rect, app: &App) {
 
 fn render_help(f: &mut Frame, area: Rect, app: &App) {
     let mode = if app.dry_run { " DRY-RUN " } else { "" };
-    let status = if app.all_done {
+    let status = if app.all_done && app.any_failed() {
+        "Failed — press [q] to close. "
+    } else if app.all_done {
         "All done! "
     } else {
         "Running... "

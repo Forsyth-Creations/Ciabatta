@@ -51,6 +51,19 @@ pub fn local_git_vars(root: &Path) -> Result<HashMap<String, String>> {
     Ok(vars)
 }
 
+/// List up to `limit` commit SHAs reachable from `refname` (a branch, tag, or
+/// commit), most recent first. Used by the pull best-hash fallback to walk a
+/// branch's history looking for the newest commit that has a published artifact.
+pub fn branch_commits(root: &Path, refname: &str, limit: usize) -> Result<Vec<String>> {
+    let max = limit.to_string();
+    let out = run_git(root, &["rev-list", "--max-count", &max, refname])?;
+    Ok(out
+        .lines()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
+        .collect())
+}
+
 /// Run `git <args>` in `root`, returning trimmed stdout on success.
 fn run_git(root: &Path, args: &[&str]) -> Result<String> {
     let output = Command::new("git")

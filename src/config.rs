@@ -339,7 +339,8 @@ pub fn validate_publish_path(path: &str, vars: &HashMap<String, String>) -> Resu
         if !vars.contains_key(var_name) {
             bail!(
                 "Variable '{{{}}}' referenced in publish path '{}' is not set. \
-                 Pass it with -e {}=<value> or ensure the CI system provides it.",
+                 Set CIABATTA_ENV=local (or pass --local) to resolve branch/commit \
+                 from git, pass it with -e {}=<value>, or let your CI system provide it.",
                 var_name,
                 path,
                 var_name

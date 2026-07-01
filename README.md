@@ -70,10 +70,10 @@ ciabatta init --ci github
 ciabatta list
 
 # 3. Dry-run to see exactly what would happen
-ciabatta run release_frontend --dry-run
+ciabatta push release_frontend --dry-run
 
-# 4. Publish for real (runs multiple recipes in parallel)
-ciabatta run release_frontend release_backend
+# 4. Publish for real (pushes multiple recipes in parallel)
+ciabatta push release_frontend release_backend
 
 # 5. Pull an artifact back down
 ciabatta pull release_frontend
@@ -87,7 +87,7 @@ artifacts are published from.
 
 | Command | What it does |
 | --- | --- |
-| `ciabatta run [RECIPE...]` | Push one or more recipes in parallel (all if none named). |
+| `ciabatta push [RECIPE...]` | Push one or more recipes in parallel (all if none named). |
 | `ciabatta pull [RECIPE...]` | Download artifacts for one or more recipes. |
 | `ciabatta list` | List all recipes defined in the config. |
 | `ciabatta init [--ci SYSTEM]` | Create a `.ciabatta/` directory with a starter `ciabatta.toml`. |
@@ -98,7 +98,7 @@ artifacts are published from.
 | `ciabatta config show` | Print the resolved configuration. |
 | `ciabatta config reference` | Show documentation on the config format and options. |
 
-Useful flags on `run` / `pull`:
+Useful flags on `push` / `pull`:
 
 - `-e, --env KEY=VALUE` — set a variable. **Command-line values always override
   CI-derived ones.** Repeatable.
@@ -310,6 +310,24 @@ On a supported CI system Ciabatta resolves these and prints them at startup:
 
 Pass any of them explicitly with `-e CIABATTA_BRANCH=main` to override what was
 detected — handy for local runs.
+
+### `CIABATTA_ENV=local`
+
+Set `CIABATTA_ENV=local` (or pass `--local`) to resolve `CIABATTA_BRANCH` /
+`_COMMIT` / `_TAG` / `_BUILD_NUMBER` from your **local git** repository instead
+of a CI system — so `ciabatta push` / `pull` just work on a dev machine without
+having to pass `-e` on every invocation:
+
+```bash
+export CIABATTA_ENV=local
+ciabatta push ciabatta_binary
+```
+
+**`ciabatta pull` finds the best commit for your branch** (in both local and CI
+mode): if the exact commit has no published artifact, it walks the branch's git
+history and pulls the most recent commit that does (over HTTP registries like
+Nexus). This just needs the branch history to be available — a normal CI checkout
+has it; it tries the branch ref, then `origin/<branch>`, then `HEAD`.
 
 ## Web frontend
 

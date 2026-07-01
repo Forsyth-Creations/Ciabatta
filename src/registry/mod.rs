@@ -46,6 +46,43 @@ pub async fn pull(opts: &RegistryOpOptions<'_>, log: &mut Vec<String>) -> Result
     }
 }
 
+/// Best-effort check for whether the artifact at `opts.remote_path` already
+/// exists in the registry.
+///
+/// Returns `Ok(Some(true|false))` for registries we can cheaply probe over HTTP
+/// (Nexus / Artifactory / generic), and `Ok(None)` for kinds we can't (Docker,
+/// ECR, S3) — signalling the caller to skip any commit-fallback logic for them.
+pub async fn exists(opts: &RegistryOpOptions<'_>) -> Result<Option<bool>> {
+    match infer_registry_kind(opts.registry_name, opts.registry_config) {
+        RegistryKind::Nexus | RegistryKind::Artifactory | RegistryKind::Generic => {
+            Ok(Some(http_exists(opts).await?))
+        }
+        _ => Ok(None),
+    }
+}
+
+/// HEAD the artifact URL to see whether it exists (2xx → yes, 404 → no).
+async fn http_exists(opts: &RegistryOpOptions<'_>) -> Result<bool> {
+    let url = format!(
+        "{}/{}",
+        opts.registry_config.url.trim_end_matches('/'),
+        opts.remote_path.trim_start_matches('/')
+    );
+    let client = reqwest::Client::builder()
+        .danger_accept_invalid_certs(!opts.registry_config.tls_verify)
+        .build()?;
+    let mut req = client.head(&url);
+    if let Some((user, pass)) = registry_credentials(opts.registry_name, opts.env_vars) {
+        req = req.basic_auth(user, Some(pass));
+    }
+    let resp = req
+        .send()
+        .await
+        .with_context(|| format!("HEAD {url} failed"))?;
+    tracing::debug!(%url, status = %resp.status(), "existence probe");
+    Ok(resp.status().is_success())
+}
+
 /// Environment-variable key suffix for a registry's credentials, e.g. the
 /// registry named `nexus` yields `NEXUS`, used in `CIABATTA_NEXUS_USER` /
 /// `CIABATTA_NEXUS_PASS`.

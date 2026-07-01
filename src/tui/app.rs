@@ -133,6 +133,13 @@ impl App {
         self.all_done = self.recipes.iter().all(|r| r.status.is_terminal());
     }
 
+    /// True if any recipe ended in a failed state.
+    pub fn any_failed(&self) -> bool {
+        self.recipes
+            .iter()
+            .any(|r| matches!(r.status, RecipeStatus::Failed(_)))
+    }
+
     pub fn selected_logs(&self) -> &[String] {
         self.recipes
             .get(self.selected)

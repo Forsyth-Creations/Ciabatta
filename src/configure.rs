@@ -174,7 +174,7 @@ pub fn run_auto(root: &Path, cfg: &CiabattaConfig, assume_yes: bool) -> Result<(
     for &i in &chosen {
         println!("  • {}", suggestions[i].recipe);
     }
-    println!("Review with `ciabatta config show`, then `ciabatta run --dry-run`.");
+    println!("Review with `ciabatta config show`, then `ciabatta push --dry-run`.");
     Ok(())
 }
 

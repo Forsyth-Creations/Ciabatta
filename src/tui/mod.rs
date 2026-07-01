@@ -93,8 +93,10 @@ async fn tui_loop(
     loop {
         terminal.draw(|f| ui::render(f, &app))?;
 
-        // When all recipes finish, linger briefly then exit automatically.
-        if app.all_done && done_at.is_none() {
+        // When all recipes finish successfully, linger briefly then exit
+        // automatically. If any recipe failed, stay open so the errors remain
+        // visible until the user quits with a keypress.
+        if app.all_done && !app.any_failed() && done_at.is_none() {
             done_at = Some(tokio::time::Instant::now());
         }
         if let Some(t) = done_at
@@ -134,7 +136,8 @@ async fn tui_loop(
                         // All senders dropped; give UI a final render cycle.
                         app.all_done = app.recipes.iter().all(|r| r.status.is_terminal());
                         terminal.draw(|f| ui::render(f, &app))?;
-                        if done_at.is_none() {
+                        // Only auto-close on success; on failure wait for a keypress.
+                        if done_at.is_none() && !app.any_failed() {
                             done_at = Some(tokio::time::Instant::now());
                         }
                     }

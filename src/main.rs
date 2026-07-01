@@ -3,6 +3,7 @@ mod ci;
 mod cli;
 mod config;
 mod configure;
+mod environment;
 mod git;
 mod registry;
 mod runner;
@@ -17,6 +18,7 @@ use clap::Parser;
 
 use cli::{Cli, Commands, ConfigCommand, ConfigureCommand};
 use config::{CiabattaConfig, find_root, load_config, load_config_file};
+use environment::CiabattaEnv;
 use runner::RunMode;
 use std::collections::BTreeMap;
 
@@ -28,7 +30,7 @@ async fn main() -> Result<()> {
     tracing::debug!("debug logging enabled");
 
     match cli.command {
-        Commands::Run {
+        Commands::Push {
             recipes,
             env,
             dry_run,
@@ -37,7 +39,9 @@ async fn main() -> Result<()> {
             config,
         } => {
             let (root, cfg) = load_project(config.as_deref())?;
-            let vars = build_env_vars(&cfg, &env, local, &root)?;
+            // Only announce resolved variables when we're not about to take over
+            // the screen with the TUI (the output would corrupt/close it).
+            let vars = build_env_vars(&cfg, &env, local, &root, no_tui)?;
             let names = resolve_recipe_names(&cfg, &recipes);
             execute_recipes(&cfg, &root, &names, &vars, dry_run, no_tui, RunMode::Push).await?;
         }
@@ -51,7 +55,7 @@ async fn main() -> Result<()> {
             config,
         } => {
             let (root, cfg) = load_project(config.as_deref())?;
-            let vars = build_env_vars(&cfg, &env, local, &root)?;
+            let vars = build_env_vars(&cfg, &env, local, &root, no_tui)?;
             let names = resolve_recipe_names(&cfg, &recipes);
             execute_recipes(&cfg, &root, &names, &vars, dry_run, no_tui, RunMode::Pull).await?;
         }
@@ -211,32 +215,43 @@ fn root_from_config_path(config_abs: &Path) -> Option<PathBuf> {
 /// 2. Merge CIABATTA_* vars from local git (`--local`) or the configured CI
 /// 3. Override with CLI -e flags (highest priority)
 /// 4. Derive CIABATTA_PATH
+///
+/// When `announce` is true the resolved variables are echoed to stderr; callers
+/// that hand off to the TUI pass `false`, since that output would corrupt the
+/// alternate screen.
 fn build_env_vars(
     cfg: &CiabattaConfig,
     cli_env: &[String],
     local: bool,
     root: &Path,
+    announce: bool,
 ) -> Result<HashMap<String, String>> {
     let mut vars: HashMap<String, String> = std::env::vars().collect();
 
-    if local {
+    // Local mode is selected by the `--local` flag OR by `CIABATTA_ENV=local`.
+    let env = CiabattaEnv::detect_with_flag(local);
+
+    if env.is_local() {
         // Local development: resolve build variables from git history. These
         // take precedence over any stale ambient CIABATTA_* in the environment.
-        let git_vars = git::local_git_vars(root)?;
-        if !git_vars.is_empty() {
+        let git_vars = env.resolve_vars(root)?;
+        if announce && !git_vars.is_empty() {
             eprintln!("CIABATTA variables resolved from local git:");
             for (k, v) in sorted(&git_vars) {
                 eprintln!("  {k} = {v}");
             }
         }
         vars.extend(git_vars);
+        // Record the mode so the runner (pull best-hash fallback) and any child
+        // processes see it, even when it was turned on by the `--local` flag.
+        vars.insert(environment::ENV_VAR.to_string(), environment::LOCAL.to_string());
     } else if let Some(ref system) = cfg.system
         && let Some(ref ci_name) = system.ci
     {
-        // Resolve CI variables and print them.
+        // Resolve CI variables and (optionally) print them.
         let ci_system = ci::CiSystem::from(ci_name.as_str());
         let (ci_vars, resolved) = ci::resolve_ci_vars(&ci_system);
-        if !resolved.is_empty() {
+        if announce && !resolved.is_empty() {
             eprintln!("CI variables resolved from {}:", ci_system);
             for rv in &resolved {
                 eprintln!(
@@ -454,7 +469,7 @@ fn cmd_init(ci: Option<&str>, containers: Option<&str>, force: bool) -> Result<(
     println!("Next steps:");
     println!("  1. Edit .ciabatta/ciabatta.toml to define your registries and recipes.");
     println!("  2. Run `ciabatta list` to verify your recipes are recognized.");
-    println!("  3. Run `ciabatta run --dry-run <recipe>` to preview what will happen.");
+    println!("  3. Run `ciabatta push --dry-run <recipe>` to preview what will happen.");
     println!("  4. Run `ciabatta tui` to open the interactive browser.");
     println!();
     println!("For config format documentation: ciabatta config reference");
@@ -758,11 +773,13 @@ Available substitution variables in publish_path:
                              /{CIABATTA_BRANCH}/{CIABATTA_COMMIT}  (otherwise)
 
 These are populated automatically from the CI system defined in [system].
-You can override any of them with: ciabatta run -e CIABATTA_BRANCH=my-branch
+You can override any of them with: ciabatta push -e CIABATTA_BRANCH=my-branch
 
-Working locally? `ciabatta run --local` derives CIABATTA_BRANCH / _COMMIT /
-_TAG / _BUILD_NUMBER from your local git history instead of CI. Run
-`ciabatta source` to print them as shell `export` lines for your own use:
+Working locally? `ciabatta push --local` (or `export CIABATTA_ENV=local`) derives
+CIABATTA_BRANCH / _COMMIT / _TAG / _BUILD_NUMBER from your local git history
+instead of CI. On any `ciabatta pull` (local or CI), when the exact commit has no
+published artifact ciabatta falls back to the newest commit on the branch that
+does. Run `ciabatta source` to print the variables as shell `export` lines:
 
     eval "$(ciabatta source)"
 
@@ -813,7 +830,8 @@ async fn run_tui_browser() -> Result<()> {
     if let Ok(c) = config::resolve_container_cmd(&cfg) {
         cfg.system.get_or_insert_with(Default::default).containers = Some(c);
     }
-    let vars = build_env_vars(&cfg, &[], false, &root)?;
+    // announce = false: the browser owns the screen, so don't print var output.
+    let vars = build_env_vars(&cfg, &[], false, &root, false)?;
     tui::browser::run_browser(cfg, root, vars).await
 }
 

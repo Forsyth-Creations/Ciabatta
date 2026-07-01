@@ -4,7 +4,8 @@ use std::path::{Path, PathBuf};
 use tokio::sync::mpsc;
 
 use crate::config::{
-    CiabattaConfig, PublishPath, SimpleRecipe, substitute_vars, validate_publish_path,
+    CiabattaConfig, PublishPath, RegistryConfig, SimpleRecipe, substitute_vars,
+    validate_publish_path,
 };
 use crate::registry::{self, RegistryOpOptions};
 
@@ -237,6 +238,25 @@ async fn execute_recipe(
         .and_then(|s| s.containers.as_deref())
         .unwrap_or("docker");
 
+    // On a pull, if the exact commit's artifact is missing, fall back to the
+    // newest commit on the branch that has one (works in both local and CI
+    // mode; it just needs the branch's git history to be available). Any
+    // override produces an adjusted variable map the transfers resolve against.
+    let overridden;
+    let env_vars: &HashMap<String, String> = if mode == RunMode::Pull {
+        match resolve_pull_commit(&recipe, registry_config, root, container_cmd, env_vars, name, tx)
+            .await
+        {
+            Some(adjusted) => {
+                overridden = adjusted;
+                &overridden
+            }
+            None => env_vars,
+        }
+    } else {
+        env_vars
+    };
+
     // Resolve the (local file, remote path) pairs this recipe transfers. A
     // single publish_path yields one pair; a list of globs yields one per
     // matched file. Owned here so the borrowed `opts` below can reference them.
@@ -371,6 +391,133 @@ async fn run_stage(
         }
         StageKind::Post => run_optional(recipe.post.as_deref(), root, env_vars, dry_run, log).await,
     }
+}
+
+/// The most commits to probe when walking a branch's history for a published
+/// artifact — bounds the number of existence requests on large repositories.
+const MAX_PULL_CANDIDATES: usize = 50;
+
+/// Candidate commits to probe for a pull, newest first: the exact commit,
+/// then the branch's history. Tries the local branch ref, then `origin/<branch>`,
+/// then `HEAD` — covering CI's detached-HEAD checkouts — and stops at the first
+/// ref that yields history. Bounded to [`MAX_PULL_CANDIDATES`].
+fn branch_candidates(root: &Path, branch: &str, exact: &str) -> Vec<String> {
+    let mut candidates = vec![exact.to_string()];
+    let mut seen: std::collections::HashSet<String> =
+        std::collections::HashSet::from([exact.to_string()]);
+
+    let origin = format!("origin/{branch}");
+    for refname in [branch, origin.as_str(), "HEAD"] {
+        let Ok(history) = crate::git::branch_commits(root, refname, MAX_PULL_CANDIDATES) else {
+            continue;
+        };
+        for c in history {
+            if seen.insert(c.clone()) {
+                candidates.push(c);
+            }
+        }
+        // Got usable history from this ref; don't also fold in the others.
+        if candidates.len() > 1 {
+            break;
+        }
+    }
+    candidates.truncate(MAX_PULL_CANDIDATES);
+    candidates
+}
+
+/// On a pull, pick the best commit for the branch: keep the exact commit when
+/// its artifact exists, otherwise walk the branch history (newest first) and use
+/// the most recent commit that does. Returns an adjusted variable map when a
+/// different commit was chosen, or `None` to keep the current one.
+///
+/// Works in both local and CI mode. It only applies to a single `publish_path`
+/// that references `{CIABATTA_COMMIT}` on a registry we can cheaply probe (HTTP),
+/// and needs the branch's git history to be available (a normal CI checkout has
+/// it). Network errors leave the commit unchanged so the pull surfaces them.
+async fn resolve_pull_commit(
+    recipe: &SimpleRecipe,
+    registry_config: Option<&RegistryConfig>,
+    root: &Path,
+    container_cmd: &str,
+    env_vars: &HashMap<String, String>,
+    recipe_name: &str,
+    tx: &mpsc::Sender<ProgressUpdate>,
+) -> Option<HashMap<String, String>> {
+    let reg_cfg = registry_config?;
+    let reg_name = recipe.registry.as_deref()?;
+    let branch = env_vars.get("CIABATTA_BRANCH").filter(|v| !v.is_empty())?;
+    let exact = env_vars
+        .get("CIABATTA_COMMIT")
+        .filter(|v| !v.is_empty())?
+        .clone();
+    let Some(PublishPath::Single(template)) = recipe.publish_path.as_ref() else {
+        return None;
+    };
+    if !template.contains("{CIABATTA_COMMIT}") {
+        return None;
+    }
+
+    let candidates = branch_candidates(root, branch, &exact);
+    for commit in &candidates {
+        let mut trial = env_vars.clone();
+        set_commit(&mut trial, commit);
+        let Ok(remote) = substitute_vars(template, &trial) else {
+            continue;
+        };
+        let opts = RegistryOpOptions {
+            registry_name: reg_name,
+            registry_config: reg_cfg,
+            local_path: Path::new(""),
+            remote_path: &remote,
+            env_vars: &trial,
+            dry_run: false,
+            container_cmd,
+        };
+        match registry::exists(&opts).await {
+            // Exact commit exists → keep it (no override).
+            Ok(Some(true)) if *commit == exact => return None,
+            Ok(Some(true)) => {
+                let _ = tx
+                    .send(ProgressUpdate::Log(
+                        recipe_name.to_string(),
+                        format!(
+                            "commit {} has no artifact; pulling newest match on {}: {}",
+                            short_sha(&exact),
+                            branch,
+                            short_sha(commit),
+                        ),
+                    ))
+                    .await;
+                return Some(trial);
+            }
+            Ok(Some(false)) => continue,
+            // Registry can't be probed, or a network error occurred: don't
+            // override — let the pull run against the exact commit.
+            Ok(None) | Err(_) => return None,
+        }
+    }
+    None
+}
+
+/// Override `CIABATTA_COMMIT` in a variable map, keeping the derived
+/// `CIABATTA_PATH` consistent when it isn't tag-based.
+fn set_commit(vars: &mut HashMap<String, String>, commit: &str) {
+    vars.insert("CIABATTA_COMMIT".to_string(), commit.to_string());
+    let has_tag = vars
+        .get("CIABATTA_TAG")
+        .map(|t| !t.is_empty())
+        .unwrap_or(false);
+    if !has_tag
+        && let Some(branch) = vars.get("CIABATTA_BRANCH").cloned()
+        && !branch.is_empty()
+    {
+        vars.insert("CIABATTA_PATH".to_string(), format!("/{branch}/{commit}"));
+    }
+}
+
+/// First 8 characters of a commit SHA (or the whole thing if shorter).
+fn short_sha(sha: &str) -> &str {
+    sha.get(..8).unwrap_or(sha)
 }
 
 /// Resolve the (local file, remote path) pairs a recipe transfers in its main
@@ -631,6 +778,32 @@ mod tests {
             remote_for_file(file, root, "/v1.2.3/", Some("dist")),
             "/v1.2.3/app.tar.gz"
         );
+    }
+
+    #[test]
+    fn set_commit_updates_commit_and_derived_path() {
+        let mut vars = HashMap::new();
+        vars.insert("CIABATTA_BRANCH".to_string(), "main".to_string());
+        vars.insert("CIABATTA_COMMIT".to_string(), "old".to_string());
+        vars.insert("CIABATTA_PATH".to_string(), "/main/old".to_string());
+
+        set_commit(&mut vars, "new");
+        assert_eq!(vars["CIABATTA_COMMIT"], "new");
+        // CIABATTA_PATH is kept consistent when it isn't tag-based.
+        assert_eq!(vars["CIABATTA_PATH"], "/main/new");
+
+        // With a tag set, the tag-based path is left untouched.
+        vars.insert("CIABATTA_TAG".to_string(), "v1".to_string());
+        vars.insert("CIABATTA_PATH".to_string(), "/v1/".to_string());
+        set_commit(&mut vars, "newer");
+        assert_eq!(vars["CIABATTA_COMMIT"], "newer");
+        assert_eq!(vars["CIABATTA_PATH"], "/v1/");
+    }
+
+    #[test]
+    fn short_sha_truncates() {
+        assert_eq!(short_sha("0d63ea6123181a46"), "0d63ea61");
+        assert_eq!(short_sha("abc"), "abc");
     }
 
     #[test]

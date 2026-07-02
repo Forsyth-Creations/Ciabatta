@@ -12,8 +12,28 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # Cargo.toml is the source of truth for the version. Bump it in the release
+  # commit before tagging; this job guards against tagging a stale version.
+  verify:
+    name: Verify version matches tag
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check Cargo.toml version == tag
+        run: |
+          CARGO_VERSION="$(grep -m1 '^version = ' Cargo.toml | sed -E 's/version = "(.*)"/\1/')"
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          echo "Cargo.toml version: $CARGO_VERSION"
+          echo "Tag version:        $TAG_VERSION"
+          if [ "$CARGO_VERSION" != "$TAG_VERSION" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match Cargo.toml version $CARGO_VERSION. Bump Cargo.toml before tagging."
+            exit 1
+          fi
+
   build:
     name: Build ${{ matrix.target }}
+    needs: verify
     runs-on: ${{ matrix.runner }}
     strategy:
       matrix:
@@ -127,14 +147,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Set version from tag
-        run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          echo "Setting crate version to $VERSION"
-          cargo set-version "$VERSION" 2>/dev/null \
-            || sed -i -E "0,/^version = \".*\"/s//version = \"$VERSION\"/" Cargo.toml
-
       - name: Publish to crates.io
-        run: cargo publish --allow-dirty
+        run: cargo publish
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}

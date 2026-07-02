@@ -198,9 +198,7 @@ async fn docker_login(opts: &RegistryOpOptions<'_>, log: &mut Vec<String>) -> Re
         stdin.write_all(pass.as_bytes()).await?;
     }
     let out = child.wait_with_output().await?;
-    for line in String::from_utf8_lossy(&out.stdout).lines() {
-        log.push(line.to_string());
-    }
+    push_output_lines(log, &out.stdout, "");
     if !out.status.success() {
         anyhow::bail!(
             "docker login to {host} failed: {}",
@@ -225,15 +223,8 @@ pub async fn run_script(
         .stderr(Stdio::piped());
 
     let output = cmd.output().await?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-
-    for line in stdout.lines() {
-        log.push(line.to_string());
-    }
-    for line in stderr.lines() {
-        log.push(format!("[stderr] {}", line));
-    }
+    push_output_lines(log, &output.stdout, "");
+    push_output_lines(log, &output.stderr, "[stderr] ");
 
     if !output.status.success() {
         anyhow::bail!(
@@ -267,17 +258,33 @@ pub async fn run_shell_command(
         .await
         .with_context(|| format!("Failed to spawn shell for command: {cmd}"))?;
 
-    for line in String::from_utf8_lossy(&output.stdout).lines() {
-        log.push(line.to_string());
-    }
-    for line in String::from_utf8_lossy(&output.stderr).lines() {
-        log.push(format!("[stderr] {}", line));
-    }
+    push_output_lines(log, &output.stdout, "");
+    push_output_lines(log, &output.stderr, "[stderr] ");
 
     if !output.status.success() {
         anyhow::bail!("Command failed (exit {:?}): {}", output.status.code(), cmd);
     }
     Ok(())
+}
+
+/// Append captured command output to `log`, collapsing carriage-return
+/// overwrites.
+///
+/// Tools like `aws s3 cp` draw a progress bar by rewriting the same line with
+/// `\r` and no trailing newline. Rust's `str::lines()` splits only on `\n`, so
+/// all those frames would otherwise arrive as one entry full of embedded `\r`s,
+/// which the TUI then hands to the terminal and gets a garbled overwrite. For
+/// each newline-delimited line we keep only the text after the final `\r` — the
+/// state a terminal would ultimately display — dropping any empty result so a
+/// bare trailing `\r` doesn't add a blank line.
+pub fn push_output_lines(log: &mut Vec<String>, raw: &[u8], prefix: &str) {
+    for line in String::from_utf8_lossy(raw).lines() {
+        let visible = line.rsplit('\r').next().unwrap_or(line).trim_end();
+        if visible.is_empty() {
+            continue;
+        }
+        log.push(format!("{prefix}{visible}"));
+    }
 }
 
 /// Helper: stream a command, collecting output lines into `log`.
@@ -300,12 +307,8 @@ pub async fn run_command(
         .output()
         .await?;
 
-    for line in String::from_utf8_lossy(&output.stdout).lines() {
-        log.push(line.to_string());
-    }
-    for line in String::from_utf8_lossy(&output.stderr).lines() {
-        log.push(format!("[stderr] {}", line));
-    }
+    push_output_lines(log, &output.stdout, "");
+    push_output_lines(log, &output.stderr, "[stderr] ");
 
     if !output.status.success() {
         anyhow::bail!(
@@ -341,6 +344,30 @@ mod tests {
         );
         // Different registry name → no credentials.
         assert_eq!(registry_credentials("docker", &env), None);
+    }
+
+    #[test]
+    fn push_output_lines_collapses_carriage_return_progress() {
+        let mut log = Vec::new();
+        // A typical `aws s3 cp` progress stream: many `\r`-overwritten frames on
+        // one line, then a final newline-terminated status.
+        let raw = b"Completed 1.0 MiB/2.0 MiB\rCompleted 1.5 MiB/2.0 MiB\rCompleted 2.0 MiB/2.0 MiB\nupload: ./a to s3://b/a\n";
+        push_output_lines(&mut log, raw, "");
+        assert_eq!(
+            log,
+            vec![
+                "Completed 2.0 MiB/2.0 MiB".to_string(),
+                "upload: ./a to s3://b/a".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn push_output_lines_applies_prefix_and_skips_blanks() {
+        let mut log = Vec::new();
+        // A bare trailing `\r` (cursor reset with no content) shouldn't add a line.
+        push_output_lines(&mut log, b"warn: slow\n\r", "[stderr] ");
+        assert_eq!(log, vec!["[stderr] warn: slow".to_string()]);
     }
 
     #[test]

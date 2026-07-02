@@ -130,9 +130,16 @@ fn render_recipe_list(f: &mut Frame, area: Rect, app: &App) {
         );
 
         let gauge_color = gauge_color_for(&recipe.status);
+        let ratio = recipe.progress();
+        // For multi-file recipes, label the bar with the file counter; otherwise
+        // fall back to the plain percentage.
+        let label = recipe
+            .transfer_label()
+            .unwrap_or_else(|| format!("{:.0}%", ratio * 100.0));
         let gauge = Gauge::default()
             .gauge_style(Style::default().fg(gauge_color).bg(Color::DarkGray))
-            .ratio(recipe.progress());
+            .label(label)
+            .ratio(ratio);
         f.render_widget(
             gauge,
             Rect {
@@ -176,12 +183,18 @@ fn render_logs(f: &mut Frame, area: Rect, app: &App) {
         .border_style(Style::default().fg(Color::Cyan));
 
     let logs = app.selected_logs();
-    let items: Vec<ListItem> = logs
+
+    // Width/height available inside the bordered block.
+    let inner_width = area.width.saturating_sub(2) as usize;
+    let inner_height = area.height.saturating_sub(2) as usize;
+
+    // Wrap each log line to the inner width so long file paths don't get
+    // cut off. Each wrapped segment becomes its own single-row ListItem,
+    // which keeps the "one item == one visual row" invariant the scroll
+    // logic below relies on.
+    let rows: Vec<ListItem> = logs
         .iter()
-        .rev()
-        .take(area.height as usize)
-        .rev()
-        .map(|l| {
+        .flat_map(|l| {
             let style = if l.starts_with("[stderr]")
                 || l.starts_with("✗")
                 || l.contains("error")
@@ -195,17 +208,39 @@ fn render_logs(f: &mut Frame, area: Rect, app: &App) {
             } else {
                 Style::default().fg(Color::Gray)
             };
-            ListItem::new(l.as_str()).style(style)
+            wrap_line(l, inner_width)
+                .into_iter()
+                .map(move |seg| ListItem::new(seg).style(style))
         })
         .collect();
+
+    // Keep only the most recent rows that fit, so the newest output stays
+    // in view.
+    let total = rows.len();
+    let start = total.saturating_sub(inner_height.max(1));
+    let items: Vec<ListItem> = rows.into_iter().skip(start).collect();
 
     let list = List::new(items).block(block);
 
     let mut state = ListState::default();
-    if !logs.is_empty() {
-        state.select(Some(logs.len() - 1));
+    let visible = total - start;
+    if visible > 0 {
+        state.select(Some(visible - 1));
     }
     f.render_stateful_widget(list, area, &mut state);
+}
+
+/// Split `line` into segments no wider than `width` characters. Returns at
+/// least one segment (possibly empty) so blank log lines are preserved.
+fn wrap_line(line: &str, width: usize) -> Vec<String> {
+    if width == 0 || line.chars().count() <= width {
+        return vec![line.to_string()];
+    }
+    let chars: Vec<char> = line.chars().collect();
+    chars
+        .chunks(width)
+        .map(|chunk| chunk.iter().collect())
+        .collect()
 }
 
 fn render_help(f: &mut Frame, area: Rect, app: &App) {

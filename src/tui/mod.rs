@@ -87,14 +87,15 @@ async fn tui_loop(
     drop(tx);
 
     let mut event_stream = EventStream::new();
-    let done_linger = Duration::from_secs(3);
+    let done_linger = Duration::from_secs(10);
     let mut done_at: Option<tokio::time::Instant> = None;
 
     loop {
         terminal.draw(|f| ui::render(f, &app))?;
 
-        // When all recipes finish successfully, linger briefly then exit
-        // automatically. If any recipe failed, stay open so the errors remain
+        // When all recipes finish successfully, keep the results on screen for
+        // `done_linger` so they can be read, then exit automatically (a keypress
+        // quits sooner). If any recipe failed, stay open so the errors remain
         // visible until the user quits with a keypress.
         if app.all_done && !app.any_failed() && done_at.is_none() {
             done_at = Some(tokio::time::Instant::now());

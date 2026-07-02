@@ -76,6 +76,14 @@ pub enum ProgressUpdate {
         stage: StageKind,
         ran: bool,
     },
+    /// Progress within a multi-file main stage: `done` of `total` files have
+    /// been transferred. Only emitted when a recipe transfers more than one file
+    /// (a list-form `publish_path`).
+    TransferProgress {
+        recipe: String,
+        done: usize,
+        total: usize,
+    },
     Log(String, String),
     Completed(String),
     Failed(String, String),
@@ -305,6 +313,7 @@ async fn execute_recipe(
             dry_run,
             mode,
             &mut log,
+            tx,
         )
         .await;
 
@@ -345,6 +354,7 @@ async fn run_stage(
     dry_run: bool,
     mode: RunMode,
     log: &mut Vec<String>,
+    tx: &mpsc::Sender<ProgressUpdate>,
 ) -> Result<bool> {
     match stage {
         StageKind::Login => {
@@ -373,12 +383,62 @@ async fn run_stage(
                 run_bash_script(script, root, env_vars, dry_run, log).await?;
                 Ok(true)
             } else if !opts.is_empty() {
-                // One built-in transfer per resolved (local, remote) pair.
-                for o in opts {
-                    match mode {
-                        RunMode::Push => registry::push(o, log).await?,
-                        RunMode::Pull => registry::pull(o, log).await?,
+                // One built-in transfer per resolved (local, remote) pair. When
+                // there's more than one file, report file-level progress so the
+                // TUI can show a "done/total" counter as each upload completes.
+                //
+                // Transfers run concurrently (bounded by MAX_CONCURRENT_TRANSFERS)
+                // so a directory of many files — each its own `aws s3 cp` /
+                // upload — is no longer bottlenecked on serial, one-at-a-time
+                // process spawns. Per-transfer logs are buffered separately and
+                // merged back in the original order once everything settles, so
+                // the log stays readable despite out-of-order completion.
+                use futures::stream::StreamExt;
+
+                let total = opts.len();
+                let report = |done: usize| {
+                    if total > 1 {
+                        let _ = tx.try_send(ProgressUpdate::TransferProgress {
+                            recipe: name.to_string(),
+                            done,
+                            total,
+                        });
                     }
+                };
+                report(0);
+
+                let mut futs = Vec::with_capacity(total);
+                for (i, o) in opts.iter().enumerate() {
+                    futs.push(run_transfer(i, o, mode));
+                }
+                let mut stream =
+                    futures::stream::iter(futs).buffer_unordered(MAX_CONCURRENT_TRANSFERS);
+
+                // Collect per-transfer output keyed by index so it can be
+                // replayed in the original order, regardless of which upload
+                // finished first.
+                let mut sublogs: Vec<Option<Vec<String>>> = (0..total).map(|_| None).collect();
+                let mut done = 0;
+                let mut first_err: Option<anyhow::Error> = None;
+                while let Some((i, res, sublog)) = stream.next().await {
+                    sublogs[i] = Some(sublog);
+                    done += 1;
+                    report(done);
+                    if let Err(e) = res {
+                        first_err = Some(e);
+                        // Stop launching new transfers; in-flight ones are
+                        // dropped (cancelled) as the stream unwinds.
+                        break;
+                    }
+                }
+                drop(stream);
+
+                for sublog in sublogs.into_iter().flatten() {
+                    log.extend(sublog);
+                }
+
+                if let Some(e) = first_err {
+                    return Err(e);
                 }
                 Ok(true)
             } else {
@@ -391,6 +451,26 @@ async fn run_stage(
         }
         StageKind::Post => run_optional(recipe.post.as_deref(), root, env_vars, dry_run, log).await,
     }
+}
+
+/// How many file transfers within a single recipe's main stage may run at once.
+/// Bounds concurrent `aws s3 cp` / upload processes so a large directory pushes
+/// in parallel without spawning an unbounded number of subprocesses.
+const MAX_CONCURRENT_TRANSFERS: usize = 40;
+
+/// Run a single push/pull transfer into its own log buffer, tagged with its
+/// original index so callers can merge concurrent results back into order.
+async fn run_transfer(
+    i: usize,
+    o: &RegistryOpOptions<'_>,
+    mode: RunMode,
+) -> (usize, Result<()>, Vec<String>) {
+    let mut sublog: Vec<String> = Vec::new();
+    let res = match mode {
+        RunMode::Push => registry::push(o, &mut sublog).await,
+        RunMode::Pull => registry::pull(o, &mut sublog).await,
+    };
+    (i, res, sublog)
 }
 
 /// The most commits to probe when walking a branch's history for a published

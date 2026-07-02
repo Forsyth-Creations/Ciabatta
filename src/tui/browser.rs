@@ -208,6 +208,13 @@ impl BrowserApp {
                 self.status_msg = Some(format!("{} → {}", recipe, stage.label(RunMode::Push)));
             }
             ProgressUpdate::StageFinished { .. } => {}
+            ProgressUpdate::TransferProgress {
+                ref recipe,
+                done,
+                total,
+            } => {
+                self.status_msg = Some(format!("{recipe} → {done}/{total} files"));
+            }
             ProgressUpdate::Log(ref name, ref line) => {
                 if let Some(r) = self.recipes.iter_mut().find(|r| &r.name == name) {
                     r.logs.push(line.clone());

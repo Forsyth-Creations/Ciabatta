@@ -21,6 +21,11 @@ pub enum Commands {
         #[arg(name = "RECIPE")]
         recipes: Vec<String>,
 
+        /// Push only the recipes grouped by the named menu (repeatable). Combines
+        /// with any RECIPE arguments. See the [menus] config section.
+        #[arg(long = "cookbook", visible_alias = "menu", value_name = "MENU")]
+        cookbooks: Vec<String>,
+
         /// Set an environment variable (KEY=VALUE). Overrides CI-derived vars.
         #[arg(short = 'e', long = "env", value_name = "KEY=VALUE")]
         env: Vec<String>,
@@ -47,6 +52,11 @@ pub enum Commands {
     Pull {
         #[arg(name = "RECIPE")]
         recipes: Vec<String>,
+
+        /// Pull only the recipes grouped by the named menu (repeatable). Combines
+        /// with any RECIPE arguments. See the [menus] config section.
+        #[arg(long = "cookbook", visible_alias = "menu", value_name = "MENU")]
+        cookbooks: Vec<String>,
 
         #[arg(short = 'e', long = "env", value_name = "KEY=VALUE")]
         env: Vec<String>,

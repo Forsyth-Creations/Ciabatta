@@ -83,9 +83,7 @@ pub(super) async fn ecr_login(opts: &RegistryOpOptions<'_>, log: &mut Vec<String
         stdin.write_all(password.trim().as_bytes()).await?;
     }
     let out = child.wait_with_output().await?;
-    for line in String::from_utf8_lossy(&out.stdout).lines() {
-        log.push(line.to_string());
-    }
+    super::push_output_lines(log, &out.stdout, "");
     if !out.status.success() {
         anyhow::bail!(
             "docker login to ECR failed: {}",

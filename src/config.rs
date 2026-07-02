@@ -1,6 +1,6 @@
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 pub const CIABATTA_DIR: &str = ".ciabatta";
@@ -13,6 +13,10 @@ pub struct CiabattaConfig {
     pub registries: HashMap<String, RegistryConfig>,
     #[serde(rename = "recipies", default)]
     pub recipes: HashMap<String, RecipeEntry>,
+    /// Named menus. A menu groups recipes so they can be pushed/pulled together
+    /// with `--cookbook <menu>`; each value lists the recipe names it contains.
+    #[serde(default)]
+    pub menus: HashMap<String, Vec<String>>,
     pub analyze: Option<AnalyzeConfig>,
 }
 
@@ -252,6 +256,69 @@ impl RecipeEntry {
             (None, Some(_)) => None,
         }
     }
+}
+
+/// Resolve which recipes to run from `--cookbook` menu selections and explicitly
+/// named recipes.
+///
+/// - Neither given → every recipe (the "push all" default).
+/// - Each cookbook expands to the recipe names its menu lists.
+/// - Explicit recipe names are appended.
+/// Results are de-duplicated in first-seen order, so a recipe shared by two
+/// selected menus (or named alongside a menu) runs once. Errors when a named
+/// menu is undefined or lists a recipe that doesn't exist.
+pub fn select_recipe_names(
+    config: &CiabattaConfig,
+    cookbooks: &[String],
+    recipes: &[String],
+) -> Result<Vec<String>> {
+    if cookbooks.is_empty() && recipes.is_empty() {
+        return Ok(config.recipes.keys().cloned().collect());
+    }
+
+    let mut names: Vec<String> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+
+    for menu in cookbooks {
+        let members = config.menus.get(menu).ok_or_else(|| {
+            let mut available: Vec<&String> = config.menus.keys().collect();
+            available.sort();
+            let hint = if available.is_empty() {
+                "No menus are defined; add a [menus] section to ciabatta.toml.".to_string()
+            } else {
+                format!(
+                    "Available menus: {}.",
+                    available
+                        .iter()
+                        .map(|s| s.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            };
+            anyhow::anyhow!("Menu '{}' is not defined. {}", menu, hint)
+        })?;
+
+        for recipe in members {
+            if !config.recipes.contains_key(recipe) {
+                bail!(
+                    "Menu '{}' references recipe '{}', which is not defined in [recipies].",
+                    menu,
+                    recipe
+                );
+            }
+            if seen.insert(recipe.clone()) {
+                names.push(recipe.clone());
+            }
+        }
+    }
+
+    for recipe in recipes {
+        if seen.insert(recipe.clone()) {
+            names.push(recipe.clone());
+        }
+    }
+
+    Ok(names)
 }
 
 /// Walk up from `start` until a `.ciabatta` directory is found.
@@ -712,6 +779,76 @@ strip_prefix = "dist/"
         );
         // `${VAR}` with no default expands to the value (empty if unset).
         assert_eq!(expand_env("${CIABATTA_TEST_HOST}"), "nexus.internal");
+    }
+
+    #[test]
+    fn select_recipe_names_expands_menus_and_dedupes() {
+        let cfg = parse(
+            r#"
+[recipies.a]
+registry = "nexus"
+[recipies.b]
+registry = "nexus"
+[recipies.c]
+registry = "nexus"
+
+[menus]
+frontend = ["a", "b"]
+backend  = ["b", "c"]
+"#,
+        );
+
+        // No selection → all recipes (order-independent).
+        let mut all = select_recipe_names(&cfg, &[], &[]).unwrap();
+        all.sort();
+        assert_eq!(all, vec!["a", "b", "c"]);
+
+        // Single menu expands to its members, in order.
+        assert_eq!(
+            select_recipe_names(&cfg, &["frontend".into()], &[]).unwrap(),
+            vec!["a", "b"]
+        );
+
+        // Two menus sharing "b" run it once, first-seen order preserved.
+        assert_eq!(
+            select_recipe_names(&cfg, &["frontend".into(), "backend".into()], &[]).unwrap(),
+            vec!["a", "b", "c"]
+        );
+
+        // Menu + an explicit recipe already on the menu → no duplicate.
+        assert_eq!(
+            select_recipe_names(&cfg, &["frontend".into()], &["a".into()]).unwrap(),
+            vec!["a", "b"]
+        );
+
+        // Menu + a distinct explicit recipe → appended after the menu members.
+        assert_eq!(
+            select_recipe_names(&cfg, &["frontend".into()], &["c".into()]).unwrap(),
+            vec!["a", "b", "c"]
+        );
+    }
+
+    #[test]
+    fn select_recipe_names_rejects_bad_menus() {
+        let cfg = parse(
+            r#"
+[recipies.a]
+registry = "nexus"
+
+[menus]
+good = ["a"]
+broken = ["a", "missing"]
+"#,
+        );
+
+        // Undefined menu.
+        let err = select_recipe_names(&cfg, &["nope".into()], &[]).unwrap_err();
+        assert!(err.to_string().contains("is not defined"));
+        assert!(err.to_string().contains("Available menus: broken, good"));
+
+        // Menu that references a missing recipe.
+        let err = select_recipe_names(&cfg, &["broken".into()], &[]).unwrap_err();
+        assert!(err.to_string().contains("references recipe 'missing'"));
     }
 
     #[test]

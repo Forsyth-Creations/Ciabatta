@@ -31,11 +31,20 @@ pub struct RecipeState {
     pub status: RecipeStatus,
     pub stages: [StageStatus; 4],
     pub logs: Vec<String>,
+    /// For multi-file recipes: (files done, total files) reported during the
+    /// main push/pull stage. `None` for single-file recipes.
+    pub transfer: Option<(usize, usize)>,
 }
 
 impl RecipeState {
     /// Fraction of the pipeline completed (0.0..=1.0), for the progress gauge.
+    ///
+    /// Each of the four stages is worth an equal slice. When the main stage is
+    /// mid-flight on a multi-file recipe, its slice fills proportionally with the
+    /// files transferred so far, so the bar advances within the push/pull step
+    /// rather than jumping from 50% to 75% in one go.
     pub fn progress(&self) -> f64 {
+        let n = self.stages.len() as f64;
         let done = self
             .stages
             .iter()
@@ -46,7 +55,24 @@ impl RecipeState {
                 )
             })
             .count();
-        done as f64 / self.stages.len() as f64
+        let mut p = done as f64 / n;
+
+        if self.stages[StageKind::Main.index()] == StageStatus::Running
+            && let Some((files_done, total)) = self.transfer
+            && total > 0
+        {
+            p += (files_done as f64 / total as f64) / n;
+        }
+        p
+    }
+
+    /// A short "3/10 files" label while a multi-file transfer is in progress,
+    /// for display over the progress gauge. `None` for single-file recipes.
+    pub fn transfer_label(&self) -> Option<String> {
+        match self.transfer {
+            Some((done, total)) if total > 1 => Some(format!("{done}/{total} files")),
+            _ => None,
+        }
     }
 }
 
@@ -67,6 +93,7 @@ impl App {
                 status: RecipeStatus::Pending,
                 stages: [StageStatus::Pending; 4],
                 logs: Vec::new(),
+                transfer: None,
             })
             .collect();
 
@@ -98,6 +125,15 @@ impl App {
                     } else {
                         StageStatus::Skipped
                     };
+                }
+            }
+            ProgressUpdate::TransferProgress {
+                recipe,
+                done,
+                total,
+            } => {
+                if let Some(r) = self.find_mut(&recipe) {
+                    r.transfer = Some((done, total));
                 }
             }
             ProgressUpdate::Log(name, line) => {
@@ -167,5 +203,48 @@ impl App {
         if !self.recipes.is_empty() {
             self.selected = self.selected.saturating_sub(1);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn recipe() -> RecipeState {
+        RecipeState {
+            name: "r".into(),
+            status: RecipeStatus::Running,
+            stages: [StageStatus::Pending; 4],
+            logs: Vec::new(),
+            transfer: None,
+        }
+    }
+
+    #[test]
+    fn progress_blends_file_transfer_into_running_main_stage() {
+        let mut r = recipe();
+        // login + pre done, push (main) running → 2 of 4 stages = 0.5.
+        r.stages[StageKind::Login.index()] = StageStatus::Done;
+        r.stages[StageKind::Pre.index()] = StageStatus::Skipped;
+        r.stages[StageKind::Main.index()] = StageStatus::Running;
+        assert!((r.progress() - 0.5).abs() < 1e-9);
+
+        // Half the files done adds half of the main stage's 0.25 slice → 0.625.
+        r.transfer = Some((2, 4));
+        assert!((r.progress() - 0.625).abs() < 1e-9);
+
+        // All files done fills the whole slice → 0.75 (still awaiting post).
+        r.transfer = Some((4, 4));
+        assert!((r.progress() - 0.75).abs() < 1e-9);
+    }
+
+    #[test]
+    fn transfer_label_only_for_multi_file() {
+        let mut r = recipe();
+        assert_eq!(r.transfer_label(), None);
+        r.transfer = Some((0, 1)); // single-file recipe: no counter
+        assert_eq!(r.transfer_label(), None);
+        r.transfer = Some((3, 10));
+        assert_eq!(r.transfer_label().as_deref(), Some("3/10 files"));
     }
 }

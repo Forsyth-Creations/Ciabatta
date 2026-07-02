@@ -32,6 +32,7 @@ async fn main() -> Result<()> {
     match cli.command {
         Commands::Push {
             recipes,
+            cookbooks,
             env,
             dry_run,
             no_tui,
@@ -42,12 +43,13 @@ async fn main() -> Result<()> {
             // Only announce resolved variables when we're not about to take over
             // the screen with the TUI (the output would corrupt/close it).
             let vars = build_env_vars(&cfg, &env, local, &root, no_tui)?;
-            let names = resolve_recipe_names(&cfg, &recipes);
+            let names = config::select_recipe_names(&cfg, &cookbooks, &recipes)?;
             execute_recipes(&cfg, &root, &names, &vars, dry_run, no_tui, RunMode::Push).await?;
         }
 
         Commands::Pull {
             recipes,
+            cookbooks,
             env,
             dry_run,
             no_tui,
@@ -56,7 +58,7 @@ async fn main() -> Result<()> {
         } => {
             let (root, cfg) = load_project(config.as_deref())?;
             let vars = build_env_vars(&cfg, &env, local, &root, no_tui)?;
-            let names = resolve_recipe_names(&cfg, &recipes);
+            let names = config::select_recipe_names(&cfg, &cookbooks, &recipes)?;
             execute_recipes(&cfg, &root, &names, &vars, dry_run, no_tui, RunMode::Pull).await?;
         }
 
@@ -335,14 +337,6 @@ fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', r"'\''"))
 }
 
-fn resolve_recipe_names(cfg: &CiabattaConfig, requested: &[String]) -> Vec<String> {
-    if requested.is_empty() {
-        cfg.recipes.keys().cloned().collect()
-    } else {
-        requested.to_vec()
-    }
-}
-
 async fn execute_recipes(
     cfg: &CiabattaConfig,
     root: &Path,
@@ -424,6 +418,14 @@ async fn run_plain(
                         stage.label(mode)
                     );
                 }
+            }
+            ProgressUpdate::TransferProgress {
+                recipe,
+                done,
+                total,
+            } => {
+                let pct = if total > 0 { done * 100 / total } else { 0 };
+                println!("[{recipe}]   {done}/{total} files ({pct}%)");
             }
             ProgressUpdate::Log(name, line) => println!("[{name}] {line}"),
             ProgressUpdate::Completed(name) => println!("[{name}] ✓ completed"),
@@ -618,6 +620,15 @@ fn list_recipes(cfg: &CiabattaConfig) {
         };
         println!("  {:<30} [{}]", name, kind);
     }
+
+    if !cfg.menus.is_empty() {
+        println!("\nMenus (run with --cookbook <name>):");
+        let mut menus: Vec<_> = cfg.menus.keys().collect();
+        menus.sort();
+        for name in menus {
+            println!("  {:<30} {}", name, cfg.menus[name].join(", "));
+        }
+    }
 }
 
 fn show_config(cfg: &CiabattaConfig, root: &Path) {
@@ -649,6 +660,15 @@ fn show_config(cfg: &CiabattaConfig, root: &Path) {
         names.sort();
         for name in names {
             println!("  {}", name);
+        }
+    }
+
+    if !cfg.menus.is_empty() {
+        println!("\nMenus:");
+        let mut names: Vec<_> = cfg.menus.keys().collect();
+        names.sort();
+        for name in names {
+            println!("  {} -> {}", name, cfg.menus[name].join(", "));
         }
     }
 }
@@ -748,6 +768,29 @@ All paths in recipes are relative to this root.
   bash_script = "scripts/push.sh"
 [recipies.<name>.pull]
   bash_script = "scripts/pull.sh"
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+[menus]                              ← group recipes so you can run a subset
+
+  A menu names a list of recipes. `ciabatta push --cookbook <menu>` (or
+  `--menu <menu>`) runs only the recipes on that menu, instead of naming each
+  recipe by hand or pushing everything.
+
+    [menus]
+    frontend = ["release_frontend", "release_assets"]
+    backend  = ["release_backend"]
+    release  = ["release_frontend", "release_assets", "release_backend"]
+
+  Usage:
+    ciabatta push --cookbook frontend            # just the frontend menu
+    ciabatta push --cookbook frontend --cookbook backend   # both menus
+    ciabatta push --cookbook release extra_recipe          # menu + a recipe
+
+  --cookbook is repeatable and combines with any recipe names given on the
+  command line; the union runs once (duplicates are de-duplicated). The same
+  flag works for `ciabatta pull`. Referencing an undefined menu, or a menu that
+  lists a recipe that doesn't exist, is an error.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 

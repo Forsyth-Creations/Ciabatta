@@ -138,6 +138,27 @@ pub enum Commands {
         config: Option<std::path::PathBuf>,
     },
 
+    /// Manage a personal todo list.
+    ///
+    /// With no arguments, launches a small web app to add / complete / remove
+    /// tasks. Pass a string to add a task from the command line. Pass -d to run
+    /// the web app in the background.
+    Todo {
+        /// Task text to add. When given, the task is added and ciabatta exits
+        /// (the web app is not started).
+        #[arg(name = "TASK")]
+        task: Option<String>,
+
+        /// Run the web app in the background (detached) instead of the
+        /// foreground. Ignored when a TASK is given.
+        #[arg(short = 'd', long)]
+        detach: bool,
+
+        /// Port for the local web app.
+        #[arg(short = 'p', long, default_value_t = 7878)]
+        port: u16,
+    },
+
     /// Configuration helpers.
     Config {
         #[command(subcommand)]

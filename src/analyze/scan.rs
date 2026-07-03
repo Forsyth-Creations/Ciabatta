@@ -348,12 +348,119 @@ fn scan_cargo(content: &str, rel: &str) -> Result<ScanOutput> {
     Ok(out)
 }
 
+/// Pull the version requirement out of a Cargo dependency spec. Handles the
+/// bare-string form (`serde = "1"`), the table form (`{ version = "1" }`), and
+/// the path/git forms (which carry no registry version).
 fn cargo_dep_version(spec: &toml::Value) -> Option<String> {
     match spec {
         toml::Value::String(s) => Some(s.clone()),
         toml::Value::Table(t) => t.get("version").and_then(|v| v.as_str()).map(String::from),
         _ => None,
     }
+}
+
+// ─── Cargo.lock resolution ───────────────────────────────────────────────────
+
+/// Resolved Rust dependency data extracted from a `Cargo.lock`. Used by a
+/// post-scan pass to (a) replace loose requirement strings from `Cargo.toml`
+/// with the *actual* locked versions, and (b) tell workspace/path crates
+/// (which have no registry source) apart from real crates.io dependencies.
+#[derive(Debug, Default)]
+pub struct RustLock {
+    /// crate name → every locked version coming from a registry (crates.io).
+    pub registry: BTreeMap<String, Vec<String>>,
+    /// crate name → locked version for git dependencies (still external).
+    pub git: BTreeMap<String, String>,
+    /// names of crates with no source line — workspace members / path deps.
+    pub local: std::collections::BTreeSet<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct CargoLockFile {
+    #[serde(default, rename = "package")]
+    packages: Vec<LockPackage>,
+}
+
+#[derive(serde::Deserialize)]
+struct LockPackage {
+    name: String,
+    version: String,
+    source: Option<String>,
+}
+
+/// Parse the workspace `Cargo.lock` (if present) into a [`RustLock`].
+pub fn load_rust_lock(root: &Path) -> Option<RustLock> {
+    let content = std::fs::read_to_string(root.join("Cargo.lock")).ok()?;
+    let parsed: CargoLockFile = toml::from_str(&content).ok()?;
+    let mut lock = RustLock::default();
+    for p in parsed.packages {
+        match p.source.as_deref() {
+            Some(s) if s.starts_with("registry+") => {
+                lock.registry.entry(p.name).or_default().push(p.version);
+            }
+            Some(s) if s.starts_with("git+") => {
+                lock.git.insert(p.name, p.version);
+            }
+            // No source (or an unrecognised one) → a local/workspace crate.
+            _ => {
+                lock.local.insert(p.name);
+            }
+        }
+    }
+    Some(lock)
+}
+
+impl RustLock {
+    /// The locked version for `name` best matching the manifest `req`. When the
+    /// lock holds several versions of a crate, prefer the one whose components
+    /// are prefixed by the requirement; otherwise fall back to the highest.
+    pub fn resolve(&self, name: &str, req: Option<&str>) -> Option<String> {
+        if let Some(v) = self.git.get(name) {
+            return Some(v.clone());
+        }
+        let versions = self.registry.get(name)?;
+        if versions.is_empty() {
+            return None;
+        }
+        if versions.len() == 1 {
+            return Some(versions[0].clone());
+        }
+        // Several locked versions: pick the highest that satisfies the req.
+        let want: Vec<&str> = req
+            .map(|r| r.trim_start_matches(['^', '~', '>', '<', '=', ' ', 'v']).trim())
+            .filter(|r| !r.is_empty())
+            .map(|r| r.split(['.', ',', ' ']).collect())
+            .unwrap_or_default();
+        let mut matching: Vec<&String> = versions
+            .iter()
+            .filter(|v| want.is_empty() || version_has_prefix(v, &want))
+            .collect();
+        if matching.is_empty() {
+            matching = versions.iter().collect();
+        }
+        matching.sort_by(|a, b| cmp_version(a, b));
+        matching.last().map(|v| (*v).clone())
+    }
+}
+
+/// Does `version`'s dotted components start with every component of `want`?
+/// e.g. `version_has_prefix("1.1.4", &["1"])` and `("0.4.31", &["0","4"])`.
+fn version_has_prefix(version: &str, want: &[&str]) -> bool {
+    let have: Vec<&str> = version.split(['.', '+', '-']).collect();
+    want.iter()
+        .enumerate()
+        .all(|(i, w)| have.get(i).is_some_and(|h| h == w))
+}
+
+/// Compare two dotted version strings numerically, component by component.
+fn cmp_version(a: &str, b: &str) -> std::cmp::Ordering {
+    let parts = |s: &str| -> Vec<u64> {
+        s.split(['.', '+', '-'])
+            .map(|p| p.chars().take_while(|c| c.is_ascii_digit()).collect::<String>())
+            .map(|p| p.parse().unwrap_or(0))
+            .collect()
+    };
+    parts(a).cmp(&parts(b))
 }
 
 // ─── npm ────────────────────────────────────────────────────────────────────
@@ -1131,6 +1238,91 @@ docker push $SECRET_IMAGE   # CI variable, ignored
             g.files
                 .iter()
                 .any(|f| f.path == "scripts/publish.sh" && f.ecosystem == "shell")
+        );
+    }
+
+    #[test]
+    fn cargo_lock_resolves_versions_and_reclassifies_internal_crates() {
+        let dir = unique_dir();
+        // A tiny workspace: `app` depends on external `serde` and internal `core`.
+        std::fs::write(
+            dir.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"app\", \"core\"]\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(dir.join("app")).unwrap();
+        std::fs::write(
+            dir.join("app/Cargo.toml"),
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\
+             [dependencies]\nserde = \"1\"\ncore = { path = \"../core\" }\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(dir.join("core")).unwrap();
+        std::fs::write(
+            dir.join("core/Cargo.toml"),
+            "[package]\nname = \"core\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        // Cargo.lock: serde from the registry, core with no source (local).
+        std::fs::write(
+            dir.join("Cargo.lock"),
+            "version = 4\n\n\
+             [[package]]\nname = \"serde\"\nversion = \"1.0.219\"\n\
+             source = \"registry+https://github.com/rust-lang/crates.io-index\"\n\n\
+             [[package]]\nname = \"app\"\nversion = \"0.1.0\"\n\n\
+             [[package]]\nname = \"core\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+
+        let mut b = root_builder();
+        let mut cache = Cache::load(&dir.join(".cache"));
+        scan_manifests(&dir, &mut b, &mut cache).unwrap();
+        b.resolve_rust_dependencies(&dir);
+        let g = b.finish(&dir);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // serde's loose "1" requirement resolved to the locked "1.0.219".
+        let serde = g.nodes.iter().find(|n| n.label == "serde").unwrap();
+        assert_eq!(serde.category, Category::External);
+        assert_eq!(serde.version.as_deref(), Some("1.0.219"));
+        assert_eq!(serde.req.as_deref(), Some("1"));
+
+        // `core` is NOT an external crates.io node — it was reclassified.
+        assert!(!g.nodes.iter().any(|n| n.id == "ext:crates.io:core"));
+        let core = g
+            .nodes
+            .iter()
+            .find(|n| n.id == "int:rust:core")
+            .expect("core is internal");
+        assert_eq!(core.category, Category::Internal);
+        // The dependency edge now runs internal → internal (core feeds app).
+        assert!(
+            g.edges
+                .iter()
+                .any(|e| e.from == "int:rust:core" && e.to == "int:rust:app")
+        );
+    }
+
+    #[test]
+    fn rust_lock_picks_matching_version_among_several() {
+        let lock = RustLock {
+            registry: [(
+                "aho-corasick".to_string(),
+                vec!["0.6.10".to_string(), "1.1.4".to_string()],
+            )]
+            .into_iter()
+            .collect(),
+            ..Default::default()
+        };
+        assert_eq!(lock.resolve("aho-corasick", Some("1")).as_deref(), Some("1.1.4"));
+        assert_eq!(
+            lock.resolve("aho-corasick", Some("0.6")).as_deref(),
+            Some("0.6.10")
+        );
+        // No/unknown requirement → highest locked version.
+        assert_eq!(
+            lock.resolve("aho-corasick", None).as_deref(),
+            Some("1.1.4")
         );
     }
 

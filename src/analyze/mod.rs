@@ -53,6 +53,10 @@ pub struct Node {
     pub ecosystem: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
+    /// The version *requirement* declared in the manifest (e.g. `"1"`, `"^0.4"`),
+    /// kept alongside the resolved `version` when the two differ.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub req: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub license: Option<String>,
     /// Where this node came from (a manifest path, a recipe name, …).
@@ -139,6 +143,7 @@ impl GraphBuilder {
             .entry(node.id.clone())
             .and_modify(|existing| {
                 existing.version = existing.version.take().or_else(|| node.version.clone());
+                existing.req = existing.req.take().or_else(|| node.req.clone());
                 existing.license = existing.license.take().or_else(|| node.license.clone());
                 existing.ecosystem = existing.ecosystem.take().or_else(|| node.ecosystem.clone());
                 existing.source = existing.source.take().or_else(|| node.source.clone());
@@ -224,6 +229,76 @@ impl GraphBuilder {
             if let Some(n) = self.nodes.get_mut(&member) {
                 n.workspace = Some(root);
             }
+        }
+    }
+
+    /// Resolve Rust dependency versions and internal/external classification
+    /// using the workspace `Cargo.lock`:
+    ///
+    ///   * every `crates.io` external node gets its loose manifest requirement
+    ///     replaced by the concrete version cargo actually locked (the old
+    ///     requirement is preserved in `req`);
+    ///   * dependencies that are really *internal* crates (a workspace member or
+    ///     a path/git crate that we also scanned as a package) are reclassified:
+    ///     their external node is dropped and the edges are rewired onto the
+    ///     internal package node so they no longer masquerade as crates.io deps.
+    pub fn resolve_rust_dependencies(&mut self, root: &Path) {
+        let lock = scan::load_rust_lock(root);
+
+        // Internal rust crates we scanned, by crate name → node id.
+        let internal_ids: BTreeMap<String, String> = self
+            .nodes
+            .values()
+            .filter(|n| {
+                n.category == Category::Internal && n.ecosystem.as_deref() == Some("rust")
+            })
+            .map(|n| (n.label.clone(), n.id.clone()))
+            .collect();
+
+        let mut reclassify: Vec<String> = Vec::new();
+        for node in self.nodes.values_mut() {
+            let Some(name) = node.id.strip_prefix("ext:crates.io:").map(String::from) else {
+                continue;
+            };
+            // A dependency naming one of our own crates is an internal edge.
+            if internal_ids.contains_key(&name) {
+                reclassify.push(node.id.clone());
+                continue;
+            }
+            // Otherwise it's a real external crate: swap the requirement for the
+            // concrete locked version, keeping the requirement in `req`.
+            if let Some(lock) = &lock
+                && let Some(resolved) = lock.resolve(&name, node.version.as_deref())
+                && node.version.as_deref() != Some(resolved.as_str())
+            {
+                node.req = node.version.take();
+                node.version = Some(resolved);
+            }
+        }
+
+        // Rewire edges off each reclassified external node onto the internal one,
+        // then drop the now-empty external node.
+        for ext_id in reclassify {
+            let name = ext_id
+                .strip_prefix("ext:crates.io:")
+                .expect("ext id")
+                .to_string();
+            let Some(int_id) = internal_ids.get(&name).cloned() else {
+                continue;
+            };
+            let moved: Vec<(String, String)> = self
+                .edges
+                .iter()
+                .filter(|(from, _)| from == &ext_id)
+                .cloned()
+                .collect();
+            for (from, to) in moved {
+                self.edges.remove(&(from, to.clone()));
+                if int_id != to {
+                    self.edges.insert((int_id.clone(), to));
+                }
+            }
+            self.nodes.remove(&ext_id);
         }
     }
 
@@ -377,6 +452,7 @@ pub fn analyze(
     scan::scan_config_scripts(cfg, root, &mut builder, &mut file_cache);
     scan::scan_publish_points(cfg, &mut builder);
     builder.resolve_workspaces();
+    builder.resolve_rust_dependencies(root);
     builder.resolve_script_owners();
     requirements::apply(&mut builder, inputs)?;
 

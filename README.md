@@ -314,6 +314,21 @@ and derives publish points from your ciabatta recipes (and a publishable crate �
 crates.io). The result is written as JSON and served at `http://127.0.0.1:8080`,
 where you can click any node for details.
 
+**Accurate Rust versions.** A `Cargo.toml` dependency is only a *requirement*
+(`serde = "1"`), so `analyze` reads the workspace `Cargo.lock` and shows the
+concrete version cargo actually locked (`serde 1.0.228`), keeping the original
+requirement alongside it. The lockfile is also how it tells your own crates
+apart from crates.io: a workspace member or a `path`/`git` dependency is
+classified as **internal** rather than being drawn as an external crates.io box,
+so internal-crate edges no longer masquerade as third-party dependencies.
+
+**Structure tab.** The view has a **Structure** tab showing the repository's
+folder tree, pruned to just the folders that contain a dependency manifest
+(`Cargo.toml`, `package.json`, `pyproject.toml`, …). Click a folder — or a
+manifest within it — to see the package it defines, its resolved dependencies
+(internal and external), and where it publishes; every entry links back into the
+graph.
+
 **Publish scripts.** Developers often publish from shell scripts, so `analyze`
 also reads `.sh` files (anywhere in the tree, plus `.ciabatta/` and any script
 referenced by your config) and turns registry-push commands into publish points:
@@ -340,6 +355,13 @@ with the **Files** button in the view.
 
 **Filtering.** The view has live filters for name search, category, ecosystem,
 and workspace, so you can focus on one corner of a large graph.
+
+**Graph layout options.** The graph toolbar lets you retune the picture without
+re-running: switch between a **columns →** and **rows ↓** layout, sort each
+column by name / connections / version, pick **curved**, **straight**, or
+**stepped** edges, **group internal packages by workspace**, **hide orphans**
+(nodes with no visible edge), **size nodes by their number of connections**, and
+zoom in / out / fit.
 
 **Managed publish points.** Publish points that come from a ciabatta recipe are
 flagged **🍞 managed by ciabatta**, distinguishing them from inferred ones like

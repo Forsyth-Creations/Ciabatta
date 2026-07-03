@@ -8,6 +8,7 @@
   :root {
     --bg: #0f1117;
     --panel: #171a23;
+    --panel2: #1d212c;
     --line: #262b38;
     --muted: #6b7280;
     --text: #e6e8ee;
@@ -35,16 +36,27 @@
   header .legend { margin-left: auto; display: flex; gap: 14px; font-size: 12px; }
   .legend .dot { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 6px; vertical-align: middle; }
 
-  .filters {
-    display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px;
-    padding: 10px 20px; border-bottom: 1px solid var(--line);
+  /* Tabs */
+  .tabs { display: flex; gap: 4px; padding: 10px 20px 0; }
+  .tab {
+    background: none; border: 1px solid transparent; border-bottom: none;
+    color: var(--muted); padding: 7px 16px; cursor: pointer; font: inherit;
+    font-size: 13px; border-radius: 7px 7px 0 0;
   }
-  .filters input[type=search], .filters select {
+  .tab:hover { color: var(--text); }
+  .tab.active { color: var(--text); background: var(--panel); border-color: var(--line); }
+
+  .toolbar {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px;
+    padding: 10px 20px; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line);
+  }
+  .toolbar input[type=search], .toolbar select {
     background: var(--panel); border: 1px solid var(--line); color: var(--text);
     border-radius: 6px; padding: 5px 9px; font: inherit; font-size: 13px;
   }
-  .filters input[type=search] { min-width: 180px; }
-  .filters .group { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); }
+  .toolbar input[type=search] { min-width: 180px; }
+  .toolbar .group { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); }
+  .toolbar .group label { color: var(--muted); }
   .chip {
     border: 1px solid var(--line); border-radius: 999px; padding: 3px 10px;
     cursor: pointer; user-select: none; font-size: 12px; color: var(--muted);
@@ -56,25 +68,57 @@
   .chip.cat-internal.on { color: var(--internal); }
   .chip.cat-publish.on { color: var(--publish); }
   .chip.eco.on { color: var(--accent); }
+  .toggle {
+    display: inline-flex; align-items: center; gap: 6px; font-size: 12px;
+    color: var(--muted); cursor: pointer; user-select: none;
+  }
+  .toggle input { accent-color: var(--accent); }
   button.linklike {
     background: none; border: 1px solid var(--line); color: var(--text);
     border-radius: 6px; padding: 5px 11px; cursor: pointer; font: inherit; font-size: 12px;
   }
   button.linklike:hover { border-color: var(--accent); }
+  .zoom { display: inline-flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+  .zoom button { background: var(--panel); border: none; color: var(--text); cursor: pointer; font: inherit; padding: 4px 10px; }
+  .zoom button:hover { background: var(--panel2); }
+  .zoom button + button { border-left: 1px solid var(--line); }
 
   main { flex: 1; display: flex; min-height: 0; position: relative; }
   #canvas { flex: 1; overflow: auto; }
   svg { display: block; }
   .col-header { fill: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 1.5px; }
+  .cluster-header { fill: var(--muted); font-size: 11px; }
   .edge { fill: none; stroke: var(--line); stroke-width: 1.2; }
+  .edge.int { stroke: #2f4a5c; }
   .node { cursor: pointer; }
-  .node.dim { opacity: .16; }
+  .node.dim { opacity: .14; }
   .node text.label { fill: var(--text); font-size: 13px; }
   .node text.sub { fill: var(--muted); font-size: 10.5px; }
   .node text.mark { font-size: 11px; }
 
+  /* Structure (folder tree) view */
+  #tree { flex: 1; overflow: auto; padding: 14px 20px; }
+  .tnode { }
+  .trow {
+    display: flex; align-items: center; gap: 8px; padding: 5px 8px;
+    border-radius: 6px; cursor: pointer; border: 1px solid transparent;
+  }
+  .trow:hover { background: var(--panel); }
+  .trow.sel { background: var(--panel2); border-color: var(--accent); }
+  .trow .tw { color: var(--muted); width: 12px; display: inline-block; text-align: center; }
+  .trow .ic { width: 16px; text-align: center; }
+  .trow .nm { color: var(--text); }
+  .trow .badge {
+    font-size: 10.5px; color: var(--muted); background: var(--panel);
+    border: 1px solid var(--line); border-radius: 999px; padding: 1px 7px;
+  }
+  .trow .badge.dep { color: var(--external); }
+  .trow .badge.mf { color: var(--internal); }
+  .tchildren { margin-left: 16px; border-left: 1px solid var(--line); padding-left: 6px; }
+  .tchildren.collapsed { display: none; }
+
   aside {
-    width: 330px; border-left: 1px solid var(--line); background: var(--panel);
+    width: 340px; border-left: 1px solid var(--line); background: var(--panel);
     padding: 18px 20px; overflow-y: auto;
   }
   aside.empty { color: var(--muted); display: flex; align-items: center; justify-content: center; text-align: center; }
@@ -84,17 +128,28 @@
   aside dl { margin: 0; display: grid; grid-template-columns: 92px 1fr; gap: 8px 12px; }
   aside dt { color: var(--muted); font-size: 12px; }
   aside dd { margin: 0; word-break: break-all; }
+  aside dd .req { color: var(--muted); }
   aside .sec { margin-top: 18px; }
   aside .sec h3 { font-size: 12px; text-transform: uppercase; letter-spacing: 1px; color: var(--muted); margin: 0 0 8px; }
   aside ul { margin: 0; padding-left: 18px; }
+  aside .deplist { list-style: none; padding: 0; margin: 0; }
+  aside .deplist li {
+    display: flex; justify-content: space-between; gap: 10px; padding: 3px 0;
+    border-bottom: 1px dashed var(--line); cursor: pointer;
+  }
+  aside .deplist li:hover .dn { color: var(--accent); }
+  aside .deplist .dn { color: var(--text); }
+  aside .deplist .dv { color: var(--muted); font-size: 12px; }
+  aside .pill { font-size: 10px; padding: 1px 6px; border-radius: 999px; margin-left: 6px; }
   aside .vuln { border: 1px solid #3a2326; background: #1c1416; border-radius: 6px; padding: 8px 10px; margin-bottom: 8px; }
   aside .vuln a { color: var(--danger); text-decoration: none; font-weight: 600; }
   aside .ok { color: var(--publish); font-size: 12px; }
+  aside .jump { color: var(--accent); cursor: pointer; }
 
   /* Files overlay */
   #files {
     position: absolute; inset: 0; background: rgba(8,10,15,.86);
-    display: none; align-items: flex-start; justify-content: center; padding: 40px;
+    display: none; align-items: flex-start; justify-content: center; padding: 40px; z-index: 5;
   }
   #files.open { display: flex; }
   #files .sheet { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; width: min(900px, 100%); max-height: 100%; overflow: auto; }
@@ -118,19 +173,67 @@
     </div>
   </header>
 
-  <div class="filters">
+  <div class="tabs">
+    <button class="tab active" data-view="graph">Graph</button>
+    <button class="tab" data-view="structure">Structure</button>
+  </div>
+
+  <!-- Graph toolbar -->
+  <div class="toolbar" id="graphToolbar">
     <input type="search" id="search" placeholder="Filter by name…" autocomplete="off" />
     <div class="group" id="catFilters">Categories:</div>
     <div class="group" id="ecoFilters">Ecosystem:</div>
     <div class="group">Workspace:
       <select id="wsFilter"><option value="all">all</option></select>
     </div>
+    <div class="group">
+      <label for="sortSel">Sort:</label>
+      <select id="sortSel">
+        <option value="name">name</option>
+        <option value="degree">connections</option>
+        <option value="version">version</option>
+      </select>
+    </div>
+    <div class="group">
+      <label for="orientSel">Layout:</label>
+      <select id="orientSel">
+        <option value="lr">columns →</option>
+        <option value="tb">rows ↓</option>
+      </select>
+    </div>
+    <div class="group">
+      <label for="edgeSel">Edges:</label>
+      <select id="edgeSel">
+        <option value="curved">curved</option>
+        <option value="straight">straight</option>
+        <option value="stepped">stepped</option>
+      </select>
+    </div>
+    <label class="toggle"><input type="checkbox" id="optGroupWs" /> group by workspace</label>
+    <label class="toggle"><input type="checkbox" id="optOrphans" /> hide orphans</label>
+    <label class="toggle"><input type="checkbox" id="optSize" /> size by connections</label>
+    <div class="zoom">
+      <button id="zoomOut" title="Zoom out">−</button>
+      <button id="zoomFit" title="Reset zoom">fit</button>
+      <button id="zoomIn" title="Zoom in">+</button>
+    </div>
     <button class="linklike" id="filesBtn">Files</button>
+    <button class="linklike" id="downloadBtn" title="Download the filtered dependency list as CSV">Download</button>
     <button class="linklike" id="resetBtn">Reset</button>
+  </div>
+
+  <!-- Structure toolbar -->
+  <div class="toolbar" id="structToolbar" style="display:none">
+    <input type="search" id="treeSearch" placeholder="Filter folders…" autocomplete="off" />
+    <label class="toggle"><input type="checkbox" id="optDepsOnly" checked /> only folders with dependencies</label>
+    <button class="linklike" id="expandAll">Expand all</button>
+    <button class="linklike" id="collapseAll">Collapse all</button>
+    <button class="linklike" id="filesBtn2">Files</button>
   </div>
 
   <main>
     <div id="canvas"><svg id="svg"></svg></div>
+    <div id="tree" style="display:none"></div>
     <aside id="panel" class="empty">Select a node to inspect it.</aside>
     <div id="files"><div class="sheet">
       <h2>Workspace files <button class="linklike" id="filesClose">Close</button></h2>
@@ -147,10 +250,21 @@ const COLS = [
   { cat: "publish",     title: "Publish" },
 ];
 const NODE_W = 188, NODE_H = 40, ROW_GAP = 13, COL_GAP = 130, MARGIN_X = 36, TOP = 64;
+// Files that declare dependencies — used to pick out "dependency folders".
+const MANIFESTS = new Set([
+  "Cargo.toml", "package.json", "pyproject.toml", "requirements.txt",
+  "Dockerfile", ".gitlab-ci.yml",
+]);
 
 let GRAPH = null;
 let SELECTED = null;
+let VIEW = "graph";
 const filters = { search: "", cats: new Set(), ecos: new Set(), ws: "all" };
+const opts = {
+  sort: "name", orient: "lr", edges: "curved",
+  groupWs: false, hideOrphans: false, sizeByDegree: false, zoom: 1,
+};
+const tree = { search: "", depsOnly: true, collapsed: new Set(), selected: null };
 
 function el(name, attrs = {}, parent) {
   const e = document.createElementNS(SVGNS, name);
@@ -175,9 +289,19 @@ function init(graph) {
     `${graph.root} · ${graph.nodes.length} nodes · ${graph.edges.length} edges · ${(graph.files||[]).length} files` +
     (graph.generated_at ? ` · ${graph.generated_at.slice(0, 19).replace("T", " ")}` : "");
 
+  graph._nodeById = new Map(graph.nodes.map(n => [n.id, n]));
+
+  // Degree (incident edge count) per node — drives the "connections" sort and
+  // "size by connections" option, and orphan detection.
+  const degree = new Map(graph.nodes.map(n => [n.id, 0]));
+  graph.edges.forEach(e => {
+    if (degree.has(e.from)) degree.set(e.from, degree.get(e.from) + 1);
+    if (degree.has(e.to)) degree.set(e.to, degree.get(e.to) + 1);
+  });
+  graph._degree = degree;
+
   // Precompute, for each node, the workspaces it's associated with (internal
   // packages by their own workspace; everything else via connected packages).
-  graph._nodeById = new Map(graph.nodes.map(n => [n.id, n]));
   const nodeWs = new Map(graph.nodes.map(n => [n.id, new Set()]));
   graph.nodes.forEach(n => { if (n.workspace) nodeWs.get(n.id).add(n.workspace); });
   graph.edges.forEach(e => {
@@ -219,13 +343,55 @@ function init(graph) {
   });
   wsSel.onchange = () => { filters.ws = wsSel.value; render(); };
 
+  // Filter / search wiring.
   document.getElementById("search").oninput = e => { filters.search = e.target.value.toLowerCase(); render(); };
   document.getElementById("resetBtn").onclick = resetFilters;
   document.getElementById("filesBtn").onclick = () => showFiles(graph);
+  document.getElementById("filesBtn2").onclick = () => showFiles(graph);
+  document.getElementById("downloadBtn").onclick = downloadFiltered;
   document.getElementById("filesClose").onclick = () => document.getElementById("files").classList.remove("open");
 
+  // Graph option wiring.
+  const bind = (id, key, ev = "change", val = e => e.target.value) => {
+    document.getElementById(id)[ev === "change" ? "onchange" : "oninput"] =
+      e => { opts[key] = val(e); render(); };
+  };
+  bind("sortSel", "sort");
+  bind("orientSel", "orient");
+  bind("edgeSel", "edges");
+  const check = (id, key) => document.getElementById(id).onchange = e => { opts[key] = e.target.checked; render(); };
+  check("optGroupWs", "groupWs");
+  check("optOrphans", "hideOrphans");
+  check("optSize", "sizeByDegree");
+  document.getElementById("zoomIn").onclick = () => { opts.zoom = Math.min(2.5, opts.zoom * 1.2); render(); };
+  document.getElementById("zoomOut").onclick = () => { opts.zoom = Math.max(0.3, opts.zoom / 1.2); render(); };
+  document.getElementById("zoomFit").onclick = () => { opts.zoom = 1; render(); };
+
+  // Tab wiring.
+  document.querySelectorAll(".tab").forEach(t => t.onclick = () => switchView(t.dataset.view));
+
+  // Structure option wiring.
+  document.getElementById("treeSearch").oninput = e => { tree.search = e.target.value.toLowerCase(); renderStructure(); };
+  document.getElementById("optDepsOnly").onchange = e => { tree.depsOnly = e.target.checked; renderStructure(); };
+  document.getElementById("expandAll").onclick = () => { tree.collapsed.clear(); renderStructure(); };
+  document.getElementById("collapseAll").onclick = () => { collapseAllFolders(); renderStructure(); };
+
+  buildFolderTree(graph);
   render();
 }
+
+function switchView(view) {
+  VIEW = view;
+  document.querySelectorAll(".tab").forEach(t => t.classList.toggle("active", t.dataset.view === view));
+  const graphView = view === "graph";
+  document.getElementById("graphToolbar").style.display = graphView ? "" : "none";
+  document.getElementById("structToolbar").style.display = graphView ? "none" : "";
+  document.getElementById("canvas").style.display = graphView ? "" : "none";
+  document.getElementById("tree").style.display = graphView ? "none" : "";
+  render();
+}
+
+function render() { VIEW === "graph" ? renderGraph() : renderStructure(); }
 
 function toggle(set, v) { set.has(v) ? set.delete(v) : set.add(v); }
 
@@ -253,61 +419,147 @@ function visible(n) {
   return true;
 }
 
-function render() {
-  const graph = GRAPH;
-  const vis = new Set(graph.nodes.filter(visible).map(n => n.id));
+// ─── Graph view ──────────────────────────────────────────────────────────────
+
+function sortNodes(nodes) {
+  const cmp = {
+    name: (a, b) => a.label.localeCompare(b.label),
+    degree: (a, b) => (GRAPH._degree.get(b.id) - GRAPH._degree.get(a.id)) || a.label.localeCompare(b.label),
+    version: (a, b) => String(a.version || "").localeCompare(String(b.version || ""), undefined, { numeric: true }) || a.label.localeCompare(b.label),
+  }[opts.sort];
+  return nodes.slice().sort(cmp);
+}
+
+// The set of node ids currently shown by the graph, honouring every toolbar
+// filter (search, categories, ecosystems, workspace) plus "hide orphans". Both
+// the graph render and the CSV download draw from this so they always agree.
+function filteredNodeIds() {
+  let vis = new Set(GRAPH.nodes.filter(visible).map(n => n.id));
+  if (opts.hideOrphans) {
+    const connected = new Set();
+    GRAPH.edges.forEach(e => {
+      if (vis.has(e.from) && vis.has(e.to)) { connected.add(e.from); connected.add(e.to); }
+    });
+    vis = new Set([...vis].filter(id => connected.has(id)));
+  }
+  return vis;
+}
+
+function renderGraph() {
+  const graph = GRAPH, LR = opts.orient === "lr";
+  const vis = filteredNodeIds();
 
   const activeCols = COLS.filter(c => graph.nodes.some(n => n.category === c.cat && vis.has(n.id)));
-  const colIndex = new Map(activeCols.map((c, i) => [c.cat, i]));
 
+  // Node size (optionally scaled by degree).
+  const maxDeg = Math.max(1, ...graph.nodes.filter(n => vis.has(n.id)).map(n => GRAPH._degree.get(n.id)));
+  const sizeOf = n => {
+    if (!opts.sizeByDegree) return { w: NODE_W, h: NODE_H };
+    const f = 0.8 + 0.7 * (GRAPH._degree.get(n.id) / maxDeg);
+    return { w: NODE_W, h: Math.round(NODE_H * f) };
+  };
+
+  // Lay out each column as a stack of rows. In "group by workspace" mode the
+  // internal column is split into per-workspace clusters with a small header.
   const pos = new Map();
+  const clusterHeaders = [];
+  const colExtent = []; // running length (along-axis) per column
+  // Step between successive nodes along a column's stacking axis: vertical
+  // (node height) for columns, horizontal (node width) for rows.
+  const stepAlong = size => (LR ? size.h : NODE_W) + ROW_GAP;
+  const headerGap = LR ? 18 : 66;
+
   activeCols.forEach((col, ci) => {
-    const x = MARGIN_X + ci * (NODE_W + COL_GAP);
-    graph.nodes.filter(n => n.category === col.cat && vis.has(n.id))
-      .sort((a, b) => a.label.localeCompare(b.label))
-      .forEach((n, i) => pos.set(n.id, { x, y: TOP + i * (NODE_H + ROW_GAP), node: n, col: ci }));
+    let cursor = TOP;
+    const inCol = sortNodes(graph.nodes.filter(n => n.category === col.cat && vis.has(n.id)));
+
+    let groups;
+    if (opts.groupWs && col.cat === "internal") {
+      const byWs = new Map();
+      inCol.forEach(n => {
+        const key = n.workspace ? (graph._nodeById.get(n.workspace)?.label || n.workspace) : "—";
+        (byWs.get(key) || byWs.set(key, []).get(key)).push(n);
+      });
+      groups = [...byWs.entries()].sort((a, b) => a[0].localeCompare(b[0]));
+    } else {
+      groups = [[null, inCol]];
+    }
+
+    groups.forEach(([label, members]) => {
+      if (label !== null) {
+        clusterHeaders.push({ col: ci, at: cursor, label });
+        cursor += headerGap;
+      }
+      members.forEach(n => {
+        pos.set(n.id, { row: cursor, node: n, col: ci, size: sizeOf(n) });
+        cursor += stepAlong(sizeOf(n));
+      });
+      if (label !== null) cursor += 8;
+    });
+    colExtent[ci] = cursor;
   });
 
-  const rows = activeCols.map(c => graph.nodes.filter(n => n.category === c.cat && vis.has(n.id)).length);
-  const maxRows = Math.max(...rows, 1);
-  const width = MARGIN_X * 2 + Math.max(activeCols.length, 1) * NODE_W + Math.max(activeCols.length - 1, 0) * COL_GAP;
-  const height = TOP + maxRows * (NODE_H + ROW_GAP) + 24;
+  // Map (col, row) → (x, y) depending on orientation.
+  const colStep = NODE_W + COL_GAP;
+  const place = (ci, rowPx, size) => LR
+    ? { x: MARGIN_X + ci * colStep, y: rowPx, w: size.w, h: size.h }
+    : { x: rowPx, y: TOP + ci * (NODE_H + 46), w: size.w, h: size.h };
+  // In row mode we stack columns vertically and let rows run left→right; reuse
+  // the same "rowPx" as the horizontal offset.
 
+  const boxes = new Map();
+  pos.forEach((p, id) => boxes.set(id, place(p.col, p.row, p.size)));
+
+  const contentLen = Math.max(...colExtent, TOP + 200);
+  const width = LR
+    ? MARGIN_X * 2 + Math.max(activeCols.length, 1) * NODE_W + Math.max(activeCols.length - 1, 0) * COL_GAP
+    : contentLen + MARGIN_X;
+  const height = LR
+    ? contentLen + 24
+    : TOP + activeCols.length * (NODE_H + 46) + 24;
+
+  const z = opts.zoom;
   const svg = document.getElementById("svg");
-  svg.setAttribute("width", width);
-  svg.setAttribute("height", height);
+  svg.setAttribute("width", width * z);
+  svg.setAttribute("height", height * z);
+  svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
   svg.innerHTML = "";
 
+  // Column headers.
   activeCols.forEach((col, ci) => {
-    const t = el("text", { x: MARGIN_X + ci * (NODE_W + COL_GAP), y: 38, class: "col-header" }, svg);
+    const p = place(ci, TOP - 26, { w: NODE_W, h: NODE_H });
+    const t = el("text", { x: p.x, y: LR ? 38 : p.y - 8, class: "col-header" }, svg);
     t.textContent = col.title;
   });
-
-  const edgeEls = [];
-  graph.edges.forEach(e => {
-    const a = pos.get(e.from), b = pos.get(e.to);
-    if (!a || !b) return;
-    const x1 = a.x + NODE_W, y1 = a.y + NODE_H / 2, x2 = b.x, y2 = b.y + NODE_H / 2;
-    let d;
-    if (a.col === b.col) {
-      const bow = 36;
-      d = `M ${a.x} ${y1} C ${a.x - bow} ${y1}, ${b.x - bow} ${y2}, ${b.x} ${y2}`;
-    } else {
-      const mx = (x1 + x2) / 2;
-      d = `M ${x1} ${y1} C ${mx} ${y1}, ${mx} ${y2}, ${x2} ${y2}`;
-    }
-    edgeEls.push({ path: el("path", { d, class: "edge" }, svg), from: e.from, to: e.to });
+  // Cluster (workspace) headers.
+  clusterHeaders.forEach(h => {
+    const p = place(h.col, h.at + 12, { w: NODE_W, h: NODE_H });
+    const t = el("text", { x: p.x, y: p.y, class: "cluster-header" }, svg);
+    t.textContent = "⬡ " + h.label;
   });
 
+  // Edges.
+  const edgeEls = [];
+  graph.edges.forEach(e => {
+    const a = boxes.get(e.from), b = boxes.get(e.to);
+    if (!a || !b) return;
+    const na = graph._nodeById.get(e.from);
+    const internalEdge = na && na.category === "internal";
+    const d = edgePath(a, b, LR, opts.edges);
+    edgeEls.push({ path: el("path", { d, class: "edge" + (internalEdge ? " int" : "") }, svg), from: e.from, to: e.to });
+  });
+
+  // Nodes.
   const nodeEls = new Map();
-  pos.forEach(({ x, y, node }) => {
+  pos.forEach((p, id) => {
+    const box = boxes.get(id), node = p.node;
     const g = el("g", { class: "node" }, svg);
     const color = `var(--${node.category})`;
-    el("rect", { x, y, width: NODE_W, height: NODE_H, fill: "var(--panel)", stroke: color, "stroke-width": 1.5, rx: 7 }, g);
-    el("rect", { x, y, width: 4, height: NODE_H, fill: color, rx: 2 }, g);
-    const label = el("text", { x: x + 13, y: y + 16, class: "label" }, g);
+    el("rect", { x: box.x, y: box.y, width: box.w, height: box.h, fill: "var(--panel)", stroke: color, "stroke-width": 1.5, rx: 7 }, g);
+    el("rect", { x: box.x, y: box.y, width: 4, height: box.h, fill: color, rx: 2 }, g);
+    const label = el("text", { x: box.x + 13, y: box.y + 16, class: "label" }, g);
     label.textContent = trim(node.label, 21);
-    const sub = el("text", { x: x + 13, y: y + 30, class: "sub" }, g);
+    const sub = el("text", { x: box.x + 13, y: box.y + 30, class: "sub" }, g);
     sub.textContent = [node.ecosystem, node.version].filter(Boolean).join(" · ");
     // Corner marks: workspace ⬡, ciabatta-managed 🍞, vulnerabilities ●.
     const marks = [];
@@ -315,15 +567,37 @@ function render() {
     if (node.ciabatta_managed) marks.push(["🍞", "var(--publish)"]);
     if (node.vulnerabilities && node.vulnerabilities.length) marks.push(["●", "var(--danger)"]);
     marks.forEach((m, i) => {
-      const t = el("text", { x: x + NODE_W - 10 - i * 13, y: y + 14, class: "mark", "text-anchor": "middle", fill: m[1] }, g);
+      const t = el("text", { x: box.x + box.w - 10 - i * 13, y: box.y + 14, class: "mark", "text-anchor": "middle", fill: m[1] }, g);
       t.textContent = m[0];
     });
     g.addEventListener("click", () => select(node.id, edgeEls, nodeEls));
     nodeEls.set(node.id, g);
   });
 
-  // Re-apply selection highlight if the selected node is still visible.
   if (SELECTED && nodeEls.has(SELECTED)) select(SELECTED, edgeEls, nodeEls);
+}
+
+// Build an edge path between two boxes for the current orientation + style.
+function edgePath(a, b, LR, style) {
+  let x1, y1, x2, y2;
+  if (LR) { x1 = a.x + a.w; y1 = a.y + a.h / 2; x2 = b.x; y2 = b.y + b.h / 2; }
+  else    { x1 = a.x + a.w / 2; y1 = a.y + a.h; x2 = b.x + b.w / 2; y2 = b.y; }
+  if (style === "straight") return `M ${x1} ${y1} L ${x2} ${y2}`;
+  if (style === "stepped") {
+    if (LR) { const mx = (x1 + x2) / 2; return `M ${x1} ${y1} H ${mx} V ${y2} H ${x2}`; }
+    const my = (y1 + y2) / 2; return `M ${x1} ${y1} V ${my} H ${x2} V ${y2}`;
+  }
+  // curved (default)
+  if (LR) {
+    if (Math.abs(a.x - b.x) < 1) { // same column: bow out to the left
+      const bow = 36;
+      return `M ${a.x} ${a.y + a.h / 2} C ${a.x - bow} ${a.y + a.h / 2}, ${b.x - bow} ${b.y + b.h / 2}, ${b.x} ${b.y + b.h / 2}`;
+    }
+    const mx = (x1 + x2) / 2;
+    return `M ${x1} ${y1} C ${mx} ${y1}, ${mx} ${y2}, ${x2} ${y2}`;
+  }
+  const my = (y1 + y2) / 2;
+  return `M ${x1} ${y1} C ${x1} ${my}, ${x2} ${my}, ${x2} ${y2}`;
 }
 
 function select(id, edgeEls, nodeEls) {
@@ -331,35 +605,43 @@ function select(id, edgeEls, nodeEls) {
   const neighbors = new Set([id]);
   edgeEls.forEach(({ path, from, to }) => {
     const lit = from === id || to === id;
-    path.setAttribute("stroke", lit ? "var(--accent)" : "var(--line)");
-    path.setAttribute("stroke-width", lit ? 2 : 1.2);
-    if (lit) { neighbors.add(from); neighbors.add(to); }
+    if (lit) { path.setAttribute("stroke", "var(--accent)"); path.setAttribute("stroke-width", 2); neighbors.add(from); neighbors.add(to); }
+    else { path.removeAttribute("stroke"); path.setAttribute("stroke-width", 1.2); }
   });
   nodeEls.forEach((g, nid) => g.classList.toggle("dim", !neighbors.has(nid)));
   showPanel(GRAPH._nodeById.get(id));
+}
+
+function depTags(n) {
+  const color = `var(--${n.category})`;
+  const tags = [`<span class="tag" style="background:${color}22;color:${color}">${n.category}</span>`];
+  if (n.is_workspace) tags.push(`<span class="tag" style="background:#38bdf822;color:var(--internal)">workspace root</span>`);
+  if (n.ciabatta_managed) tags.push(`<span class="tag" style="background:#34d39922;color:var(--publish)">🍞 managed by ciabatta</span>`);
+  return tags;
 }
 
 function showPanel(n) {
   if (!n) return;
   const panel = document.getElementById("panel");
   panel.classList.remove("empty");
-  const color = `var(--${n.category})`;
-
-  const tags = [`<span class="tag" style="background:${color}22;color:${color}">${n.category}</span>`];
-  if (n.is_workspace) tags.push(`<span class="tag" style="background:#38bdf822;color:var(--internal)">workspace root</span>`);
-  if (n.ciabatta_managed) tags.push(`<span class="tag" style="background:#34d39922;color:var(--publish)">🍞 managed by ciabatta</span>`);
 
   const rows = [
     ["ecosystem", n.ecosystem],
-    ["version", n.version],
+    ["version", n.version ? `${escape(n.version)}${n.req && n.req !== n.version ? ` <span class="req">(req ${escape(n.req)})</span>` : ""}` : null, true],
     ["license", n.license],
     ["workspace", n.workspace && GRAPH._nodeById.get(n.workspace)?.label],
     ["source", n.source],
   ].filter(([, v]) => v);
 
-  let html = `<h2>${escape(n.label)}</h2><div class="tags">${tags.join("")}</div>`;
+  let html = `<h2>${escape(n.label)}</h2><div class="tags">${depTags(n).join("")}</div>`;
   if (n.description) html += `<p>${escape(n.description)}</p>`;
-  html += `<dl>` + rows.map(([k, v]) => `<dt>${k}</dt><dd>${escape(v)}</dd>`).join("") + `</dl>`;
+  html += `<dl>` + rows.map(([k, v, raw]) => `<dt>${k}</dt><dd>${raw ? v : escape(v)}</dd>`).join("") + `</dl>`;
+
+  // Dependencies feeding this node, and where it publishes to.
+  const deps = GRAPH.edges.filter(e => e.to === n.id).map(e => GRAPH._nodeById.get(e.from)).filter(Boolean);
+  const pubs = GRAPH.edges.filter(e => e.from === n.id).map(e => GRAPH._nodeById.get(e.to)).filter(d => d && d.category === "publish");
+  if (deps.length) html += depSection(`Dependencies (${deps.length})`, deps);
+  if (pubs.length) html += depSection(`Publishes to (${pubs.length})`, pubs);
 
   if (n.traced_files && n.traced_files.length) {
     html += `<div class="sec"><h3>Traced files</h3><ul>` +
@@ -376,7 +658,235 @@ function showPanel(n) {
     html += `<div class="sec"><span class="ok">No known vulnerabilities (run analyze with --check-vulns).</span></div>`;
   }
   panel.innerHTML = html;
+  panel.querySelectorAll(".deplist li").forEach(li => li.onclick = () => jumpTo(li.dataset.id));
 }
+
+function depSection(title, nodes) {
+  const items = nodes.slice().sort((a, b) => a.label.localeCompare(b.label)).map(d => {
+    const color = `var(--${d.category})`;
+    return `<li data-id="${escape(d.id)}"><span class="dn">${escape(d.label)}` +
+      `<span class="pill" style="background:${color}22;color:${color}">${d.category}</span></span>` +
+      `<span class="dv">${escape(d.version || "")}</span></li>`;
+  }).join("");
+  return `<div class="sec"><h3>${title}</h3><ul class="deplist">${items}</ul></div>`;
+}
+
+// Switch to the graph and select a node (used from structure/dep lists).
+function jumpTo(id) {
+  if (!GRAPH._nodeById.has(id)) return;
+  SELECTED = id;
+  if (VIEW !== "graph") switchView("graph"); else renderGraph();
+}
+
+// ─── Structure (folder tree) view ────────────────────────────────────────────
+
+function buildFolderTree(graph) {
+  const files = (graph.files || []);
+  // Root folder node.
+  const root = { name: graph.root.split("/").pop() || graph.root, path: "", children: new Map(), files: [], hasDep: false };
+  const ensure = path => {
+    if (path === "") return root;
+    const parts = path.split("/");
+    let cur = root, acc = "";
+    for (const part of parts) {
+      acc = acc ? acc + "/" + part : part;
+      if (!cur.children.has(part)) cur.children.set(part, { name: part, path: acc, children: new Map(), files: [], hasDep: false });
+      cur = cur.children.get(part);
+    }
+    return cur;
+  };
+  files.forEach(f => {
+    const dir = f.path.includes("/") ? f.path.slice(0, f.path.lastIndexOf("/")) : "";
+    const folder = ensure(dir);
+    folder.files.push(f);
+    if (MANIFESTS.has(f.kind)) {
+      // Mark this folder and all its ancestors as containing a dependency file.
+      let p = dir, node = folder;
+      node.hasDep = true;
+      while (p !== "") { p = p.includes("/") ? p.slice(0, p.lastIndexOf("/")) : ""; ensure(p).hasDep = true; }
+    }
+  });
+  graph._tree = root;
+}
+
+function collapseAllFolders() {
+  tree.collapsed.clear();
+  const walk = node => { if (node.children.size) { tree.collapsed.add(node.path); node.children.forEach(walk); } };
+  graph_children(graph_root()).forEach(walk);
+}
+function graph_root() { return GRAPH._tree; }
+function graph_children(n) { return [...n.children.values()]; }
+
+function renderStructure() {
+  const host = document.getElementById("tree");
+  const root = GRAPH._tree;
+  host.innerHTML = "";
+  host.appendChild(renderTreeNode(root, true));
+}
+
+function renderTreeNode(node, isRoot) {
+  const wrap = document.createElement("div");
+  wrap.className = "tnode";
+
+  // Which children to show: folders (respecting depsOnly), then files.
+  let childFolders = [...node.children.values()]
+    .filter(c => !tree.depsOnly || c.hasDep)
+    .sort((a, b) => a.name.localeCompare(b.name));
+  const manifests = node.files.filter(f => MANIFESTS.has(f.kind))
+    .sort((a, b) => a.kind.localeCompare(b.kind));
+
+  if (tree.search) {
+    const match = s => s.toLowerCase().includes(tree.search);
+    const subMatches = n => match(n.name) || n.files.some(f => match(f.kind)) || [...n.children.values()].some(subMatches);
+    childFolders = childFolders.filter(subMatches);
+  }
+
+  const collapsed = tree.collapsed.has(node.path);
+  const hasChildren = childFolders.length > 0;
+
+  const row = document.createElement("div");
+  row.className = "trow" + (tree.selected === node.path ? " sel" : "");
+  const depCount = countDeps(node);
+  row.innerHTML =
+    `<span class="tw">${hasChildren ? (collapsed ? "▸" : "▾") : ""}</span>` +
+    `<span class="ic">${isRoot ? "🍞" : "📁"}</span>` +
+    `<span class="nm">${escape(isRoot ? node.name + "  (root)" : node.name)}</span>` +
+    (manifests.length ? `<span class="badge mf">${manifests.length} manifest${manifests.length > 1 ? "s" : ""}</span>` : "") +
+    (depCount ? `<span class="badge dep">${depCount} deps</span>` : "");
+  row.onclick = e => {
+    e.stopPropagation();
+    if (hasChildren && e.target.classList.contains("tw")) {
+      toggle(tree.collapsed, node.path); renderStructure(); return;
+    }
+    tree.selected = node.path; showFolderPanel(node); renderStructure();
+  };
+  wrap.appendChild(row);
+
+  // Manifest files as leaf rows under the folder.
+  manifests.forEach(f => {
+    const frow = document.createElement("div");
+    frow.className = "trow";
+    frow.style.marginLeft = "16px";
+    const pkg = f.package ? GRAPH._nodeById.get(f.package) : null;
+    frow.innerHTML =
+      `<span class="tw"></span><span class="ic">${manifestIcon(f.kind)}</span>` +
+      `<span class="nm">${escape(f.kind)}</span>` +
+      (pkg ? `<span class="badge mf">${escape(pkg.label)}${pkg.version ? " " + escape(pkg.version) : ""}</span>` : "");
+    frow.onclick = e => { e.stopPropagation(); tree.selected = node.path; showFolderPanel(node, f); renderStructure(); };
+    wrap.appendChild(frow);
+  });
+
+  if (hasChildren && !collapsed) {
+    const kids = document.createElement("div");
+    kids.className = "tchildren";
+    childFolders.forEach(c => kids.appendChild(renderTreeNode(c, false)));
+    wrap.appendChild(kids);
+  }
+  return wrap;
+}
+
+function manifestIcon(kind) {
+  return {
+    "Cargo.toml": "🦀", "package.json": "📦", "pyproject.toml": "🐍",
+    "requirements.txt": "🐍", "Dockerfile": "🐳", ".gitlab-ci.yml": "🦊",
+  }[kind] || "📄";
+}
+
+// Count the distinct dependencies owned by the packages defined in a folder.
+function countDeps(node) {
+  let total = 0;
+  node.files.filter(f => MANIFESTS.has(f.kind)).forEach(f => {
+    const owner = f.package || "int:root";
+    total += GRAPH.edges.filter(e => e.to === owner &&
+      (GRAPH._nodeById.get(e.from)?.category === "external" || GRAPH._nodeById.get(e.from)?.category === "internal")).length;
+  });
+  return total;
+}
+
+function showFolderPanel(node, focusFile) {
+  const panel = document.getElementById("panel");
+  panel.classList.remove("empty");
+  const manifests = node.files.filter(f => MANIFESTS.has(f.kind));
+
+  let html = `<h2>📁 ${escape(node.path || node.name)}</h2>`;
+  html += `<div class="tags"><span class="tag" style="background:#38bdf822;color:var(--internal)">folder</span></div>`;
+
+  const files = focusFile ? [focusFile] : manifests;
+  if (!files.length) { html += `<p>No dependency manifests in this folder.</p>`; panel.innerHTML = html; return; }
+
+  files.forEach(f => {
+    const owner = f.package || "int:root";
+    const pkg = GRAPH._nodeById.get(f.package);
+    html += `<div class="sec"><h3>${manifestIcon(f.kind)} ${escape(f.kind)}</h3>`;
+    if (pkg) {
+      html += `<dl><dt>package</dt><dd><span class="jump" data-id="${escape(pkg.id)}">${escape(pkg.label)}</span></dd>`;
+      if (pkg.version) html += `<dt>version</dt><dd>${escape(pkg.version)}</dd>`;
+      if (pkg.license) html += `<dt>license</dt><dd>${escape(pkg.license)}</dd>`;
+      html += `</dl>`;
+    }
+    const deps = GRAPH.edges.filter(e => e.to === owner)
+      .map(e => GRAPH._nodeById.get(e.from))
+      .filter(d => d && (d.category === "external" || d.category === "internal"));
+    const pubs = GRAPH.edges.filter(e => e.from === owner)
+      .map(e => GRAPH._nodeById.get(e.to)).filter(d => d && d.category === "publish");
+    // Deduplicate (root-owned manifests can share the owner).
+    const uniq = arr => [...new Map(arr.map(d => [d.id, d])).values()];
+    html = html.replace("</div>", "");
+    if (deps.length) html += depSection(`Dependencies (${uniq(deps).length})`, uniq(deps));
+    if (pubs.length) html += depSection(`Publishes to (${uniq(pubs).length})`, uniq(pubs));
+    html += `</div>`;
+  });
+
+  panel.innerHTML = html;
+  panel.querySelectorAll(".deplist li").forEach(li => li.onclick = () => jumpTo(li.dataset.id));
+  panel.querySelectorAll(".jump").forEach(j => j.onclick = () => jumpTo(j.dataset.id));
+}
+
+// ─── Download filtered dependency list ───────────────────────────────────────
+
+// Export the nodes currently visible under the active filters as a CSV of
+// name/version/etc. Uses the same set the graph draws, so what you filter to in
+// the GUI is exactly what you get.
+function downloadFiltered() {
+  const vis = filteredNodeIds();
+  const nodes = GRAPH.nodes
+    .filter(n => vis.has(n.id))
+    .sort((a, b) => a.category.localeCompare(b.category) || a.label.localeCompare(b.label));
+
+  const cols = [
+    ["name", n => n.label],
+    ["category", n => n.category],
+    ["ecosystem", n => n.ecosystem || ""],
+    ["version", n => n.version || ""],
+    ["requirement", n => n.req || ""],
+    ["license", n => n.license || ""],
+    ["source", n => n.source || ""],
+    ["vulnerabilities", n => (n.vulnerabilities || []).map(v => v.id).join(" ")],
+  ];
+  const csvCell = s => {
+    s = String(s);
+    return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  };
+  const lines = [cols.map(c => c[0]).join(",")];
+  nodes.forEach(n => lines.push(cols.map(c => csvCell(c[1](n))).join(",")));
+  const csv = lines.join("\n") + "\n";
+
+  const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
+  const base = (GRAPH.root || "project").split("/").pop() || "project";
+  triggerDownload(`${base}-dependencies-${stamp}.csv`, csv, "text/csv");
+}
+
+function triggerDownload(filename, text, type) {
+  const blob = new Blob([text], { type: `${type};charset=utf-8` });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = filename;
+  document.body.appendChild(a); a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+// ─── Files overlay ───────────────────────────────────────────────────────────
 
 function showFiles(graph) {
   const files = (graph.files || []).slice().sort((a, b) => a.path.localeCompare(b.path));

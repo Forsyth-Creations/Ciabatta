@@ -7,6 +7,7 @@ mod environment;
 mod git;
 mod registry;
 mod runner;
+mod todo;
 mod tui;
 
 use std::collections::HashMap;
@@ -117,8 +118,58 @@ async fn main() -> Result<()> {
         Commands::Configure { subcommand } => {
             cmd_configure(subcommand)?;
         }
+
+        Commands::Todo {
+            task,
+            detach,
+            port,
+        } => {
+            cmd_todo(task, detach, port).await?;
+        }
     }
 
+    Ok(())
+}
+
+/// Dispatch `ciabatta todo`:
+///   - a TASK string adds the task and exits
+///   - `-d` spawns a detached copy that serves the web app in the background
+///   - otherwise serve the web app in the foreground until Ctrl-C
+async fn cmd_todo(task: Option<String>, detach: bool, port: u16) -> Result<()> {
+    let store = std::sync::Arc::new(todo::Store::open()?);
+
+    if let Some(text) = task {
+        let added = store.add(&text)?;
+        println!("Added task #{}: {}", added.id, added.text);
+        return Ok(());
+    }
+
+    if detach {
+        spawn_detached_todo(port)?;
+        println!("Todo app started in the background at http://127.0.0.1:{port}");
+        println!("Stop it with: pkill -f 'ciabatta todo'");
+        return Ok(());
+    }
+
+    todo::server::serve(store, port).await
+}
+
+/// Re-launch this executable as a detached background process serving the todo
+/// web app (`ciabatta todo --port <port>`), with its stdio discarded so it
+/// keeps running after this process exits.
+fn spawn_detached_todo(port: u16) -> Result<()> {
+    use std::process::{Command, Stdio};
+
+    let exe = env::current_exe().context("Failed to locate the ciabatta executable")?;
+    Command::new(exe)
+        .arg("todo")
+        .arg("--port")
+        .arg(port.to_string())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .context("Failed to start the background todo app")?;
     Ok(())
 }
 

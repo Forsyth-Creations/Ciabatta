@@ -103,14 +103,16 @@ jobs:
         if: runner.os != 'Windows'
         run: |
           cp target/${{ matrix.target }}/release/${{ matrix.artifact }} .
-          tar czf ${{ matrix.archive }} ${{ matrix.artifact }}
+          cp install/install.sh .
+          tar czf ${{ matrix.archive }} ${{ matrix.artifact }} install.sh
 
       - name: Package (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           Copy-Item target/${{ matrix.target }}/release/${{ matrix.artifact }} .
-          Compress-Archive -Path ${{ matrix.artifact }} -DestinationPath ${{ matrix.archive }}
+          Copy-Item install\install.ps1 .
+          Compress-Archive -Path ${{ matrix.artifact }}, install.ps1 -DestinationPath ${{ matrix.archive }}
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

@@ -51,11 +51,21 @@ cargo install ciabatta
 ### Pre-built binaries
 
 Download the archive for your platform from the
-[latest release](https://github.com/forsyth-creations/ciabatta/releases/latest)
-and move the binary onto your `PATH`:
+[latest release](https://github.com/forsyth-creations/ciabatta/releases/latest).
+Each archive includes an install script that puts the binary on your `PATH`.
 
+**Linux / macOS**
 ```bash
-tar xzf ciabatta-linux-x86_64.tar.gz && sudo mv ciabatta /usr/local/bin/
+tar xzf ciabatta-linux-x86_64.tar.gz
+./install.sh                  # installs to /usr/local/bin (uses sudo if needed)
+./install.sh ~/.local/bin     # or pick your own directory
+```
+
+**Windows** (PowerShell)
+```powershell
+Expand-Archive ciabatta-windows-x86_64.zip
+.\install.ps1                 # installs to %LOCALAPPDATA%\Programs\ciabatta and adds it to your PATH
+.\install.ps1 -InstallDir C:\tools\ciabatta   # or pick your own directory
 ```
 
 Builds are published for Linux (x86_64 / aarch64, static), macOS

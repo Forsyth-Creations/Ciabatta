@@ -249,14 +249,15 @@ fn build_suggestions(
         let image = image_name(df, root);
         let ctx = parent_or_dot(df);
         for reg in &ecr {
-            let url = cfg.registries[reg].url.trim_end_matches('/').to_string();
             let recipe = uniquify(&format!("{image}_to_{reg}"), &mut used);
             let snippet = format!(
                 "\n# Build the Docker image from {df} and push it to the \"{reg}\" ECR registry.\n\
+                 # ciabatta retags {image}:$CIABATTA_COMMIT to the registry URL and pushes it.\n\
                  [recipies.{recipe}]\n\
                  registry     = {reg_q}\n\
+                 local_image  = {tag}\n\
                  publish_path = {tag}\n\
-                 pre          = '{container} build -t {url}/{image}:$CIABATTA_COMMIT -f {df} {ctx}'\n",
+                 pre          = '{container} build -t {image}:$CIABATTA_COMMIT -f {df} {ctx}'\n",
                 reg_q = toml_basic(reg),
                 tag = toml_basic(&format!("{image}:{{CIABATTA_COMMIT}}")),
             );

@@ -9,6 +9,96 @@ use crate::config::{RegistryConfig, RegistryKind, infer_registry_kind};
 use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::path::Path;
+use tokio::sync::mpsc::UnboundedSender;
+
+/// A destination for command output lines.
+///
+/// Lines are always accumulated into `lines` (for error context and final
+/// display). When `live` is set, each line is *also* forwarded immediately as
+/// it is produced, so a watching UI (the deploy GUI / TUI) can show output while
+/// a long-running process is still executing instead of only after it exits.
+pub struct LogSink<'a> {
+    lines: &'a mut Vec<String>,
+    live: Option<UnboundedSender<String>>,
+}
+
+impl<'a> LogSink<'a> {
+    /// A sink that only accumulates — no live forwarding.
+    pub fn buffered(lines: &'a mut Vec<String>) -> Self {
+        Self { lines, live: None }
+    }
+
+    /// A sink that accumulates and forwards each line to `live` as it arrives.
+    pub fn streaming(lines: &'a mut Vec<String>, live: UnboundedSender<String>) -> Self {
+        Self {
+            lines,
+            live: Some(live),
+        }
+    }
+
+    /// Record one fully-formed log line, forwarding it live if wired.
+    pub fn push(&mut self, line: String) {
+        if let Some(tx) = &self.live {
+            // A closed receiver just means the UI went away; keep accumulating.
+            let _ = tx.send(line.clone());
+        }
+        self.lines.push(line);
+    }
+
+    /// Record one raw output line, collapsing carriage-return progress frames
+    /// the same way [`push_output_lines`] does, and skipping blanks.
+    fn push_raw(&mut self, raw_line: &str, prefix: &str) {
+        if let Some(visible) = clean_line(raw_line) {
+            self.push(format!("{prefix}{visible}"));
+        }
+    }
+}
+
+/// Reduce one newline-delimited output line to what a terminal would ultimately
+/// display: the text after the final `\r`, trimmed, or `None` if empty. See
+/// [`push_output_lines`] for why carriage-return frames are collapsed.
+fn clean_line(line: &str) -> Option<&str> {
+    let visible = line.rsplit('\r').next().unwrap_or(line).trim_end();
+    if visible.is_empty() {
+        None
+    } else {
+        Some(visible)
+    }
+}
+
+/// Drive a spawned child to completion, streaming its stdout and stderr into
+/// `sink` line-by-line as they are produced. Reading both pipes concurrently
+/// avoids a deadlock where a child blocks writing to a full stderr pipe while we
+/// only drain stdout.
+async fn stream_child_output(
+    mut child: tokio::process::Child,
+    sink: &mut LogSink<'_>,
+) -> Result<std::process::ExitStatus> {
+    use tokio::io::{AsyncBufReadExt, BufReader};
+
+    let mut out = child.stdout.take().map(|s| BufReader::new(s).lines());
+    let mut err = child.stderr.take().map(|s| BufReader::new(s).lines());
+
+    loop {
+        tokio::select! {
+            res = async { out.as_mut().unwrap().next_line().await }, if out.is_some() => {
+                match res? {
+                    Some(line) => sink.push_raw(&line, ""),
+                    None => out = None,
+                }
+            }
+            res = async { err.as_mut().unwrap().next_line().await }, if err.is_some() => {
+                match res? {
+                    Some(line) => sink.push_raw(&line, "[stderr] "),
+                    None => err = None,
+                }
+            }
+            else => break,
+        }
+    }
+
+    Ok(child.wait().await?)
+}
 
 /// Shared options for a registry operation.
 pub struct RegistryOpOptions<'a> {
@@ -16,6 +106,9 @@ pub struct RegistryOpOptions<'a> {
     pub registry_config: &'a RegistryConfig,
     pub local_path: &'a Path,
     pub remote_path: &'a str,
+    /// Docker/ECR only: the local image reference to retag to the remote target
+    /// before pushing (see [`crate::config::SimpleRecipe::local_image`]).
+    pub local_image: Option<&'a str>,
     pub env_vars: &'a HashMap<String, String>,
     pub dry_run: bool,
     pub container_cmd: &'a str,
@@ -208,29 +301,51 @@ async fn docker_login(opts: &RegistryOpOptions<'_>, log: &mut Vec<String>) -> Re
     Ok(true)
 }
 
+/// `<container> tag <from> <to>` — retag a local image to another reference.
+///
+/// Used by the Docker/ECR push (retag a locally-built image to its remote
+/// repository reference before pushing) and pull (retag the pulled remote image
+/// back to the recipe's local name).
+pub(super) async fn tag_image(
+    opts: &RegistryOpOptions<'_>,
+    from: &str,
+    to: &str,
+    log: &mut Vec<String>,
+) -> Result<()> {
+    log.push(format!("Docker tag: {from} -> {to}"));
+    if opts.dry_run {
+        log.push(format!(
+            "[dry-run] would run: {} tag {from} {to}",
+            opts.container_cmd
+        ));
+        return Ok(());
+    }
+    run_command(opts.container_cmd, &["tag", from, to], opts.env_vars, log).await
+}
+
 pub async fn run_script(
     script: &str,
     env_vars: &HashMap<String, String>,
-    log: &mut Vec<String>,
+    sink: &mut LogSink<'_>,
 ) -> Result<()> {
     use std::process::Stdio;
     use tokio::process::Command;
 
-    let mut cmd = Command::new("bash");
-    cmd.arg(script)
+    let child = Command::new("bash")
+        .arg(script)
         .envs(env_vars)
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .stderr(Stdio::piped())
+        .spawn()
+        .with_context(|| format!("Failed to spawn script '{script}'"))?;
 
-    let output = cmd.output().await?;
-    push_output_lines(log, &output.stdout, "");
-    push_output_lines(log, &output.stderr, "[stderr] ");
+    let status = stream_child_output(child, sink).await?;
 
-    if !output.status.success() {
+    if !status.success() {
         anyhow::bail!(
             "Script '{}' failed with exit code {:?}",
             script,
-            output.status.code()
+            status.code()
         );
     }
     Ok(())
@@ -242,27 +357,25 @@ pub async fn run_shell_command(
     cmd: &str,
     cwd: &Path,
     env_vars: &HashMap<String, String>,
-    log: &mut Vec<String>,
+    sink: &mut LogSink<'_>,
 ) -> Result<()> {
     use std::process::Stdio;
     use tokio::process::Command;
 
-    let output = Command::new("sh")
+    let child = Command::new("sh")
         .arg("-c")
         .arg(cmd)
         .current_dir(cwd)
         .envs(env_vars)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .output()
-        .await
+        .spawn()
         .with_context(|| format!("Failed to spawn shell for command: {cmd}"))?;
 
-    push_output_lines(log, &output.stdout, "");
-    push_output_lines(log, &output.stderr, "[stderr] ");
+    let status = stream_child_output(child, sink).await?;
 
-    if !output.status.success() {
-        anyhow::bail!("Command failed (exit {:?}): {}", output.status.code(), cmd);
+    if !status.success() {
+        anyhow::bail!("Command failed (exit {:?}): {}", status.code(), cmd);
     }
     Ok(())
 }
@@ -279,11 +392,9 @@ pub async fn run_shell_command(
 /// bare trailing `\r` doesn't add a blank line.
 pub fn push_output_lines(log: &mut Vec<String>, raw: &[u8], prefix: &str) {
     for line in String::from_utf8_lossy(raw).lines() {
-        let visible = line.rsplit('\r').next().unwrap_or(line).trim_end();
-        if visible.is_empty() {
-            continue;
+        if let Some(visible) = clean_line(line) {
+            log.push(format!("{prefix}{visible}"));
         }
-        log.push(format!("{prefix}{visible}"));
     }
 }
 
@@ -324,6 +435,37 @@ pub async fn run_command(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn run_shell_command_streams_lines_before_exit() {
+        // A command that prints, pauses, then prints again. The first line must
+        // reach the live channel well before the whole command finishes —
+        // otherwise the deploy GUI would sit at "(no output yet)" until exit.
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let env = HashMap::new();
+        let cwd = Path::new(".");
+
+        let runner = tokio::spawn(async move {
+            let mut lines = Vec::new();
+            {
+                let mut sink = LogSink::streaming(&mut lines, tx);
+                run_shell_command("echo first; sleep 0.4; echo second", cwd, &env, &mut sink)
+                    .await
+                    .unwrap();
+            }
+            lines
+        });
+
+        // The first line arrives promptly, long before the ~0.4s command ends.
+        let first = tokio::time::timeout(std::time::Duration::from_millis(250), rx.recv())
+            .await
+            .expect("first line should stream before the command exits")
+            .expect("live channel stays open while the command runs");
+        assert_eq!(first, "first");
+
+        let all = runner.await.unwrap();
+        assert_eq!(all, vec!["first".to_string(), "second".to_string()]);
+    }
 
     #[test]
     fn cred_key_uppercases_and_sanitizes() {

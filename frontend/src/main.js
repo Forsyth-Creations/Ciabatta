@@ -42,6 +42,8 @@ const STAGES = [
 const COMMANDS = [
   ["ciabatta push [RECIPE…]", "Push one or more recipes in parallel — all of them if you name none."],
   ["ciabatta pull [RECIPE…]", "Fetch artifacts back down; finds the best commit on your branch if the exact one is missing."],
+  ["ciabatta deploy [RECIPE…]", "Run a deploy: a DAG of dependent scripts with error-recovery branches. Add --gui for a live browser view."],
+  ["ciabatta deploy --build", "Open a visual builder to design a deploy flowchart, then copy the generated TOML into a file."],
   ["ciabatta list", "List every recipe defined in the config."],
   ["ciabatta init --ci github", "Scaffold a .ciabatta/ directory with a starter config."],
   ["ciabatta configure", "Add a registry (and optionally a recipe) interactively — no hand-editing TOML."],
@@ -102,6 +104,38 @@ const S3_CONFIG_HTML = `<span class="c"># Point the registry at a bucket with th
 <span class="k">publish_path</span>        = <span class="v">"app/{CIABATTA_BRANCH}/{CIABATTA_COMMIT}/app"</span>
 <span class="c">#  → s3://my-artifacts-bucket/app/&lt;branch&gt;/&lt;commit&gt;/app</span>`;
 
+// Annotated deploy flowchart example.
+const DEPLOY_CONFIG_HTML = `<span class="c"># Main config: point a recipe's deploy at a separate flowchart file.</span>
+<span class="s">[recipies.web.deploy]</span>
+<span class="k">flowchart</span> = <span class="v">".ciabatta/deploys.toml"</span>
+<span class="k">pre</span>       = <span class="v">"scripts/notify_start.sh"</span>   <span class="c"># optional phase hooks</span>
+
+<span class="c"># deploys.toml — each entry is a series of dependent steps.</span>
+<span class="s">[web]</span>
+  <span class="s">[[web.steps]]</span>
+  <span class="k">name</span>   = <span class="v">"build"</span>
+  <span class="k">script</span> = <span class="v">"scripts/build.sh"</span>
+
+  <span class="s">[[web.steps]]</span>
+  <span class="k">name</span>     = <span class="v">"migrate"</span>
+  <span class="k">script</span>   = <span class="v">"scripts/migrate.sh"</span>
+  <span class="new">needs</span>    = <span class="v">["build"]</span>          <span class="c"># DAG edge</span>
+  <span class="new">on_error</span> = <span class="v">"fix_migrate"</span>       <span class="c"># if it fails, go recover</span>
+
+  <span class="s">[[web.steps]]</span>                    <span class="c"># a recovery node</span>
+  <span class="k">name</span>    = <span class="v">"fix_migrate"</span>
+  <span class="new">recover</span> = <span class="v">true</span>
+  <span class="k">retry</span>   = <span class="v">"migrate"</span>            <span class="c"># re-run after a fix</span>
+  <span class="new">options</span> = [
+    { <span class="k">label</span> = <span class="v">"Roll back"</span>,   <span class="k">script</span> = <span class="v">"scripts/rollback.sh"</span> },
+    { <span class="k">label</span> = <span class="v">"Force unlock"</span>, <span class="k">run</span> = <span class="v">"make unlock"</span>, <span class="k">default</span> = <span class="v">true</span> },
+  ]
+
+  <span class="s">[[web.steps]]</span>
+  <span class="k">name</span>   = <span class="v">"release"</span>
+  <span class="k">script</span> = <span class="v">"scripts/release.sh"</span>
+  <span class="new">needs</span>  = <span class="v">["migrate"]</span>`;
+
 function platformCard(p) {
   return `
     <div class="pcard">
@@ -122,6 +156,7 @@ function render() {
         <a class="topbar__link" href="#install">Install</a>
         <a class="topbar__link" href="#config">Config</a>
         <a class="topbar__link" href="#s3">S3</a>
+        <a class="topbar__link" href="#deploy">Deploy</a>
         <a class="topbar__link" href="#commands">Commands</a>
         <a class="topbar__cta" href="${REPO}">GitHub ↗</a>
       </div>
@@ -241,6 +276,23 @@ function render() {
             <div class="fcard"><div class="fcard__icon">🪣</div><h3>Bucket in, key out</h3><p>Use <code>url = "s3://bucket"</code>. Ciabatta joins it with <code>publish_path</code> and runs <code>aws s3 cp</code> — push uploads, <code>ciabatta pull</code> downloads.</p></div>
             <div class="fcard"><div class="fcard__icon">🔑</div><h3>Standard AWS auth</h3><p>No login script needed. Credentials come from the usual chain: <code>AWS_ACCESS_KEY_ID</code> / <code>AWS_SECRET_ACCESS_KEY</code>, <code>AWS_PROFILE</code>, or an instance role.</p></div>
             <div class="fcard"><div class="fcard__icon">⚙</div><h3>Needs the AWS CLI</h3><p>Install and configure the <code>aws</code> CLI on the machine or runner. Set <code>AWS_REGION</code> if your bucket isn't in the CLI's default region.</p></div>
+          </div>
+        </div>
+      </section>
+
+      <section class="section reveal" id="deploy">
+        <div class="section__head">
+          <div class="eyebrow">Configuration · Deploy</div>
+          <h2>Deploys: a flowchart of scripts that heals itself.</h2>
+          <p class="section__sub">A <code>deploy</code> recipe runs a DAG of dependent script steps — the same four phases (<code>login → pre-deploy → deploy → post-deploy</code>), but the deploy phase walks a graph. Each step names a <code>script</code> and its <code>needs</code>; the flowchart lives in its own file, referenced from your config.</p>
+        </div>
+        <div class="split">
+          <pre class="code">${DEPLOY_CONFIG_HTML}</pre>
+          <div class="grid" style="grid-template-columns: 1fr;">
+            <div class="fcard"><div class="fcard__icon">🔀</div><h3>Dependent steps, in order</h3><p>Declare <code>needs = ["build"]</code> and Ciabatta runs steps once their dependencies succeed. The graph is validated up front — missing edges and cycles fail before anything runs.</p></div>
+            <div class="fcard"><div class="fcard__icon">🩹</div><h3>“If error” recovery branches</h3><p>A step's <code>on_error</code> jumps to a recovery node that offers a choice of fix scripts. Pick one, and <code>retry</code> re-runs the failed step. In CI, the <code>default</code> option self-heals unattended.</p></div>
+            <div class="fcard"><div class="fcard__icon">🖥</div><h3>Debug it in the browser</h3><p><code>ciabatta deploy web --gui</code> opens a live view: the flowchart lights up per step, logs stream in, and recovery nodes show fix-it buttons you click to resolve.</p></div>
+            <div class="fcard"><div class="fcard__icon">🧰</div><h3>Build flowcharts visually</h3><p><code>ciabatta deploy --build</code> opens a visual editor. Lay out steps, edges, and recovery options, then copy the generated TOML into your flowchart file — or paste an existing config back in to keep editing.</p></div>
           </div>
         </div>
       </section>

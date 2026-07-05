@@ -1,0 +1,409 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Ciabatta — Deploy</title>
+    <style>
+      :root {
+        --bg: #0f1115; --panel: #171a21; --panel2: #1e222b; --line: #2a2f3a;
+        --fg: #e6e9ef; --muted: #9aa4b2; --accent: #f0a54a;
+        --pending: #545b68; --running: #4aa3f0; --success: #46c17a;
+        --failed: #ef5f6b; --recover: #c07af0;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0; background: var(--bg); color: var(--fg);
+        font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+      }
+      header {
+        padding: 14px 20px; border-bottom: 1px solid var(--line);
+        display: flex; align-items: center; gap: 12px; position: sticky; top: 0;
+        background: var(--bg); z-index: 5;
+      }
+      header .loaf { font-size: 20px; }
+      header h1 { font-size: 15px; margin: 0; font-weight: 600; }
+      header .status { margin-left: auto; color: var(--muted); font-size: 13px; }
+      .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
+      main { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; padding: 16px 20px; }
+      @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
+      .recipe { border: 1px solid var(--line); border-radius: 10px; background: var(--panel); overflow: hidden; }
+      .recipe > .rhead {
+        padding: 10px 14px; border-bottom: 1px solid var(--line);
+        display: flex; align-items: center; gap: 10px; font-weight: 600;
+      }
+      .badge { font-size: 11px; padding: 2px 8px; border-radius: 999px; text-transform: uppercase; letter-spacing: .04em; }
+      .b-pending { background: #2a2f3a; color: var(--muted); }
+      .b-running { background: rgba(74,163,240,.15); color: var(--running); }
+      .b-success { background: rgba(70,193,122,.15); color: var(--success); }
+      .b-failed { background: rgba(239,95,107,.15); color: var(--failed); }
+      .flow { padding: 12px 14px; display: flex; flex-direction: column; gap: 8px; }
+      .node {
+        border: 1px solid var(--line); border-left: 3px solid var(--pending);
+        border-radius: 8px; padding: 8px 10px; background: var(--panel2);
+      }
+      .node.running { border-left-color: var(--running); box-shadow: 0 0 0 1px rgba(74,163,240,.25); }
+      .node.success { border-left-color: var(--success); }
+      .node.failed { border-left-color: var(--failed); box-shadow: 0 0 0 1px rgba(239,95,107,.25); }
+      .node.recover { border-left-color: var(--recover); border-style: dashed; }
+      .node.skipped { opacity: .5; }
+      .node .n-top { display: flex; align-items: center; gap: 8px; }
+      .node .n-name { font-weight: 600; }
+      .node .n-meta { color: var(--muted); font-size: 12px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+      .node .n-needs { color: var(--muted); font-size: 12px; }
+      .node .n-status { margin-left: auto; font-size: 11px; text-transform: uppercase; letter-spacing: .04em; }
+      .node.failed .n-status { color: var(--failed); }
+      .node.skipped .n-status { color: var(--muted); }
+      /* Per-step (per-node) log pane, shown inline under a node once it has output. */
+      .node .n-logs {
+        margin-top: 8px; border-top: 1px solid var(--line); padding-top: 6px;
+      }
+      .node .n-logs pre {
+        margin: 0; max-height: 180px; overflow: auto;
+        font: 11.5px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--muted);
+        white-space: pre-wrap; word-break: break-word;
+      }
+      /* Deploy-phase strip: login → pre → deploy → post. */
+      .stages { display: flex; flex-wrap: wrap; gap: 6px; padding: 10px 14px 0; }
+      .stage {
+        display: inline-flex; align-items: center; gap: 6px; font-size: 12px;
+        padding: 3px 9px; border-radius: 999px; border: 1px solid var(--line);
+        background: var(--panel2); color: var(--muted);
+      }
+      .stage.running { color: var(--running); border-color: rgba(74,163,240,.4); }
+      .stage.success { color: var(--success); border-color: rgba(70,193,122,.4); }
+      .stage.failed { color: var(--failed); border-color: rgba(239,95,107,.5); background: rgba(239,95,107,.08); }
+      .stage.skipped { color: var(--muted); opacity: .6; text-decoration: line-through; }
+      .arrow { color: var(--muted); text-align: center; font-size: 12px; line-height: 1; }
+      .choice { margin-top: 8px; border: 1px solid var(--recover); border-radius: 8px; padding: 10px; background: rgba(192,122,240,.08); }
+      .choice .c-msg { margin-bottom: 8px; color: var(--fg); }
+      .choice button {
+        display: block; width: 100%; text-align: left; margin: 6px 0; padding: 8px 10px;
+        border: 1px solid var(--line); border-radius: 6px; background: var(--panel);
+        color: var(--fg); cursor: pointer; font: inherit;
+      }
+      .choice button:hover { border-color: var(--recover); background: var(--panel2); }
+      .logs { border-top: 1px solid var(--line); }
+      .logs-bar {
+        display: flex; align-items: center; gap: 8px; padding: 6px 14px; color: var(--muted);
+      }
+      .logs-bar .logs-title {
+        font-size: 12px; text-transform: uppercase; letter-spacing: .04em;
+      }
+      .logs-bar .spacer { margin-left: auto; }
+      .log-btn {
+        border: 1px solid var(--line); border-radius: 6px; background: var(--panel2);
+        color: var(--fg); cursor: pointer; font: inherit; font-size: 12px; padding: 3px 8px;
+      }
+      .log-btn:hover:not(:disabled) { border-color: var(--accent); }
+      .log-btn:disabled { opacity: .4; cursor: default; }
+      .logs pre {
+        margin: 0; padding: 10px 14px; max-height: 260px; overflow: auto;
+        font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--muted);
+        white-space: pre-wrap; word-break: break-word;
+      }
+      .logs pre[hidden] { display: none; }
+      /* Fullscreen: let the log pane fill the viewport. */
+      .logs:fullscreen { background: var(--bg); display: flex; flex-direction: column; }
+      .logs:fullscreen .logs-bar { padding: 12px 16px; }
+      .logs:fullscreen pre { flex: 1 1 auto; max-height: none; display: block; }
+      .err { color: var(--failed); padding: 8px 14px; font-size: 13px; }
+      .empty { color: var(--muted); padding: 40px; text-align: center; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <span class="loaf">🍞</span>
+      <h1>ciabatta deploy</h1>
+      <span class="status" id="status">connecting…</span>
+    </header>
+    <main id="app"><div class="empty">Loading…</div></main>
+
+    <script>
+      const STATUS_COLORS = {
+        pending: "var(--pending)", running: "var(--running)",
+        success: "var(--success)", failed: "var(--failed)", skipped: "var(--pending)",
+      };
+      const esc = (s) =>
+        String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+      // ── ANSI → HTML ──────────────────────────────────────────────────────────
+      // Deploy tools (terraform, docker, …) emit ANSI SGR escape codes for color
+      // and bold. Render them as styled spans instead of dumping raw escapes.
+      const ANSI = ["#3b4048","#ef5f6b","#46c17a","#e0af68","#4aa3f0","#c07af0","#4ec9d8","#c8ccd4"];
+      const ANSI_BRIGHT = ["#6b7280","#ff7a86","#67d391","#f0c674","#6cb6ff","#d3a0ff","#6fe0ec","#ffffff"];
+      function xterm256(n) {
+        if (n < 8) return ANSI[n];
+        if (n < 16) return ANSI_BRIGHT[n - 8];
+        if (n < 232) {
+          n -= 16;
+          const v = (x) => (x ? 55 + x * 40 : 0);
+          return `rgb(${v(Math.floor(n / 36))},${v(Math.floor((n % 36) / 6))},${v(n % 6)})`;
+        }
+        const g = 8 + (n - 232) * 10;
+        return `rgb(${g},${g},${g})`;
+      }
+      function applySgr(st, params) {
+        const codes = params === "" ? [0] : params.split(";").map((x) => parseInt(x, 10) || 0);
+        for (let i = 0; i < codes.length; i++) {
+          const c = codes[i];
+          if (c === 0) Object.assign(st, { fg: null, bg: null, bold: false, dim: false, italic: false, underline: false });
+          else if (c === 1) st.bold = true;
+          else if (c === 2) st.dim = true;
+          else if (c === 3) st.italic = true;
+          else if (c === 4) st.underline = true;
+          else if (c === 22) { st.bold = false; st.dim = false; }
+          else if (c === 23) st.italic = false;
+          else if (c === 24) st.underline = false;
+          else if (c >= 30 && c <= 37) st.fg = ANSI[c - 30];
+          else if (c === 39) st.fg = null;
+          else if (c >= 40 && c <= 47) st.bg = ANSI[c - 40];
+          else if (c === 49) st.bg = null;
+          else if (c >= 90 && c <= 97) st.fg = ANSI_BRIGHT[c - 90];
+          else if (c >= 100 && c <= 107) st.bg = ANSI_BRIGHT[c - 100];
+          else if (c === 38 || c === 48) {
+            const col = codes[i + 1] === 5 ? xterm256(codes[i + 2])
+              : codes[i + 1] === 2 ? `rgb(${codes[i + 2]},${codes[i + 3]},${codes[i + 4]})` : null;
+            if (col) { if (c === 38) st.fg = col; else st.bg = col; }
+            i += codes[i + 1] === 2 ? 4 : 2;
+          }
+        }
+      }
+      function styleOf(st) {
+        const p = [];
+        if (st.fg) p.push("color:" + st.fg);
+        if (st.bg) p.push("background:" + st.bg);
+        if (st.bold) p.push("font-weight:600");
+        if (st.dim) p.push("opacity:.7");
+        if (st.italic) p.push("font-style:italic");
+        if (st.underline) p.push("text-decoration:underline");
+        return p.join(";");
+      }
+      function ansiToHtml(input) {
+        const text = String(input);
+        const st = { fg: null, bg: null, bold: false, dim: false, italic: false, underline: false };
+        const csi = /\x1b\[([0-9;?]*)([A-Za-z])/g;
+        let out = "", last = 0, m;
+        const emit = (chunk) => {
+          if (!chunk) return;
+          const style = styleOf(st);
+          out += style ? `<span style="${style}">${esc(chunk)}</span>` : esc(chunk);
+        };
+        while ((m = csi.exec(text)) !== null) {
+          emit(text.slice(last, m.index));
+          last = csi.lastIndex;
+          if (m[2] === "m") applySgr(st, m[1]); // other CSI (cursor/erase) is dropped
+        }
+        emit(text.slice(last));
+        return out;
+      }
+      const ansiLines = (arr) => arr.map(ansiToHtml).join("\n");
+
+      async function choose(recipe, step, option) {
+        try {
+          await fetch("/choose", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ recipe, step, option }),
+          });
+        } catch (e) {}
+        tick(); // refresh promptly after answering
+      }
+
+      // Status labels shown on the right of a node when it isn't just quietly
+      // pending/running (i.e. it needs calling out).
+      const NODE_STATUS_LABEL = { failed: "✗ failed", skipped: "skipped" };
+
+      function nodeHTML(recipe, s, recipeStopped) {
+        // A step still pending when the whole deploy has stopped never ran.
+        const status = s.status === "pending" && recipeStopped ? "skipped" : s.status;
+        const cls = ["node", status, s.recover ? "recover" : ""].filter(Boolean).join(" ");
+        const meta = s.action ? `<div class="n-meta">${esc(s.action)}</div>` : "";
+        const needs = s.needs && s.needs.length ? `<div class="n-needs">needs: ${esc(s.needs.join(", "))}</div>` : "";
+        const err = s.on_error ? `<div class="n-needs">on error → ${esc(s.on_error)}</div>` : "";
+        const statusLabel = NODE_STATUS_LABEL[status]
+          ? `<span class="n-status">${NODE_STATUS_LABEL[status]}</span>` : "";
+        const logs = s.logs && s.logs.length
+          ? `<div class="n-logs"><pre data-key="nlog:${esc(recipe.name)}:${esc(s.name)}">${ansiLines(s.logs)}</pre></div>` : "";
+        return `<div class="${cls}" data-step="${esc(s.name)}">
+          <div class="n-top">
+            <span class="dot" style="background:${STATUS_COLORS[status] || "var(--pending)"}"></span>
+            <span class="n-name">${esc(s.name)}</span>
+            ${s.recover ? '<span class="badge b-running" style="background:rgba(192,122,240,.15);color:var(--recover)">recovery</span>' : ""}
+            ${statusLabel}
+          </div>
+          ${meta}${needs}${err}${logs}
+        </div>`;
+      }
+
+      function stagesHTML(r) {
+        if (!r.stages || !r.stages.length) return "";
+        const chips = r.stages
+          .map((s) => `<span class="stage ${s.status}">
+            <span class="dot" style="background:${STATUS_COLORS[s.status] || "var(--pending)"}"></span>${esc(s.name)}
+          </span>`)
+          .join("");
+        return `<div class="stages">${chips}</div>`;
+      }
+
+      function choiceHTML(recipe, pending) {
+        const btns = pending.options
+          .map((o, i) => `<button onclick="choose('${esc(recipe.name)}','${esc(pending.step)}',${i})">▶ ${esc(o)}</button>`)
+          .join("");
+        return `<div class="choice">
+          <div class="c-msg">⚠ ${esc(pending.message)}</div>${btns}
+        </div>`;
+      }
+
+      function recipeHTML(r) {
+        const stopped = r.status === "failed";
+        const nodes = r.steps.map((s) => nodeHTML(r, s, stopped)).join('<div class="arrow">↓</div>');
+        const choice = r.pending ? choiceHTML(r, r.pending) : "";
+        const err = r.error ? `<div class="err">✗ ${esc(r.error)}</div>` : "";
+        const key = "log:" + r.name;
+        const hasLogs = r.logs && r.logs.length;
+        const open = logOpen.has(key);
+        const logs = hasLogs ? ansiLines(r.logs) : "(no output yet)";
+        const count = logCount(r);
+        const dis = hasLogs ? "" : "disabled";
+        return `<section class="recipe">
+          <div class="rhead">
+            <span>${esc(r.name)}</span>
+            <span class="badge b-${r.status}">${r.status}</span>
+          </div>
+          ${stagesHTML(r)}
+          <div class="flow">${nodes || '<div class="empty">no steps</div>'}${choice}</div>
+          ${err}
+          <div class="logs">
+            <div class="logs-bar">
+              <span class="logs-title">logs · ${count}</span>
+              <span class="spacer"></span>
+              <button class="log-btn" data-act="copy" ${dis}>Copy</button>
+              <button class="log-btn" data-act="full" ${dis}>⛶ Full screen</button>
+              <button class="log-btn" data-act="toggle" ${dis}>${open ? "Hide logs" : "Show logs"}</button>
+            </div>
+            <pre data-key="${esc(key)}"${open ? "" : " hidden"}>${logs}</pre>
+          </div>
+        </section>`;
+      }
+
+      // Recipe log panes are collapsed by default; this holds the keys of the
+      // ones the user has expanded, so the choice survives re-renders.
+      const logOpen = new Set();
+
+      const logCount = (r) =>
+        r.logs && r.logs.length ? `${r.logs.length} line${r.logs.length === 1 ? "" : "s"}` : "no output";
+
+      // Copy a log pane's plain text (ANSI already stripped) to the clipboard,
+      // with a fallback for non-secure contexts (e.g. http over a LAN IP).
+      async function copyLogs(pre, btn) {
+        const text = pre.textContent;
+        try {
+          await navigator.clipboard.writeText(text);
+        } catch (e) {
+          const ta = document.createElement("textarea");
+          ta.value = text; ta.style.position = "fixed"; ta.style.opacity = "0";
+          document.body.appendChild(ta); ta.select();
+          try { document.execCommand("copy"); } catch (_) {}
+          ta.remove();
+        }
+        const orig = btn.textContent;
+        btn.textContent = "Copied!";
+        setTimeout(() => { btn.textContent = orig; }, 1200);
+      }
+
+      // Toolbar actions on the recipe log panes (delegated so they survive
+      // re-renders that replace the DOM).
+      document.getElementById("app").addEventListener("click", (e) => {
+        const btn = e.target.closest(".log-btn");
+        if (!btn || btn.disabled) return;
+        const box = btn.closest(".logs");
+        const pre = box.querySelector("pre");
+        const key = pre.dataset.key;
+        const act = btn.dataset.act;
+        if (act === "copy") return copyLogs(pre, btn);
+        if (act === "full") {
+          logOpen.add(key);
+          pre.hidden = false;
+          box.querySelector('[data-act="toggle"]').textContent = "Hide logs";
+          if (box.requestFullscreen) box.requestFullscreen().catch(() => {});
+          pre.scrollTop = pre.scrollHeight;
+          return;
+        }
+        if (act === "toggle") {
+          const show = pre.hidden;
+          pre.hidden = !show;
+          if (show) { logOpen.add(key); pre.scrollTop = pre.scrollHeight; }
+          else logOpen.delete(key);
+          btn.textContent = pre.hidden ? "Show logs" : "Hide logs";
+        }
+      });
+
+      // Was this log pane scrolled (near) to the bottom? Used to decide whether
+      // to follow new output or leave the user where they scrolled to.
+      const atBottom = (pre) => pre.scrollHeight - pre.clientHeight - pre.scrollTop <= 4;
+
+      let lastHTML = "";
+      function render(state) {
+        const app = document.getElementById("app");
+        const st = document.getElementById("status");
+        st.innerHTML = state.done
+          ? '<span class="dot" style="background:var(--success)"></span>done'
+          : '<span class="dot" style="background:var(--running)"></span>running' +
+            (state.dry_run ? " · dry-run" : "");
+
+        // While a log pane is fullscreen, a full innerHTML rebuild would destroy
+        // it and drop out of fullscreen (which we can't re-enter without a user
+        // gesture). Update just that pane in place and skip the rebuild.
+        const fs = document.fullscreenElement;
+        if (fs && fs.classList.contains("logs") && app.contains(fs)) {
+          const pre = fs.querySelector("pre");
+          const r = state.recipes.find((x) => "log:" + x.name === pre.dataset.key);
+          if (r) {
+            const stick = atBottom(pre);
+            pre.innerHTML = r.logs && r.logs.length ? ansiLines(r.logs) : "(no output yet)";
+            const title = fs.querySelector(".logs-title");
+            if (title) title.textContent = "logs · " + logCount(r);
+            if (stick) pre.scrollTop = pre.scrollHeight;
+          }
+          lastHTML = ""; // force a clean rebuild once we leave fullscreen
+          return;
+        }
+
+        const html = state.recipes.map(recipeHTML).join("");
+        // Nothing changed since the last poll — leave the DOM (and scroll
+        // positions) untouched so the logs don't jump around.
+        if (html === lastHTML) return;
+        lastHTML = html;
+
+        // Remember each log pane's scroll state before we rebuild, keyed so we
+        // can match the same pane in the new DOM.
+        const prev = {};
+        app.querySelectorAll("pre[data-key]").forEach((pre) => {
+          prev[pre.dataset.key] = { scrollTop: pre.scrollTop, bottom: atBottom(pre) };
+        });
+
+        app.innerHTML = html;
+
+        // Restore scroll: a pane that was pinned to the bottom keeps following
+        // the newest line; otherwise we keep exactly where the user scrolled to.
+        // Panes that are new this render start at their newest line.
+        app.querySelectorAll("pre[data-key]").forEach((pre) => {
+          const p = prev[pre.dataset.key];
+          pre.scrollTop = !p || p.bottom ? pre.scrollHeight : p.scrollTop;
+        });
+      }
+
+      async function tick() {
+        try {
+          const res = await fetch("/state.json");
+          render(await res.json());
+        } catch (e) {
+          document.getElementById("status").textContent = "disconnected";
+        }
+      }
+      tick();
+      setInterval(tick, 700);
+    </script>
+  </body>
+</html>

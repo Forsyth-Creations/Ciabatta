@@ -3,6 +3,7 @@ mod ci;
 mod cli;
 mod config;
 mod configure;
+mod deploy;
 mod environment;
 mod git;
 mod registry;
@@ -61,6 +62,40 @@ async fn main() -> Result<()> {
             let vars = build_env_vars(&cfg, &env, local, &root, no_tui)?;
             let names = config::select_recipe_names(&cfg, &cookbooks, &recipes)?;
             execute_recipes(&cfg, &root, &names, &vars, dry_run, no_tui, RunMode::Pull).await?;
+        }
+
+        Commands::Deploy {
+            recipes,
+            cookbooks,
+            env,
+            dry_run,
+            no_tui,
+            local,
+            config,
+            gui,
+            build,
+            port,
+        } => {
+            // --build is an authoring tool: it needs no project and runs nothing.
+            if build {
+                deploy::server::serve_builder(port).await?;
+            } else {
+                let (root, cfg) = load_project(config.as_deref())?;
+                let vars = build_env_vars(&cfg, &env, local, &root, no_tui || gui)?;
+                let names = select_deploy_names(&cfg, &cookbooks, &recipes)?;
+                if gui {
+                    if names.is_empty() {
+                        bail!(
+                            "No deploy recipes found. Add a [recipies.<name>.deploy] section, or run `ciabatta deploy --build` to design one."
+                        );
+                    }
+                    runner::validate_recipes(&cfg, &root, &names, &vars, &RunMode::Deploy)?;
+                    deploy::server::serve_gui(cfg, root, names, vars, dry_run, port).await?;
+                } else {
+                    execute_recipes(&cfg, &root, &names, &vars, dry_run, no_tui, RunMode::Deploy)
+                        .await?;
+                }
+            }
         }
 
         Commands::Source { env } => {
@@ -388,6 +423,43 @@ fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', r"'\''"))
 }
 
+/// Resolve which recipes a deploy run targets. Like [`config::select_recipe_names`]
+/// but the "everything" default is narrowed to deploy-capable recipes only, and
+/// any explicitly named recipe must actually define a `[deploy]` section.
+fn select_deploy_names(
+    cfg: &CiabattaConfig,
+    cookbooks: &[String],
+    recipes: &[String],
+) -> Result<Vec<String>> {
+    if cookbooks.is_empty() && recipes.is_empty() {
+        let mut names: Vec<String> = cfg
+            .recipes
+            .iter()
+            .filter(|(_, e)| e.deploy_recipe().is_some())
+            .map(|(n, _)| n.clone())
+            .collect();
+        names.sort();
+        return Ok(names);
+    }
+
+    let names = config::select_recipe_names(cfg, cookbooks, recipes)?;
+    for name in &names {
+        let entry = cfg
+            .recipes
+            .get(name)
+            .ok_or_else(|| anyhow::anyhow!("Recipe '{}' not found", name))?;
+        if entry.deploy_recipe().is_none() {
+            bail!(
+                "Recipe '{}' has no [deploy] definition, so it can't be deployed. \
+                 Add a [recipies.{}.deploy] section (see `ciabatta config reference`).",
+                name,
+                name
+            );
+        }
+    }
+    Ok(names)
+}
+
 async fn execute_recipes(
     cfg: &CiabattaConfig,
     root: &Path,
@@ -403,14 +475,24 @@ async fn execute_recipes(
         );
     }
 
-    // Validate that all publish-path variables are present before launching.
-    runner::validate_recipes(cfg, names, vars, &mode)?;
+    // Validate publish-path variables (push/pull) or the step DAG (deploy)
+    // before launching.
+    runner::validate_recipes(cfg, root, names, vars, &mode)?;
 
     // Resolve the container runtime once up front so every recipe shares it and
-    // an ambiguous/missing runtime fails fast (before any work starts).
+    // an ambiguous/missing runtime fails fast (before any work starts). Deploys
+    // run scripts, not built-in container actions, so a missing runtime there is
+    // best-effort rather than fatal.
     let mut cfg = cfg.clone();
-    let container_cmd = config::resolve_container_cmd(&cfg)?;
-    cfg.system.get_or_insert_with(Default::default).containers = Some(container_cmd);
+    match config::resolve_container_cmd(&cfg) {
+        Ok(container_cmd) => {
+            cfg.system.get_or_insert_with(Default::default).containers = Some(container_cmd);
+        }
+        Err(e) if mode == RunMode::Deploy => {
+            tracing::debug!("no container runtime resolved for deploy: {e}");
+        }
+        Err(e) => return Err(e),
+    }
     let cfg = &cfg;
 
     if no_tui {
@@ -479,6 +561,26 @@ async fn run_plain(
                 println!("[{recipe}]   {done}/{total} files ({pct}%)");
             }
             ProgressUpdate::Log(name, line) => println!("[{name}] {line}"),
+            ProgressUpdate::StepStarted { recipe, step } => {
+                println!("[{recipe}] ▶ step: {step}")
+            }
+            ProgressUpdate::StepFinished { recipe, step, ok } => {
+                println!("[{recipe}]   {} step: {step}", if ok { "✓" } else { "✗" })
+            }
+            ProgressUpdate::StepLog { recipe, step, line } => {
+                println!("[{recipe}]   [{step}] {line}")
+            }
+            ProgressUpdate::StepNeedsChoice {
+                recipe,
+                step,
+                message,
+                options,
+            } => {
+                println!("[{recipe}] ⚠ {step}: {message}");
+                for (i, opt) in options.iter().enumerate() {
+                    println!("[{recipe}]     [{i}] {opt}");
+                }
+            }
             ProgressUpdate::Completed(name) => println!("[{name}] ✓ completed"),
             ProgressUpdate::Failed(name, err) => {
                 eprintln!("[{name}] ✗ failed: {err}");
@@ -613,6 +715,16 @@ fn build_starter_toml(ci: Option<&str>, containers: Option<&str>) -> String {
 # pre  = "python scripts/bundle.py"
 # post = "./scripts/notify.sh deployed"
 #
+# ─── Deploys ───────────────────────────────────────────────────────────────────
+# `ciabatta deploy <recipe>` runs a DAG of dependent script steps (login →
+# pre-deploy → deploy → post-deploy). The steps live in a separate flowchart
+# file; each step runs a script and may declare `needs` and an `on_error`
+# recovery node. See `ciabatta config reference`, or design one visually with
+# `ciabatta deploy --build` (and watch a run with `ciabatta deploy <r> --gui`).
+#
+# [recipies.web.deploy]
+# flowchart = ".ciabatta/deploys.toml"   # each entry is a series of steps
+#
 # ─── Credentials ───────────────────────────────────────────────────────────────
 # When a registry has no login_script, ciabatta reads per-registry credentials:
 #   CIABATTA_<REGISTRY>_USER  /  CIABATTA_<REGISTRY>_PASS
@@ -662,12 +774,22 @@ fn list_recipes(cfg: &CiabattaConfig) {
     for name in names {
         let entry = &cfg.recipes[name];
         let push = entry.push_recipe();
-        let kind = if entry.push.is_some() || entry.pull.is_some() {
-            "push/pull"
+        // A recipe can define a deploy alongside a push/pull action; when it's
+        // deploy-only, prefer the "deploy" label over the transfer defaults.
+        let transfer_kind = if entry.push.is_some() || entry.pull.is_some() {
+            Some("push/pull")
         } else if push.main.is_some() || push.bash_script.is_some() {
-            "command"
+            Some("command")
+        } else if push.registry.is_some() || push.publish_path.is_some() {
+            Some("registry")
         } else {
-            "registry"
+            None
+        };
+        let kind = match (transfer_kind, entry.deploy.is_some()) {
+            (Some(t), true) => format!("{t}, deploy"),
+            (Some(t), false) => t.to_string(),
+            (None, true) => "deploy".to_string(),
+            (None, false) => "registry".to_string(),
         };
         println!("  {:<30} [{}]", name, kind);
     }
@@ -815,10 +937,75 @@ All paths in recipes are relative to this root.
   publish_path       = "group/{CIABATTA_BRANCH}/{CIABATTA_COMMIT}/artifact"
   bash_script        = "scripts/publish.sh"   # Alternative: run a script
 
+[recipies.<name>]                    ← docker/ecr image recipe
+  registry     = "myecr"             # a docker- or ecr-type registry
+  local_image  = "app:latest"        # a locally-built image (name or name:tag)
+  publish_path = "app:{CIABATTA_COMMIT}"   # remote image ref (repo[:tag])
+  # ciabatta retags local_image to <registry url>/<publish_path> and pushes it,
+  # so you don't bake the registry URL into your build. `pull` retags the pulled
+  # image back to local_image. When publish_path is omitted, local_image is
+  # reused as the remote reference.
+
 [recipies.<name>.push]               ← push/pull recipe with separate actions
   bash_script = "scripts/push.sh"
 [recipies.<name>.pull]
   bash_script = "scripts/pull.sh"
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Deploys — a DAG of dependent script steps (`ciabatta deploy`)
+
+  A deploy is a third recipe direction (alongside push/pull) that runs a graph
+  of dependent script "steps" instead of a registry transfer. It runs the same
+  four phases: login → pre-deploy → deploy → post-deploy. The `deploy` phase
+  executes the step DAG; login/pre/post are optional command hooks.
+
+  [recipies.<name>.deploy]
+    flowchart = ".ciabatta/deploys.toml"   # separate file holding the steps
+    entry     = "web"                       # entry to use (default: recipe name)
+    login = "..."   pre = "..."   post = "..."   # optional phase hooks
+
+  The flowchart file lists steps. Each step runs a `script` (a bash file) or an
+  inline `run` command, and may declare `needs` (steps that must succeed first)
+  and `on_error` (jump to a recovery node on failure). Steps with satisfied
+  `needs` are eligible to run; the graph must be acyclic.
+
+    # .ciabatta/deploys.toml
+    [web]
+      [[web.steps]]
+      name = "build"
+      script = "scripts/build.sh"
+
+      [[web.steps]]
+      name = "migrate"
+      script  = "scripts/migrate.sh"
+      needs   = ["build"]
+      on_error = "fix_migrate"        # on failure, go to the recovery node
+
+      [[web.steps]]                   # a recovery node: offers fix choices
+      name = "fix_migrate"
+      recover = true
+      message = "Migration failed — choose how to recover:"
+      retry   = "migrate"             # re-run this step after a successful fix
+      options = [
+        { label = "Roll back",   script = "scripts/rollback.sh" },
+        { label = "Force unlock", run = "make unlock", default = true },
+      ]
+
+      [[web.steps]]
+      name = "release"
+      script = "scripts/release.sh"
+      needs  = ["migrate"]
+
+  Recovery: when a step with `on_error` fails, its recovery node offers a choice
+  of fix `options`. With `--gui` you pick one in the browser; otherwise (plain /
+  CI) the option marked `default = true` runs automatically, or the deploy fails
+  if none is. After a fix succeeds, `retry` re-runs the named step. Retry loops
+  are bounded so a persistently failing step can't spin forever.
+
+    ciabatta deploy [RECIPE…]        run deploy recipes (all deploy-capable if none named)
+    ciabatta deploy web --gui        live web view: flowchart, logs, fix-it buttons
+    ciabatta deploy --build          open the visual builder; copy the TOML it emits
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 

@@ -145,6 +145,9 @@ pub struct RecipeEntry {
     pub push: Option<SimpleRecipe>,
     /// Pull-direction overrides (any field set here wins over `base`).
     pub pull: Option<SimpleRecipe>,
+    /// Deploy-direction definition: a DAG of dependent script steps (usually in
+    /// a separate flowchart file). Unlike push/pull this is not a `SimpleRecipe`.
+    pub deploy: Option<crate::deploy::DeployRecipe>,
 }
 
 /// Where a recipe publishes to. Either a single remote path (the classic form,
@@ -181,6 +184,12 @@ pub struct SimpleRecipe {
     pub registry: Option<String>,
     /// Local filesystem path for the artifact.
     pub local_artifact_path: Option<String>,
+    /// Docker/ECR only: a local image reference (`name` or `name:tag`) to push.
+    /// ciabatta retags it to the registry's target reference before pushing
+    /// (`docker tag <local_image> <url>/<publish_path>`), and on pull retags the
+    /// pulled image back to this name. When set, `publish_path` is the remote
+    /// image reference; if omitted, the local reference is reused verbatim.
+    pub local_image: Option<String>,
     /// Destination path in the registry; supports {CIABATTA_*} variable
     /// substitution, or a list of local file globs (see [`PublishPath`]).
     pub publish_path: Option<PublishPath>,
@@ -215,6 +224,10 @@ impl SimpleRecipe {
                 .local_artifact_path
                 .clone()
                 .or_else(|| self.local_artifact_path.clone()),
+            local_image: over
+                .local_image
+                .clone()
+                .or_else(|| self.local_image.clone()),
             publish_path: over
                 .publish_path
                 .clone()
@@ -255,6 +268,12 @@ impl RecipeEntry {
             (None, None) => Some(self.base.clone()),
             (None, Some(_)) => None,
         }
+    }
+
+    /// The deploy definition for this recipe, if it declares a `[deploy]`
+    /// sub-table. Deploys are opt-in per recipe (no implicit default).
+    pub fn deploy_recipe(&self) -> Option<&crate::deploy::DeployRecipe> {
+        self.deploy.as_ref()
     }
 }
 
@@ -677,6 +696,29 @@ post = "./notify.sh"
     }
 
     #[test]
+    fn parses_local_image_and_overlays_it() {
+        let cfg = parse(
+            r#"
+[recipies.app]
+registry = "ecr"
+local_image = "app:latest"
+publish_path = "app:{CIABATTA_COMMIT}"
+
+[recipies.app.push]
+local_image = "app:release"
+"#,
+        );
+        let entry = &cfg.recipes["app"];
+        // Base value is visible on a plain read.
+        assert_eq!(entry.base.local_image.as_deref(), Some("app:latest"));
+        // Push override wins over the shared base.
+        assert_eq!(
+            entry.push_recipe().local_image.as_deref(),
+            Some("app:release")
+        );
+    }
+
+    #[test]
     fn parses_pushpull_with_per_direction_stages() {
         let cfg = parse(
             r#"
@@ -849,6 +891,71 @@ broken = ["a", "missing"]
         // Menu that references a missing recipe.
         let err = select_recipe_names(&cfg, &["broken".into()], &[]).unwrap_err();
         assert!(err.to_string().contains("references recipe 'missing'"));
+    }
+
+    #[test]
+    fn parses_deploy_sub_table() {
+        let cfg = parse(
+            r#"
+[recipies.web]
+registry = "nexus"
+
+[recipies.web.deploy]
+flowchart = ".ciabatta/deploys.toml"
+pre  = "scripts/notify.sh"
+
+[recipies.web.push]
+bash_script = "scripts/push.sh"
+"#,
+        );
+        let entry = &cfg.recipes["web"];
+        let deploy = entry.deploy_recipe().expect("deploy present");
+        assert_eq!(deploy.flowchart.as_deref(), Some(".ciabatta/deploys.toml"));
+        assert_eq!(deploy.pre.as_deref(), Some("scripts/notify.sh"));
+        // Deploy coexists with a push action on the same recipe.
+        assert_eq!(
+            entry.push_recipe().bash_script.as_deref(),
+            Some("scripts/push.sh")
+        );
+    }
+
+    #[test]
+    fn parses_inline_deploy_steps() {
+        let cfg = parse(
+            r#"
+[recipies.svc.deploy]
+[[recipies.svc.deploy.steps]]
+name = "build"
+script = "b.sh"
+[[recipies.svc.deploy.steps]]
+name = "ship"
+run = "make ship"
+needs = ["build"]
+on_error = "fix"
+[[recipies.svc.deploy.steps]]
+name = "fix"
+recover = true
+options = [ { label = "retry", run = "true", default = true } ]
+"#,
+        );
+        let deploy = cfg.recipes["svc"].deploy_recipe().unwrap();
+        assert_eq!(deploy.steps.len(), 3);
+        assert_eq!(deploy.steps[1].on_error.as_deref(), Some("fix"));
+        assert!(deploy.steps[2].recover);
+        assert_eq!(deploy.steps[2].options[0].label, "retry");
+        assert!(deploy.steps[2].options[0].default);
+    }
+
+    #[test]
+    fn recipe_without_deploy_has_none() {
+        let cfg = parse(
+            r#"
+[recipies.a]
+registry = "nexus"
+publish_path = "x/y"
+"#,
+        );
+        assert!(cfg.recipes["a"].deploy_recipe().is_none());
     }
 
     #[test]

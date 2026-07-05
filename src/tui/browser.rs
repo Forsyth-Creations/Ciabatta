@@ -233,6 +233,11 @@ impl BrowserApp {
                 }
                 self.status_msg = Some(format!("✗ {} failed: {}", name, err));
             }
+            // Deploy step updates don't occur in the push-on-demand browser.
+            ProgressUpdate::StepStarted { .. }
+            | ProgressUpdate::StepFinished { .. }
+            | ProgressUpdate::StepLog { .. }
+            | ProgressUpdate::StepNeedsChoice { .. } => {}
         }
     }
 }

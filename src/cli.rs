@@ -76,6 +76,53 @@ pub enum Commands {
         config: Option<std::path::PathBuf>,
     },
 
+    /// Run a deploy recipe: a DAG of dependent script steps with error-recovery
+    /// branches. Add --gui for a live web view, or --build to design a flowchart.
+    Deploy {
+        /// Recipe names to deploy. Deploys all deploy-capable recipes if omitted.
+        #[arg(name = "RECIPE")]
+        recipes: Vec<String>,
+
+        /// Deploy only the recipes grouped by the named menu (repeatable).
+        #[arg(long = "cookbook", visible_alias = "menu", value_name = "MENU")]
+        cookbooks: Vec<String>,
+
+        /// Set an environment variable (KEY=VALUE). Overrides CI-derived vars.
+        #[arg(short = 'e', long = "env", value_name = "KEY=VALUE")]
+        env: Vec<String>,
+
+        /// Show what would happen without actually running anything.
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Disable the TUI and print progress to stdout.
+        #[arg(long)]
+        no_tui: bool,
+
+        /// Derive CIABATTA_BRANCH/_COMMIT/_TAG/_BUILD_NUMBER from local git
+        /// history instead of the configured CI system.
+        #[arg(long)]
+        local: bool,
+
+        /// Path to ciabatta.toml (overrides .ciabatta/ciabatta.toml discovery).
+        #[arg(short = 'c', long)]
+        config: Option<std::path::PathBuf>,
+
+        /// Show the deploy live in a web browser (flowchart + logs + fix-it
+        /// buttons for recovery nodes) instead of the terminal TUI.
+        #[arg(long)]
+        gui: bool,
+
+        /// Open a visual builder in the browser to design a flowchart TOML file.
+        /// Runs nothing; you copy the generated TOML into your own file.
+        #[arg(long, conflicts_with = "gui")]
+        build: bool,
+
+        /// Port for the --gui / --build web view.
+        #[arg(short = 'p', long, default_value_t = 8088)]
+        port: u16,
+    },
+
     /// Print CIABATTA_* variables (resolved from local git) as shell `export`
     /// lines, so you can load them into your shell: eval "$(ciabatta source)"
     Source {

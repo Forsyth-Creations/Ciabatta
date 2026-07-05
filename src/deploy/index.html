@@ -1,0 +1,168 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Ciabatta — Deploy</title>
+    <style>
+      :root {
+        --bg: #0f1115; --panel: #171a21; --panel2: #1e222b; --line: #2a2f3a;
+        --fg: #e6e9ef; --muted: #9aa4b2; --accent: #f0a54a;
+        --pending: #545b68; --running: #4aa3f0; --success: #46c17a;
+        --failed: #ef5f6b; --recover: #c07af0;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0; background: var(--bg); color: var(--fg);
+        font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+      }
+      header {
+        padding: 14px 20px; border-bottom: 1px solid var(--line);
+        display: flex; align-items: center; gap: 12px; position: sticky; top: 0;
+        background: var(--bg); z-index: 5;
+      }
+      header .loaf { font-size: 20px; }
+      header h1 { font-size: 15px; margin: 0; font-weight: 600; }
+      header .status { margin-left: auto; color: var(--muted); font-size: 13px; }
+      .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
+      main { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; padding: 16px 20px; }
+      @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
+      .recipe { border: 1px solid var(--line); border-radius: 10px; background: var(--panel); overflow: hidden; }
+      .recipe > .rhead {
+        padding: 10px 14px; border-bottom: 1px solid var(--line);
+        display: flex; align-items: center; gap: 10px; font-weight: 600;
+      }
+      .badge { font-size: 11px; padding: 2px 8px; border-radius: 999px; text-transform: uppercase; letter-spacing: .04em; }
+      .b-pending { background: #2a2f3a; color: var(--muted); }
+      .b-running { background: rgba(74,163,240,.15); color: var(--running); }
+      .b-success { background: rgba(70,193,122,.15); color: var(--success); }
+      .b-failed { background: rgba(239,95,107,.15); color: var(--failed); }
+      .flow { padding: 12px 14px; display: flex; flex-direction: column; gap: 8px; }
+      .node {
+        border: 1px solid var(--line); border-left: 3px solid var(--pending);
+        border-radius: 8px; padding: 8px 10px; background: var(--panel2);
+      }
+      .node.running { border-left-color: var(--running); box-shadow: 0 0 0 1px rgba(74,163,240,.25); }
+      .node.success { border-left-color: var(--success); }
+      .node.failed { border-left-color: var(--failed); }
+      .node.recover { border-left-color: var(--recover); border-style: dashed; }
+      .node .n-top { display: flex; align-items: center; gap: 8px; }
+      .node .n-name { font-weight: 600; }
+      .node .n-meta { color: var(--muted); font-size: 12px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+      .node .n-needs { color: var(--muted); font-size: 12px; }
+      .arrow { color: var(--muted); text-align: center; font-size: 12px; line-height: 1; }
+      .choice { margin-top: 8px; border: 1px solid var(--recover); border-radius: 8px; padding: 10px; background: rgba(192,122,240,.08); }
+      .choice .c-msg { margin-bottom: 8px; color: var(--fg); }
+      .choice button {
+        display: block; width: 100%; text-align: left; margin: 6px 0; padding: 8px 10px;
+        border: 1px solid var(--line); border-radius: 6px; background: var(--panel);
+        color: var(--fg); cursor: pointer; font: inherit;
+      }
+      .choice button:hover { border-color: var(--recover); background: var(--panel2); }
+      .logs { border-top: 1px solid var(--line); }
+      .logs pre {
+        margin: 0; padding: 10px 14px; max-height: 260px; overflow: auto;
+        font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--muted);
+        white-space: pre-wrap; word-break: break-word;
+      }
+      .err { color: var(--failed); padding: 8px 14px; font-size: 13px; }
+      .empty { color: var(--muted); padding: 40px; text-align: center; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <span class="loaf">🍞</span>
+      <h1>ciabatta deploy</h1>
+      <span class="status" id="status">connecting…</span>
+    </header>
+    <main id="app"><div class="empty">Loading…</div></main>
+
+    <script>
+      const STATUS_COLORS = {
+        pending: "var(--pending)", running: "var(--running)",
+        success: "var(--success)", failed: "var(--failed)",
+      };
+      const esc = (s) =>
+        String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+      async function choose(recipe, step, option) {
+        try {
+          await fetch("/choose", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ recipe, step, option }),
+          });
+        } catch (e) {}
+        tick(); // refresh promptly after answering
+      }
+
+      function nodeHTML(recipe, s) {
+        const cls = ["node", s.status, s.recover ? "recover" : ""].filter(Boolean).join(" ");
+        const meta = s.action ? `<div class="n-meta">${esc(s.action)}</div>` : "";
+        const needs = s.needs && s.needs.length ? `<div class="n-needs">needs: ${esc(s.needs.join(", "))}</div>` : "";
+        const err = s.on_error ? `<div class="n-needs">on error → ${esc(s.on_error)}</div>` : "";
+        return `<div class="${cls}">
+          <div class="n-top">
+            <span class="dot" style="background:${STATUS_COLORS[s.status] || "var(--pending)"}"></span>
+            <span class="n-name">${esc(s.name)}</span>
+            ${s.recover ? '<span class="badge b-running" style="background:rgba(192,122,240,.15);color:var(--recover)">recovery</span>' : ""}
+          </div>
+          ${meta}${needs}${err}
+        </div>`;
+      }
+
+      function choiceHTML(recipe, pending) {
+        const btns = pending.options
+          .map((o, i) => `<button onclick="choose('${esc(recipe.name)}','${esc(pending.step)}',${i})">▶ ${esc(o)}</button>`)
+          .join("");
+        return `<div class="choice">
+          <div class="c-msg">⚠ ${esc(pending.message)}</div>${btns}
+        </div>`;
+      }
+
+      function recipeHTML(r) {
+        const nodes = r.steps.map((s) => nodeHTML(r, s)).join('<div class="arrow">↓</div>');
+        const choice = r.pending ? choiceHTML(r, r.pending) : "";
+        const err = r.error ? `<div class="err">✗ ${esc(r.error)}</div>` : "";
+        const logs = r.logs && r.logs.length ? esc(r.logs.join("\n")) : "(no output yet)";
+        return `<section class="recipe">
+          <div class="rhead">
+            <span>${esc(r.name)}</span>
+            <span class="badge b-${r.status}">${r.status}</span>
+          </div>
+          <div class="flow">${nodes || '<div class="empty">no steps</div>'}${choice}</div>
+          ${err}
+          <div class="logs"><pre>${logs}</pre></div>
+        </section>`;
+      }
+
+      let lastLogLengths = {};
+      function render(state) {
+        const app = document.getElementById("app");
+        const st = document.getElementById("status");
+        st.innerHTML = state.done
+          ? '<span class="dot" style="background:var(--success)"></span>done'
+          : '<span class="dot" style="background:var(--running)"></span>running' +
+            (state.dry_run ? " · dry-run" : "");
+        app.innerHTML = state.recipes.map(recipeHTML).join("");
+        // Keep each log pane scrolled to the newest line when it grew.
+        document.querySelectorAll(".logs pre").forEach((pre, i) => {
+          const name = state.recipes[i] && state.recipes[i].name;
+          const len = state.recipes[i] ? state.recipes[i].logs.length : 0;
+          if (lastLogLengths[name] !== len) { pre.scrollTop = pre.scrollHeight; lastLogLengths[name] = len; }
+        });
+      }
+
+      async function tick() {
+        try {
+          const res = await fetch("/state.json");
+          render(await res.json());
+        } catch (e) {
+          document.getElementById("status").textContent = "disconnected";
+        }
+      }
+      tick();
+      setInterval(tick, 700);
+    </script>
+  </body>
+</html>

@@ -43,10 +43,13 @@ impl StageKind {
             (StageKind::Login, _) => "login",
             (StageKind::Pre, RunMode::Push) => "pre-push",
             (StageKind::Pre, RunMode::Pull) => "pre-pull",
+            (StageKind::Pre, RunMode::Deploy) => "pre-deploy",
             (StageKind::Main, RunMode::Push) => "push",
             (StageKind::Main, RunMode::Pull) => "pull",
+            (StageKind::Main, RunMode::Deploy) => "deploy",
             (StageKind::Post, RunMode::Push) => "post-push",
             (StageKind::Post, RunMode::Pull) => "post-pull",
+            (StageKind::Post, RunMode::Deploy) => "post-deploy",
         }
     }
 
@@ -57,6 +60,7 @@ impl StageKind {
             (StageKind::Pre, _) => "pre",
             (StageKind::Main, RunMode::Push) => "push",
             (StageKind::Main, RunMode::Pull) => "pull",
+            (StageKind::Main, RunMode::Deploy) => "deploy",
             (StageKind::Post, _) => "post",
         }
     }
@@ -85,19 +89,68 @@ pub enum ProgressUpdate {
         total: usize,
     },
     Log(String, String),
+    /// A deploy step (DAG node) started running its action.
+    StepStarted {
+        recipe: String,
+        step: String,
+    },
+    /// A deploy step finished. `ok` is false when the action failed (it may then
+    /// be routed to a recovery node).
+    StepFinished {
+        recipe: String,
+        step: String,
+        ok: bool,
+    },
+    /// A log line produced by a specific deploy step's action.
+    StepLog {
+        recipe: String,
+        step: String,
+        line: String,
+    },
+    /// A recovery node is waiting for the operator to pick a fix option. The UI
+    /// replies with a [`StepChoice`] over the deploy control channel. `options`
+    /// carries the option labels in order.
+    StepNeedsChoice {
+        recipe: String,
+        step: String,
+        message: String,
+        options: Vec<String>,
+    },
     Completed(String),
     Failed(String, String),
+}
+
+/// A recovery decision sent from the UI (TUI / `--gui`) back to the deploy
+/// engine: run option `option` of recovery node `step` for recipe `recipe`.
+#[derive(Debug, Clone)]
+pub struct StepChoice {
+    pub recipe: String,
+    pub step: String,
+    pub option: usize,
+}
+
+/// How a deploy run resolves recovery choices. Push/pull ignore this entirely.
+#[derive(Clone, Default)]
+pub struct DeployCtl {
+    /// When true, recovery nodes wait for a UI choice on `choices`; when false
+    /// (plain / CI) the engine auto-picks the first `default` option or fails.
+    pub interactive: bool,
+    /// Broadcast bus the UI publishes [`StepChoice`]s on. Each recipe engine
+    /// subscribes and filters for its own recipe + step.
+    pub choices: Option<tokio::sync::broadcast::Sender<StepChoice>>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum RunMode {
     Push,
     Pull,
+    Deploy,
 }
 
 /// Pre-flight validation: all publish-path vars must be set.
 pub fn validate_recipes(
     config: &CiabattaConfig,
+    root: &Path,
     recipe_names: &[String],
     env_vars: &HashMap<String, String>,
     mode: &RunMode,
@@ -108,11 +161,23 @@ pub fn validate_recipes(
             .get(name)
             .ok_or_else(|| anyhow::anyhow!("Recipe '{}' not found in config", name))?;
 
+        // Deploys resolve and validate their step DAG (from the flowchart file)
+        // instead of a publish path.
+        if let RunMode::Deploy = mode {
+            let deploy = entry.deploy_recipe().ok_or_else(|| {
+                anyhow::anyhow!("Recipe '{}' has no [deploy] definition", name)
+            })?;
+            crate::deploy::resolve_deploy(deploy, name, root)
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            continue;
+        }
+
         let recipe = match mode {
             RunMode::Push => entry.push_recipe(),
             RunMode::Pull => entry
                 .pull_recipe()
                 .ok_or_else(|| anyhow::anyhow!("Recipe '{}' has no pull action defined", name))?,
+            RunMode::Deploy => unreachable!(),
         };
 
         // Only the built-in main action consumes publish_path; if the user
@@ -154,6 +219,32 @@ pub async fn run_all(
     mode: RunMode,
     tx: mpsc::Sender<ProgressUpdate>,
 ) -> Result<()> {
+    run_all_ctl(
+        config,
+        root,
+        recipe_names,
+        env_vars,
+        dry_run,
+        mode,
+        DeployCtl::default(),
+        tx,
+    )
+    .await
+}
+
+/// Like [`run_all`], but with a [`DeployCtl`] for interactive recovery choices.
+/// Push/pull callers use [`run_all`] (which passes a default, unused `DeployCtl`).
+#[allow(clippy::too_many_arguments)]
+pub async fn run_all_ctl(
+    config: &CiabattaConfig,
+    root: &Path,
+    recipe_names: &[String],
+    env_vars: &HashMap<String, String>,
+    dry_run: bool,
+    mode: RunMode,
+    ctl: DeployCtl,
+    tx: mpsc::Sender<ProgressUpdate>,
+) -> Result<()> {
     let mut handles = Vec::new();
     for name in recipe_names {
         let name = name.clone();
@@ -161,9 +252,10 @@ pub async fn run_all(
         let root = root.to_path_buf();
         let env_vars = env_vars.clone();
         let tx = tx.clone();
+        let ctl = ctl.clone();
 
         let handle = tokio::spawn(async move {
-            run_one(name, &config, &root, &env_vars, dry_run, mode, tx).await
+            run_one(name, &config, &root, &env_vars, dry_run, mode, &ctl, tx).await
         });
         handles.push(handle);
     }
@@ -175,6 +267,7 @@ pub async fn run_all(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_one(
     name: String,
     config: &CiabattaConfig,
@@ -182,17 +275,26 @@ async fn run_one(
     env_vars: &HashMap<String, String>,
     dry_run: bool,
     mode: RunMode,
+    ctl: &DeployCtl,
     tx: mpsc::Sender<ProgressUpdate>,
 ) -> Result<()> {
     let _ = tx.send(ProgressUpdate::Started(name.clone())).await;
     tracing::debug!(
         recipe = %name,
-        mode = if mode == RunMode::Push { "push" } else { "pull" },
+        mode = match mode {
+            RunMode::Push => "push",
+            RunMode::Pull => "pull",
+            RunMode::Deploy => "deploy",
+        },
         dry_run,
         "starting recipe"
     );
 
-    let result = execute_recipe(&name, config, root, env_vars, dry_run, mode, &tx).await;
+    let result = if mode == RunMode::Deploy {
+        crate::deploy::run_deploy(&name, config, root, env_vars, dry_run, ctl, &tx).await
+    } else {
+        execute_recipe(&name, config, root, env_vars, dry_run, mode, &tx).await
+    };
 
     match result {
         Ok(()) => {
@@ -226,6 +328,8 @@ async fn execute_recipe(
         RunMode::Pull => entry
             .pull_recipe()
             .ok_or_else(|| anyhow::anyhow!("Recipe '{}' has no pull action", name))?,
+        // Deploy is dispatched to the DAG engine in `run_one` before reaching here.
+        RunMode::Deploy => unreachable!("deploy mode is handled by the deploy engine"),
     };
 
     // Resolve the registry (if any) and the artifact paths once up front, so the
@@ -278,6 +382,7 @@ async fn execute_recipe(
                 registry_config: rc,
                 local_path: local.as_path(),
                 remote_path: remote.as_str(),
+                local_image: recipe.local_image.as_deref(),
                 env_vars,
                 dry_run,
                 container_cmd,
@@ -469,6 +574,8 @@ async fn run_transfer(
     let res = match mode {
         RunMode::Push => registry::push(o, &mut sublog).await,
         RunMode::Pull => registry::pull(o, &mut sublog).await,
+        // Deploys never resolve registry transfers.
+        RunMode::Deploy => unreachable!("deploy mode does not run registry transfers"),
     };
     (i, res, sublog)
 }
@@ -549,6 +656,7 @@ async fn resolve_pull_commit(
             registry_config: reg_cfg,
             local_path: Path::new(""),
             remote_path: &remote,
+            local_image: None,
             env_vars: &trial,
             dry_run: false,
             container_cmd,
@@ -614,6 +722,21 @@ fn build_transfers(
     root: &Path,
     env_vars: &HashMap<String, String>,
 ) -> Result<Vec<(PathBuf, String)>> {
+    // A Docker/ECR image recipe (`local_image`) tags and pushes a single image;
+    // there is no local file to walk. The remote reference is `publish_path`
+    // (with {VAR} substitution), falling back to the local image's own name:tag.
+    if let Some(image) = recipe.local_image.as_deref() {
+        let remote = match recipe.publish_path.as_ref() {
+            Some(PublishPath::Single(path)) => substitute_vars(path, env_vars)?,
+            None => image.to_string(),
+            Some(PublishPath::Many(_)) => bail!(
+                "local_image pushes a single image, so publish_path must be a single remote \
+                 image reference (e.g. \"app:{{CIABATTA_COMMIT}}\"), not a list of globs"
+            ),
+        };
+        return Ok(vec![(PathBuf::from(image), remote)]);
+    }
+
     match recipe.publish_path.as_ref() {
         Some(PublishPath::Single(path)) => {
             let remote = substitute_vars(path, env_vars)?;
@@ -828,10 +951,15 @@ mod tests {
         assert_eq!(StageKind::Main.label(RunMode::Push), "push");
         assert_eq!(StageKind::Main.label(RunMode::Pull), "pull");
         assert_eq!(StageKind::Post.label(RunMode::Pull), "post-pull");
+        // Deploy labels its phases pre-deploy → deploy → post-deploy.
+        assert_eq!(StageKind::Pre.label(RunMode::Deploy), "pre-deploy");
+        assert_eq!(StageKind::Main.label(RunMode::Deploy), "deploy");
+        assert_eq!(StageKind::Post.label(RunMode::Deploy), "post-deploy");
         // Compact forms drop the direction suffix on pre/post.
         assert_eq!(StageKind::Pre.short(RunMode::Push), "pre");
         assert_eq!(StageKind::Post.short(RunMode::Pull), "post");
         assert_eq!(StageKind::Main.short(RunMode::Push), "push");
+        assert_eq!(StageKind::Main.short(RunMode::Deploy), "deploy");
     }
 
     #[test]
@@ -921,6 +1049,50 @@ mod tests {
     }
 
     #[test]
+    fn build_transfers_uses_local_image_without_touching_filesystem() {
+        // A docker/ECR image recipe: no file is walked; the single transfer maps
+        // the local image (as local_path) to the substituted remote reference.
+        let recipe = SimpleRecipe {
+            registry: Some("ecr".to_string()),
+            local_image: Some("app:latest".to_string()),
+            publish_path: Some(PublishPath::Single("app:{CIABATTA_COMMIT}".to_string())),
+            ..Default::default()
+        };
+        let mut vars = HashMap::new();
+        vars.insert("CIABATTA_COMMIT".to_string(), "abc".to_string());
+
+        // A path that doesn't exist would blow up the file-based branch; here it's
+        // ignored entirely.
+        let transfers = build_transfers(&recipe, Path::new("/nonexistent"), &vars).unwrap();
+        assert_eq!(transfers.len(), 1);
+        assert_eq!(transfers[0].0, PathBuf::from("app:latest"));
+        assert_eq!(transfers[0].1, "app:abc");
+    }
+
+    #[test]
+    fn build_transfers_local_image_defaults_remote_to_image_ref() {
+        // With no publish_path, the remote reference reuses the local image name.
+        let recipe = SimpleRecipe {
+            registry: Some("dockerhub".to_string()),
+            local_image: Some("app:v1".to_string()),
+            ..Default::default()
+        };
+        let transfers =
+            build_transfers(&recipe, Path::new("/nonexistent"), &HashMap::new()).unwrap();
+        assert_eq!(transfers, vec![(PathBuf::from("app:v1"), "app:v1".to_string())]);
+    }
+
+    #[test]
+    fn build_transfers_local_image_rejects_glob_list() {
+        let recipe = SimpleRecipe {
+            local_image: Some("app:v1".to_string()),
+            publish_path: Some(PublishPath::Many(vec!["dist/*".to_string()])),
+            ..Default::default()
+        };
+        assert!(build_transfers(&recipe, Path::new("/x"), &HashMap::new()).is_err());
+    }
+
+    #[test]
     fn validate_list_publish_path_requires_ciabatta_path() {
         let cfg: CiabattaConfig = toml::from_str(
             r#"
@@ -933,12 +1105,12 @@ publish_path = ["dist/*.tar.gz"]
 
         // Without CIABATTA_PATH the list form fails validation up front.
         let empty = HashMap::new();
-        assert!(validate_recipes(&cfg, &["a".to_string()], &empty, &RunMode::Push).is_err());
+        assert!(validate_recipes(&cfg, Path::new("."), &["a".to_string()], &empty, &RunMode::Push).is_err());
 
         // With CIABATTA_PATH set it passes.
         let mut vars = HashMap::new();
         vars.insert("CIABATTA_PATH".to_string(), "/main/abc".to_string());
-        assert!(validate_recipes(&cfg, &["a".to_string()], &vars, &RunMode::Push).is_ok());
+        assert!(validate_recipes(&cfg, Path::new("."), &["a".to_string()], &vars, &RunMode::Push).is_ok());
     }
 
     #[test]
@@ -955,7 +1127,7 @@ main = "echo hi"
 "#,
         )
         .unwrap();
-        assert!(validate_recipes(&cfg, &["a".to_string()], &vars, &RunMode::Push).is_ok());
+        assert!(validate_recipes(&cfg, Path::new("."), &["a".to_string()], &vars, &RunMode::Push).is_ok());
 
         // built-in main: the missing variable must be caught up front.
         let cfg2: CiabattaConfig = toml::from_str(
@@ -966,6 +1138,6 @@ publish_path = "x/{MISSING_VAR}/y"
 "#,
         )
         .unwrap();
-        assert!(validate_recipes(&cfg2, &["a".to_string()], &vars, &RunMode::Push).is_err());
+        assert!(validate_recipes(&cfg2, Path::new("."), &["a".to_string()], &vars, &RunMode::Push).is_err());
     }
 }

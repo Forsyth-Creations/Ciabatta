@@ -16,6 +16,9 @@ pub struct RegistryOpOptions<'a> {
     pub registry_config: &'a RegistryConfig,
     pub local_path: &'a Path,
     pub remote_path: &'a str,
+    /// Docker/ECR only: the local image reference to retag to the remote target
+    /// before pushing (see [`crate::config::SimpleRecipe::local_image`]).
+    pub local_image: Option<&'a str>,
     pub env_vars: &'a HashMap<String, String>,
     pub dry_run: bool,
     pub container_cmd: &'a str,
@@ -206,6 +209,28 @@ async fn docker_login(opts: &RegistryOpOptions<'_>, log: &mut Vec<String>) -> Re
         );
     }
     Ok(true)
+}
+
+/// `<container> tag <from> <to>` — retag a local image to another reference.
+///
+/// Used by the Docker/ECR push (retag a locally-built image to its remote
+/// repository reference before pushing) and pull (retag the pulled remote image
+/// back to the recipe's local name).
+pub(super) async fn tag_image(
+    opts: &RegistryOpOptions<'_>,
+    from: &str,
+    to: &str,
+    log: &mut Vec<String>,
+) -> Result<()> {
+    log.push(format!("Docker tag: {from} -> {to}"));
+    if opts.dry_run {
+        log.push(format!(
+            "[dry-run] would run: {} tag {from} {to}",
+            opts.container_cmd
+        ));
+        return Ok(());
+    }
+    run_command(opts.container_cmd, &["tag", from, to], opts.env_vars, log).await
 }
 
 pub async fn run_script(

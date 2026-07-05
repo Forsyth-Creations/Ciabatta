@@ -141,6 +141,36 @@ impl App {
                     r.logs.push(line);
                 }
             }
+            ProgressUpdate::StepStarted { recipe, step } => {
+                if let Some(r) = self.find_mut(&recipe) {
+                    r.logs.push(format!("▶ {step}"));
+                }
+            }
+            ProgressUpdate::StepFinished { recipe, step, ok } => {
+                if let Some(r) = self.find_mut(&recipe) {
+                    r.logs.push(format!("{} {step}", if ok { "✓" } else { "✗" }));
+                }
+            }
+            ProgressUpdate::StepLog { recipe, step, line } => {
+                if let Some(r) = self.find_mut(&recipe) {
+                    r.logs.push(format!("  [{step}] {line}"));
+                }
+            }
+            ProgressUpdate::StepNeedsChoice {
+                recipe,
+                step,
+                message,
+                options,
+            } => {
+                if let Some(r) = self.find_mut(&recipe) {
+                    r.logs.push(format!("⚠ {step}: {message}"));
+                    for (i, opt) in options.iter().enumerate() {
+                        r.logs.push(format!("    [{i}] {opt}"));
+                    }
+                    r.logs
+                        .push("    (choose a fix in --gui mode)".to_string());
+                }
+            }
             ProgressUpdate::Completed(name) => {
                 if let Some(r) = self.find_mut(&name) {
                     r.status = RecipeStatus::Success;

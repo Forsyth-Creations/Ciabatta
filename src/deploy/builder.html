@@ -1,0 +1,437 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Ciabatta — Flowchart Builder</title>
+    <style>
+      :root {
+        --bg:#0f1115; --panel:#171a21; --panel2:#1e222b; --line:#2a2f3a;
+        --fg:#e6e9ef; --muted:#9aa4b2; --accent:#f0a54a; --recover:#c07af0;
+        --ok:#46c17a; --err:#ef5f6b;
+      }
+      * { box-sizing:border-box; }
+      body { margin:0; background:var(--bg); color:var(--fg);
+        font:14px/1.5 ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
+      header { padding:14px 20px; border-bottom:1px solid var(--line); display:flex; align-items:center; gap:12px; }
+      header .loaf { font-size:20px; } header h1 { font-size:15px; margin:0; font-weight:600; }
+      header .hint { color:var(--muted); font-size:13px; margin-left:auto; }
+      main { display:grid; grid-template-columns:1.2fr 1fr; gap:16px; padding:16px 20px; }
+      @media (max-width:980px){ main{ grid-template-columns:1fr; } }
+      .col-h { display:flex; align-items:center; gap:10px; margin-bottom:10px; }
+      .col-h h2 { font-size:13px; text-transform:uppercase; letter-spacing:.05em; color:var(--muted); margin:0; }
+      input, textarea, select { width:100%; background:var(--panel2); color:var(--fg);
+        border:1px solid var(--line); border-radius:6px; padding:6px 8px; font:inherit; }
+      textarea { resize:vertical; min-height:38px; }
+      label { display:block; font-size:12px; color:var(--muted); margin:6px 0 2px; }
+      .card { border:1px solid var(--line); border-radius:10px; background:var(--panel); padding:12px; margin-bottom:12px; }
+      .card.recover { border-color:var(--recover); }
+      .row { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
+      .row3 { display:grid; grid-template-columns:1fr 1fr auto; gap:8px; align-items:end; }
+      .btn { border:1px solid var(--line); border-radius:6px; background:var(--panel2); color:var(--fg);
+        padding:6px 12px; cursor:pointer; font:inherit; }
+      .btn:hover { border-color:var(--accent); }
+      .btn.primary { background:var(--accent); color:#1b1300; border-color:var(--accent); font-weight:600; }
+      .btn.danger:hover { border-color:var(--err); color:var(--err); }
+      .btns { display:flex; gap:8px; flex-wrap:wrap; }
+      .chk { display:flex; align-items:center; gap:6px; margin-top:8px; font-size:13px; color:var(--muted); }
+      .chk input { width:auto; }
+      .opt { border:1px dashed var(--line); border-radius:8px; padding:8px; margin-top:8px; background:var(--panel2); }
+      pre#toml { background:#0b0d11; border:1px solid var(--line); border-radius:10px; padding:14px; overflow:auto;
+        font:12.5px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace; white-space:pre; max-height:60vh; }
+      .warn { color:var(--err); font-size:13px; min-height:20px; }
+      .muted { color:var(--muted); font-size:12px; }
+      .sticky { position:sticky; top:12px; }
+      .tag { font-size:11px; padding:1px 7px; border-radius:999px; background:#2a2f3a; color:var(--muted); }
+      .importer { margin-top:10px; border:1px solid var(--line); border-radius:8px; padding:8px 10px; background:var(--panel); }
+      .importer summary { cursor:pointer; color:var(--muted); font-size:13px; }
+      .importer textarea { margin-top:8px; min-height:120px; font:12.5px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <span class="loaf">🍞</span>
+      <h1>ciabatta deploy — flowchart builder</h1>
+      <span class="hint">Design your pipeline, then copy the TOML into a flowchart file.</span>
+    </header>
+    <main>
+      <div>
+        <div class="col-h">
+          <h2>Steps</h2>
+          <div class="btns" style="margin-left:auto">
+            <button class="btn" onclick="addStep(false)">+ Step</button>
+            <button class="btn" onclick="addStep(true)">+ Recovery node</button>
+          </div>
+        </div>
+        <label>Flowchart entry name (the <code>[entry]</code> table)</label>
+        <input id="entry" value="web" oninput="render()" />
+
+        <details class="importer">
+          <summary>Paste existing TOML to keep editing a pipeline…</summary>
+          <textarea id="importText" placeholder="[web]&#10;  [[web.steps]]&#10;  name = &quot;build&quot;&#10;  script = &quot;scripts/build.sh&quot;"></textarea>
+          <div class="btns" style="margin-top:8px">
+            <button class="btn primary" onclick="importToml()">Import</button>
+            <span id="importMsg" class="muted"></span>
+          </div>
+        </details>
+
+        <div id="steps" style="margin-top:12px"></div>
+      </div>
+
+      <div>
+        <div class="sticky">
+          <div class="col-h">
+            <h2>Generated TOML</h2>
+            <div class="btns" style="margin-left:auto">
+              <button class="btn primary" onclick="copyToml()">Copy</button>
+              <button class="btn" onclick="downloadToml()">Download</button>
+            </div>
+          </div>
+          <div class="warn" id="warn"></div>
+          <pre id="toml"></pre>
+          <p class="muted">Reference this file from your main config:
+            <br /><code>[recipies.NAME.deploy]</code> · <code>flowchart = "path/to/file.toml"</code></p>
+        </div>
+      </div>
+    </main>
+
+    <script>
+      let steps = [];
+      let nextId = 1;
+
+      function addStep(recover) {
+        steps.push({
+          id: nextId++,
+          name: recover ? "fix_" + nextId : "step_" + nextId,
+          actionType: "script",
+          action: "",
+          needs: "",
+          on_error: "",
+          recover: !!recover,
+          message: "",
+          retry: "",
+          options: recover ? [{ label: "Retry", actionType: "script", action: "", default: true }] : [],
+        });
+        render();
+      }
+      function removeStep(id) { steps = steps.filter((s) => s.id !== id); render(); }
+      function addOption(id) {
+        const s = steps.find((s) => s.id === id);
+        s.options.push({ label: "", actionType: "script", action: "", default: false });
+        render();
+      }
+      function removeOption(id, i) {
+        const s = steps.find((s) => s.id === id);
+        s.options.splice(i, 1); render();
+      }
+      const set = (id, k, v) => { const s = steps.find((s) => s.id === id); s[k] = v; renderToml(); };
+      const setOpt = (id, i, k, v) => { const s = steps.find((s) => s.id === id); s.options[i][k] = v; renderToml(); };
+
+      const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;" }[c]));
+
+      function stepCard(s) {
+        const opts = s.options.map((o, i) => `
+          <div class="opt">
+            <div class="row3">
+              <div><label>Option label</label><input value="${esc(o.label)}" oninput="setOpt(${s.id},${i},'label',this.value)" /></div>
+              <div><label>${o.actionType}</label><input value="${esc(o.action)}" placeholder="script path or command"
+                     oninput="setOpt(${s.id},${i},'action',this.value)" /></div>
+              <button class="btn danger" onclick="removeOption(${s.id},${i})">✕</button>
+            </div>
+            <div style="display:flex; gap:14px; align-items:center; margin-top:6px">
+              <label class="chk"><span>action:</span>
+                <select style="width:auto" onchange="setOpt(${s.id},${i},'actionType',this.value)">
+                  <option value="script" ${o.actionType==="script"?"selected":""}>script</option>
+                  <option value="run" ${o.actionType==="run"?"selected":""}>run</option>
+                </select></label>
+              <label class="chk"><input type="checkbox" ${o.default?"checked":""}
+                onchange="setOpt(${s.id},${i},'default',this.checked)" /> default (auto-pick in CI)</label>
+            </div>
+          </div>`).join("");
+
+        const recoverFields = s.recover ? `
+          <label>Message shown to the operator</label>
+          <textarea oninput="set(${s.id},'message',this.value)" placeholder="Migration failed — choose a fix:">${esc(s.message)}</textarea>
+          <div class="row">
+            <div><label>retry (step to re-run after a fix)</label><input value="${esc(s.retry)}" oninput="set(${s.id},'retry',this.value)" /></div>
+            <div></div>
+          </div>
+          <div class="col-h" style="margin-top:10px"><h2>Fix options</h2>
+            <button class="btn" style="margin-left:auto" onclick="addOption(${s.id})">+ Option</button></div>
+          ${opts}` : `
+          <div class="row">
+            <div>
+              <label>action type</label>
+              <select onchange="set(${s.id},'actionType',this.value)">
+                <option value="script" ${s.actionType==="script"?"selected":""}>script (bash file)</option>
+                <option value="run" ${s.actionType==="run"?"selected":""}>run (inline command)</option>
+              </select>
+            </div>
+            <div><label>${s.actionType==="script"?"script path":"command"}</label>
+              <input value="${esc(s.action)}" oninput="set(${s.id},'action',this.value)"
+                placeholder="${s.actionType==="script"?"scripts/build.sh":"make build"}" /></div>
+          </div>
+          <div class="row">
+            <div><label>needs (comma-separated step names)</label>
+              <input value="${esc(s.needs)}" oninput="set(${s.id},'needs',this.value)" placeholder="build, test" /></div>
+            <div><label>on_error (recovery node to jump to)</label>
+              <input value="${esc(s.on_error)}" oninput="set(${s.id},'on_error',this.value)" placeholder="fix_migrate" /></div>
+          </div>`;
+
+        return `<div class="card ${s.recover?"recover":""}">
+          <div class="col-h">
+            <input style="max-width:240px; font-weight:600" value="${esc(s.name)}" oninput="set(${s.id},'name',this.value)" />
+            ${s.recover ? '<span class="tag" style="color:var(--recover)">recovery</span>' : '<span class="tag">step</span>'}
+            <button class="btn danger" style="margin-left:auto" onclick="removeStep(${s.id})">Delete</button>
+          </div>
+          ${recoverFields}
+        </div>`;
+      }
+
+      // ── TOML generation ──────────────────────────────────────────────────
+      const q = (s) => '"' + String(s).replace(/\\/g, "\\\\").replace(/"/g, '\\"') + '"';
+      const list = (arr) => "[" + arr.map(q).join(", ") + "]";
+
+      function toml() {
+        const entry = (document.getElementById("entry").value || "web").trim();
+        let out = `[${entry}]\n`;
+        for (const s of steps) {
+          out += `\n  [[${entry}.steps]]\n`;
+          out += `  name = ${q(s.name)}\n`;
+          if (s.recover) {
+            out += `  recover = true\n`;
+            if (s.message.trim()) out += `  message = ${q(s.message)}\n`;
+            if (s.retry.trim()) out += `  retry = ${q(s.retry.trim())}\n`;
+            const optLines = s.options.map((o) => {
+              const parts = [`label = ${q(o.label)}`];
+              if (o.action.trim()) parts.push(`${o.actionType} = ${q(o.action.trim())}`);
+              if (o.default) parts.push(`default = true`);
+              return "    { " + parts.join(", ") + " }";
+            });
+            if (optLines.length) out += `  options = [\n${optLines.join(",\n")},\n  ]\n`;
+          } else {
+            if (s.action.trim()) out += `  ${s.actionType} = ${q(s.action.trim())}\n`;
+            const needs = s.needs.split(",").map((x) => x.trim()).filter(Boolean);
+            if (needs.length) out += `  needs = ${list(needs)}\n`;
+            if (s.on_error.trim()) out += `  on_error = ${q(s.on_error.trim())}\n`;
+          }
+        }
+        return out;
+      }
+
+      function validate() {
+        const names = steps.map((s) => s.name.trim());
+        const set = new Set();
+        const problems = [];
+        for (const n of names) {
+          if (!n) problems.push("a step has an empty name");
+          else if (set.has(n)) problems.push(`duplicate step name "${n}"`);
+          set.add(n);
+        }
+        for (const s of steps) {
+          const refs = [];
+          s.needs.split(",").map((x) => x.trim()).filter(Boolean).forEach((n) => refs.push(["needs", n]));
+          if (s.on_error.trim()) refs.push(["on_error", s.on_error.trim()]);
+          if (s.recover && s.retry.trim()) refs.push(["retry", s.retry.trim()]);
+          for (const [kind, r] of refs) if (!set.has(r)) problems.push(`${s.name}.${kind} → unknown step "${r}"`);
+          if (!s.recover && !s.action.trim()) problems.push(`step "${s.name}" has no script/run`);
+          if (s.recover && s.options.length === 0) problems.push(`recovery "${s.name}" has no options`);
+          if (s.on_error.trim()) {
+            const target = steps.find((x) => x.name.trim() === s.on_error.trim());
+            if (target && !target.recover) problems.push(`on_error target "${s.on_error.trim()}" is not a recovery node`);
+          }
+        }
+        return problems;
+      }
+
+      function renderToml() {
+        document.getElementById("toml").textContent = toml();
+        const problems = validate();
+        document.getElementById("warn").textContent = problems.length ? "⚠ " + problems.join(" · ") : "";
+      }
+      function render() {
+        document.getElementById("steps").innerHTML =
+          steps.length ? steps.map(stepCard).join("") : '<p class="muted">No steps yet — add one above.</p>';
+        renderToml();
+      }
+
+      function copyToml() {
+        navigator.clipboard.writeText(toml()).then(() => {
+          const b = event.target; const t = b.textContent; b.textContent = "Copied!";
+          setTimeout(() => (b.textContent = t), 1200);
+        });
+      }
+      function downloadToml() {
+        const blob = new Blob([toml()], { type: "text/plain" });
+        const a = document.createElement("a");
+        a.href = URL.createObjectURL(blob);
+        a.download = (document.getElementById("entry").value || "deploy") + ".toml";
+        a.click();
+      }
+
+      // ── Import: parse a flowchart-subset of TOML back into editable steps ──
+      // Supports what the builder (and ciabatta) emit: [entry] / [[entry.steps]]
+      // tables, string / bool / number scalars, string arrays, and arrays of
+      // inline tables (the recovery `options`). Enough for round-tripping.
+      function parseToml(src) {
+        let i = 0;
+        const n = src.length;
+        const root = {};
+        let current = root;
+
+        const isWs = (c) => c === " " || c === "\t" || c === "\r" || c === "\n";
+        function skip() {
+          while (i < n) {
+            if (src[i] === "#") { while (i < n && src[i] !== "\n") i++; }
+            else if (isWs(src[i])) i++;
+            else break;
+          }
+        }
+        function parseString() {
+          const q = src[i++];
+          let out = "";
+          if (q === '"') {
+            while (i < n && src[i] !== '"') {
+              if (src[i] === "\\") { i++; const e = src[i++];
+                out += e === "n" ? "\n" : e === "t" ? "\t" : e === "r" ? "\r" : e; }
+              else out += src[i++];
+            }
+            i++;
+          } else {
+            while (i < n && src[i] !== "'") out += src[i++];
+            i++;
+          }
+          return out;
+        }
+        function parseKey() {
+          skip();
+          if (src[i] === '"' || src[i] === "'") return parseString();
+          const start = i;
+          while (i < n && " \t=.]".indexOf(src[i]) === -1) i++;
+          return src.slice(start, i);
+        }
+        function parseValue() {
+          skip();
+          const c = src[i];
+          if (c === '"' || c === "'") return parseString();
+          if (c === "[") return parseArray();
+          if (c === "{") return parseInline();
+          const start = i;
+          while (i < n && ",]}\n#".indexOf(src[i]) === -1) i++;
+          const tok = src.slice(start, i).trim();
+          if (tok === "true") return true;
+          if (tok === "false") return false;
+          const num = Number(tok);
+          return tok !== "" && !isNaN(num) ? num : tok;
+        }
+        function parseArray() {
+          i++; const arr = [];
+          while (i < n) {
+            skip();
+            if (src[i] === "]") { i++; break; }
+            arr.push(parseValue());
+            skip();
+            if (src[i] === ",") { i++; continue; }
+            if (src[i] === "]") { i++; break; }
+          }
+          return arr;
+        }
+        function parseInline() {
+          i++; const obj = {};
+          while (i < n) {
+            skip();
+            if (src[i] === "}") { i++; break; }
+            const k = parseKey(); skip();
+            if (src[i] === "=") i++;
+            obj[k] = parseValue(); skip();
+            if (src[i] === ",") { i++; continue; }
+            if (src[i] === "}") { i++; break; }
+          }
+          return obj;
+        }
+        function resolve(path, doubled) {
+          let obj = root;
+          for (let k = 0; k < path.length - 1; k++) {
+            const key = path[k];
+            if (obj[key] === undefined) obj[key] = {};
+            obj = Array.isArray(obj[key]) ? obj[key][obj[key].length - 1] : obj[key];
+          }
+          const last = path[path.length - 1];
+          if (doubled) {
+            if (!Array.isArray(obj[last])) obj[last] = [];
+            const t = {}; obj[last].push(t); return t;
+          }
+          if (obj[last] === undefined) obj[last] = {};
+          return obj[last];
+        }
+
+        while (i < n) {
+          skip();
+          if (i >= n) break;
+          if (src[i] === "[") {
+            const doubled = src[i + 1] === "[";
+            i += doubled ? 2 : 1;
+            const path = [];
+            while (i < n) { skip(); path.push(parseKey()); skip();
+              if (src[i] === ".") { i++; continue; } break; }
+            skip();
+            if (src[i] === "]") i++;
+            if (doubled && src[i] === "]") i++;
+            current = resolve(path, doubled);
+          } else {
+            const k = parseKey(); skip();
+            if (src[i] === "=") i++;
+            current[k] = parseValue();
+          }
+        }
+        return root;
+      }
+
+      function optType(o) { return o.run !== undefined && o.script === undefined ? "run" : "script"; }
+      function optAction(o) { return o.script !== undefined ? String(o.script) : o.run !== undefined ? String(o.run) : ""; }
+
+      function importToml() {
+        const text = (document.getElementById("importText").value || "").trim();
+        const msg = document.getElementById("importMsg");
+        if (!text) { msg.textContent = "Paste some TOML first."; return; }
+        let root;
+        try { root = parseToml(text); }
+        catch (e) { msg.textContent = "Could not parse: " + e.message; return; }
+        const entries = Object.keys(root).filter((k) => root[k] && Array.isArray(root[k].steps));
+        if (!entries.length) { msg.textContent = "No [entry] with [[entry.steps]] found."; return; }
+        const name = entries[0];
+        document.getElementById("entry").value = name;
+        steps = root[name].steps.map((s) => ({
+          id: nextId++,
+          name: s.name || "",
+          actionType: optType(s),
+          action: optAction(s),
+          needs: Array.isArray(s.needs) ? s.needs.join(", ") : s.needs || "",
+          on_error: s.on_error || "",
+          recover: !!s.recover,
+          message: s.message || "",
+          retry: s.retry || "",
+          options: Array.isArray(s.options)
+            ? s.options.map((o) => ({ label: o.label || "", actionType: optType(o), action: optAction(o), default: !!o.default }))
+            : [],
+        }));
+        msg.textContent = `Imported ${steps.length} step(s) from [${name}]` +
+          (entries.length > 1 ? ` (first of ${entries.length} entries)` : "");
+        document.querySelector(".importer").open = false;
+        render();
+      }
+
+      // Seed with a small illustrative pipeline.
+      steps = [
+        { id: nextId++, name: "build", actionType: "script", action: "scripts/build.sh", needs: "", on_error: "", recover: false, message: "", retry: "", options: [] },
+        { id: nextId++, name: "migrate", actionType: "script", action: "scripts/migrate.sh", needs: "build", on_error: "fix_migrate", recover: false, message: "", retry: "", options: [] },
+        { id: nextId++, name: "fix_migrate", actionType: "script", action: "", needs: "", on_error: "", recover: true, message: "Migration failed — choose how to recover:", retry: "migrate", options: [
+          { label: "Roll back the migration", actionType: "script", action: "scripts/rollback.sh", default: false },
+          { label: "Force-unlock & continue", actionType: "run", action: "make unlock", default: true },
+        ] },
+        { id: nextId++, name: "release", actionType: "script", action: "scripts/release.sh", needs: "migrate", on_error: "", recover: false, message: "", retry: "", options: [] },
+      ];
+      render();
+    </script>
+  </body>
+</html>

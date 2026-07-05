@@ -100,6 +100,7 @@ artifacts are published from.
 | --- | --- |
 | `ciabatta push [RECIPE...]` | Push one or more recipes in parallel (all if none named). |
 | `ciabatta pull [RECIPE...]` | Download artifacts for one or more recipes. |
+| `ciabatta deploy [RECIPE...]` | Run a deploy: a DAG of dependent script steps with error-recovery branches. `--gui` for a live browser view, `--build` for a visual flowchart editor. |
 | `ciabatta list` | List all recipes defined in the config. |
 | `ciabatta init [--ci SYSTEM]` | Create a `.ciabatta/` directory with a starter `ciabatta.toml`. |
 | `ciabatta configure` | Interactively add a registry (and optionally a recipe) — no hand-editing TOML. |
@@ -246,14 +247,44 @@ publish_path        = "app/{CIABATTA_BRANCH}/{CIABATTA_COMMIT}/app"
 - The `aws` CLI must be installed and configured on the machine or CI runner;
   Ciabatta shells out to `aws s3 cp` for both push and pull.
 
+### Docker / ECR images
+
+For `docker`- and `ecr`-type registries, point a recipe at a **locally-built
+image** with `local_image`. Ciabatta retags it to the registry's target
+reference and pushes it — so you don't have to bake the registry URL into your
+`docker build`:
+
+```toml
+[registries.myecr]
+type = "ecr"                       # inferred when the name contains "ecr"
+url  = "123456789.dkr.ecr.us-east-1.amazonaws.com"
+
+[recipies.app]
+registry     = "myecr"
+local_image  = "app:latest"        # a local image (name or name:tag)
+publish_path = "app:{CIABATTA_COMMIT}"   # remote image ref (repo[:tag])
+
+  # Build the image locally; ciabatta handles the tag + push.
+  [recipies.app.push]
+  pre = "docker build -t app:latest ."
+```
+
+On push this runs `docker tag app:latest <url>/app:<commit>` then
+`docker push <url>/app:<commit>`. On pull it pulls that remote reference and
+retags it back to `app:latest`. Omit `publish_path` to reuse `local_image`
+verbatim as the remote reference. ECR auto-logs in via
+`aws ecr get-login-password`; plain Docker registries use
+`CIABATTA_<REGISTRY>_USER` / `_PASS`.
+
 ## Stages
 
 Every direction runs as a four-stage state machine, and the TUI shows progress
 through each stage live:
 
 ```
-Push:  login → pre-push → push → post-push
-Pull:  login → pre-pull → pull → post-pull
+Push:    login → pre-push   → push   → post-push
+Pull:    login → pre-pull   → pull   → post-pull
+Deploy:  login → pre-deploy → deploy → post-deploy
 ```
 
 Override any stage with an arbitrary command — bash, python, a compiled binary,
@@ -284,6 +315,89 @@ publish_path = "front/{CIABATTA_COMMIT}/dist"
 | pre-push / pre-pull | `pre` | nothing |
 | push / pull | `main` | built-in registry action (or legacy `bash_script`) |
 | post-push / post-pull | `post` | nothing |
+
+## Deploys
+
+A **deploy** is a third recipe direction, run with `ciabatta deploy`. Instead of
+a single registry transfer, its `deploy` phase runs a **DAG of dependent script
+steps** — build → migrate → release, and so on. Deploys are "just another
+recipe": they live in `[recipies.<name>.deploy]`, show up in `ciabatta list`,
+and work with menus (`--cookbook`).
+
+The **step graph lives in its own flowchart file**, referenced from your config,
+so a complex pipeline doesn't clutter `ciabatta.toml`:
+
+```toml
+# .ciabatta/ciabatta.toml
+[recipies.web.deploy]
+flowchart = ".ciabatta/deploys.toml"   # the step DAG (a separate file)
+pre  = "scripts/notify_start.sh"        # optional login/pre/post phase hooks
+```
+
+```toml
+# .ciabatta/deploys.toml — each top-level entry is a series of dependent steps.
+[web]
+  [[web.steps]]
+  name = "build"
+  script = "scripts/build.sh"           # a bash file… (or use run = "…" inline)
+
+  [[web.steps]]
+  name = "migrate"
+  script  = "scripts/migrate.sh"
+  needs   = ["build"]                    # runs once "build" succeeds (a DAG edge)
+  on_error = "fix_migrate"               # on failure, jump to a recovery node
+
+  [[web.steps]]                          # a recovery node: a choice of fixes
+  name = "fix_migrate"
+  recover = true
+  message = "Migration failed — choose how to recover:"
+  retry   = "migrate"                    # re-run this step after a fix succeeds
+  options = [
+    { label = "Roll back",    script = "scripts/rollback.sh" },
+    { label = "Force unlock", run = "make unlock", default = true },
+  ]
+
+  [[web.steps]]
+  name = "release"
+  script = "scripts/release.sh"
+  needs  = ["migrate"]
+```
+
+Steps whose `needs` are all satisfied become eligible to run; the graph is
+validated up front (missing edges, non-recovery `on_error` targets, and cycles
+are rejected before anything runs).
+
+### Error recovery ("if error")
+
+When a step with `on_error` fails, control jumps to its **recovery node**, which
+presents a list of fix `options`:
+
+- With **`--gui`**, the browser shows fix-it buttons — click one to run that fix.
+- Without a UI (plain / CI), the option marked **`default = true`** runs
+  automatically (unattended self-heal); if none is marked, the deploy fails and
+  prints the available remedies.
+- After a fix succeeds, **`retry`** re-runs the named step. Retry loops are
+  bounded so a persistently failing step can't spin forever.
+
+### Watching and building deploys in the browser
+
+```bash
+ciabatta deploy web --gui     # live view: flowchart + streaming logs + fix buttons
+ciabatta deploy --build       # visual flowchart editor → copy the generated TOML
+```
+
+`--gui` serves a local page (default `--port 8088`) that shows each step lighting
+up as it runs, per-step logs, and interactive recovery. `--build` opens a visual
+builder that needs no project: lay out steps, edges, and recovery options, then
+copy the emitted TOML into your flowchart file. Already have a pipeline? Paste
+its TOML into the builder's import box to keep editing it visually.
+
+| Phase | Override key | Default |
+| --- | --- | --- |
+| login | `login` | nothing (deploys usually authenticate inside a step) |
+| pre-deploy | `pre` | nothing |
+| deploy | the `steps` DAG | runs the flowchart |
+| post-deploy | `post` | nothing |
 
 ## Credentials
 

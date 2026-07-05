@@ -337,6 +337,8 @@ pre  = "scripts/notify_start.sh"        # optional login/pre/post phase hooks
 ```toml
 # .ciabatta/deploys.toml — each top-level entry is a series of dependent steps.
 [web]
+  REQUIRED_ENV = ["DEPLOY_TOKEN", "AWS_REGION"]  # gate the whole flowchart
+
   [[web.steps]]
   name = "build"
   script = "scripts/build.sh"           # a bash file… (or use run = "…" inline)
@@ -366,6 +368,12 @@ pre  = "scripts/notify_start.sh"        # optional login/pre/post phase hooks
 Steps whose `needs` are all satisfied become eligible to run; the graph is
 validated up front (missing edges, non-recovery `on_error` targets, and cycles
 are rejected before anything runs).
+
+**`REQUIRED_ENV`** lists variables the flowchart needs. Before any phase runs,
+each is checked; if one is empty or unset the deploy is aborted — the missing
+names are printed to the console and shown in the `--gui` view, and no step runs.
+(You can also set `REQUIRED_ENV` on the `[recipies.<name>.deploy]` table; the two
+lists are merged.)
 
 ### Error recovery ("if error")
 

@@ -40,6 +40,13 @@ pub struct DeployRecipe {
     /// Override the `post-deploy` phase (default: no-op).
     pub post: Option<String>,
 
+    /// Environment variables that must be set (and non-empty) for the deploy to
+    /// run. Checked before any phase executes; if any are empty/unset the deploy
+    /// is aborted with an error. Merged with the flowchart file's own
+    /// `REQUIRED_ENV` when a `flowchart` file is used.
+    #[serde(default, rename = "REQUIRED_ENV")]
+    pub required_env: Vec<String>,
+
     /// Steps written inline, when not using a separate `flowchart` file.
     #[serde(default)]
     pub steps: Vec<DeployStep>,
@@ -117,6 +124,11 @@ pub struct FlowchartFile {
 /// One named flowchart within a [`FlowchartFile`].
 #[derive(Debug, Deserialize, Clone, Default)]
 pub struct Flowchart {
+    /// Environment variables that must be set (and non-empty) for this
+    /// flowchart's deploy steps to run. Empty/unset variables abort the deploy
+    /// before any phase executes.
+    #[serde(default, rename = "REQUIRED_ENV")]
+    pub required_env: Vec<String>,
     #[serde(default)]
     pub steps: Vec<DeployStep>,
 }
@@ -128,6 +140,8 @@ pub struct ResolvedDeploy {
     pub login: Option<String>,
     pub pre: Option<String>,
     pub post: Option<String>,
+    /// Variables that must be set (non-empty) before the deploy may run.
+    pub required_env: Vec<String>,
     pub steps: Vec<DeployStep>,
 }
 
@@ -148,6 +162,10 @@ pub fn resolve_deploy(
     recipe_name: &str,
     root: &Path,
 ) -> Result<ResolvedDeploy> {
+    // Variables required by the flowchart entry (if a file is used); merged with
+    // any declared on the recipe's `[deploy]` table below.
+    let mut required_env: Vec<String> = Vec::new();
+
     let steps = match deploy.flowchart.as_deref() {
         Some(rel) => {
             let path = root.join(rel);
@@ -181,15 +199,25 @@ pub fn resolve_deploy(
                     recipe_name
                 );
             }
+            required_env.extend(chart.required_env.iter().cloned());
             chart.steps.clone()
         }
         None => deploy.steps.clone(),
     };
 
+    // Recipe-level `REQUIRED_ENV` applies to both inline and file flowcharts;
+    // fold it in, de-duplicating so a var listed in both places is checked once.
+    for var in &deploy.required_env {
+        if !required_env.contains(var) {
+            required_env.push(var.clone());
+        }
+    }
+
     let resolved = ResolvedDeploy {
         login: deploy.login.clone(),
         pre: deploy.pre.clone(),
         post: deploy.post.clone(),
+        required_env,
         steps,
     };
     validate_flowchart(&resolved.steps, recipe_name)?;
@@ -659,6 +687,48 @@ needs = ["a"]
         assert!(err.contains("api") && err.contains("web"));
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn resolve_merges_required_env_from_file_and_recipe() {
+        let dir = std::env::temp_dir().join(format!("ciab_flow_env_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("deploys.toml"),
+            r#"
+[web]
+REQUIRED_ENV = ["API_TOKEN", "REGION"]
+  [[web.steps]]
+  name = "build"
+  script = "b.sh"
+"#,
+        )
+        .unwrap();
+
+        // Flowchart file's REQUIRED_ENV plus a recipe-level one, de-duped.
+        let deploy = DeployRecipe {
+            flowchart: Some("deploys.toml".to_string()),
+            required_env: vec!["REGION".to_string(), "STAGE".to_string()],
+            ..Default::default()
+        };
+        let resolved = resolve_deploy(&deploy, "web", &dir).unwrap();
+        assert_eq!(
+            resolved.required_env,
+            vec!["API_TOKEN".to_string(), "REGION".to_string(), "STAGE".to_string()]
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn resolve_required_env_for_inline_steps() {
+        let deploy = DeployRecipe {
+            required_env: vec!["DEPLOY_KEY".to_string()],
+            steps: steps_from("[[steps]]\nname=\"a\"\nscript=\"a.sh\"\n"),
+            ..Default::default()
+        };
+        let resolved = resolve_deploy(&deploy, "web", Path::new("/proj")).unwrap();
+        assert_eq!(resolved.required_env, vec!["DEPLOY_KEY".to_string()]);
     }
 
     #[test]

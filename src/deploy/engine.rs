@@ -20,6 +20,23 @@ use super::{DeployStep, ResolvedDeploy, resolve_deploy};
 /// gives up — bounds retry loops so a persistently failing step can't spin forever.
 const MAX_STEP_ATTEMPTS: u32 = 20;
 
+/// Return the names from `required` that are absent from `env_vars` or present
+/// but empty (after trimming). An empty result means every required variable is
+/// set, so the deploy may proceed. Order follows `required` so the reported list
+/// matches how the operator declared `REQUIRED_ENV`.
+fn missing_required_env(required: &[String], env_vars: &HashMap<String, String>) -> Vec<String> {
+    required
+        .iter()
+        .filter(|key| {
+            env_vars
+                .get(key.as_str())
+                .map(|v| v.trim().is_empty())
+                .unwrap_or(true)
+        })
+        .cloned()
+        .collect()
+}
+
 /// Whether a step counts as "satisfied" for the purposes of its dependents.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum StepState {
@@ -56,6 +73,40 @@ pub async fn run_deploy(
         .deploy_recipe()
         .ok_or_else(|| anyhow::anyhow!("Recipe '{}' has no [deploy] definition", name))?;
     let resolved = resolve_deploy(deploy, name, root)?;
+
+    // Gate the whole flowchart on `REQUIRED_ENV`: if any required variable is
+    // empty or unset, abort before running a single phase, surfacing the missing
+    // names to both the console and the deploy GUI.
+    let missing = missing_required_env(&resolved.required_env, env_vars);
+    if !missing.is_empty() {
+        let list = missing.join(", ");
+        // Console: printed directly so it shows even in `--gui` mode, where
+        // progress updates are folded into the browser view rather than stdout.
+        eprintln!(
+            "[{name}] ✗ deploy aborted — required env variable(s) empty or unset: {list}"
+        );
+        // GUI: emit a log line per missing variable into the recipe's log panel.
+        let _ = tx
+            .send(ProgressUpdate::Log(
+                name.to_string(),
+                format!("✗ Deploy aborted before running — missing required env variable(s): {list}"),
+            ))
+            .await;
+        for var in &missing {
+            let _ = tx
+                .send(ProgressUpdate::Log(
+                    name.to_string(),
+                    format!("  • {var} is empty or unset"),
+                ))
+                .await;
+        }
+        // Returning Err becomes a `Failed` update (shown as the recipe's error in
+        // the GUI, and on stderr by the plain runner).
+        bail!(
+            "Deploy '{name}' cannot run: required env variable(s) empty or unset: {list}. \
+             Set them (see REQUIRED_ENV in the flowchart) and retry."
+        );
+    }
 
     for stage in StageKind::ALL {
         let _ = tx
@@ -489,4 +540,29 @@ fn recipe_log_stream(
         }
     });
     (line_tx, handle)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn env(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+    }
+
+    #[test]
+    fn missing_required_env_flags_unset_and_empty_only() {
+        let required = vec!["API_TOKEN".to_string(), "REGION".to_string(), "STAGE".to_string()];
+        // API_TOKEN set, REGION empty, STAGE absent → REGION + STAGE missing.
+        let missing = missing_required_env(&required, &env(&[("API_TOKEN", "abc"), ("REGION", "  ")]));
+        assert_eq!(missing, vec!["REGION".to_string(), "STAGE".to_string()]);
+    }
+
+    #[test]
+    fn missing_required_env_empty_when_all_set() {
+        let required = vec!["A".to_string(), "B".to_string()];
+        assert!(missing_required_env(&required, &env(&[("A", "1"), ("B", "2")])).is_empty());
+        // No requirements → never missing.
+        assert!(missing_required_env(&[], &env(&[])).is_empty());
+    }
 }

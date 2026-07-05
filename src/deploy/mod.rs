@@ -193,7 +193,87 @@ pub fn resolve_deploy(
         steps,
     };
     validate_flowchart(&resolved.steps, recipe_name)?;
+    let mut resolved = resolved;
+    resolved.steps = topo_order(&resolved.steps);
     Ok(resolved)
+}
+
+/// Reorder steps so that dependencies always precede their dependents, giving
+/// both the executor and the live view (`--gui`) a logical top-to-bottom order
+/// regardless of how the flowchart file happened to list them.
+///
+/// Normal steps are topologically sorted over their `needs` edges, with ties
+/// broken by original position so the result is stable and deterministic. Each
+/// recovery node is placed immediately after the first step that routes to it
+/// via `on_error` (where an operator would encounter it); any recovery node not
+/// referenced that way is appended at the end so nothing is dropped.
+///
+/// Assumes the DAG has already passed [`validate_flowchart`] (acyclic, every
+/// edge resolves), so a total order always exists.
+fn topo_order(steps: &[DeployStep]) -> Vec<DeployStep> {
+    use std::collections::VecDeque;
+
+    let idx_of: HashMap<&str, usize> = steps
+        .iter()
+        .enumerate()
+        .map(|(i, s)| (s.name.as_str(), i))
+        .collect();
+    let normal: Vec<usize> = (0..steps.len()).filter(|&i| !steps[i].recover).collect();
+    let is_normal = |name: &str| idx_of.get(name).is_some_and(|&i| !steps[i].recover);
+
+    // In-degree counts `needs` edges to other normal steps only (recovery nodes
+    // are entered via `on_error`, not the success DAG).
+    let mut indegree: HashMap<usize, usize> = normal.iter().map(|&i| (i, 0)).collect();
+    for &i in &normal {
+        for dep in &steps[i].needs {
+            if is_normal(dep) {
+                *indegree.get_mut(&i).unwrap() += 1;
+            }
+        }
+    }
+
+    // Kahn's algorithm. The ready queue is seeded — and refilled — in original
+    // order, so among steps with satisfied dependencies the author's ordering is
+    // preserved.
+    let mut ready: VecDeque<usize> = normal.iter().copied().filter(|i| indegree[i] == 0).collect();
+    let mut ordered_normal: Vec<usize> = Vec::with_capacity(normal.len());
+    while let Some(node) = ready.pop_front() {
+        ordered_normal.push(node);
+        for &j in &normal {
+            if steps[j].needs.iter().any(|d| idx_of.get(d.as_str()) == Some(&node)) {
+                let deg = indegree.get_mut(&j).unwrap();
+                *deg -= 1;
+                if *deg == 0 {
+                    ready.push_back(j);
+                }
+            }
+        }
+    }
+
+    // Emit each normal step, dropping in the recovery node it first routes to
+    // right after it.
+    let mut result: Vec<DeployStep> = Vec::with_capacity(steps.len());
+    let mut placed = vec![false; steps.len()];
+    for &node in &ordered_normal {
+        result.push(steps[node].clone());
+        placed[node] = true;
+        if let Some(target) = steps[node].on_error.as_deref()
+            && let Some(&ri) = idx_of.get(target)
+            && steps[ri].recover
+            && !placed[ri]
+        {
+            result.push(steps[ri].clone());
+            placed[ri] = true;
+        }
+    }
+    // Anything not yet emitted (unreferenced recovery nodes, or normal steps a
+    // malformed-but-validated graph left out) follows in original order.
+    for (i, step) in steps.iter().enumerate() {
+        if !placed[i] {
+            result.push(step.clone());
+        }
+    }
+    result
 }
 
 /// Validate a resolved step DAG:
@@ -474,6 +554,39 @@ name = "a"
 "#,
         );
         assert!(validate_flowchart(&steps, "web").unwrap_err().to_string().contains("no `script` or `run`"));
+    }
+
+    #[test]
+    fn resolve_orders_steps_by_dependencies() {
+        // Declared out of dependency order, with a recovery node listed last.
+        let deploy = DeployRecipe {
+            steps: steps_from(
+                r#"
+[[steps]]
+name = "release"
+script = "r.sh"
+needs = ["migrate"]
+[[steps]]
+name = "migrate"
+script = "m.sh"
+needs = ["build"]
+on_error = "fix"
+[[steps]]
+name = "build"
+script = "b.sh"
+[[steps]]
+name = "fix"
+recover = true
+retry = "migrate"
+options = [ { label = "unlock", run = "make unlock", default = true } ]
+"#,
+            ),
+            ..Default::default()
+        };
+        let resolved = resolve_deploy(&deploy, "web", Path::new("/proj")).unwrap();
+        let order: Vec<&str> = resolved.steps.iter().map(|s| s.name.as_str()).collect();
+        // build → migrate (with its recovery node folded in right after) → release.
+        assert_eq!(order, vec!["build", "migrate", "fix", "release"]);
     }
 
     #[test]

@@ -61,6 +61,7 @@
           <div class="btns" style="margin-left:auto">
             <button class="btn" onclick="addStep(false)">+ Step</button>
             <button class="btn" onclick="addStep(true)">+ Recovery node</button>
+            <button class="btn" onclick="sortByDeps()" title="Reorder so each step follows the steps it needs">↕ Sort by dependencies</button>
           </div>
         </div>
         <label>Flowchart entry name (the <code>[entry]</code> table)</label>
@@ -126,6 +127,45 @@
       }
       const set = (id, k, v) => { const s = steps.find((s) => s.id === id); s[k] = v; renderToml(); };
       const setOpt = (id, i, k, v) => { const s = steps.find((s) => s.id === id); s.options[i][k] = v; renderToml(); };
+
+      const parseNeeds = (s) => String(s.needs || "").split(",").map((x) => x.trim()).filter(Boolean);
+
+      // Reorder steps so dependencies precede dependents, matching how ciabatta
+      // renders and runs them: normal steps topologically sorted over `needs`
+      // (ties keep their current order), each recovery node tucked in right after
+      // the first step that routes to it via `on_error`, and anything left over
+      // appended so nothing is lost. A dependency cycle is left untouched.
+      function sortByDeps() {
+        const byName = new Map(steps.map((s) => [s.name.trim(), s]));
+        const normal = steps.filter((s) => !s.recover);
+        const isNormal = (n) => { const t = byName.get(n); return t && !t.recover; };
+
+        const indeg = new Map(normal.map((s) => [s, parseNeeds(s).filter(isNormal).length]));
+        const ready = normal.filter((s) => indeg.get(s) === 0);
+        const ordered = [];
+        while (ready.length) {
+          const node = ready.shift();
+          ordered.push(node);
+          for (const s of normal) {
+            if (parseNeeds(s).some((d) => byName.get(d) === node)) {
+              indeg.set(s, indeg.get(s) - 1);
+              if (indeg.get(s) === 0) ready.push(s);
+            }
+          }
+        }
+        if (ordered.length < normal.length) return; // cycle: leave as-is
+
+        const placed = new Set();
+        const result = [];
+        for (const s of ordered) {
+          result.push(s); placed.add(s);
+          const target = byName.get(String(s.on_error || "").trim());
+          if (target && target.recover && !placed.has(target)) { result.push(target); placed.add(target); }
+        }
+        for (const s of steps) if (!placed.has(s)) result.push(s);
+        steps = result;
+        render();
+      }
 
       const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;" }[c]));
 
@@ -418,7 +458,9 @@
         msg.textContent = `Imported ${steps.length} step(s) from [${name}]` +
           (entries.length > 1 ? ` (first of ${entries.length} entries)` : "");
         document.querySelector(".importer").open = false;
-        render();
+        // Present the imported pipeline in dependency order regardless of how the
+        // source file happened to list its steps.
+        sortByDeps();
       }
 
       // Seed with a small illustrative pipeline.

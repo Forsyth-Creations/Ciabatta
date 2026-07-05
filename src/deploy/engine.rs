@@ -7,10 +7,11 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use anyhow::{Result, bail};
-use tokio::sync::mpsc;
+use tokio::sync::mpsc::{self, UnboundedSender};
+use tokio::task::JoinHandle;
 
 use crate::config::CiabattaConfig;
-use crate::registry;
+use crate::registry::{self, LogSink};
 use crate::runner::{DeployCtl, ProgressUpdate, StageKind};
 
 use super::{DeployStep, ResolvedDeploy, resolve_deploy};
@@ -103,16 +104,22 @@ async fn run_phase_hook(
     tx: &mpsc::Sender<ProgressUpdate>,
 ) -> Result<bool> {
     let Some(cmd) = cmd else { return Ok(false) };
-    let mut log: Vec<String> = vec![format!("$ {cmd}")];
-    if dry_run {
-        log.push(format!("[dry-run] would run: {cmd}"));
-    } else {
-        let res = registry::run_shell_command(cmd, root, env_vars, &mut log).await;
-        forward_logs(tx, recipe, &log).await;
-        res?;
-        return Ok(true);
-    }
-    forward_logs(tx, recipe, &log).await;
+    let mut log: Vec<String> = Vec::new();
+    let (line_tx, forwarder) = recipe_log_stream(tx, recipe);
+    let res = {
+        let mut sink = LogSink::streaming(&mut log, line_tx);
+        sink.push(format!("$ {cmd}"));
+        if dry_run {
+            sink.push(format!("[dry-run] would run: {cmd}"));
+            Ok(())
+        } else {
+            registry::run_shell_command(cmd, root, env_vars, &mut sink).await
+        }
+    };
+    // Dropping the sink closes the line channel; awaiting the forwarder flushes
+    // every streamed line into the UI state before we move on.
+    let _ = forwarder.await;
+    res?;
     Ok(true)
 }
 
@@ -251,17 +258,22 @@ async fn recover<'a>(
             step: node.name.clone(),
         })
         .await;
-    let mut log: Vec<String> = vec![format!("recover: {}", option.label)];
-    let res = run_action(
-        option.script.as_deref(),
-        option.run.as_deref(),
-        root,
-        env_vars,
-        dry_run,
-        &mut log,
-    )
-    .await;
-    forward_step_logs(tx, recipe, &node.name, &log).await;
+    let mut log: Vec<String> = Vec::new();
+    let (line_tx, forwarder) = step_log_stream(tx, recipe, &node.name);
+    let res = {
+        let mut sink = LogSink::streaming(&mut log, line_tx);
+        sink.push(format!("recover: {}", option.label));
+        run_action(
+            option.script.as_deref(),
+            option.run.as_deref(),
+            root,
+            env_vars,
+            dry_run,
+            &mut sink,
+        )
+        .await
+    };
+    let _ = forwarder.await;
     let fixed = res.is_ok();
     let _ = tx
         .send(ProgressUpdate::StepFinished {
@@ -370,16 +382,21 @@ async fn run_step_action(
         .await;
 
     let mut log: Vec<String> = Vec::new();
-    let res = run_action(
-        step.script.as_deref(),
-        step.run.as_deref(),
-        root,
-        env_vars,
-        dry_run,
-        &mut log,
-    )
-    .await;
-    forward_step_logs(tx, recipe, &step.name, &log).await;
+    let (line_tx, forwarder) = step_log_stream(tx, recipe, &step.name);
+    let res = {
+        let mut sink = LogSink::streaming(&mut log, line_tx);
+        run_action(
+            step.script.as_deref(),
+            step.run.as_deref(),
+            root,
+            env_vars,
+            dry_run,
+            &mut sink,
+        )
+        .await
+    };
+    // Flush all streamed lines into the UI before reporting the step's outcome.
+    let _ = forwarder.await;
 
     let _ = tx
         .send(ProgressUpdate::StepFinished {
@@ -400,57 +417,76 @@ async fn run_action(
     root: &Path,
     env_vars: &HashMap<String, String>,
     dry_run: bool,
-    log: &mut Vec<String>,
+    sink: &mut LogSink<'_>,
 ) -> Result<()> {
     match (script, run) {
         (Some(script), _) => {
             let path = root.join(script);
-            log.push(format!("Running script: {}", path.display()));
+            sink.push(format!("Running script: {}", path.display()));
             if dry_run {
-                log.push(format!("[dry-run] would run: bash {}", path.display()));
+                sink.push(format!("[dry-run] would run: bash {}", path.display()));
                 return Ok(());
             }
-            registry::run_script(&path.to_string_lossy(), env_vars, log).await
+            registry::run_script(&path.to_string_lossy(), env_vars, sink).await
         }
         (None, Some(cmd)) => {
-            log.push(format!("$ {cmd}"));
+            sink.push(format!("$ {cmd}"));
             if dry_run {
-                log.push(format!("[dry-run] would run: {cmd}"));
+                sink.push(format!("[dry-run] would run: {cmd}"));
                 return Ok(());
             }
-            registry::run_shell_command(cmd, root, env_vars, log).await
+            registry::run_shell_command(cmd, root, env_vars, sink).await
         }
         (None, None) => {
             // A recovery option with no action: nothing to do (mark resolved).
-            log.push("(no action)".to_string());
+            sink.push("(no action)".to_string());
             Ok(())
         }
     }
 }
 
-/// Forward a buffer of log lines as recipe-level `Log` updates.
-async fn forward_logs(tx: &mpsc::Sender<ProgressUpdate>, recipe: &str, log: &[String]) {
-    for line in log {
-        let _ = tx
-            .send(ProgressUpdate::Log(recipe.to_string(), line.clone()))
-            .await;
-    }
-}
-
-/// Forward a buffer of log lines as step-scoped `StepLog` updates.
-async fn forward_step_logs(
+/// Spawn a task that forwards each streamed output line as a step-scoped
+/// `StepLog` update. Returns the line sender to feed into a streaming
+/// [`LogSink`], plus the task handle: dropping the sender ends the task, and
+/// awaiting the handle guarantees every line has been folded into the UI state.
+fn step_log_stream(
     tx: &mpsc::Sender<ProgressUpdate>,
     recipe: &str,
     step: &str,
-    log: &[String],
-) {
-    for line in log {
-        let _ = tx
-            .send(ProgressUpdate::StepLog {
-                recipe: recipe.to_string(),
-                step: step.to_string(),
-                line: line.clone(),
-            })
-            .await;
-    }
+) -> (UnboundedSender<String>, JoinHandle<()>) {
+    let (line_tx, mut line_rx) = mpsc::unbounded_channel::<String>();
+    let tx = tx.clone();
+    let recipe = recipe.to_string();
+    let step = step.to_string();
+    let handle = tokio::spawn(async move {
+        while let Some(line) = line_rx.recv().await {
+            let _ = tx
+                .send(ProgressUpdate::StepLog {
+                    recipe: recipe.clone(),
+                    step: step.clone(),
+                    line,
+                })
+                .await;
+        }
+    });
+    (line_tx, handle)
+}
+
+/// Like [`step_log_stream`], but forwards lines as recipe-level `Log` updates
+/// (used by the login/pre/post phase hooks, which aren't tied to a step).
+fn recipe_log_stream(
+    tx: &mpsc::Sender<ProgressUpdate>,
+    recipe: &str,
+) -> (UnboundedSender<String>, JoinHandle<()>) {
+    let (line_tx, mut line_rx) = mpsc::unbounded_channel::<String>();
+    let tx = tx.clone();
+    let recipe = recipe.to_string();
+    let handle = tokio::spawn(async move {
+        while let Some(line) = line_rx.recv().await {
+            let _ = tx
+                .send(ProgressUpdate::Log(recipe.clone(), line))
+                .await;
+        }
+    });
+    (line_tx, handle)
 }

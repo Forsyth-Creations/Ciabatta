@@ -888,7 +888,7 @@ async fn run_shell(
         log.push(format!("[dry-run] would run: {cmd}"));
         return Ok(());
     }
-    registry::run_shell_command(cmd, root, env_vars, log).await
+    registry::run_shell_command(cmd, root, env_vars, &mut registry::LogSink::buffered(log)).await
 }
 
 async fn run_bash_script(
@@ -909,7 +909,12 @@ async fn run_bash_script(
         return Ok(());
     }
 
-    registry::run_script(&script_path.to_string_lossy(), env_vars, log).await
+    registry::run_script(
+        &script_path.to_string_lossy(),
+        env_vars,
+        &mut registry::LogSink::buffered(log),
+    )
+    .await
 }
 
 async fn run_login_script(
@@ -930,7 +935,12 @@ async fn run_login_script(
         return Ok(());
     }
 
-    registry::run_script(&script_path.to_string_lossy(), env_vars, log).await
+    registry::run_script(
+        &script_path.to_string_lossy(),
+        env_vars,
+        &mut registry::LogSink::buffered(log),
+    )
+    .await
 }
 
 #[cfg(test)]

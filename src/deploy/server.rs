@@ -20,7 +20,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{broadcast, mpsc};
 
 use crate::config::CiabattaConfig;
-use crate::runner::{self, DeployCtl, ProgressUpdate, RunMode, StepChoice};
+use crate::runner::{self, DeployCtl, ProgressUpdate, RunMode, StageKind, StepChoice};
 
 use super::resolve_deploy;
 
@@ -43,10 +43,20 @@ struct RecipeView {
     name: String,
     status: String,
     error: Option<String>,
+    /// The four deploy phases (login → pre → deploy → post) with their live
+    /// status, so the GUI can show which phase is running and where it stopped.
+    stages: Vec<StageView>,
     steps: Vec<StepView>,
     edges: Vec<EdgeView>,
     logs: Vec<String>,
     pending: Option<PendingChoice>,
+}
+
+#[derive(Serialize, Clone)]
+struct StageView {
+    name: String,
+    /// pending · running · success · skipped · failed
+    status: String,
 }
 
 #[derive(Serialize, Clone)]
@@ -148,12 +158,39 @@ impl GuiState {
                     r.error = Some(err.clone());
                     r.pending = None;
                     r.logs.push(format!("✗ {err}"));
+                    // Pin the blame on whichever stage was mid-flight, and mark
+                    // any later stages as not reached.
+                    let mut hit = false;
+                    for st in &mut r.stages {
+                        if st.status == "running" {
+                            st.status = "failed".into();
+                            hit = true;
+                        } else if hit && st.status == "pending" {
+                            st.status = "skipped".into();
+                        }
+                    }
+                }
+            }
+            ProgressUpdate::StageStarted { recipe, stage } => {
+                let label = stage.label(RunMode::Deploy);
+                if let Some(r) = self.recipe_mut(&recipe)
+                    && let Some(s) = r.stages.iter_mut().find(|s| s.name == label)
+                {
+                    s.status = "running".into();
+                }
+            }
+            ProgressUpdate::StageFinished { recipe, stage, ran } => {
+                let label = stage.label(RunMode::Deploy);
+                if let Some(r) = self.recipe_mut(&recipe)
+                    && let Some(s) = r.stages.iter_mut().find(|s| s.name == label)
+                    // A stage that already failed stays failed.
+                    && s.status != "failed"
+                {
+                    s.status = if ran { "success".into() } else { "skipped".into() };
                 }
             }
             // Deploys don't emit stage-file-transfer progress.
-            ProgressUpdate::StageStarted { .. }
-            | ProgressUpdate::StageFinished { .. }
-            | ProgressUpdate::TransferProgress { .. } => {}
+            ProgressUpdate::TransferProgress { .. } => {}
         }
         self.done = self
             .recipes
@@ -215,10 +252,19 @@ fn initial_state(
             });
         }
 
+        let stages = StageKind::ALL
+            .iter()
+            .map(|s| StageView {
+                name: s.label(RunMode::Deploy).to_string(),
+                status: "pending".into(),
+            })
+            .collect();
+
         recipes.push(RecipeView {
             name: name.clone(),
             status: "pending".into(),
             error: None,
+            stages,
             steps,
             edges,
             logs: Vec::new(),

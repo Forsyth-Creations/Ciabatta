@@ -291,6 +291,9 @@ fn build_recipe_rows(
     let mut rows: Vec<_> = config
         .recipes
         .iter()
+        // Deploy-only recipes have no push/pull action; the browser drives
+        // push/pull, so leave them out (they run via `ciabatta deploy`).
+        .filter(|(_, entry)| !entry.is_deploy_only())
         .map(|(name, entry)| {
             let push = entry.push_recipe();
             let kind: &'static str = if entry.push.is_some() || entry.pull.is_some() {

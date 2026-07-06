@@ -104,6 +104,27 @@ const S3_CONFIG_HTML = `<span class="c"># Point the registry at a bucket with th
 <span class="k">publish_path</span>        = <span class="v">"app/{CIABATTA_BRANCH}/{CIABATTA_COMMIT}/app"</span>
 <span class="c">#  → s3://my-artifacts-bucket/app/&lt;branch&gt;/&lt;commit&gt;/app</span>`;
 
+// Annotated container (Docker / ECR) config example.
+const DOCKER_CONFIG_HTML = `<span class="c"># An "ecr" registry auto-logs in via aws — no credentials in config.</span>
+<span class="s">[registries.myecr]</span>
+<span class="k">type</span> = <span class="v">"ecr"</span>                       <span class="c"># inferred when the name contains "ecr"</span>
+<span class="k">url</span>  = <span class="v">"123456789.dkr.ecr.us-east-1.amazonaws.com"</span>
+
+<span class="c"># A plain Docker registry logs in with CIABATTA_&lt;NAME&gt;_USER / _PASS.</span>
+<span class="s">[registries.hub]</span>
+<span class="k">type</span> = <span class="v">"docker"</span>
+<span class="k">url</span>  = <span class="v">"docker.io/myorg"</span>
+
+<span class="c"># Point a recipe at a locally-built image; ciabatta retags + pushes it.</span>
+<span class="s">[recipies.app]</span>
+<span class="k">registry</span>     = <span class="v">"myecr"</span>
+<span class="new">local_image</span>  = <span class="v">"app:latest"</span>          <span class="c"># a local image (name or name:tag)</span>
+<span class="k">publish_path</span> = <span class="v">"app:{CIABATTA_COMMIT}"</span>   <span class="c"># remote ref (repo[:tag])</span>
+
+  <span class="c"># Build the image first; ciabatta handles the tag + push.</span>
+  <span class="s">[recipies.app.push]</span>
+  <span class="k">pre</span> = <span class="v">"docker build -t app:latest ."</span>`;
+
 // Annotated deploy flowchart example.
 const DEPLOY_CONFIG_HTML = `<span class="c"># Main config: point a recipe's deploy at a separate flowchart file.</span>
 <span class="s">[recipies.web.deploy]</span>
@@ -156,6 +177,7 @@ function render() {
         <a class="topbar__link" href="#install">Install</a>
         <a class="topbar__link" href="#config">Config</a>
         <a class="topbar__link" href="#s3">S3</a>
+        <a class="topbar__link" href="#docker">Containers</a>
         <a class="topbar__link" href="#deploy">Deploy</a>
         <a class="topbar__link" href="#commands">Commands</a>
         <a class="topbar__cta" href="${REPO}">GitHub ↗</a>
@@ -276,6 +298,23 @@ function render() {
             <div class="fcard"><div class="fcard__icon">🪣</div><h3>Bucket in, key out</h3><p>Use <code>url = "s3://bucket"</code>. Ciabatta joins it with <code>publish_path</code> and runs <code>aws s3 cp</code> — push uploads, <code>ciabatta pull</code> downloads.</p></div>
             <div class="fcard"><div class="fcard__icon">🔑</div><h3>Standard AWS auth</h3><p>No login script needed. Credentials come from the usual chain: <code>AWS_ACCESS_KEY_ID</code> / <code>AWS_SECRET_ACCESS_KEY</code>, <code>AWS_PROFILE</code>, or an instance role.</p></div>
             <div class="fcard"><div class="fcard__icon">⚙</div><h3>Needs the AWS CLI</h3><p>Install and configure the <code>aws</code> CLI on the machine or runner. Set <code>AWS_REGION</code> if your bucket isn't in the CLI's default region.</p></div>
+          </div>
+        </div>
+      </section>
+
+      <section class="section reveal" id="docker">
+        <div class="section__head">
+          <div class="eyebrow">Configuration · Containers</div>
+          <h2>Push Docker &amp; ECR images.</h2>
+          <p class="section__sub">Point a recipe at a <b>locally-built image</b> with <code>local_image</code>. Ciabatta retags it to the registry's target reference and pushes it — so the registry URL never has to be baked into your <code>docker build</code>.</p>
+        </div>
+        <div class="split">
+          <pre class="code">${DOCKER_CONFIG_HTML}</pre>
+          <div class="grid" style="grid-template-columns: 1fr;">
+            <div class="fcard"><div class="fcard__icon">🐳</div><h3>Retag, don't rebuild</h3><p>On push, Ciabatta runs <code>docker tag</code> then <code>docker push</code> to the registry's ref. Omit <code>publish_path</code> to reuse <code>local_image</code> verbatim.</p></div>
+            <div class="fcard"><div class="fcard__icon">🔐</div><h3>ECR logs in for you</h3><p>An <code>ecr</code> registry authenticates automatically with <code>aws ecr get-login-password</code> — no credentials in your config. Plain Docker registries use <code>CIABATTA_&lt;NAME&gt;_USER</code> / <code>_PASS</code>.</p></div>
+            <div class="fcard"><div class="fcard__icon">🐋</div><h3>Docker or podman</h3><p>Set <code>containers</code> under <code>[system]</code>, or let Ciabatta auto-detect what's installed. The same recipe works with either engine.</p></div>
+            <div class="fcard"><div class="fcard__icon">↩</div><h3>Pull retags back</h3><p><code>ciabatta pull</code> pulls the remote reference and retags it back to <code>local_image</code>, so the image lands locally under the name you started with.</p></div>
           </div>
         </div>
       </section>

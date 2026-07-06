@@ -275,6 +275,27 @@ impl RecipeEntry {
     pub fn deploy_recipe(&self) -> Option<&crate::deploy::DeployRecipe> {
         self.deploy.as_ref()
     }
+
+    /// Whether the push/pull direction has something to transfer or run. A recipe
+    /// needs a registry, a path/image to move, or a `main`/`bash_script` command;
+    /// with none of these the push runner has nothing to do and errors with
+    /// "no push/pull action".
+    pub fn has_transfer_action(&self) -> bool {
+        let push = self.push_recipe();
+        push.registry.is_some()
+            || push.publish_path.is_some()
+            || push.local_image.is_some()
+            || push.local_artifact_path.is_some()
+            || push.main.is_some()
+            || push.bash_script.is_some()
+    }
+
+    /// A recipe that declares a `[deploy]` section but has no push/pull transfer
+    /// action is deploy-only: it exists solely as a deployment task, so `ciabatta
+    /// push`/`pull` skips it rather than failing on "no push/pull action".
+    pub fn is_deploy_only(&self) -> bool {
+        self.deploy.is_some() && !self.has_transfer_action()
+    }
 }
 
 /// Resolve which recipes to run from `--cookbook` menu selections and explicitly
@@ -917,6 +938,39 @@ bash_script = "scripts/push.sh"
             entry.push_recipe().bash_script.as_deref(),
             Some("scripts/push.sh")
         );
+    }
+
+    #[test]
+    fn is_deploy_only_distinguishes_pure_deploy_recipes() {
+        let cfg = parse(
+            r#"
+# Deploy-only: a [deploy] section and nothing to push/pull.
+[recipies.migrate.deploy]
+flowchart = ".ciabatta/deploys.toml"
+
+# Deploy alongside a real push action → still pushable.
+[recipies.web]
+registry = "nexus"
+publish_path = "web/{CIABATTA_COMMIT}/dist"
+[recipies.web.deploy]
+flowchart = ".ciabatta/deploys.toml"
+
+# A plain transfer recipe with no deploy → never deploy-only.
+[recipies.assets]
+registry = "nexus"
+
+# A command recipe (no registry/path) is a push action, not deploy-only.
+[recipies.script.deploy]
+flowchart = ".ciabatta/deploys.toml"
+[recipies.script.push]
+main = "make ship"
+"#,
+        );
+
+        assert!(cfg.recipes["migrate"].is_deploy_only());
+        assert!(!cfg.recipes["web"].is_deploy_only());
+        assert!(!cfg.recipes["assets"].is_deploy_only());
+        assert!(!cfg.recipes["script"].is_deploy_only());
     }
 
     #[test]

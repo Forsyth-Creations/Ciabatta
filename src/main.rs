@@ -45,7 +45,7 @@ async fn main() -> Result<()> {
             // Only announce resolved variables when we're not about to take over
             // the screen with the TUI (the output would corrupt/close it).
             let vars = build_env_vars(&cfg, &env, local, &root, no_tui)?;
-            let names = config::select_recipe_names(&cfg, &cookbooks, &recipes)?;
+            let names = select_transfer_names(&cfg, &cookbooks, &recipes)?;
             execute_recipes(&cfg, &root, &names, &vars, dry_run, no_tui, RunMode::Push).await?;
         }
 
@@ -60,7 +60,7 @@ async fn main() -> Result<()> {
         } => {
             let (root, cfg) = load_project(config.as_deref())?;
             let vars = build_env_vars(&cfg, &env, local, &root, no_tui)?;
-            let names = config::select_recipe_names(&cfg, &cookbooks, &recipes)?;
+            let names = select_transfer_names(&cfg, &cookbooks, &recipes)?;
             execute_recipes(&cfg, &root, &names, &vars, dry_run, no_tui, RunMode::Pull).await?;
         }
 
@@ -421,6 +421,23 @@ fn cmd_source(cli_env: &[String]) -> Result<()> {
 /// Single-quote a value for safe inclusion in a shell `export`.
 fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', r"'\''"))
+}
+
+/// Resolve which recipes a push/pull run targets. Like
+/// [`config::select_recipe_names`] but deploy-only recipes — a `[deploy]` section
+/// with no push/pull transfer action — are dropped: they're pure deployment
+/// tasks, so `ciabatta push`/`pull` skips them instead of failing on
+/// "no push/pull action".
+fn select_transfer_names(
+    cfg: &CiabattaConfig,
+    cookbooks: &[String],
+    recipes: &[String],
+) -> Result<Vec<String>> {
+    let names = config::select_recipe_names(cfg, cookbooks, recipes)?;
+    Ok(names
+        .into_iter()
+        .filter(|n| cfg.recipes.get(n).is_none_or(|e| !e.is_deploy_only()))
+        .collect())
 }
 
 /// Resolve which recipes a deploy run targets. Like [`config::select_recipe_names`]

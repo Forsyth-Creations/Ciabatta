@@ -14,6 +14,9 @@
     --text: #e6e8ee;
     --accent: #34d399;
     --danger: #f87171;
+    --prio-high: #f87171;
+    --prio-medium: #fbbf24;
+    --prio-low: #60a5fa;
   }
   * { box-sizing: border-box; }
   html, body { margin: 0; min-height: 100%; }
@@ -28,6 +31,13 @@
   header .brand { font-size: 20px; font-weight: 700; letter-spacing: .3px; }
   header .brand .crumb { color: var(--muted); font-weight: 400; }
   header .count { margin-left: auto; color: var(--muted); font-size: 13px; }
+
+  .toolbar { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; color: var(--muted); font-size: 13px; }
+  .toolbar select {
+    background: var(--panel); border: 1px solid var(--line); color: var(--text);
+    border-radius: 6px; padding: 5px 8px; font: inherit; font-size: 13px; cursor: pointer;
+  }
+  .toolbar select:focus { outline: none; border-color: var(--accent); }
 
   form.add { display: flex; gap: 8px; margin-bottom: 20px; }
   form.add input {
@@ -45,16 +55,36 @@
   li.item {
     display: flex; align-items: center; gap: 12px;
     background: var(--panel); border: 1px solid var(--line);
+    border-left: 3px solid var(--line);
     border-radius: 8px; padding: 12px 14px;
   }
+  li.item.prio-high { border-left-color: var(--prio-high); }
+  li.item.prio-medium { border-left-color: var(--prio-medium); }
+  li.item.prio-low { border-left-color: var(--prio-low); }
   li.item .check {
     flex: none; width: 20px; height: 20px; border-radius: 6px; cursor: pointer;
     border: 1.5px solid var(--muted); background: transparent;
     display: grid; place-items: center; color: transparent; font-size: 13px;
   }
   li.item.done .check { background: var(--accent); border-color: var(--accent); color: #06281c; }
-  li.item .text { flex: 1; word-break: break-word; }
+  li.item .text { flex: 1; word-break: break-word; cursor: text; }
+  li.item .text a { color: var(--accent); text-decoration: underline; }
   li.item.done .text { text-decoration: line-through; color: var(--muted); }
+  li.item .edit-input {
+    flex: 1; background: var(--panel2); border: 1px solid var(--accent); color: var(--text);
+    border-radius: 6px; padding: 6px 8px; font: inherit;
+  }
+  li.item .edit-input:focus { outline: none; }
+  li.item .edit {
+    flex: none; background: none; border: none; color: var(--muted); cursor: pointer;
+    font-size: 15px; line-height: 1; padding: 4px 6px; border-radius: 6px;
+  }
+  li.item .edit:hover { color: var(--text); background: var(--panel2); }
+  li.item .prio {
+    flex: none; background: var(--panel2); border: 1px solid var(--line); color: var(--text);
+    border-radius: 6px; padding: 5px 6px; font: inherit; font-size: 13px; cursor: pointer;
+  }
+  li.item .prio:focus { outline: none; border-color: var(--accent); }
   li.item .del {
     flex: none; background: none; border: none; color: var(--muted); cursor: pointer;
     font-size: 18px; line-height: 1; padding: 4px 6px; border-radius: 6px;
@@ -76,6 +106,16 @@
     <button type="submit">Add</button>
   </form>
 
+  <div class="toolbar">
+    <label for="sort">Sort by</label>
+    <select id="sort">
+      <option value="priority">Priority</option>
+      <option value="newest">Newest</option>
+      <option value="oldest">Oldest</option>
+      <option value="alpha">A–Z</option>
+    </select>
+  </div>
+
   <ul class="list" id="list"></ul>
 </main>
 
@@ -84,6 +124,11 @@
   const countEl = document.getElementById("count");
   const form = document.getElementById("add-form");
   const input = document.getElementById("add-input");
+  const sortEl = document.getElementById("sort");
+
+  // The latest list as received from the server, before applying the chosen
+  // sort. Kept so editing can recover a task's raw (un-linkified) text.
+  let allTodos = [];
 
   function escapeHtml(s) {
     return s.replace(/[&<>"']/g, c => (
@@ -91,7 +136,37 @@
     ));
   }
 
-  function render(todos) {
+  // Escape text, then turn any http(s) URLs into clickable links.
+  function linkify(s) {
+    const urlRe = /(https?:\/\/[^\s<]+)/g;
+    let out = "", last = 0, m;
+    while ((m = urlRe.exec(s)) !== null) {
+      out += escapeHtml(s.slice(last, m.index));
+      const url = m[0];
+      out += `<a href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(url)}</a>`;
+      last = m.index + url.length;
+    }
+    out += escapeHtml(s.slice(last));
+    return out;
+  }
+
+  const PRIO_RANK = { high: 2, medium: 1, low: 0 };
+
+  function sortTodos(todos) {
+    const t = todos.slice();
+    switch (sortEl.value) {
+      case "newest": return t.sort((a, b) => b.id - a.id);
+      case "oldest": return t.sort((a, b) => a.id - b.id);
+      case "alpha":  return t.sort((a, b) => a.text.localeCompare(b.text));
+      case "priority":
+      default:
+        return t.sort((a, b) =>
+          (PRIO_RANK[b.priority] ?? 1) - (PRIO_RANK[a.priority] ?? 1) || b.id - a.id);
+    }
+  }
+
+  function render() {
+    const todos = sortTodos(allTodos);
     const open = todos.filter(t => !t.done).length;
     countEl.textContent = todos.length
       ? `${open} open · ${todos.length} total`
@@ -102,13 +177,22 @@
       return;
     }
 
-    listEl.innerHTML = todos.map(t => `
-      <li class="item ${t.done ? "done" : ""}" data-id="${t.id}">
+    listEl.innerHTML = todos.map(t => {
+      const prio = t.priority || "medium";
+      const opt = (v, label) =>
+        `<option value="${v}" ${prio === v ? "selected" : ""}>${label}</option>`;
+      return `
+      <li class="item prio-${prio} ${t.done ? "done" : ""}" data-id="${t.id}">
         <button class="check" data-action="toggle" title="Toggle complete">✓</button>
-        <span class="text">${escapeHtml(t.text)}</span>
+        <span class="text" title="Double-click to edit">${linkify(t.text)}</span>
+        <button class="edit" data-action="edit" title="Edit">✎</button>
+        <select class="prio" data-action="priority" title="Priority">
+          ${opt("high", "High")}${opt("medium", "Medium")}${opt("low", "Low")}
+        </select>
         <button class="del" data-action="delete" title="Remove">×</button>
       </li>
-    `).join("");
+    `;
+    }).join("");
   }
 
   async function api(path, body) {
@@ -120,25 +204,80 @@
     return res.json();
   }
 
+  function setTodos(todos) {
+    allTodos = todos;
+    render();
+  }
+
   async function refresh() {
-    render(await api("/api/todos"));
+    setTodos(await api("/api/todos"));
+  }
+
+  // Swap a task's text for an inline input, saving on Enter/blur and
+  // cancelling on Escape.
+  function startEdit(id) {
+    const li = listEl.querySelector(`.item[data-id="${id}"]`);
+    const todo = allTodos.find(t => t.id === id);
+    if (!li || !todo) return;
+    const textEl = li.querySelector(".text");
+
+    const inp = document.createElement("input");
+    inp.className = "edit-input";
+    inp.value = todo.text;
+    textEl.replaceWith(inp);
+    inp.focus();
+    inp.setSelectionRange(inp.value.length, inp.value.length);
+
+    let settled = false;
+    const commit = async (save) => {
+      if (settled) return;
+      settled = true;
+      const val = inp.value.trim();
+      if (save && val && val !== todo.text) {
+        setTodos(await api("/api/todos/edit", { id, text: val }));
+      } else {
+        render();
+      }
+    };
+
+    inp.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") { e.preventDefault(); commit(true); }
+      else if (e.key === "Escape") { e.preventDefault(); commit(false); }
+    });
+    inp.addEventListener("blur", () => commit(true));
   }
 
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
     const text = input.value.trim();
     if (!text) return;
-    render(await api("/api/todos", { text }));
+    setTodos(await api("/api/todos", { text }));
     input.value = "";
     input.focus();
   });
 
+  sortEl.addEventListener("change", render);
+
   listEl.addEventListener("click", async (e) => {
-    const btn = e.target.closest("[data-action]");
+    const btn = e.target.closest("button[data-action]");
     if (!btn) return;
     const id = Number(btn.closest(".item").dataset.id);
     const action = btn.dataset.action;
-    render(await api(`/api/todos/${action}`, { id }));
+    if (action === "edit") { startEdit(id); return; }
+    setTodos(await api(`/api/todos/${action}`, { id }));
+  });
+
+  listEl.addEventListener("dblclick", (e) => {
+    const textEl = e.target.closest(".text");
+    if (!textEl || e.target.closest("a")) return;
+    startEdit(Number(textEl.closest(".item").dataset.id));
+  });
+
+  listEl.addEventListener("change", async (e) => {
+    const sel = e.target.closest("select[data-action='priority']");
+    if (!sel) return;
+    const id = Number(sel.closest(".item").dataset.id);
+    setTodos(await api("/api/todos/priority", { id, priority: sel.value }));
   });
 
   refresh();

@@ -10,6 +10,7 @@ mod registry;
 mod runner;
 mod todo;
 mod tui;
+mod watch;
 
 use std::collections::HashMap;
 use std::env;
@@ -81,7 +82,12 @@ async fn main() -> Result<()> {
                 deploy::server::serve_builder(port).await?;
             } else {
                 let (root, cfg) = load_project(config.as_deref())?;
-                let vars = build_env_vars(&cfg, &env, local, &root, no_tui || gui)?;
+                let mut vars = build_env_vars(&cfg, &env, local, &root, no_tui || gui)?;
+                // Auto-source the CIABATTA_* build variables from local git so
+                // every deploy script sees CIABATTA_BRANCH/_COMMIT/_TAG/
+                // _BUILD_NUMBER/_PATH, even when the run isn't in explicit
+                // `--local` or CI mode. Anything already resolved wins.
+                source_ciabatta_vars(&mut vars, &root, no_tui && !gui);
                 let names = select_deploy_names(&cfg, &cookbooks, &recipes)?;
                 if gui {
                     if names.is_empty() {
@@ -140,6 +146,16 @@ async fn main() -> Result<()> {
             .await?;
         }
 
+        Commands::Watch {
+            command,
+            triggers,
+            max_lines,
+            port,
+            no_open,
+        } => {
+            cmd_watch(command, triggers, max_lines, port, no_open).await?;
+        }
+
         Commands::Config { subcommand } => match subcommand {
             ConfigCommand::Show => {
                 let (root, cfg) = load_project(None)?;
@@ -187,6 +203,30 @@ async fn cmd_todo(task: Option<String>, detach: bool, port: u16) -> Result<()> {
     }
 
     todo::server::serve(store, port).await
+}
+
+/// Dispatch `ciabatta watch <command>`: run the command through the shell,
+/// capturing its output into a searchable, live web view. Bookmarks and triggers
+/// persist to disk keyed by the command, so they survive restarts.
+async fn cmd_watch(
+    command: Vec<String>,
+    triggers: Vec<String>,
+    max_lines: usize,
+    port: u16,
+    no_open: bool,
+) -> Result<()> {
+    let command = command.join(" ");
+    if command.trim().is_empty() {
+        bail!("No command given. Usage: ciabatta watch <command>");
+    }
+
+    let store = std::sync::Arc::new(watch::WatchState::new(&command, max_lines)?);
+    // Seed any -t triggers from the command line (deduped against persisted ones).
+    for phrase in &triggers {
+        store.add_trigger(phrase, false)?;
+    }
+
+    watch::server::serve(store, command, port, !no_open).await
 }
 
 /// Re-launch this executable as a detached background process serving the todo
@@ -416,6 +456,51 @@ fn cmd_source(cli_env: &[String]) -> Result<()> {
         println!("export {k}={}", shell_quote(v));
     }
     Ok(())
+}
+
+/// Auto-source the `CIABATTA_*` build variables from local git into an existing
+/// variable map, filling only the ones that aren't already set (so values from
+/// CI, the ambient environment, or `-e` win). Used by `ciabatta deploy` so a
+/// deploy's scripts always see the resolved build variables — the same set
+/// `ciabatta source` prints — without the operator having to `eval` them first.
+///
+/// A non-git directory (or any git error) is not fatal: the deploy simply runs
+/// without git-derived variables, exactly as it would today.
+fn source_ciabatta_vars(vars: &mut HashMap<String, String>, root: &Path, announce: bool) {
+    let git_vars = match git::local_git_vars(root) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::debug!(error = %e, "deploy: could not source CIABATTA_* from local git");
+            return;
+        }
+    };
+    let mut added: Vec<String> = Vec::new();
+    for (k, v) in git_vars {
+        if v.is_empty() {
+            continue;
+        }
+        let slot = vars.entry(k.clone()).or_default();
+        if slot.is_empty() {
+            *slot = v;
+            added.push(k);
+        }
+    }
+    // Derive CIABATTA_PATH from the now-augmented set, if it isn't set already.
+    if vars.get("CIABATTA_PATH").map(|v| v.is_empty()).unwrap_or(true)
+        && let Some(path) = derive_ciabatta_path(vars)
+    {
+        vars.insert("CIABATTA_PATH".to_string(), path);
+        added.push("CIABATTA_PATH".to_string());
+    }
+    if announce && !added.is_empty() {
+        added.sort();
+        eprintln!("Sourced CIABATTA variables from local git for deploy:");
+        for k in &added {
+            if let Some(v) = vars.get(k) {
+                eprintln!("  {k} = {v}");
+            }
+        }
+    }
 }
 
 /// Single-quote a value for safe inclusion in a shell `export`.

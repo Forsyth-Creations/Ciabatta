@@ -206,6 +206,40 @@ pub enum Commands {
         port: u16,
     },
 
+    /// Run a command and stream its logs into a live, searchable web view.
+    ///
+    /// The command runs through your shell, so pipes, &&, and redirects work —
+    /// quote the whole thing when you use them:
+    ///   ciabatta watch "npm run dev | grep -i error"
+    /// Set trigger phrases with -t to get notified when a matching line appears.
+    Watch {
+        /// The command to run (and its arguments). Everything after `watch` is
+        /// captured, including the command's own flags.
+        #[arg(
+            name = "COMMAND",
+            trailing_var_arg = true,
+            allow_hyphen_values = true,
+            required = true
+        )]
+        command: Vec<String>,
+
+        /// Notify when a new log line contains this phrase (repeatable).
+        #[arg(short = 't', long = "trigger", value_name = "PHRASE")]
+        triggers: Vec<String>,
+
+        /// Cap the in-memory log buffer; older lines are dropped past this.
+        #[arg(long, default_value_t = 200_000)]
+        max_lines: usize,
+
+        /// Port for the local web view.
+        #[arg(short = 'p', long, default_value_t = 8090)]
+        port: u16,
+
+        /// Don't open the browser automatically.
+        #[arg(long)]
+        no_open: bool,
+    },
+
     /// Configuration helpers.
     Config {
         #[command(subcommand)]

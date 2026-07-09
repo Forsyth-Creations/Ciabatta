@@ -107,6 +107,7 @@ artifacts are published from.
 | `ciabatta configure auto` | Analyze the project and pick recipes from an interactive checklist (Docker → ECR/Nexus, Rust binaries → crates.io / S3 / Nexus). |
 | `ciabatta tui` (alias `browse`) | Interactive browser — inspect registries, check paths, push on demand. |
 | `ciabatta analyze` | Build the project's dependency graph and serve an interactive view. |
+| `ciabatta watch <command>` | Run a command and stream its logs into a live, searchable web view with bookmarks and notification triggers. |
 | `ciabatta config show` | Print the resolved configuration. |
 | `ciabatta config reference` | Show documentation on the config format and options. |
 
@@ -375,6 +376,26 @@ names are printed to the console and shown in the `--gui` view, and no step runs
 (You can also set `REQUIRED_ENV` on the `[recipies.<name>.deploy]` table; the two
 lists are merged.)
 
+### Build variables are auto-sourced
+
+Every `ciabatta deploy` **auto-sources the `CIABATTA_*` build variables from your
+local git** (`CIABATTA_BRANCH` / `_COMMIT` / `_TAG` / `_BUILD_NUMBER`, plus the
+derived `CIABATTA_PATH`) and makes them available to every step, `run` command,
+and phase hook — the same set `ciabatta source` prints, so you don't need to
+`eval "$(ciabatta source)"` first. This happens regardless of `--local` /
+`CIABATTA_ENV`, so a deploy script can reference `$CIABATTA_COMMIT` on a plain
+dev-machine run:
+
+```toml
+[[web.steps]]
+name = "release"
+run  = "./scripts/release.sh --tag $CIABATTA_COMMIT"
+```
+
+Only *unset* variables are filled in: anything you provide explicitly — from a CI
+system, the ambient environment, or `-e CIABATTA_BRANCH=…` — takes precedence. A
+non-git directory is fine; the deploy just runs without the git-derived values.
+
 ### Error recovery ("if error")
 
 When a step with `on_error` fails, control jumps to its **recovery node**, which
@@ -518,6 +539,53 @@ unless you pass `--check-vulns`).
 Scanned files are content-hashed into `.ciabatta/.cache/analyze.json`, so
 re-running `analyze` only re-parses the manifests that actually changed (it
 reports e.g. `cache: 4 reused, 1 parsed`).
+
+## Watch
+
+`ciabatta watch <command>` runs a command, captures everything it writes to
+stdout and stderr, and serves a **live, searchable web view** of the logs — handy
+for dev servers, long builds, test runners, or any chatty process you'd rather
+scan in a browser than in a scrollback buffer.
+
+```bash
+ciabatta watch "npm run dev"                 # stream a dev server's logs
+ciabatta watch -t error -t "panic" "cargo test"   # notify on matching lines
+ciabatta watch --port 9000 "make deploy | tee build.log"
+```
+
+The command runs through your shell, so pipes, `&&`, and redirects work — quote
+the whole command when you use them. The view opens in your browser at
+`http://127.0.0.1:8090` (override with `--port`, suppress with `--no-open`), and
+keeps serving after the command exits so the logs stay browsable. The status pill
+shows whether it's running or how it exited.
+
+- **Search** — type one or more terms (comma/space separated) and match **any**
+  (OR) or **all** (AND) of them; filter by stdout/stderr, or switch on regex.
+  Search runs server-side over the whole buffer, so history that has scrolled out
+  of the live view is still findable. Matches are highlighted.
+- **Live tail** — new lines stream in automatically; toggle "follow tail" to stop
+  auto-scrolling while you read.
+- **Bookmarks ("points")** — hover any line and click ★ to save it with a label.
+  Click a bookmark to jump back to it. Each bookmark snapshots the line's text, so
+  it stays viewable even after the line scrolls out of the buffer.
+- **Triggers** — add a phrase (or regex) and get notified whenever a new matching
+  line appears: a desktop notification (Web Notifications, permission asked once),
+  an in-page toast with a sound, **and** the matching line printed with a terminal
+  bell in the console where `ciabatta watch` is running. Seed triggers up front
+  with `-t`/`--trigger` (repeatable) or add them live in the sidebar, which also
+  keeps a running hit count and a feed of recent matches.
+
+Bookmarks and triggers **persist to disk** under `~/.ciabatta/watch/`, keyed by
+the command, so they come back the next time you watch the same command. Log
+lines themselves are never written to disk. The in-memory buffer is bounded
+(`--max-lines`, default 200,000); older lines are dropped once it's full.
+
+Useful flags:
+
+- `-t, --trigger PHRASE` — notify on lines containing this phrase (repeatable).
+- `-p, --port PORT` — port for the web view (default `8090`).
+- `--max-lines N` — cap the in-memory log buffer (default `200000`).
+- `--no-open` — don't open the browser automatically.
 
 ## CI variables
 

@@ -11,7 +11,7 @@ use serde::Deserialize;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
-use super::Store;
+use super::{Priority, Store};
 
 /// The embedded single-page app (HTML + CSS + JS, no external assets).
 const INDEX_HTML: &str = include_str!("index.html");
@@ -55,6 +55,20 @@ struct TextPayload {
     text: String,
 }
 
+/// A JSON payload setting a task's priority.
+#[derive(Deserialize)]
+struct PriorityPayload {
+    id: u64,
+    priority: Priority,
+}
+
+/// A JSON payload replacing a task's text (edit).
+#[derive(Deserialize)]
+struct EditPayload {
+    id: u64,
+    text: String,
+}
+
 async fn handle(mut socket: TcpStream, store: &Store) -> Result<()> {
     let Some(req) = read_request(&mut socket).await? else {
         return Ok(());
@@ -75,6 +89,24 @@ async fn handle(mut socket: TcpStream, store: &Store) -> Result<()> {
             },
             ("POST", "/api/todos/toggle") => mutate(store, &req.body, |s, id| s.toggle(id)),
             ("POST", "/api/todos/delete") => mutate(store, &req.body, |s, id| s.remove(id)),
+            ("POST", "/api/todos/priority") => {
+                match serde_json::from_str::<PriorityPayload>(&req.body) {
+                    Ok(p) => match store.set_priority(p.id, p.priority) {
+                        Ok(()) => json_response(store),
+                        Err(e) => bad_request(&e.to_string()),
+                    },
+                    Err(e) => bad_request(&e.to_string()),
+                }
+            }
+            ("POST", "/api/todos/edit") => {
+                match serde_json::from_str::<EditPayload>(&req.body) {
+                    Ok(p) => match store.set_text(p.id, &p.text) {
+                        Ok(()) => json_response(store),
+                        Err(e) => bad_request(&e.to_string()),
+                    },
+                    Err(e) => bad_request(&e.to_string()),
+                }
+            }
             _ => (
                 "404 Not Found",
                 "text/plain; charset=utf-8",

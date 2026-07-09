@@ -17,6 +17,29 @@ use std::sync::Mutex;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+/// How important a task is. Higher-priority tasks sort to the top of the list.
+/// Serialized as a lowercase string (`"high"`/`"medium"`/`"low"`) so the JSON
+/// file stays readable for hand-editing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum Priority {
+    High,
+    #[default]
+    Medium,
+    Low,
+}
+
+impl Priority {
+    /// Sort rank: higher is more important, so it sorts first.
+    fn rank(self) -> u8 {
+        match self {
+            Priority::High => 2,
+            Priority::Medium => 1,
+            Priority::Low => 0,
+        }
+    }
+}
+
 /// A single task.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Todo {
@@ -24,6 +47,9 @@ pub struct Todo {
     pub text: String,
     #[serde(default)]
     pub done: bool,
+    /// How important the task is; drives the list's sort order.
+    #[serde(default)]
+    pub priority: Priority,
     /// RFC 3339 timestamp of when the task was added.
     pub created_at: String,
 }
@@ -46,11 +72,17 @@ impl Store {
         })
     }
 
-    /// A snapshot of every task, newest first.
+    /// A snapshot of every task, highest priority first and newest first within
+    /// a priority.
     pub fn list(&self) -> Vec<Todo> {
         let todos = self.inner.lock().unwrap();
         let mut out = todos.clone();
-        out.sort_by(|a, b| b.id.cmp(&a.id));
+        out.sort_by(|a, b| {
+            b.priority
+                .rank()
+                .cmp(&a.priority.rank())
+                .then(b.id.cmp(&a.id))
+        });
         out
     }
 
@@ -65,6 +97,7 @@ impl Store {
             id: next_id,
             text: text.to_string(),
             done: false,
+            priority: Priority::default(),
             created_at: now_rfc3339(),
         };
         todos.push(todo.clone());
@@ -77,6 +110,27 @@ impl Store {
         let mut todos = self.inner.lock().unwrap();
         if let Some(t) = todos.iter_mut().find(|t| t.id == id) {
             t.done = !t.done;
+        }
+        save(&self.path, &todos)
+    }
+
+    /// Set a task's priority and persist.
+    pub fn set_priority(&self, id: u64, priority: Priority) -> Result<()> {
+        let mut todos = self.inner.lock().unwrap();
+        if let Some(t) = todos.iter_mut().find(|t| t.id == id) {
+            t.priority = priority;
+        }
+        save(&self.path, &todos)
+    }
+
+    /// Replace a task's text and persist.
+    pub fn set_text(&self, id: u64, text: &str) -> Result<()> {
+        let text = text.trim();
+        anyhow::ensure!(!text.is_empty(), "task text is empty");
+
+        let mut todos = self.inner.lock().unwrap();
+        if let Some(t) = todos.iter_mut().find(|t| t.id == id) {
+            t.text = text.to_string();
         }
         save(&self.path, &todos)
     }

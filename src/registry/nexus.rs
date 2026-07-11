@@ -178,10 +178,7 @@ async fn write_npm_userconfig(opts: &RegistryOpOptions<'_>, registry_arg: &str) 
 
     let mut contents = format!("registry={registry_arg}\n//{scoped}:always-auth=true\n");
 
-    let token_key = format!(
-        "CIABATTA_{}_TOKEN",
-        super::cred_key(opts.registry_name)
-    );
+    let token_key = format!("CIABATTA_{}_TOKEN", super::cred_key(opts.registry_name));
     if let Some(token) = opts.env_vars.get(&token_key) {
         contents.push_str(&format!("//{scoped}:_authToken={token}\n"));
     } else if let Some((user, pass)) =
@@ -282,8 +279,7 @@ fn build_client(tls_verify: bool) -> Result<reqwest::Client> {
 /// Minimal standard-alphabet base64 encoder (no padding shortcuts), used for
 /// npm basic-auth `_auth` tokens without pulling in a crate.
 fn base64_encode(input: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
     for chunk in input.chunks(3) {
         let b0 = chunk[0] as u32;

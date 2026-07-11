@@ -189,7 +189,11 @@ pub fn resolve_deploy(
                     if names.is_empty() {
                         "(none)".to_string()
                     } else {
-                        names.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")
+                        names
+                            .iter()
+                            .map(|s| s.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
                     }
                 )
             })?;
@@ -263,12 +267,20 @@ fn topo_order(steps: &[DeployStep]) -> Vec<DeployStep> {
     // Kahn's algorithm. The ready queue is seeded — and refilled — in original
     // order, so among steps with satisfied dependencies the author's ordering is
     // preserved.
-    let mut ready: VecDeque<usize> = normal.iter().copied().filter(|i| indegree[i] == 0).collect();
+    let mut ready: VecDeque<usize> = normal
+        .iter()
+        .copied()
+        .filter(|i| indegree[i] == 0)
+        .collect();
     let mut ordered_normal: Vec<usize> = Vec::with_capacity(normal.len());
     while let Some(node) = ready.pop_front() {
         ordered_normal.push(node);
         for &j in &normal {
-            if steps[j].needs.iter().any(|d| idx_of.get(d.as_str()) == Some(&node)) {
+            if steps[j]
+                .needs
+                .iter()
+                .any(|d| idx_of.get(d.as_str()) == Some(&node))
+            {
                 let deg = indegree.get_mut(&j).unwrap();
                 *deg -= 1;
                 if *deg == 0 {
@@ -318,7 +330,10 @@ pub fn validate_flowchart(steps: &[DeployStep], recipe_name: &str) -> Result<()>
     let mut names: HashSet<&str> = HashSet::new();
     for step in steps {
         if step.name.trim().is_empty() {
-            bail!("Deploy recipe '{}' has a step with an empty name.", recipe_name);
+            bail!(
+                "Deploy recipe '{}' has a step with an empty name.",
+                recipe_name
+            );
         }
         if !names.insert(step.name.as_str()) {
             bail!(
@@ -531,7 +546,12 @@ script = "a.sh"
 needs = ["ghost"]
 "#,
         );
-        assert!(validate_flowchart(&needs, "web").unwrap_err().to_string().contains("ghost"));
+        assert!(
+            validate_flowchart(&needs, "web")
+                .unwrap_err()
+                .to_string()
+                .contains("ghost")
+        );
 
         let on_err = steps_from(
             r#"
@@ -570,7 +590,12 @@ name = "fix"
 recover = true
 "#,
         );
-        assert!(validate_flowchart(&steps, "web").unwrap_err().to_string().contains("no options"));
+        assert!(
+            validate_flowchart(&steps, "web")
+                .unwrap_err()
+                .to_string()
+                .contains("no options")
+        );
     }
 
     #[test]
@@ -581,7 +606,12 @@ recover = true
 name = "a"
 "#,
         );
-        assert!(validate_flowchart(&steps, "web").unwrap_err().to_string().contains("no `script` or `run`"));
+        assert!(
+            validate_flowchart(&steps, "web")
+                .unwrap_err()
+                .to_string()
+                .contains("no `script` or `run`")
+        );
     }
 
     #[test]
@@ -682,7 +712,9 @@ needs = ["a"]
             entry: Some("ghost".to_string()),
             ..Default::default()
         };
-        let err = resolve_deploy(&deploy, "web", &dir).unwrap_err().to_string();
+        let err = resolve_deploy(&deploy, "web", &dir)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("no entry 'ghost'"));
         assert!(err.contains("api") && err.contains("web"));
 
@@ -714,7 +746,11 @@ REQUIRED_ENV = ["API_TOKEN", "REGION"]
         let resolved = resolve_deploy(&deploy, "web", &dir).unwrap();
         assert_eq!(
             resolved.required_env,
-            vec!["API_TOKEN".to_string(), "REGION".to_string(), "STAGE".to_string()]
+            vec![
+                "API_TOKEN".to_string(),
+                "REGION".to_string(),
+                "STAGE".to_string()
+            ]
         );
 
         std::fs::remove_dir_all(&dir).ok();
@@ -745,7 +781,9 @@ REQUIRED_ENV = ["API_TOKEN", "REGION"]
             steps: steps_from("[[steps]]\nname=\"x\"\nrun=\"true\"\n"),
             ..Default::default()
         };
-        let err = resolve_deploy(&deploy, "web", &dir).unwrap_err().to_string();
+        let err = resolve_deploy(&deploy, "web", &dir)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("both") && err.contains("inline"));
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -768,6 +806,11 @@ script = "c.sh"
 needs = ["b"]
 "#,
         );
-        assert!(validate_flowchart(&steps, "web").unwrap_err().to_string().contains("cycle"));
+        assert!(
+            validate_flowchart(&steps, "web")
+                .unwrap_err()
+                .to_string()
+                .contains("cycle")
+        );
     }
 }

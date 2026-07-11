@@ -383,10 +383,7 @@ impl WatchState {
         limit: usize,
     ) -> (Vec<LogLine>, usize) {
         // Compile each term once (bad regex → matches nothing).
-        let matchers: Vec<Option<Regex>> = terms
-            .iter()
-            .map(|t| compile(t, regex).ok())
-            .collect();
+        let matchers: Vec<Option<Regex>> = terms.iter().map(|t| compile(t, regex).ok()).collect();
 
         let inner = self.inner.lock().unwrap();
         let mut out = Vec::new();
@@ -457,8 +454,7 @@ fn compile(pattern: &str, is_regex: bool) -> Result<Regex> {
 fn persist_path_for(command: &str) -> Result<PathBuf> {
     let home = home_dir().context("Could not determine your home directory (HOME is unset)")?;
     let dir = home.join(".ciabatta").join("watch");
-    std::fs::create_dir_all(&dir)
-        .with_context(|| format!("Failed to create {}", dir.display()))?;
+    std::fs::create_dir_all(&dir).with_context(|| format!("Failed to create {}", dir.display()))?;
     Ok(dir.join(format!("watch-{}.json", stable_hash(command))))
 }
 
@@ -481,8 +477,9 @@ fn home_dir() -> Option<PathBuf> {
 fn load(path: &PathBuf) -> Result<Persisted> {
     match std::fs::read_to_string(path) {
         Ok(s) if s.trim().is_empty() => Ok(Persisted::default()),
-        Ok(s) => serde_json::from_str(&s)
-            .with_context(|| format!("Failed to parse {}", path.display())),
+        Ok(s) => {
+            serde_json::from_str(&s).with_context(|| format!("Failed to parse {}", path.display()))
+        }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Persisted::default()),
         Err(e) => Err(e).with_context(|| format!("Failed to read {}", path.display())),
     }

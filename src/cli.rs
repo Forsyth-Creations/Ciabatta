@@ -204,6 +204,11 @@ pub enum Commands {
         /// Port for the local web app.
         #[arg(short = 'p', long, default_value_t = 7878)]
         port: u16,
+
+        /// Port the `ciabatta ai` daemon listens on. When that daemon is
+        /// running, the todo app shows a button to ship a task to the AI.
+        #[arg(long, default_value_t = 8095)]
+        ai_port: u16,
     },
 
     /// Run a command and stream its logs into a live, searchable web view.
@@ -240,6 +245,36 @@ pub enum Commands {
         no_open: bool,
     },
 
+    /// AI assistant: chat with an LLM that learns your codebase architecture.
+    ///
+    /// With no subcommand, opens a chat TUI and serves the live architecture
+    /// mind map in the browser. The assistant tags files as it works (you
+    /// confirm the tags), and your feedback trains a per-project confidence
+    /// score stored under .ciabatta/ai/.
+    Ai {
+        #[command(subcommand)]
+        subcommand: Option<AiCommand>,
+
+        /// Port for the live mind-map / daemon web view.
+        #[arg(short = 'p', long, default_value_t = 8095, global = true)]
+        port: u16,
+
+        /// Don't start the mind-map web server alongside the TUI.
+        #[arg(long)]
+        no_graph: bool,
+
+        /// Assistant mode: plan (research only, no edits), edit (changes wait
+        /// for your approval), or auto (changes apply immediately).
+        /// Shift-Tab cycles modes inside the TUI.
+        #[arg(long, default_value = "edit", global = true)]
+        mode: String,
+
+        /// Resume the most recent saved conversation instead of starting a new
+        /// one. Conversations are stored under .ciabatta/ai/conversations/.
+        #[arg(short = 'c', long = "continue", global = true)]
+        continue_last: bool,
+    },
+
     /// Configuration helpers.
     Config {
         #[command(subcommand)]
@@ -250,6 +285,66 @@ pub enum Commands {
     Configure {
         #[command(subcommand)]
         subcommand: Option<ConfigureCommand>,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum AiCommand {
+    /// Interactively configure the assistant (Claude or an OpenAI-compatible
+    /// endpoint) and write the [ai] section into .ciabatta/ciabatta.toml.
+    Setup,
+
+    /// Ask a one-shot question and print the answer (no TUI).
+    Ask {
+        /// The question. Everything after `ask` is captured.
+        #[arg(name = "PROMPT", trailing_var_arg = true, required = true)]
+        prompt: Vec<String>,
+    },
+
+    /// Run only the AI assistant daemon: the live mind map plus a JSON API
+    /// (POST /api/ask, /api/feedback, /api/confirm).
+    Serve,
+
+    /// Resume a saved conversation. With no id, lists the saved conversations
+    /// (stored under .ciabatta/ai/conversations/) so you can pick one.
+    Resume {
+        /// The conversation id to resume (see `ciabatta ai resume` with no id).
+        id: Option<String>,
+    },
+
+    /// Ship a task to the assistant to complete behind the scenes. It runs the
+    /// full agent loop autonomously (auto-accept mode) and records the result.
+    Ship {
+        /// The task to complete. Everything after `ship` is captured. Omit when
+        /// using --todo.
+        #[arg(name = "TASK", trailing_var_arg = true)]
+        task: Vec<String>,
+
+        /// Ship the text of this personal todo (see `ciabatta todo`) instead of
+        /// a literal task; the todo is marked done if the job succeeds.
+        #[arg(long, value_name = "ID")]
+        todo: Option<u64>,
+    },
+
+    /// List background AI tasks and their status (see `ciabatta ai ship`).
+    Jobs,
+
+    /// Burn-in: traverse the codebase, determine its architecture parts, and
+    /// build the mind map in one pass. Watch it happen live in the browser.
+    ///
+    /// The assistant first surveys the file tree to name the architectures,
+    /// then reads files batch by batch and tags each into the map. Tags apply
+    /// immediately by default; use --review to queue every tag for your
+    /// confirmation instead (shown as ghost nodes on the map).
+    BurnIn {
+        /// Queue tags as pending proposals for review instead of applying
+        /// them to the map immediately.
+        #[arg(long)]
+        review: bool,
+
+        /// Analyze at most N files (useful for a quick first pass).
+        #[arg(long, value_name = "N")]
+        limit: Option<usize>,
     },
 }
 

@@ -114,21 +114,6 @@ impl Store {
         save(&self.path, &todos)
     }
 
-    /// Set a task's completion state explicitly and persist. Used when the AI
-    /// finishes a task that was shipped from the todo list.
-    pub fn set_done(&self, id: u64, done: bool) -> Result<()> {
-        let mut todos = self.inner.lock().unwrap();
-        if let Some(t) = todos.iter_mut().find(|t| t.id == id) {
-            t.done = done;
-        }
-        save(&self.path, &todos)
-    }
-
-    /// A task's text by id, if it exists (used to ship a todo to the AI).
-    pub fn text_of(&self, id: u64) -> Option<String> {
-        self.inner.lock().unwrap().iter().find(|t| t.id == id).map(|t| t.text.clone())
-    }
-
     /// Set a task's priority and persist.
     pub fn set_priority(&self, id: u64, priority: Priority) -> Result<()> {
         let mut todos = self.inner.lock().unwrap();

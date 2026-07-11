@@ -21,3 +21,10 @@ needs_auth = true
 registry            = "nexus"
 local_artifact_path = "target/release/ciabatta"
 publish_path        = "ciabatta/{CIABATTA_BRANCH}/{CIABATTA_COMMIT}/ciabatta"
+
+[ai]
+api_key_env = "ANTHROPIC_API_KEY"
+endpoint = "https://api.anthropic.com"
+images = []
+model = "claude-opus-4-8"
+provider = "claude"

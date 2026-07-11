@@ -249,9 +249,7 @@ impl GraphBuilder {
         let internal_ids: BTreeMap<String, String> = self
             .nodes
             .values()
-            .filter(|n| {
-                n.category == Category::Internal && n.ecosystem.as_deref() == Some("rust")
-            })
+            .filter(|n| n.category == Category::Internal && n.ecosystem.as_deref() == Some("rust"))
             .map(|n| (n.label.clone(), n.id.clone()))
             .collect();
 

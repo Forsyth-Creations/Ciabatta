@@ -164,9 +164,9 @@ pub fn validate_recipes(
         // Deploys resolve and validate their step DAG (from the flowchart file)
         // instead of a publish path.
         if let RunMode::Deploy = mode {
-            let deploy = entry.deploy_recipe().ok_or_else(|| {
-                anyhow::anyhow!("Recipe '{}' has no [deploy] definition", name)
-            })?;
+            let deploy = entry
+                .deploy_recipe()
+                .ok_or_else(|| anyhow::anyhow!("Recipe '{}' has no [deploy] definition", name))?;
             crate::deploy::resolve_deploy(deploy, name, root)
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
             continue;
@@ -356,8 +356,16 @@ async fn execute_recipe(
     // override produces an adjusted variable map the transfers resolve against.
     let overridden;
     let env_vars: &HashMap<String, String> = if mode == RunMode::Pull {
-        match resolve_pull_commit(&recipe, registry_config, root, container_cmd, env_vars, name, tx)
-            .await
+        match resolve_pull_commit(
+            &recipe,
+            registry_config,
+            root,
+            container_cmd,
+            env_vars,
+            name,
+            tx,
+        )
+        .await
         {
             Some(adjusted) => {
                 overridden = adjusted;
@@ -1027,8 +1035,7 @@ mod tests {
     #[test]
     fn build_transfers_expands_directory_into_per_file_uploads() {
         use std::fs;
-        let tmp =
-            std::env::temp_dir().join(format!("ciabatta_dir_push_{}", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!("ciabatta_dir_push_{}", std::process::id()));
         let dist = tmp.join("dist");
         fs::create_dir_all(dist.join("assets")).unwrap();
         fs::write(dist.join("index.html"), b"x").unwrap();
@@ -1089,7 +1096,10 @@ mod tests {
         };
         let transfers =
             build_transfers(&recipe, Path::new("/nonexistent"), &HashMap::new()).unwrap();
-        assert_eq!(transfers, vec![(PathBuf::from("app:v1"), "app:v1".to_string())]);
+        assert_eq!(
+            transfers,
+            vec![(PathBuf::from("app:v1"), "app:v1".to_string())]
+        );
     }
 
     #[test]
@@ -1115,12 +1125,30 @@ publish_path = ["dist/*.tar.gz"]
 
         // Without CIABATTA_PATH the list form fails validation up front.
         let empty = HashMap::new();
-        assert!(validate_recipes(&cfg, Path::new("."), &["a".to_string()], &empty, &RunMode::Push).is_err());
+        assert!(
+            validate_recipes(
+                &cfg,
+                Path::new("."),
+                &["a".to_string()],
+                &empty,
+                &RunMode::Push
+            )
+            .is_err()
+        );
 
         // With CIABATTA_PATH set it passes.
         let mut vars = HashMap::new();
         vars.insert("CIABATTA_PATH".to_string(), "/main/abc".to_string());
-        assert!(validate_recipes(&cfg, Path::new("."), &["a".to_string()], &vars, &RunMode::Push).is_ok());
+        assert!(
+            validate_recipes(
+                &cfg,
+                Path::new("."),
+                &["a".to_string()],
+                &vars,
+                &RunMode::Push
+            )
+            .is_ok()
+        );
     }
 
     #[test]
@@ -1137,7 +1165,16 @@ main = "echo hi"
 "#,
         )
         .unwrap();
-        assert!(validate_recipes(&cfg, Path::new("."), &["a".to_string()], &vars, &RunMode::Push).is_ok());
+        assert!(
+            validate_recipes(
+                &cfg,
+                Path::new("."),
+                &["a".to_string()],
+                &vars,
+                &RunMode::Push
+            )
+            .is_ok()
+        );
 
         // built-in main: the missing variable must be caught up front.
         let cfg2: CiabattaConfig = toml::from_str(
@@ -1148,6 +1185,15 @@ publish_path = "x/{MISSING_VAR}/y"
 "#,
         )
         .unwrap();
-        assert!(validate_recipes(&cfg2, Path::new("."), &["a".to_string()], &vars, &RunMode::Push).is_err());
+        assert!(
+            validate_recipes(
+                &cfg2,
+                Path::new("."),
+                &["a".to_string()],
+                &vars,
+                &RunMode::Push
+            )
+            .is_err()
+        );
     }
 }

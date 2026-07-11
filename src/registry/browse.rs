@@ -121,9 +121,18 @@ mod tests {
         assert_eq!(
             entries,
             vec![
-                Entry { name: "releases".into(), is_dir: true },
-                Entry { name: "snapshots".into(), is_dir: true },
-                Entry { name: "app-1.0.0.jar".into(), is_dir: false },
+                Entry {
+                    name: "releases".into(),
+                    is_dir: true
+                },
+                Entry {
+                    name: "snapshots".into(),
+                    is_dir: true
+                },
+                Entry {
+                    name: "app-1.0.0.jar".into(),
+                    is_dir: false
+                },
             ]
         );
     }

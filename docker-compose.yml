@@ -23,6 +23,10 @@ services:
       - "8527:8081"
     volumes:
       - nexus-data:/nexus-data
+  local-model:
+    image: hf.co/zai-org/GLM-5.2
+    ports:
+      - "8080:8080"
 
 volumes:
   claude-config:

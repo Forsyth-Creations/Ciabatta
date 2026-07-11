@@ -121,7 +121,11 @@ impl GuiState {
                 if let Some(r) = self.recipe_mut(&recipe)
                     && let Some(s) = r.step_mut(&step)
                 {
-                    s.status = if ok { "success".into() } else { "failed".into() };
+                    s.status = if ok {
+                        "success".into()
+                    } else {
+                        "failed".into()
+                    };
                 }
             }
             ProgressUpdate::StepLog { recipe, step, line } => {
@@ -186,7 +190,11 @@ impl GuiState {
                     // A stage that already failed stays failed.
                     && s.status != "failed"
                 {
-                    s.status = if ran { "success".into() } else { "skipped".into() };
+                    s.status = if ran {
+                        "success".into()
+                    } else {
+                        "skipped".into()
+                    };
                 }
             }
             // Deploys don't emit stage-file-transfer progress.
@@ -385,7 +393,13 @@ async fn handle_gui(
 
     if req.path.starts_with("/state.json") {
         let json = { serde_json::to_vec(&*state.lock().unwrap())? };
-        return respond(&mut socket, "200 OK", "application/json; charset=utf-8", &json).await;
+        return respond(
+            &mut socket,
+            "200 OK",
+            "application/json; charset=utf-8",
+            &json,
+        )
+        .await;
     }
 
     if req.path == "/" || req.path.starts_with("/index") {
@@ -512,9 +526,7 @@ async fn read_request(socket: &mut TcpStream) -> Result<Option<Request>> {
 }
 
 fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    haystack
-        .windows(needle.len())
-        .position(|w| w == needle)
+    haystack.windows(needle.len()).position(|w| w == needle)
 }
 
 async fn respond(

@@ -3,11 +3,17 @@
 //! It serves the embedded single-page UI at `/` and a small JSON API under
 //! `/api/todos` (list / add / toggle / delete). Every mutating request returns
 //! the full, updated list so the front end can simply re-render.
+//!
+//! It also bridges to the `ciabatta ai` daemon: `/api/ai-status` reports
+//! whether that daemon is reachable, and `/api/ship` forwards a todo to it as a
+//! background task. The forwarding happens here (server-side) so the browser
+//! never makes a cross-origin request to the AI daemon.
 
 use std::sync::Arc;
 
 use anyhow::Result;
 use serde::Deserialize;
+use serde_json::json;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
@@ -17,19 +23,22 @@ use super::{Priority, Store};
 const INDEX_HTML: &str = include_str!("index.html");
 
 /// Serve the todo app on `127.0.0.1:port` until the process is interrupted.
-pub async fn serve(store: Arc<Store>, port: u16) -> Result<()> {
+/// `ai_port` is where the `ciabatta ai` daemon is expected to be listening, so
+/// the app can offer to ship tasks to it.
+pub async fn serve(store: Arc<Store>, port: u16, ai_port: u16) -> Result<()> {
     let listener = TcpListener::bind(("127.0.0.1", port)).await.map_err(|e| {
         anyhow::anyhow!("Failed to bind 127.0.0.1:{port} ({e}). Try a different --port.")
     })?;
 
     println!("\nTodo app ready at http://127.0.0.1:{port}");
+    println!("Ship-to-AI targets the ciabatta ai daemon on port {ai_port}.");
     println!("Press Ctrl-C to stop.");
 
     loop {
         let (socket, _) = listener.accept().await?;
         let store = store.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle(socket, &store).await {
+            if let Err(e) = handle(socket, &store, ai_port).await {
                 eprintln!("todo server: connection error: {e}");
             }
         });
@@ -69,7 +78,7 @@ struct EditPayload {
     text: String,
 }
 
-async fn handle(mut socket: TcpStream, store: &Store) -> Result<()> {
+async fn handle(mut socket: TcpStream, store: &Store, ai_port: u16) -> Result<()> {
     let Some(req) = read_request(&mut socket).await? else {
         return Ok(());
     };
@@ -79,6 +88,11 @@ async fn handle(mut socket: TcpStream, store: &Store) -> Result<()> {
             ("GET", "/") | ("GET", "/index.html") => {
                 ("200 OK", "text/html; charset=utf-8", INDEX_HTML.into())
             }
+            ("GET", "/api/ai-status") => {
+                let running = ai_daemon_reachable(ai_port).await;
+                ok_json(json!({ "running": running, "port": ai_port }))
+            }
+            ("POST", "/api/ship") => ship_to_ai(store, &req.body, ai_port).await,
             ("GET", "/api/todos") => json_response(store),
             ("POST", "/api/todos") => match serde_json::from_str::<TextPayload>(&req.body) {
                 Ok(p) => match store.add(&p.text) {
@@ -98,15 +112,13 @@ async fn handle(mut socket: TcpStream, store: &Store) -> Result<()> {
                     Err(e) => bad_request(&e.to_string()),
                 }
             }
-            ("POST", "/api/todos/edit") => {
-                match serde_json::from_str::<EditPayload>(&req.body) {
-                    Ok(p) => match store.set_text(p.id, &p.text) {
-                        Ok(()) => json_response(store),
-                        Err(e) => bad_request(&e.to_string()),
-                    },
+            ("POST", "/api/todos/edit") => match serde_json::from_str::<EditPayload>(&req.body) {
+                Ok(p) => match store.set_text(p.id, &p.text) {
+                    Ok(()) => json_response(store),
                     Err(e) => bad_request(&e.to_string()),
-                }
-            }
+                },
+                Err(e) => bad_request(&e.to_string()),
+            },
             _ => (
                 "404 Not Found",
                 "text/plain; charset=utf-8",
@@ -136,6 +148,75 @@ fn mutate(
 fn json_response(store: &Store) -> (&'static str, &'static str, Vec<u8>) {
     let body = serde_json::to_vec(&store.list()).unwrap_or_else(|_| b"[]".to_vec());
     ("200 OK", "application/json; charset=utf-8", body)
+}
+
+/// A JSON value as a 200 response.
+fn ok_json(v: serde_json::Value) -> (&'static str, &'static str, Vec<u8>) {
+    ("200 OK", "application/json; charset=utf-8", v.to_string().into_bytes())
+}
+
+/// Best-effort probe of the `ciabatta ai` daemon: it answers `GET /api/jobs`
+/// only when it is up, so a quick, short-timeout request tells us if the
+/// ship-to-AI button should be offered.
+async fn ai_daemon_reachable(ai_port: u16) -> bool {
+    let Ok(client) = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_millis(400))
+        .build()
+    else {
+        return false;
+    };
+    client
+        .get(format!("http://127.0.0.1:{ai_port}/api/jobs"))
+        .send()
+        .await
+        .map(|r| r.status().is_success())
+        .unwrap_or(false)
+}
+
+/// Forward a todo to the AI daemon as a background task. The browser posts
+/// `{"id": <todo id>}`; we resolve the task text here and hand it to the
+/// daemon's `/api/ship`, tagging the source as `todo:<id>`.
+async fn ship_to_ai(
+    store: &Store,
+    body: &str,
+    ai_port: u16,
+) -> (&'static str, &'static str, Vec<u8>) {
+    let id = match serde_json::from_str::<IdPayload>(body) {
+        Ok(p) => p.id,
+        Err(e) => return bad_request(&e.to_string()),
+    };
+    let Some(text) = store.text_of(id) else {
+        return bad_request(&format!("no todo #{id}"));
+    };
+
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => return bad_request(&e.to_string()),
+    };
+    let resp = client
+        .post(format!("http://127.0.0.1:{ai_port}/api/ship"))
+        .json(&json!({ "prompt": text, "source": format!("todo:{id}") }))
+        .send()
+        .await;
+
+    match resp {
+        Ok(r) if r.status().is_success() => {
+            let job = r.json::<serde_json::Value>().await.unwrap_or_else(|_| json!({}));
+            ok_json(json!({ "ok": true, "job": job }))
+        }
+        Ok(r) => {
+            let code = r.status();
+            let msg = r.text().await.unwrap_or_default();
+            bad_request(&format!("AI daemon returned {code}: {msg}"))
+        }
+        Err(_) => bad_request(
+            "The ciabatta ai daemon isn't reachable. Start it with `ciabatta ai` \
+             in your project, then try again.",
+        ),
+    }
 }
 
 /// A 400 response carrying a short plain-text message.

@@ -148,7 +148,8 @@ impl App {
             }
             ProgressUpdate::StepFinished { recipe, step, ok } => {
                 if let Some(r) = self.find_mut(&recipe) {
-                    r.logs.push(format!("{} {step}", if ok { "✓" } else { "✗" }));
+                    r.logs
+                        .push(format!("{} {step}", if ok { "✓" } else { "✗" }));
                 }
             }
             ProgressUpdate::StepLog { recipe, step, line } => {
@@ -167,8 +168,7 @@ impl App {
                     for (i, opt) in options.iter().enumerate() {
                         r.logs.push(format!("    [{i}] {opt}"));
                     }
-                    r.logs
-                        .push("    (choose a fix in --gui mode)".to_string());
+                    r.logs.push("    (choose a fix in --gui mode)".to_string());
                 }
             }
             ProgressUpdate::Completed(name) => {

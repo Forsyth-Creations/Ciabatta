@@ -27,12 +27,7 @@ const INDEX_HTML: &str = include_str!("index.html");
 const DEFAULT_LIMIT: usize = 5000;
 
 /// Run the command and serve its live log view at `http://127.0.0.1:port`.
-pub async fn serve(
-    store: Arc<WatchState>,
-    command: String,
-    port: u16,
-    open: bool,
-) -> Result<()> {
+pub async fn serve(store: Arc<WatchState>, command: String, port: u16, open: bool) -> Result<()> {
     let listener = TcpListener::bind(("127.0.0.1", port)).await.map_err(|e| {
         anyhow::anyhow!("Failed to bind 127.0.0.1:{port} ({e}). Try a different --port.")
     })?;
@@ -108,7 +103,11 @@ async fn handle(mut socket: TcpStream, store: &WatchState) -> Result<()> {
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(DEFAULT_LIMIT);
             let json = store.snapshot(after, limit);
-            ("200 OK", "application/json; charset=utf-8", serde_json::to_vec(&json)?)
+            (
+                "200 OK",
+                "application/json; charset=utf-8",
+                serde_json::to_vec(&json)?,
+            )
         }
         ("GET", "/search") => {
             let terms: Vec<String> = query
@@ -134,7 +133,11 @@ async fn handle(mut socket: TcpStream, store: &WatchState) -> Result<()> {
                 store.search(&terms, all, regex, stream, DEFAULT_LIMIT)
             };
             let json = serde_json::json!({ "lines": lines, "total": total, "capped": total > lines.len() });
-            ("200 OK", "application/json; charset=utf-8", serde_json::to_vec(&json)?)
+            (
+                "200 OK",
+                "application/json; charset=utf-8",
+                serde_json::to_vec(&json)?,
+            )
         }
         ("POST", "/bookmarks") => match serde_json::from_str::<AddBookmark>(&req.body) {
             Ok(p) => {

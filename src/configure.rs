@@ -73,7 +73,8 @@ pub fn run_interactive(root: &Path, cfg: &CiabattaConfig) -> Result<()> {
     // Nexus can target a specific repository and speak several repo formats;
     // gather those so the generated block is complete.
     let (nexus_repository, nexus_format, nexus_base_path) = if kind == "nexus" {
-        let repo = prompt("Nexus repository (e.g. raw-hosted, npm-hosted; blank if url includes it): ")?;
+        let repo =
+            prompt("Nexus repository (e.g. raw-hosted, npm-hosted; blank if url includes it): ")?;
         let fmt = {
             let f = prompt("Format [raw|npm|pypi] (default: raw): ")?;
             if f.is_empty() { "raw".to_string() } else { f }
@@ -520,8 +521,7 @@ fn render_selector(
     );
     f.render_widget(preview, cols[1]);
 
-    let help =
-        " [↑↓/jk] move   [enter] select   [a] all   [n] none   [s] save   [q/esc] cancel";
+    let help = " [↑↓/jk] move   [enter] select   [a] all   [n] none   [s] save   [q/esc] cancel";
     f.render_widget(
         Paragraph::new(help).style(Style::default().fg(Color::DarkGray)),
         rows[2],

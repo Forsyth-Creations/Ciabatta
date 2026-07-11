@@ -82,14 +82,14 @@ pub async fn run_deploy(
         let list = missing.join(", ");
         // Console: printed directly so it shows even in `--gui` mode, where
         // progress updates are folded into the browser view rather than stdout.
-        eprintln!(
-            "[{name}] ✗ deploy aborted — required env variable(s) empty or unset: {list}"
-        );
+        eprintln!("[{name}] ✗ deploy aborted — required env variable(s) empty or unset: {list}");
         // GUI: emit a log line per missing variable into the recipe's log panel.
         let _ = tx
             .send(ProgressUpdate::Log(
                 name.to_string(),
-                format!("✗ Deploy aborted before running — missing required env variable(s): {list}"),
+                format!(
+                    "✗ Deploy aborted before running — missing required env variable(s): {list}"
+                ),
             ))
             .await;
         for var in &missing {
@@ -201,9 +201,12 @@ async fn run_dag(
             .filter(|s| !s.recover)
             .filter(|s| state.get(s.name.as_str()) == Some(&StepState::Pending))
             .filter(|s| {
-                s.needs
-                    .iter()
-                    .all(|dep| state.get(dep.as_str()).map(|st| st.satisfied()).unwrap_or(false))
+                s.needs.iter().all(|dep| {
+                    state
+                        .get(dep.as_str())
+                        .map(|st| st.satisfied())
+                        .unwrap_or(false)
+                })
             })
             .collect();
 
@@ -335,7 +338,12 @@ async fn recover<'a>(
         .await;
 
     if let Err(e) = res {
-        bail!("Recovery '{}' for step '{}' failed: {}", option.label, failed.name, e);
+        bail!(
+            "Recovery '{}' for step '{}' failed: {}",
+            option.label,
+            failed.name,
+            e
+        );
     }
 
     state.insert(node.name.as_str(), StepState::Succeeded);
@@ -381,9 +389,7 @@ async fn pick_option(
             .await;
         loop {
             match rx.recv().await {
-                Ok(choice)
-                    if choice.recipe == recipe && choice.step == node.name =>
-                {
+                Ok(choice) if choice.recipe == recipe && choice.step == node.name => {
                     if choice.option < node.options.len() {
                         return Ok(choice.option);
                     }
@@ -402,17 +408,14 @@ async fn pick_option(
     }
 
     // Non-interactive: the first option flagged `default` is the unattended fix.
-    node.options
-        .iter()
-        .position(|o| o.default)
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "Recovery node '{}' needs an operator choice, but this run is non-interactive \
+    node.options.iter().position(|o| o.default).ok_or_else(|| {
+        anyhow::anyhow!(
+            "Recovery node '{}' needs an operator choice, but this run is non-interactive \
                  and no option is marked `default = true`. Options: {}.",
-                node.name,
-                labels.join(", ")
-            )
-        })
+            node.name,
+            labels.join(", ")
+        )
+    })
 }
 
 /// Run a normal step's action, emitting start/log/finish updates. Returns the
@@ -534,9 +537,7 @@ fn recipe_log_stream(
     let recipe = recipe.to_string();
     let handle = tokio::spawn(async move {
         while let Some(line) = line_rx.recv().await {
-            let _ = tx
-                .send(ProgressUpdate::Log(recipe.clone(), line))
-                .await;
+            let _ = tx.send(ProgressUpdate::Log(recipe.clone(), line)).await;
         }
     });
     (line_tx, handle)
@@ -547,14 +548,22 @@ mod tests {
     use super::*;
 
     fn env(pairs: &[(&str, &str)]) -> HashMap<String, String> {
-        pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
     }
 
     #[test]
     fn missing_required_env_flags_unset_and_empty_only() {
-        let required = vec!["API_TOKEN".to_string(), "REGION".to_string(), "STAGE".to_string()];
+        let required = vec![
+            "API_TOKEN".to_string(),
+            "REGION".to_string(),
+            "STAGE".to_string(),
+        ];
         // API_TOKEN set, REGION empty, STAGE absent → REGION + STAGE missing.
-        let missing = missing_required_env(&required, &env(&[("API_TOKEN", "abc"), ("REGION", "  ")]));
+        let missing =
+            missing_required_env(&required, &env(&[("API_TOKEN", "abc"), ("REGION", "  ")]));
         assert_eq!(missing, vec!["REGION".to_string(), "STAGE".to_string()]);
     }
 

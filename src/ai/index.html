@@ -1,0 +1,832 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ciabatta · AI mind map</title>
+<style>
+  :root {
+    --bg: #0f1115; --panel: #171a21; --panel2: #1e222b; --line: #2a2f3a;
+    --fg: #e6e9ef; --muted: #9aa4b2; --accent: #f0a54a; --accent-dim: #b97f39;
+    --file: #7fb4e6; --good: #46c17a; --bad: #ef5f6b;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0; display: flex; height: 100vh; overflow: hidden;
+    background: var(--bg); color: var(--fg);
+    font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+
+  /* ── canvas stage ─────────────────────────────────────────────────────── */
+  #stage { position: relative; flex: 1; min-width: 0; }
+  #graph { position: absolute; inset: 0; width: 100%; height: 100%; cursor: grab; }
+  #graph.dragging { cursor: grabbing; }
+
+  #tooltip {
+    position: absolute; pointer-events: none; display: none; z-index: 3;
+    max-width: 380px; padding: 8px 10px; border-radius: 8px;
+    background: var(--panel2); border: 1px solid var(--line);
+    box-shadow: 0 8px 24px rgba(0,0,0,.45); font-size: 12.5px;
+  }
+  #tooltip .t-name { font-family: ui-monospace, Menlo, monospace; word-break: break-all; }
+  #tooltip .t-meta { color: var(--muted); margin-top: 2px; }
+  #tooltip .t-tag { color: var(--accent); }
+
+  /* prune menu: opens on click, offers forget/untag actions */
+  #prune {
+    position: absolute; z-index: 5; min-width: 220px; max-width: 340px;
+    padding: 10px 12px; border-radius: 10px;
+    background: var(--panel2); border: 1px solid var(--line);
+    box-shadow: 0 10px 28px rgba(0,0,0,.5);
+  }
+  #prune[hidden] { display: none; }
+  #prune .p-name { font-family: ui-monospace, Menlo, monospace; font-size: 12.5px;
+                   color: var(--file); word-break: break-all; margin-bottom: 8px; }
+  #prune .p-name.arch { color: var(--accent); }
+  #prune button { display: block; width: 100%; text-align: left; margin-top: 6px; }
+  #prune .p-hint { color: var(--muted); font-size: 11.5px; margin-top: 8px; }
+
+  #empty {
+    position: absolute; inset: 0; display: flex; align-items: center;
+    justify-content: center; z-index: 2; pointer-events: none;
+  }
+  #empty[hidden] { display: none; }
+  #empty .card {
+    max-width: 420px; text-align: center; padding: 28px 32px; border-radius: 14px;
+    background: color-mix(in srgb, var(--panel) 82%, transparent);
+    border: 1px dashed var(--line); backdrop-filter: blur(2px);
+  }
+  #empty .loaf { font-size: 34px; }
+  #empty h2 { margin: 10px 0 6px; font-size: 16px; font-weight: 600; }
+  #empty p { margin: 0; color: var(--muted); font-size: 13px; }
+  #empty .mono { color: var(--accent); }
+
+  #status {
+    position: absolute; left: 14px; bottom: 12px; z-index: 2;
+    display: flex; align-items: center; gap: 7px;
+    padding: 4px 11px; border-radius: 999px; font-size: 12px; color: var(--muted);
+    background: color-mix(in srgb, var(--panel) 85%, transparent);
+    border: 1px solid var(--line);
+  }
+  #status .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--good); }
+  #status.off .dot { background: var(--bad); }
+  #status.busy .dot { background: var(--accent); animation: pulse 1.1s ease-in-out infinite; }
+  @keyframes pulse { 50% { opacity: .35; } }
+
+  #toast {
+    position: absolute; left: 50%; top: 14px; transform: translateX(-50%);
+    z-index: 4; padding: 7px 14px; border-radius: 999px; font-size: 13px;
+    background: var(--panel2); border: 1px solid var(--line); color: var(--fg);
+    opacity: 0; transition: opacity .25s, translate .25s; pointer-events: none;
+  }
+  #toast.show { opacity: 1; }
+
+  /* ── sidebar ──────────────────────────────────────────────────────────── */
+  #side {
+    width: 340px; flex-shrink: 0; display: flex; flex-direction: column;
+    border-left: 1px solid var(--line); background: var(--panel);
+    overflow-y: auto;
+  }
+  #side > header {
+    display: flex; align-items: center; gap: 10px;
+    padding: 14px 18px 12px; border-bottom: 1px solid var(--line);
+  }
+  #side > header .loaf { font-size: 20px; }
+  #side > header h1 { margin: 0; font-size: 15px; font-weight: 600; }
+  #side > header .sub { color: var(--muted); font-size: 12px; margin-top: 1px; }
+
+  section { padding: 14px 18px 4px; }
+  h2 {
+    margin: 0 0 10px; font-size: 11px; font-weight: 600;
+    letter-spacing: .09em; text-transform: uppercase; color: var(--muted);
+  }
+
+  .stats { display: flex; gap: 8px; }
+  .stat {
+    flex: 1; padding: 8px 10px; border-radius: 10px; text-align: center;
+    background: var(--panel2); border: 1px solid var(--line);
+  }
+  .stat b { display: block; font-size: 17px; font-weight: 650; }
+  .stat span { font-size: 11px; color: var(--muted); }
+
+  /* confidence meter: junior → senior with a marker */
+  .meter { position: relative; height: 10px; border-radius: 999px; overflow: visible;
+           background: linear-gradient(90deg, #6b4a3a, var(--accent-dim), var(--good));
+           opacity: .9; margin: 14px 2px 6px; }
+  .meter .mark {
+    position: absolute; top: 50%; translate: -50% -50%;
+    width: 16px; height: 16px; border-radius: 50%;
+    background: var(--fg); border: 3px solid var(--bg);
+    box-shadow: 0 0 0 1.5px var(--accent);
+    transition: left .6s cubic-bezier(.3,1,.4,1);
+  }
+  .meter-scale { display: flex; justify-content: space-between; margin: 0 2px;
+                 font-size: 11px; color: var(--muted); }
+  .meter-read { display: flex; align-items: baseline; gap: 8px; margin-top: 8px; }
+  .meter-read b { font-size: 20px; font-weight: 650; }
+  .meter-read .persona { color: var(--accent); font-size: 12.5px; }
+
+  .card {
+    border: 1px solid var(--line); background: var(--panel2);
+    border-radius: 10px; padding: 10px 12px; margin-bottom: 8px;
+  }
+  .card .file { font-family: ui-monospace, Menlo, monospace; font-size: 12.5px;
+                color: var(--file); word-break: break-all; }
+  .card .tags { margin: 3px 0 2px; }
+  .card .tag {
+    display: inline-block; margin: 2px 4px 2px 0; padding: 1px 8px;
+    border-radius: 999px; font-size: 11.5px; color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 12%, transparent);
+    border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+  }
+  .card .reason { color: var(--muted); font-size: 12px; margin: 2px 0 8px; }
+  .card .row { display: flex; gap: 8px; }
+
+  button {
+    font: inherit; font-size: 12.5px; cursor: pointer;
+    padding: 6px 12px; border-radius: 8px; color: var(--fg);
+    background: var(--panel); border: 1px solid var(--line);
+    transition: border-color .15s, background .15s;
+  }
+  button:hover { border-color: var(--muted); }
+  button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  button.yes { border-color: color-mix(in srgb, var(--good) 45%, var(--line)); }
+  button.yes:hover { background: color-mix(in srgb, var(--good) 14%, var(--panel)); }
+  button.no { border-color: color-mix(in srgb, var(--bad) 45%, var(--line)); }
+  button.no:hover { background: color-mix(in srgb, var(--bad) 14%, var(--panel)); }
+  .row > button { flex: 1; }
+
+  .empty-note { color: var(--muted); font-size: 12.5px; font-style: italic; }
+
+  /* background AI tasks ("ship to AI") */
+  #ship-form { display: flex; flex-direction: column; gap: 6px; margin-bottom: 10px; }
+  #ship-input {
+    resize: vertical; font: inherit; font-size: 12.5px; color: var(--fg);
+    background: var(--panel2); border: 1px solid var(--line);
+    border-radius: 8px; padding: 7px 9px; min-height: 40px;
+  }
+  #ship-input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .ship-btn { border-color: color-mix(in srgb, var(--accent) 45%, var(--line)); }
+  .ship-btn:hover { background: color-mix(in srgb, var(--accent) 14%, var(--panel)); }
+  .job {
+    border: 1px solid var(--line); background: var(--panel2);
+    border-radius: 10px; padding: 8px 10px; margin-bottom: 8px;
+  }
+  .job-top { display: flex; align-items: center; gap: 7px; }
+  .job .pill {
+    font-size: 10px; text-transform: uppercase; letter-spacing: .06em;
+    padding: 1px 7px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted);
+  }
+  .job .pill.running { color: var(--accent); border-color: var(--accent-dim); }
+  .job .pill.done { color: var(--good); border-color: color-mix(in srgb, var(--good) 45%, var(--line)); }
+  .job .pill.failed { color: var(--bad); border-color: color-mix(in srgb, var(--bad) 45%, var(--line)); }
+  .job .spin { width: 8px; height: 8px; border-radius: 50%; background: var(--accent);
+               animation: pulse 1.1s ease-in-out infinite; flex-shrink: 0; }
+  .job-prompt { font-size: 12.5px; margin-top: 5px; }
+  .job-meta { color: var(--muted); font-size: 11.5px; margin-top: 4px; }
+  .job-files { color: var(--file); font-family: ui-monospace, Menlo, monospace;
+               font-size: 11.5px; margin-top: 4px; word-break: break-all; }
+
+  .legend { font-size: 12px; color: var(--muted); line-height: 1.9; }
+  .legend .swatch { display: inline-block; width: 10px; height: 10px; border-radius: 50%;
+                    margin-right: 7px; vertical-align: -1px; }
+  .legend .swatch.arch { background: var(--accent); box-shadow: 0 0 6px var(--accent-dim); }
+  .legend .swatch.file { background: var(--file); }
+
+  #side > footer { margin-top: auto; padding: 12px 18px; color: var(--muted);
+                   font-size: 11.5px; border-top: 1px solid var(--line); }
+
+  @media (max-width: 760px) {
+    body { flex-direction: column; }
+    #side { width: auto; border-left: 0; border-top: 1px solid var(--line);
+            max-height: 45vh; }
+  }
+  .bulk { display: flex; gap: 8px; margin-bottom: 10px; }
+  .bulk > button { flex: 1; }
+
+  @media (prefers-reduced-motion: reduce) {
+    .meter .mark, #toast, button { transition: none; }
+    #status.busy .dot { animation: none; }
+  }
+</style>
+</head>
+<body>
+
+<div id="stage">
+  <canvas id="graph" aria-label="Architecture mind map"></canvas>
+  <div id="tooltip" role="tooltip"></div>
+  <div id="prune" hidden></div>
+  <div id="empty" hidden>
+    <div class="card">
+      <div class="loaf">🍞</div>
+      <h2>Nothing on the worktop yet</h2>
+      <p>Ask the assistant something — <span class="mono">ciabatta ai</span> —
+         and accept its tag proposals. Confirmed tags appear here as a living
+         map of files → architectures.</p>
+    </div>
+  </div>
+  <div id="status"><span class="dot"></span><span id="status-text">connecting…</span></div>
+  <div id="toast"></div>
+</div>
+
+<aside id="side">
+  <header>
+    <span class="loaf">🍞</span>
+    <div>
+      <h1>ciabatta · AI mind map</h1>
+      <div class="sub">what the assistant knows about this project</div>
+    </div>
+  </header>
+
+  <section>
+    <div class="stats">
+      <div class="stat"><b id="stat-arch">0</b><span>architectures</span></div>
+      <div class="stat"><b id="stat-files">0</b><span>files mapped</span></div>
+      <div class="stat"><b id="stat-inter">0</b><span>questions</span></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Confidence</h2>
+    <div class="meter"><div class="mark" id="conf-mark" style="left:30%"></div></div>
+    <div class="meter-scale"><span>junior</span><span>mid</span><span>senior</span></div>
+    <div class="meter-read">
+      <b id="conf-val">–</b>
+      <span class="persona" id="conf-persona"></span>
+    </div>
+  </section>
+
+  <section>
+    <h2>Ship a task to the AI</h2>
+    <form id="ship-form">
+      <textarea id="ship-input" rows="2"
+        placeholder="Describe a task — the AI works it in the background…"></textarea>
+      <button type="submit" class="ship-btn">🚀 Ship to AI</button>
+    </form>
+    <div id="jobs"><div class="empty-note">No background tasks yet.</div></div>
+  </section>
+
+  <section>
+    <h2>Waiting for your confirmation</h2>
+    <div id="pending"><div class="empty-note">No tag proposals waiting.</div></div>
+  </section>
+
+  <section>
+    <h2>Rate the last answer</h2>
+    <div class="row">
+      <button class="yes" onclick="feedback(true)">👍 Good — trust it more</button>
+      <button class="no" onclick="feedback(false)">👎 Off — trust it less</button>
+    </div>
+  </section>
+
+  <section>
+    <h2>Reading the map</h2>
+    <div class="legend">
+      <div><span class="swatch arch"></span>architecture — glow grows with knowledge</div>
+      <div><span class="swatch file"></span>file — thread thickens the more it's used</div>
+      <div>drag nodes · scroll to zoom · drag space to pan</div>
+      <div>click a node to prune it from what the assistant knows</div>
+    </div>
+  </section>
+
+  <footer>Learned state lives in <span class="mono">.ciabatta/ai/brain.json</span> — updates live as the assistant works.</footer>
+</aside>
+
+<script>
+"use strict";
+const canvas = document.getElementById("graph");
+const ctx = canvas.getContext("2d");
+const tooltip = document.getElementById("tooltip");
+const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+let nodes = [], edges = [], byId = new Map(), adj = new Map();
+let seq = 0, view = { x: 0, y: 0, k: 1 }, drag = null, hover = null;
+let alpha = 0;                    // physics "heat": cools to a standstill
+let centered = false;             // fit the view once, on first data
+
+function heat(v) { alpha = Math.max(alpha, v); }
+
+// ── canvas sizing (backing store only changes on real resizes) ──────────────
+function resize() {
+  const w = canvas.clientWidth, h = canvas.clientHeight;
+  canvas.width = Math.max(1, w * devicePixelRatio);
+  canvas.height = Math.max(1, h * devicePixelRatio);
+  heat(0.3);
+}
+new ResizeObserver(resize).observe(canvas);
+
+// ── data ─────────────────────────────────────────────────────────────────────
+async function poll() {
+  const status = document.getElementById("status");
+  try {
+    const r = await fetch(`/api/graph?after=${seq}`);
+    const g = await r.json();
+    status.classList.remove("off");
+    // The activity line follows the assistant (burn-in progress etc.) even
+    // when the map itself hasn't changed.
+    status.classList.toggle("busy", !!g.activity);
+    document.getElementById("status-text").textContent =
+      g.activity || "live · following the assistant";
+    if (g.changed) { seq = g.seq; apply(g); }
+  } catch {
+    status.classList.add("off");
+    document.getElementById("status-text").textContent = "daemon unreachable — retrying";
+  } finally {
+    setTimeout(poll, 1000);
+  }
+}
+
+function apply(g) {
+  const cw = canvas.clientWidth, ch = canvas.clientHeight;
+  const cx = cw / 2, cy = ch / 2;
+
+  // Deterministic seeding: architecture hubs on a ring, files beside the hubs
+  // they belong to. Existing nodes keep their positions.
+  const archesIn = g.nodes.filter(n => n.kind === "architecture");
+  const ring = Math.min(cw, ch) * 0.28 + archesIn.length * 6;
+  const angleOf = i => -Math.PI / 2 + (i / Math.max(1, archesIn.length)) * Math.PI * 2;
+
+  const next = new Map();
+  archesIn.forEach((n, i) => {
+    const old = byId.get(n.id);
+    const node = old || {
+      x: cx + Math.cos(angleOf(i)) * ring,
+      y: cy + Math.sin(angleOf(i)) * ring,
+      vx: 0, vy: 0,
+    };
+    Object.assign(node, n);
+    next.set(n.id, node);
+  });
+  for (const n of g.nodes) {
+    if (n.kind === "architecture") continue;
+    const old = byId.get(n.id);
+    let node = old;
+    if (!node) {
+      // seed next to the first hub this file connects to
+      const e = g.edges.find(e => e.to === n.id);
+      const hub = e && next.get(e.from);
+      const jx = (hash(n.id) % 97 - 48) * 1.6, jy = (hash(n.id + "y") % 97 - 48) * 1.6;
+      node = { x: (hub ? hub.x : cx) + jx, y: (hub ? hub.y : cy) + jy, vx: 0, vy: 0 };
+    }
+    Object.assign(node, n);
+    next.set(n.id, node);
+  }
+
+  byId = next;
+  nodes = [...byId.values()];
+  edges = g.edges.filter(e => byId.has(e.from) && byId.has(e.to));
+  adj = new Map();
+  for (const e of edges) {
+    (adj.get(e.from) || adj.set(e.from, new Set()).get(e.from)).add(e.to);
+    (adj.get(e.to) || adj.set(e.to, new Set()).get(e.to)).add(e.from);
+  }
+  heat(1);
+
+  // sidebar
+  const files = nodes.filter(n => n.kind === "file").length;
+  const arches = nodes.length - files;
+  document.getElementById("stat-arch").textContent = arches;
+  document.getElementById("stat-files").textContent = files;
+  document.getElementById("stat-inter").textContent = g.interactions ?? 0;
+  setConfidence(g.confidence ?? 0);
+  renderPending(g.pending || []);
+  document.getElementById("empty").hidden = nodes.length > 0;
+
+  if (!centered && nodes.length) { fitView(); centered = true; }
+}
+
+function hash(s) { let h = 9; for (const c of s) h = (h * 31 + c.charCodeAt(0)) >>> 0; return h; }
+
+function setConfidence(c) {
+  document.getElementById("conf-mark").style.left = `${Math.max(2, Math.min(98, c))}%`;
+  document.getElementById("conf-val").textContent = `${Math.round(c)} / 100`;
+  document.getElementById("conf-persona").textContent =
+    c < 35 ? "thinks like a junior dev" : c < 70 ? "thinks like a mid-level dev"
+           : "thinks like a senior dev";
+}
+
+function renderPending(pending) {
+  const box = document.getElementById("pending");
+  if (!pending.length) {
+    box.innerHTML = '<div class="empty-note">No tag proposals waiting.</div>';
+    return;
+  }
+  box.innerHTML = "";
+  if (pending.length > 1) {
+    const bulk = document.createElement("div");
+    bulk.className = "bulk";
+    const all = document.createElement("button");
+    all.className = "yes"; all.textContent = `Accept all ${pending.length}`;
+    all.onclick = () => confirmAll(true);
+    const none = document.createElement("button");
+    none.className = "no"; none.textContent = "Reject all";
+    none.onclick = () => confirmAll(false);
+    bulk.append(all, none);
+    box.append(bulk);
+  }
+  for (const p of pending) {
+    const card = document.createElement("div");
+    card.className = "card";
+    const tags = p.tags.map(t => `<span class="tag">${esc(t)}</span>`).join("");
+    const reason = p.reason ? `<div class="reason">${esc(p.reason)}</div>` : "";
+    card.innerHTML = `<div class="file">${esc(p.file)}</div>
+                      <div class="tags">${tags}</div>${reason}`;
+    const row = document.createElement("div");
+    row.className = "row";
+    const yes = document.createElement("button");
+    yes.className = "yes"; yes.textContent = "Accept tags";
+    yes.onclick = () => confirmTag(p.file, true);
+    const no = document.createElement("button");
+    no.className = "no"; no.textContent = "Reject";
+    no.onclick = () => confirmTag(p.file, false);
+    row.append(yes, no);
+    card.append(row);
+    box.append(card);
+  }
+}
+
+async function confirmAll(accept) {
+  const r = await fetch("/api/confirm-all", { method: "POST", body: JSON.stringify({ accept }) });
+  const j = await r.json().catch(() => ({}));
+  toast(`${accept ? "Accepted" : "Rejected"} ${j.resolved ?? "all"} proposals`);
+}
+
+async function confirmTag(file, accept) {
+  await fetch("/api/confirm", { method: "POST", body: JSON.stringify({ file, accept }) });
+  toast(accept ? `Tags accepted for ${file}` : `Tags rejected for ${file}`);
+}
+
+async function feedback(positive) {
+  const r = await fetch("/api/feedback", { method: "POST", body: JSON.stringify({ positive }) });
+  const j = await r.json().catch(() => ({}));
+  toast(`Feedback recorded — confidence ${Math.round(j.confidence ?? 0)}/100`);
+}
+
+// ── background AI tasks ("ship to AI") ───────────────────────────────────────
+let jobsSeq = -1;
+async function pollJobs() {
+  try {
+    const r = await fetch("/api/jobs");
+    const g = await r.json();
+    if (g.seq !== jobsSeq) { jobsSeq = g.seq; renderJobs(g.jobs || []); }
+  } catch { /* daemon momentarily unreachable; the graph poll shows that */ }
+  finally { setTimeout(pollJobs, 1500); }
+}
+
+function renderJobs(jobs) {
+  const box = document.getElementById("jobs");
+  if (!jobs.length) {
+    box.innerHTML = '<div class="empty-note">No background tasks yet.</div>';
+    return;
+  }
+  box.innerHTML = "";
+  for (const j of jobs.slice(0, 12)) {
+    const card = document.createElement("div");
+    card.className = "job";
+    const active = j.status === "running" || j.status === "queued";
+    const files = (j.changed_files || []).length
+      ? `<div class="job-files">✏ ${j.changed_files.map(esc).join(", ")}</div>` : "";
+    let tail = "";
+    if (j.status === "failed" && j.error) {
+      tail = `<div class="job-meta">error: ${esc(j.error)}</div>`;
+    } else if (j.status === "done" && j.answer) {
+      const a = j.answer.length > 180 ? j.answer.slice(0, 180) + "…" : j.answer;
+      tail = `<div class="job-meta">${esc(a)}</div>`;
+    }
+    card.innerHTML =
+      `<div class="job-top">
+         ${active ? '<span class="spin"></span>' : ''}
+         <span class="pill ${esc(j.status)}">${esc(j.status)}</span>
+         <span class="job-meta">#${j.id} · ${esc(j.source || "")}</span>
+       </div>
+       <div class="job-prompt">${esc(j.prompt)}</div>${files}${tail}`;
+    box.append(card);
+  }
+}
+
+async function shipTask(text) {
+  const t = text.trim();
+  if (!t) return;
+  try {
+    const r = await fetch("/api/ship",
+      { method: "POST", body: JSON.stringify({ prompt: t, source: "gui" }) });
+    if (r.ok) {
+      const j = await r.json().catch(() => ({}));
+      toast(`Shipped task #${j.id ?? ""} to the AI`);
+      jobsSeq = -1;   // force the next poll to re-render with the new job
+    } else {
+      toast(`Ship failed: ${await r.text()}`);
+    }
+  } catch { toast("Ship failed — daemon unreachable"); }
+}
+
+document.getElementById("ship-form").addEventListener("submit", e => {
+  e.preventDefault();
+  const input = document.getElementById("ship-input");
+  shipTask(input.value);
+  input.value = "";
+});
+
+let toastTimer;
+function toast(msg) {
+  const t = document.getElementById("toast");
+  t.textContent = msg; t.classList.add("show");
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => t.classList.remove("show"), 2400);
+}
+
+const esc = s => String(s).replace(/[&<>"']/g,
+  c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+// ── physics (cools to a stop; reheated by data, drag, resize) ────────────────
+function step() {
+  if (alpha < 0.015) { alpha = 0; return; }
+  alpha *= reducedMotion ? 0.90 : 0.985;
+  const cw = canvas.clientWidth, ch = canvas.clientHeight;
+
+  for (const e of edges) {
+    const a = byId.get(e.from), b = byId.get(e.to);
+    const dx = b.x - a.x, dy = b.y - a.y;
+    const d = Math.hypot(dx, dy) || 1;
+    const want = 70 + 50 / (1 + (e.score || 0));  // stronger threads pull closer
+    const f = (d - want) * 0.006 * alpha;
+    a.vx += dx / d * f; a.vy += dy / d * f;
+    b.vx -= dx / d * f; b.vy -= dy / d * f;
+  }
+  for (let i = 0; i < nodes.length; i++) {
+    const a = nodes[i];
+    for (let j = i + 1; j < nodes.length; j++) {
+      const b = nodes[j];
+      const dx = b.x - a.x, dy = b.y - a.y;
+      const d2 = dx * dx + dy * dy || 1;
+      if (d2 > 160000) continue;
+      // hubs shove harder so clusters keep breathing room
+      const push = (a.kind === "architecture" || b.kind === "architecture") ? 2600 : 700;
+      const f = push / d2 * alpha;
+      const d = Math.sqrt(d2);
+      a.vx -= dx / d * f; a.vy -= dy / d * f;
+      b.vx += dx / d * f; b.vy += dy / d * f;
+    }
+    a.vx += (cw / 2 - a.x) * 0.0008 * alpha;
+    a.vy += (ch / 2 - a.y) * 0.0008 * alpha;
+  }
+  for (const n of nodes) {
+    if (drag && drag.node === n) continue;
+    n.vx = Math.max(-4, Math.min(4, n.vx * 0.85));
+    n.vy = Math.max(-4, Math.min(4, n.vy * 0.85));
+    n.x += n.vx; n.y += n.vy;
+  }
+}
+
+// ── drawing ──────────────────────────────────────────────────────────────────
+function radius(n) {
+  if (n.kind === "architecture") return 11 + Math.min(15, (n.knowledge || 0) * 0.8);
+  return 4.5;
+}
+const basename = p => p.split("/").pop();
+
+function draw() {
+  const cw = canvas.clientWidth, ch = canvas.clientHeight;
+  ctx.setTransform(devicePixelRatio, 0, 0, devicePixelRatio, 0, 0);
+  ctx.clearRect(0, 0, cw, ch);
+
+  // faint worktop grid (screen space)
+  ctx.fillStyle = "rgba(154,164,178,0.07)";
+  const g = 26, ox = ((view.x % g) + g) % g, oy = ((view.y % g) + g) % g;
+  for (let x = ox; x < cw; x += g)
+    for (let y = oy; y < ch; y += g)
+      ctx.fillRect(x, y, 1.4, 1.4);
+
+  ctx.save();
+  ctx.translate(view.x, view.y); ctx.scale(view.k, view.k);
+
+  const focus = hover ? (adj.get(hover.id) || new Set()) : null;
+  const related = n => !hover || n === hover || focus.has(n.id);
+
+  // threads (curved, weighted by score; proposals are dashed ghosts)
+  for (const e of edges) {
+    const a = byId.get(e.from), b = byId.get(e.to);
+    const lit = hover && (a === hover || b === hover);
+    const alpha_ = hover ? (lit ? 0.75 : 0.06) : 0.16 + Math.min(0.3, (e.score || 0) * 0.06);
+    ctx.strokeStyle = lit ? `rgba(240,165,74,${alpha_})` : `rgba(154,164,178,${alpha_})`;
+    ctx.lineWidth = Math.min(4, 0.7 + (e.score || 0) * 0.35) / Math.sqrt(view.k);
+    ctx.setLineDash(e.provisional ? [5 / view.k, 5 / view.k] : []);
+    const mx = (a.x + b.x) / 2 + (a.y - b.y) * 0.08;
+    const my = (a.y + b.y) / 2 + (b.x - a.x) * 0.08;
+    ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.quadraticCurveTo(mx, my, b.x, b.y); ctx.stroke();
+  }
+  ctx.setLineDash([]);
+
+  // hearth glow behind architecture hubs
+  for (const n of nodes) {
+    if (n.kind !== "architecture") continue;
+    const r = radius(n) * 2.6;
+    const grad = ctx.createRadialGradient(n.x, n.y, 0, n.x, n.y, r);
+    const dim = hover && !related(n);
+    grad.addColorStop(0, `rgba(240,165,74,${dim ? 0.05 : 0.22})`);
+    grad.addColorStop(1, "rgba(240,165,74,0)");
+    ctx.fillStyle = grad;
+    ctx.beginPath(); ctx.arc(n.x, n.y, r, 0, Math.PI * 2); ctx.fill();
+  }
+
+  // nodes (proposals render hollow until confirmed)
+  for (const n of nodes) {
+    const r = radius(n), dim = hover && !related(n);
+    if (n.kind === "architecture") {
+      if (n.provisional) {
+        ctx.strokeStyle = dim ? "rgba(185,127,57,0.35)" : "rgba(240,165,74,0.8)";
+        ctx.lineWidth = 1.6; ctx.setLineDash([4, 3]);
+        ctx.beginPath(); ctx.arc(n.x, n.y, r, 0, Math.PI * 2); ctx.stroke();
+        ctx.setLineDash([]);
+      } else {
+        ctx.fillStyle = dim ? "rgba(185,127,57,0.35)" : "#f0a54a";
+        ctx.beginPath(); ctx.arc(n.x, n.y, r, 0, Math.PI * 2); ctx.fill();
+        ctx.strokeStyle = "rgba(15,17,21,0.9)"; ctx.lineWidth = 2;
+        ctx.stroke();
+      }
+    } else if (n.provisional) {
+      ctx.strokeStyle = dim ? "rgba(127,180,230,0.25)" : "rgba(127,180,230,0.85)";
+      ctx.lineWidth = 1.4;
+      ctx.beginPath(); ctx.arc(n.x, n.y, r, 0, Math.PI * 2); ctx.stroke();
+    } else {
+      ctx.fillStyle = dim ? "rgba(127,180,230,0.25)" : "#7fb4e6";
+      ctx.beginPath(); ctx.arc(n.x, n.y, r, 0, Math.PI * 2); ctx.fill();
+    }
+    if (n === hover) {
+      ctx.strokeStyle = "#e6e9ef"; ctx.lineWidth = 1.6 / view.k;
+      ctx.beginPath(); ctx.arc(n.x, n.y, r + 3 / view.k, 0, Math.PI * 2); ctx.stroke();
+    }
+  }
+
+  // labels: architectures always; file basenames when zoomed or focused
+  ctx.textBaseline = "middle";
+  for (const n of nodes) {
+    const isArch = n.kind === "architecture";
+    const show = isArch || view.k > 1.15 || (hover && related(n));
+    if (!show || (hover && !related(n))) continue;
+    const r = radius(n);
+    const label = isArch ? n.label : basename(n.label);
+    const size = (isArch ? 13 : 10.5) / Math.max(1, view.k * 0.75);
+    ctx.font = `${isArch ? "600 " : ""}${size}px ui-sans-serif, system-ui, sans-serif`;
+    ctx.lineWidth = 3.5 / view.k;
+    ctx.strokeStyle = "rgba(15,17,21,0.85)";
+    ctx.strokeText(label, n.x + r + 5 / view.k, n.y);
+    ctx.fillStyle = isArch ? "#f4d9b0" : (n === hover ? "#e6e9ef" : "#9aa4b2");
+    ctx.fillText(label, n.x + r + 5 / view.k, n.y);
+  }
+  ctx.restore();
+}
+
+/// Fit all nodes into view with padding (used once, on first data).
+function fitView() {
+  const cw = canvas.clientWidth, ch = canvas.clientHeight;
+  let minX = 1e9, minY = 1e9, maxX = -1e9, maxY = -1e9;
+  for (const n of nodes) {
+    minX = Math.min(minX, n.x); maxX = Math.max(maxX, n.x);
+    minY = Math.min(minY, n.y); maxY = Math.max(maxY, n.y);
+  }
+  const pad = 90;
+  const k = Math.min(2, Math.min(cw / (maxX - minX + pad * 2), ch / (maxY - minY + pad * 2)));
+  view.k = isFinite(k) && k > 0 ? k : 1;
+  view.x = cw / 2 - (minX + maxX) / 2 * view.k;
+  view.y = ch / 2 - (minY + maxY) / 2 * view.k;
+}
+
+function tick() { step(); draw(); requestAnimationFrame(tick); }
+
+// ── interaction ──────────────────────────────────────────────────────────────
+function toWorld(px, py) { return { x: (px - view.x) / view.k, y: (py - view.y) / view.k }; }
+function nodeAt(px, py) {
+  const w = toWorld(px, py);
+  let best = null, bestD = 1e9;
+  for (const n of nodes) {
+    const d = Math.hypot(n.x - w.x, n.y - w.y);
+    if (d < radius(n) + 6 / view.k && d < bestD) { best = n; bestD = d; }
+  }
+  return best;
+}
+
+let press = null; // where the last mousedown landed, to tell clicks from drags
+canvas.addEventListener("mousedown", e => {
+  const n = nodeAt(e.offsetX, e.offsetY);
+  press = { x: e.offsetX, y: e.offsetY, node: n };
+  drag = n ? { node: n } : { panX: e.offsetX - view.x, panY: e.offsetY - view.y };
+  canvas.classList.add("dragging");
+  hidePrune();
+});
+canvas.addEventListener("click", e => {
+  if (!press) return;
+  const moved = Math.hypot(e.offsetX - press.x, e.offsetY - press.y);
+  if (moved < 5 && press.node) openPrune(press.node, e);
+});
+canvas.addEventListener("mousemove", e => {
+  if (drag && drag.node) {
+    const w = toWorld(e.offsetX, e.offsetY);
+    drag.node.x = w.x; drag.node.y = w.y;
+    drag.node.vx = drag.node.vy = 0;
+    heat(0.4);
+  } else if (drag) {
+    view.x = e.offsetX - drag.panX; view.y = e.offsetY - drag.panY;
+  } else {
+    hover = nodeAt(e.offsetX, e.offsetY);
+    canvas.style.cursor = hover ? "pointer" : "";
+    updateTooltip(e, hover);
+  }
+});
+window.addEventListener("mouseup", () => { drag = null; canvas.classList.remove("dragging"); });
+canvas.addEventListener("mouseleave", () => { hover = null; tooltip.style.display = "none"; });
+canvas.addEventListener("wheel", e => {
+  e.preventDefault();
+  const k = Math.min(4, Math.max(0.25, view.k * (e.deltaY < 0 ? 1.12 : 0.89)));
+  const w = toWorld(e.offsetX, e.offsetY);
+  view.x = e.offsetX - w.x * k; view.y = e.offsetY - w.y * k; view.k = k;
+}, { passive: false });
+
+// ── pruning ──────────────────────────────────────────────────────────────────
+const pruneBox = document.getElementById("prune");
+
+function hidePrune() { pruneBox.hidden = true; }
+document.addEventListener("mousedown", e => {
+  if (!pruneBox.contains(e.target) && e.target !== canvas) hidePrune();
+});
+
+function openPrune(n, e) {
+  pruneBox.innerHTML = "";
+  const name = document.createElement("div");
+  name.className = "p-name" + (n.kind === "architecture" ? " arch" : "");
+  name.textContent = n.label;
+  pruneBox.append(name);
+
+  const act = (label, payload, doneMsg) => {
+    const b = document.createElement("button");
+    b.className = "no";
+    b.textContent = label;
+    b.onclick = () => prune(payload, doneMsg);
+    pruneBox.append(b);
+  };
+
+  if (n.kind === "architecture") {
+    act(`🗑 forget architecture “${n.label}”`,
+        { kind: "architecture", id: n.label },
+        `forgot architecture ${n.label}`);
+  } else {
+    for (const t of n.tags || []) {
+      act(`✂ untag “${t}”`,
+          { kind: "tag", id: n.label, tag: t },
+          `untagged ${t} from ${basename(n.label)}`);
+    }
+    act("🗑 forget this file",
+        { kind: "file", id: n.label },
+        `forgot ${basename(n.label)}`);
+  }
+
+  const hint = document.createElement("div");
+  hint.className = "p-hint";
+  hint.textContent = "Pruning edits brain.json — the assistant re-learns only if it revisits.";
+  pruneBox.append(hint);
+
+  pruneBox.hidden = false;
+  const stage = canvas.parentElement.getBoundingClientRect();
+  const x = Math.min(e.clientX - stage.left + 10, stage.width - pruneBox.offsetWidth - 10);
+  const y = Math.min(e.clientY - stage.top + 10, stage.height - pruneBox.offsetHeight - 10);
+  pruneBox.style.left = `${Math.max(4, x)}px`;
+  pruneBox.style.top = `${Math.max(4, y)}px`;
+}
+
+async function prune(payload, doneMsg) {
+  hidePrune();
+  try {
+    const r = await fetch("/api/prune", { method: "POST", body: JSON.stringify(payload) });
+    toast(r.ok ? doneMsg : `prune failed: ${await r.text()}`);
+  } catch {
+    toast("prune failed — daemon unreachable");
+  }
+}
+
+function updateTooltip(e, n) {
+  if (!n) { tooltip.style.display = "none"; return; }
+  const ghost = n.provisional ? " · awaiting confirmation" : "";
+  if (n.kind === "architecture") {
+    const files = (adj.get(n.id) || new Set()).size;
+    const desc = n.description ? `<div class="t-meta">${esc(n.description)}</div>` : "";
+    tooltip.innerHTML = `<div class="t-name">${esc(n.label)}</div>${desc}
+      <div class="t-meta">architecture · knowledge ${(n.knowledge || 0).toFixed(1)} · ${files} file${files === 1 ? "" : "s"}${ghost}</div>`;
+  } else {
+    const tags = (n.tags || []).map(t => `<span class="t-tag">${esc(t)}</span>`).join(", ");
+    tooltip.innerHTML = `<div class="t-name">${esc(n.label)}</div>
+      <div class="t-meta">${tags || "file"}${ghost}</div>`;
+  }
+  tooltip.style.display = "block";
+  const stage = canvas.parentElement.getBoundingClientRect();
+  const x = Math.min(e.clientX - stage.left + 14, stage.width - tooltip.offsetWidth - 10);
+  const y = Math.min(e.clientY - stage.top + 14, stage.height - tooltip.offsetHeight - 10);
+  tooltip.style.left = `${Math.max(4, x)}px`;
+  tooltip.style.top = `${Math.max(4, y)}px`;
+}
+
+resize(); poll(); pollJobs(); tick();
+</script>
+</body>
+</html>

@@ -91,6 +91,33 @@
   }
   li.item .del:hover { color: var(--danger); background: var(--panel2); }
 
+  /* Ship-to-AI: only shown when the ai daemon is reachable. */
+  li.item .ship {
+    flex: none; background: var(--panel2); border: 1px solid var(--line); color: var(--accent);
+    cursor: pointer; font: inherit; font-size: 12.5px; line-height: 1;
+    padding: 6px 9px; border-radius: 6px;
+  }
+  li.item .ship:hover { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, var(--panel2)); }
+  li.item .ship[disabled] { opacity: .6; cursor: default; }
+  body:not(.ai-on) li.item .ship { display: none; }
+
+  .ai-pill {
+    display: inline-flex; align-items: center; gap: 6px;
+    font-size: 12px; color: var(--muted);
+    border: 1px solid var(--line); border-radius: 999px; padding: 3px 10px;
+  }
+  .ai-pill .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); }
+  body.ai-on .ai-pill { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 45%, var(--line)); }
+  body.ai-on .ai-pill .dot { background: var(--accent); }
+
+  #toast {
+    position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%);
+    background: var(--panel2); border: 1px solid var(--line); color: var(--text);
+    padding: 8px 14px; border-radius: 999px; font-size: 13px;
+    opacity: 0; transition: opacity .25s; pointer-events: none; z-index: 5;
+  }
+  #toast.show { opacity: 1; }
+
   .empty { color: var(--muted); text-align: center; padding: 40px 0; }
 </style>
 </head>
@@ -100,6 +127,12 @@
     <div class="brand">🍞 ciabatta <span class="crumb">· todo</span></div>
     <div class="count" id="count"></div>
   </header>
+
+  <div class="toolbar" style="margin-bottom:16px;">
+    <span class="ai-pill" id="ai-pill" title="Whether the ciabatta ai daemon is reachable">
+      <span class="dot"></span><span id="ai-pill-text">AI daemon: checking…</span>
+    </span>
+  </div>
 
   <form class="add" id="add-form">
     <input id="add-input" placeholder="Add a task…" autocomplete="off" autofocus />
@@ -118,6 +151,7 @@
 
   <ul class="list" id="list"></ul>
 </main>
+<div id="toast"></div>
 
 <script>
   const listEl = document.getElementById("list");
@@ -189,6 +223,7 @@
         <select class="prio" data-action="priority" title="Priority">
           ${opt("high", "High")}${opt("medium", "Medium")}${opt("low", "Low")}
         </select>
+        <button class="ship" data-action="ship" title="Send this task to the AI daemon">🚀 AI</button>
         <button class="del" data-action="delete" title="Remove">×</button>
       </li>
     `;
@@ -264,8 +299,63 @@
     const id = Number(btn.closest(".item").dataset.id);
     const action = btn.dataset.action;
     if (action === "edit") { startEdit(id); return; }
+    if (action === "ship") { shipToAi(id, btn); return; }
     setTodos(await api(`/api/todos/${action}`, { id }));
   });
+
+  // Hand a task to the ciabatta ai daemon (proxied through the todo server, so
+  // there's no cross-origin call from the browser).
+  async function shipToAi(id, btn) {
+    btn.disabled = true;
+    const original = btn.textContent;
+    btn.textContent = "shipping…";
+    try {
+      const res = await fetch("/api/ship", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id }),
+      });
+      if (res.ok) {
+        const data = await res.json().catch(() => ({}));
+        const jobId = data.job && data.job.id;
+        toast(jobId ? `Shipped to AI — job #${jobId} running` : "Shipped to the AI");
+      } else {
+        toast(`Couldn't ship: ${await res.text()}`);
+      }
+    } catch {
+      toast("Couldn't reach the todo server");
+    } finally {
+      btn.disabled = false;
+      btn.textContent = original;
+    }
+  }
+
+  let toastTimer;
+  function toast(msg) {
+    const t = document.getElementById("toast");
+    t.textContent = msg;
+    t.classList.add("show");
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => t.classList.remove("show"), 2600);
+  }
+
+  // Poll whether the ai daemon is up; the ship buttons only show when it is.
+  async function pollAiStatus() {
+    const textEl = document.getElementById("ai-pill-text");
+    try {
+      const s = await (await fetch("/api/ai-status")).json();
+      const on = !!s.running;
+      document.body.classList.toggle("ai-on", on);
+      textEl.textContent = on
+        ? `AI daemon: connected (:${s.port})`
+        : "AI daemon: not running";
+    } catch {
+      document.body.classList.remove("ai-on");
+      textEl.textContent = "AI daemon: unknown";
+    } finally {
+      setTimeout(pollAiStatus, 4000);
+    }
+  }
 
   listEl.addEventListener("dblclick", (e) => {
     const textEl = e.target.closest(".text");
@@ -281,6 +371,7 @@
   });
 
   refresh();
+  pollAiStatus();
 </script>
 </body>
 </html>

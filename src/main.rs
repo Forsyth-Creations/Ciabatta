@@ -1,3 +1,4 @@
+mod ai;
 mod analyze;
 mod ci;
 mod cli;
@@ -19,7 +20,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use clap::Parser;
 
-use cli::{Cli, Commands, ConfigCommand, ConfigureCommand};
+use cli::{AiCommand, Cli, Commands, ConfigCommand, ConfigureCommand};
 use config::{CiabattaConfig, find_root, load_config, load_config_file};
 use environment::CiabattaEnv;
 use runner::RunMode;
@@ -156,6 +157,16 @@ async fn main() -> Result<()> {
             cmd_watch(command, triggers, max_lines, port, no_open).await?;
         }
 
+        Commands::Ai {
+            subcommand,
+            port,
+            no_graph,
+            mode,
+            continue_last,
+        } => {
+            cmd_ai(subcommand, port, no_graph, mode, continue_last).await?;
+        }
+
         Commands::Config { subcommand } => match subcommand {
             ConfigCommand::Show => {
                 let (root, cfg) = load_project(None)?;
@@ -170,12 +181,8 @@ async fn main() -> Result<()> {
             cmd_configure(subcommand)?;
         }
 
-        Commands::Todo {
-            task,
-            detach,
-            port,
-        } => {
-            cmd_todo(task, detach, port).await?;
+        Commands::Todo { task, detach, port, ai_port } => {
+            cmd_todo(task, detach, port, ai_port).await?;
         }
     }
 
@@ -186,7 +193,7 @@ async fn main() -> Result<()> {
 ///   - a TASK string adds the task and exits
 ///   - `-d` spawns a detached copy that serves the web app in the background
 ///   - otherwise serve the web app in the foreground until Ctrl-C
-async fn cmd_todo(task: Option<String>, detach: bool, port: u16) -> Result<()> {
+async fn cmd_todo(task: Option<String>, detach: bool, port: u16, ai_port: u16) -> Result<()> {
     let store = std::sync::Arc::new(todo::Store::open()?);
 
     if let Some(text) = task {
@@ -196,13 +203,85 @@ async fn cmd_todo(task: Option<String>, detach: bool, port: u16) -> Result<()> {
     }
 
     if detach {
-        spawn_detached_todo(port)?;
+        spawn_detached_todo(port, ai_port)?;
         println!("Todo app started in the background at http://127.0.0.1:{port}");
         println!("Stop it with: pkill -f 'ciabatta todo'");
         return Ok(());
     }
 
-    todo::server::serve(store, port).await
+    todo::server::serve(store, port, ai_port).await
+}
+
+/// Dispatch `ciabatta ai`:
+///   - no subcommand: the chat TUI plus the live mind-map server
+///   - `setup`: interactively write the [ai] config section
+///   - `ask PROMPT…`: one-shot question, plain output
+///   - `serve`: just the daemon (mind map + JSON API)
+///
+/// Like `configure`, this works before the project is initialized: it prefers
+/// an existing .ciabatta root and otherwise targets the current directory
+/// (setup/first use creates .ciabatta/ai/ as needed).
+async fn cmd_ai(
+    subcommand: Option<AiCommand>,
+    port: u16,
+    no_graph: bool,
+    mode: String,
+    continue_last: bool,
+) -> Result<()> {
+    let cwd = env::current_dir().context("Failed to get current directory")?;
+    let root = find_root(&cwd).unwrap_or(cwd);
+
+    if let Some(AiCommand::Setup) = subcommand {
+        return ai::run_setup(&root);
+    }
+
+    let mode = ai::Mode::parse(&mode)?;
+    let cfg = load_config(&root)?;
+    if cfg.ai.is_none() {
+        eprintln!("note: no [ai] section in ciabatta.toml — run `ciabatta ai setup` to configure");
+        eprintln!("      a provider (Claude, an OpenAI-compatible endpoint, or vLLM). Trying defaults…\n");
+    }
+
+    // `--continue` resumes the latest conversation for the TUI and one-shot ask.
+    let resume = if continue_last { ai::Resume::Latest } else { ai::Resume::None };
+
+    match subcommand {
+        None => ai::run_tui(&root, &cfg, port, no_graph, mode, resume).await,
+        Some(AiCommand::Serve) => ai::run_serve(&root, &cfg, port, mode).await,
+        Some(AiCommand::Resume { id }) => {
+            ai::run_resume(&root, &cfg, port, no_graph, mode, id).await
+        }
+        Some(AiCommand::Ship { task, todo }) => {
+            // The task text is either given inline or pulled from a todo.
+            let prompt = if let Some(id) = todo {
+                let store = todo::Store::open()?;
+                let text = store
+                    .text_of(id)
+                    .with_context(|| format!("no todo #{id} — see `ciabatta todo`"))?;
+                if !task.is_empty() {
+                    // Allow appending extra guidance after --todo.
+                    format!("{text}\n\n{}", task.join(" "))
+                } else {
+                    text
+                }
+            } else {
+                let p = task.join(" ");
+                if p.trim().is_empty() {
+                    bail!("Nothing to ship. Usage: ciabatta ai ship <task>  (or --todo <id>)");
+                }
+                p
+            };
+            ai::run_ship(&root, &cfg, &prompt, todo).await
+        }
+        Some(AiCommand::Jobs) => ai::run_jobs(&root, &cfg),
+        Some(AiCommand::Ask { prompt }) => {
+            ai::run_ask(&root, &cfg, &prompt.join(" "), mode, resume).await
+        }
+        Some(AiCommand::BurnIn { review, limit }) => {
+            ai::run_burn_in(&root, &cfg, port, review, limit).await
+        }
+        Some(AiCommand::Setup) => unreachable!("handled above"),
+    }
 }
 
 /// Dispatch `ciabatta watch <command>`: run the command through the shell,
@@ -232,7 +311,7 @@ async fn cmd_watch(
 /// Re-launch this executable as a detached background process serving the todo
 /// web app (`ciabatta todo --port <port>`), with its stdio discarded so it
 /// keeps running after this process exits.
-fn spawn_detached_todo(port: u16) -> Result<()> {
+fn spawn_detached_todo(port: u16, ai_port: u16) -> Result<()> {
     use std::process::{Command, Stdio};
 
     let exe = env::current_exe().context("Failed to locate the ciabatta executable")?;
@@ -240,6 +319,8 @@ fn spawn_detached_todo(port: u16) -> Result<()> {
         .arg("todo")
         .arg("--port")
         .arg(port.to_string())
+        .arg("--ai-port")
+        .arg(ai_port.to_string())
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -266,7 +347,11 @@ fn init_logging(debug_flag: bool) {
             })
             .unwrap_or(false);
 
-    let default_directive = if debug { "ciabatta=debug" } else { "ciabatta=warn" };
+    let default_directive = if debug {
+        "ciabatta=debug"
+    } else {
+        "ciabatta=warn"
+    };
     let filter = EnvFilter::try_from_env("CIABATTA_LOG")
         .unwrap_or_else(|_| EnvFilter::new(default_directive));
 
@@ -372,7 +457,10 @@ fn build_env_vars(
         vars.extend(git_vars);
         // Record the mode so the runner (pull best-hash fallback) and any child
         // processes see it, even when it was turned on by the `--local` flag.
-        vars.insert(environment::ENV_VAR.to_string(), environment::LOCAL.to_string());
+        vars.insert(
+            environment::ENV_VAR.to_string(),
+            environment::LOCAL.to_string(),
+        );
     } else if let Some(ref system) = cfg.system
         && let Some(ref ci_name) = system.ci
     {
@@ -486,7 +574,10 @@ fn source_ciabatta_vars(vars: &mut HashMap<String, String>, root: &Path, announc
         }
     }
     // Derive CIABATTA_PATH from the now-augmented set, if it isn't set already.
-    if vars.get("CIABATTA_PATH").map(|v| v.is_empty()).unwrap_or(true)
+    if vars
+        .get("CIABATTA_PATH")
+        .map(|v| v.is_empty())
+        .unwrap_or(true)
         && let Some(path) = derive_ciabatta_path(vars)
     {
         vars.insert("CIABATTA_PATH".to_string(), path);
@@ -979,6 +1070,27 @@ All paths in recipes are relative to this root.
   trace        = "trace.csv" # CSV of `requirement,file` connections
                              # (paths are relative to the project root;
                              #  --requirements / --trace override these)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+[ai]                       # Settings for `ciabatta ai` (run `ciabatta ai setup`)
+  provider    = "claude"     # claude | openai | vllm (openai & vllm both speak
+                             # the OpenAI format; vllm defaults to localhost:8000)
+  endpoint    = "https://api.anthropic.com"   # or e.g. http://localhost:8000
+  model       = "claude-opus-4-8"
+  api_key_env = "ANTHROPIC_API_KEY"  # env var holding the API key
+  tls_verify  = true         # false to skip cert checks for a self-signed
+                             # vLLM/OpenAI dev endpoint
+  images      = ["python:3.12", "node:22"]    # sandbox base images the AI may
+                             # spin up via podman/docker ([system].containers)
+
+  The assistant's learned state (architecture tags, the file→architecture
+  mind map, and its 1-100 confidence score) lives in .ciabatta/ai/brain.json.
+  Chat sessions are saved under .ciabatta/ai/conversations/ — resume the most
+  recent with `ciabatta ai -c`, or list/pick one with `ciabatta ai resume`.
+  Hand off background work with `ciabatta ai ship "<task>"` (or `--todo <id>`);
+  track it with `ciabatta ai jobs`, saved in .ciabatta/ai/jobs.json. The AI may
+  only read and write the project workspace and /tmp — nothing else.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 

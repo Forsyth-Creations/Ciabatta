@@ -372,7 +372,10 @@ fn render_explorer(f: &mut Frame, area: Rect, explorer: &Explorer) {
     } else {
         ""
     };
-    let title = format!(" Explore {}{}  {} ", explorer.registry_name, auth, path_display);
+    let title = format!(
+        " Explore {}{}  {} ",
+        explorer.registry_name, auth, path_display
+    );
 
     let block = Block::default()
         .title(Span::styled(
@@ -928,7 +931,10 @@ fn handle_explorer_key(app: &mut BrowserApp, code: KeyCode, tx: &mpsc::Sender<Ex
         KeyCode::Up | KeyCode::Char('k') => explorer.move_up(),
         KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => {
             // Descend into the selected folder.
-            let descend = explorer.selected().filter(|e| e.is_dir).map(|e| e.name.clone());
+            let descend = explorer
+                .selected()
+                .filter(|e| e.is_dir)
+                .map(|e| e.name.clone());
             if let Some(seg) = descend {
                 explorer.path = if explorer.path.is_empty() {
                     seg

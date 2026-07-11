@@ -18,6 +18,8 @@ pub struct CiabattaConfig {
     #[serde(default)]
     pub menus: HashMap<String, Vec<String>>,
     pub analyze: Option<AnalyzeConfig>,
+    /// Settings for the `ciabatta ai` assistant.
+    pub ai: Option<AiConfig>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
@@ -35,6 +37,47 @@ pub struct AnalyzeConfig {
     pub requirements: Option<String>,
     /// A CSV tracing requirements to source files (columns: requirement, file).
     pub trace: Option<String>,
+}
+
+/// Settings for the `ciabatta ai` assistant (see `ciabatta ai setup`).
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct AiConfig {
+    /// Which wire format to speak: `claude` (default), `openai`, or `vllm` —
+    /// the latter two both cover any OpenAI-compatible endpoint (OpenAI, vLLM,
+    /// Ollama, LM Studio, …); `vllm` just defaults the endpoint to
+    /// http://localhost:8000.
+    pub provider: Option<String>,
+    /// Base URL of the API. Defaults per provider (api.anthropic.com /
+    /// api.openai.com / localhost:8000 for vLLM); point it at a local or
+    /// remote server for self-hosted models.
+    pub endpoint: Option<String>,
+    /// Model name. Defaults per provider.
+    pub model: Option<String>,
+    /// Name of the environment variable holding the API key
+    /// (default: ANTHROPIC_API_KEY or OPENAI_API_KEY).
+    pub api_key_env: Option<String>,
+    /// Verify the endpoint's TLS certificate. Defaults to true; set to false
+    /// for a self-hosted vLLM/OpenAI endpoint behind a self-signed cert.
+    #[serde(default = "default_true")]
+    pub tls_verify: bool,
+    /// Container base images the assistant may spin up as sandboxes via the
+    /// configured runtime ([system].containers → podman/docker). Any number of
+    /// images; the assistant can only use images listed here.
+    #[serde(default)]
+    pub images: Vec<String>,
+}
+
+impl Default for AiConfig {
+    fn default() -> Self {
+        Self {
+            provider: None,
+            endpoint: None,
+            model: None,
+            api_key_env: None,
+            tls_verify: true,
+            images: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -602,7 +645,10 @@ repository = "raw-hosted"
 "#,
         );
         let rc = &cfg.registries["nexus"];
-        assert_eq!(rc.nexus_repo_url(), "http://localhost:8527/repository/raw-hosted");
+        assert_eq!(
+            rc.nexus_repo_url(),
+            "http://localhost:8527/repository/raw-hosted"
+        );
         assert_eq!(
             rc.nexus_object_url("group/app.bin"),
             "http://localhost:8527/repository/raw-hosted/group/app.bin"
@@ -659,9 +705,18 @@ url = "http://h"
 format = "maven"
 "#,
         );
-        assert_eq!(cfg.registries["raw"].nexus_format().unwrap(), NexusFormat::Raw);
-        assert_eq!(cfg.registries["npm"].nexus_format().unwrap(), NexusFormat::Npm);
-        assert_eq!(cfg.registries["pypi"].nexus_format().unwrap(), NexusFormat::Pypi);
+        assert_eq!(
+            cfg.registries["raw"].nexus_format().unwrap(),
+            NexusFormat::Raw
+        );
+        assert_eq!(
+            cfg.registries["npm"].nexus_format().unwrap(),
+            NexusFormat::Npm
+        );
+        assert_eq!(
+            cfg.registries["pypi"].nexus_format().unwrap(),
+            NexusFormat::Pypi
+        );
         assert!(cfg.registries["bad"].nexus_format().is_err());
     }
 

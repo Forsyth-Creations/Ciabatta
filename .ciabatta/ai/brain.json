@@ -1,0 +1,451 @@
+{
+  "confidence": 43.51999999999998,
+  "interactions": 8,
+  "architectures": {
+    "ai": {
+      "knowledge": 9.350000000000001,
+      "description": "AI brain, provider integration, tools, and chat server/TUI",
+      "files": {
+        ".ciabatta/ciabatta.toml": 1.0,
+        "AI.md": 1.0,
+        "src/ai/brain.rs": 1.25,
+        "src/ai/burnin.rs": 1.0,
+        "src/ai/index.html": 1.0,
+        "src/ai/mod.rs": 2.5,
+        "src/ai/provider.rs": 1.25,
+        "src/ai/server.rs": 3.5,
+        "src/ai/tools.rs": 2.25,
+        "src/ai/tui.rs": 1.0
+      }
+    },
+    "analyze": {
+      "knowledge": 3.5,
+      "description": "Codebase scanning, requirements detection, and caching",
+      "files": {
+        "src/ai/burnin.rs": 1.0,
+        "src/analyze/cache.rs": 1.0,
+        "src/analyze/index.html": 1.0,
+        "src/analyze/mod.rs": 1.0,
+        "src/analyze/requirements.rs": 1.0,
+        "src/analyze/scan.rs": 1.0,
+        "src/analyze/server.rs": 1.0
+      }
+    },
+    "build": {
+      "knowledge": 4.1,
+      "description": "",
+      "files": {
+        "Cargo.toml": 1.25,
+        "frontend/vite.config.js": 1.0,
+        "src/deploy/builder.html": 1.0,
+        "src/environment.rs": 1.0,
+        "src/git.rs": 2.25
+      }
+    },
+    "cli": {
+      "knowledge": 3.7999999999999985,
+      "description": "Command-line entrypoint, argument parsing, config, and CI metadata handling",
+      "files": {
+        "install/install.ps1": 1.0,
+        "install/install.sh": 1.0,
+        "src/cli.rs": 1.75,
+        "src/configure.rs": 1.0,
+        "src/main.rs": 2.75
+      }
+    },
+    "config": {
+      "knowledge": 5.55,
+      "description": "",
+      "files": {
+        ".ciabatta/ciabatta.toml": 1.0,
+        ".yarnrc.yml": 1.0,
+        "Cargo.toml": 1.25,
+        "frontend/vite.config.js": 1.0,
+        "src/ci.rs": 1.0,
+        "src/config.rs": 2.0,
+        "src/configure.rs": 1.0,
+        "src/deploy/mod.rs": 1.0,
+        "src/environment.rs": 1.0
+      }
+    },
+    "core": {
+      "knowledge": 5.899999999999999,
+      "description": "",
+      "files": {
+        "src/ai/brain.rs": 1.25,
+        "src/ai/mod.rs": 1.25,
+        "src/deploy/engine.rs": 1.25,
+        "src/git.rs": 2.25,
+        "src/main.rs": 1.75,
+        "src/registry/mod.rs": 1.0,
+        "src/runner.rs": 1.25
+      }
+    },
+    "deploy": {
+      "knowledge": 5.05,
+      "description": "Deployment engine and build/deploy server",
+      "files": {
+        "Dockerfile": 1.0,
+        "docker-compose.yml": 1.0,
+        "install/install.ps1": 1.0,
+        "install/install.sh": 1.0,
+        "src/ci.rs": 1.0,
+        "src/deploy/builder.html": 1.0,
+        "src/deploy/engine.rs": 1.25,
+        "src/deploy/index.html": 1.0,
+        "src/deploy/mod.rs": 1.0,
+        "src/deploy/server.rs": 1.0
+      }
+    },
+    "docs": {
+      "knowledge": 2.0,
+      "description": "",
+      "files": {
+        "AI.md": 1.0,
+        "README.md": 2.0
+      }
+    },
+    "entrypoint": {
+      "knowledge": 1.6500000000000001,
+      "description": "",
+      "files": {
+        "src/main.rs": 2.75
+      }
+    },
+    "frontend": {
+      "knowledge": 13.250000000000002,
+      "description": "Vite-based web frontend UI",
+      "files": {
+        ".yarnrc.yml": 1.0,
+        "frontend/index.html": 1.0,
+        "frontend/src/main.js": 1.0,
+        "frontend/src/style.css": 1.0,
+        "frontend/vite.config.js": 1.0,
+        "src/ai/index.html": 1.0,
+        "src/ai/server.rs": 3.5,
+        "src/analyze/index.html": 1.0,
+        "src/analyze/server.rs": 1.0,
+        "src/deploy/builder.html": 1.0,
+        "src/deploy/index.html": 1.0,
+        "src/deploy/server.rs": 1.0,
+        "src/todo/index.html": 3.5,
+        "src/todo/server.rs": 2.25,
+        "src/watch/index.html": 1.0
+      }
+    },
+    "git": {
+      "knowledge": 1.0,
+      "description": "",
+      "files": {
+        "src/git.rs": 1.0
+      }
+    },
+    "manifest": {
+      "knowledge": 2.05,
+      "description": "",
+      "files": {
+        "Cargo.toml": 2.25,
+        "src/analyze/scan.rs": 1.0
+      }
+    },
+    "registry": {
+      "knowledge": 5.0,
+      "description": "Publish/pull adapters for Nexus, S3, Artifactory, Docker, and ECR",
+      "files": {
+        ".ciabatta/ciabatta.toml": 1.0,
+        "src/configure.rs": 1.0,
+        "src/registry/artifactory.rs": 1.0,
+        "src/registry/browse.rs": 1.0,
+        "src/registry/docker.rs": 1.0,
+        "src/registry/ecr.rs": 1.0,
+        "src/registry/mod.rs": 1.0,
+        "src/registry/nexus.rs": 1.0,
+        "src/registry/s3.rs": 1.0,
+        "src/tui/browser.rs": 1.0
+      }
+    },
+    "sandbox": {
+      "knowledge": 3.55,
+      "description": "",
+      "files": {
+        "Dockerfile": 1.0,
+        "docker-compose.yml": 1.0,
+        "src/ai/tools.rs": 2.25,
+        "src/config.rs": 1.0
+      }
+    },
+    "ship-to-ai": {
+      "knowledge": 6.1499999999999995,
+      "description": "",
+      "files": {
+        "src/ai/server.rs": 2.25,
+        "src/todo/index.html": 2.25,
+        "src/todo/server.rs": 2.25
+      }
+    },
+    "todo": {
+      "knowledge": 6.799999999999999,
+      "description": "Todo tracking module with its own server view",
+      "files": {
+        "src/todo/index.html": 3.5,
+        "src/todo/mod.rs": 2.5,
+        "src/todo/server.rs": 3.5
+      }
+    },
+    "tools": {
+      "knowledge": 1.55,
+      "description": "",
+      "files": {
+        "src/ai/tools.rs": 2.25
+      }
+    },
+    "tui": {
+      "knowledge": 2.5,
+      "description": "Terminal UI app, browser, and rendering",
+      "files": {
+        "src/ai/tui.rs": 1.0,
+        "src/tui/app.rs": 1.0,
+        "src/tui/browser.rs": 1.0,
+        "src/tui/mod.rs": 1.0,
+        "src/tui/ui.rs": 1.0
+      }
+    },
+    "watch": {
+      "knowledge": 1.5,
+      "description": "File/artifact watching module and its server",
+      "files": {
+        "src/watch/index.html": 1.0,
+        "src/watch/mod.rs": 1.0,
+        "src/watch/server.rs": 1.0
+      }
+    }
+  },
+  "tags": {
+    ".ciabatta/ciabatta.toml": [
+      "ai",
+      "config",
+      "registry"
+    ],
+    ".yarnrc.yml": [
+      "config",
+      "frontend"
+    ],
+    "AI.md": [
+      "ai",
+      "docs"
+    ],
+    "Cargo.toml": [
+      "build",
+      "config",
+      "manifest"
+    ],
+    "Dockerfile": [
+      "deploy",
+      "sandbox"
+    ],
+    "README.md": [
+      "docs"
+    ],
+    "docker-compose.yml": [
+      "deploy",
+      "sandbox"
+    ],
+    "frontend/index.html": [
+      "frontend"
+    ],
+    "frontend/src/main.js": [
+      "frontend"
+    ],
+    "frontend/src/style.css": [
+      "frontend"
+    ],
+    "frontend/vite.config.js": [
+      "build",
+      "config",
+      "frontend"
+    ],
+    "install/install.ps1": [
+      "cli",
+      "deploy"
+    ],
+    "install/install.sh": [
+      "cli",
+      "deploy"
+    ],
+    "src/ai/brain.rs": [
+      "ai",
+      "core"
+    ],
+    "src/ai/burnin.rs": [
+      "ai",
+      "analyze"
+    ],
+    "src/ai/index.html": [
+      "ai",
+      "frontend"
+    ],
+    "src/ai/mod.rs": [
+      "ai",
+      "core"
+    ],
+    "src/ai/provider.rs": [
+      "ai"
+    ],
+    "src/ai/server.rs": [
+      "ai",
+      "frontend",
+      "ship-to-ai"
+    ],
+    "src/ai/tools.rs": [
+      "ai",
+      "sandbox",
+      "tools"
+    ],
+    "src/ai/tui.rs": [
+      "ai",
+      "tui"
+    ],
+    "src/analyze/cache.rs": [
+      "analyze"
+    ],
+    "src/analyze/index.html": [
+      "analyze",
+      "frontend"
+    ],
+    "src/analyze/mod.rs": [
+      "analyze"
+    ],
+    "src/analyze/requirements.rs": [
+      "analyze"
+    ],
+    "src/analyze/scan.rs": [
+      "analyze",
+      "manifest"
+    ],
+    "src/analyze/server.rs": [
+      "analyze",
+      "frontend"
+    ],
+    "src/ci.rs": [
+      "config",
+      "deploy"
+    ],
+    "src/cli.rs": [
+      "cli"
+    ],
+    "src/config.rs": [
+      "config",
+      "sandbox"
+    ],
+    "src/configure.rs": [
+      "cli",
+      "config",
+      "registry"
+    ],
+    "src/deploy/builder.html": [
+      "build",
+      "deploy",
+      "frontend"
+    ],
+    "src/deploy/engine.rs": [
+      "core",
+      "deploy"
+    ],
+    "src/deploy/index.html": [
+      "deploy",
+      "frontend"
+    ],
+    "src/deploy/mod.rs": [
+      "config",
+      "deploy"
+    ],
+    "src/deploy/server.rs": [
+      "deploy",
+      "frontend"
+    ],
+    "src/environment.rs": [
+      "build",
+      "config"
+    ],
+    "src/git.rs": [
+      "build",
+      "core",
+      "git"
+    ],
+    "src/main.rs": [
+      "cli",
+      "core",
+      "entrypoint"
+    ],
+    "src/registry/artifactory.rs": [
+      "registry"
+    ],
+    "src/registry/browse.rs": [
+      "registry"
+    ],
+    "src/registry/docker.rs": [
+      "registry"
+    ],
+    "src/registry/ecr.rs": [
+      "registry"
+    ],
+    "src/registry/mod.rs": [
+      "core",
+      "registry"
+    ],
+    "src/registry/nexus.rs": [
+      "registry"
+    ],
+    "src/registry/s3.rs": [
+      "registry"
+    ],
+    "src/runner.rs": [
+      "core"
+    ],
+    "src/todo/index.html": [
+      "frontend",
+      "ship-to-ai",
+      "todo"
+    ],
+    "src/todo/mod.rs": [
+      "todo"
+    ],
+    "src/todo/server.rs": [
+      "frontend",
+      "ship-to-ai",
+      "todo"
+    ],
+    "src/tui/app.rs": [
+      "tui"
+    ],
+    "src/tui/browser.rs": [
+      "registry",
+      "tui"
+    ],
+    "src/tui/mod.rs": [
+      "tui"
+    ],
+    "src/tui/ui.rs": [
+      "tui"
+    ],
+    "src/watch/index.html": [
+      "frontend",
+      "watch"
+    ],
+    "src/watch/mod.rs": [
+      "watch"
+    ],
+    "src/watch/server.rs": [
+      "watch"
+    ]
+  },
+  "pending": [],
+  "feedback": [
+    {
+      "at": "2026-07-10T20:44:39.148112743-04:00",
+      "positive": true,
+      "files_used": 1,
+      "note": ""
+    }
+  ]
+}

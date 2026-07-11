@@ -427,7 +427,10 @@ impl RustLock {
         }
         // Several locked versions: pick the highest that satisfies the req.
         let want: Vec<&str> = req
-            .map(|r| r.trim_start_matches(['^', '~', '>', '<', '=', ' ', 'v']).trim())
+            .map(|r| {
+                r.trim_start_matches(['^', '~', '>', '<', '=', ' ', 'v'])
+                    .trim()
+            })
             .filter(|r| !r.is_empty())
             .map(|r| r.split(['.', ',', ' ']).collect())
             .unwrap_or_default();
@@ -456,7 +459,11 @@ fn version_has_prefix(version: &str, want: &[&str]) -> bool {
 fn cmp_version(a: &str, b: &str) -> std::cmp::Ordering {
     let parts = |s: &str| -> Vec<u64> {
         s.split(['.', '+', '-'])
-            .map(|p| p.chars().take_while(|c| c.is_ascii_digit()).collect::<String>())
+            .map(|p| {
+                p.chars()
+                    .take_while(|c| c.is_ascii_digit())
+                    .collect::<String>()
+            })
             .map(|p| p.parse().unwrap_or(0))
             .collect()
     };
@@ -1314,16 +1321,16 @@ docker push $SECRET_IMAGE   # CI variable, ignored
             .collect(),
             ..Default::default()
         };
-        assert_eq!(lock.resolve("aho-corasick", Some("1")).as_deref(), Some("1.1.4"));
+        assert_eq!(
+            lock.resolve("aho-corasick", Some("1")).as_deref(),
+            Some("1.1.4")
+        );
         assert_eq!(
             lock.resolve("aho-corasick", Some("0.6")).as_deref(),
             Some("0.6.10")
         );
         // No/unknown requirement → highest locked version.
-        assert_eq!(
-            lock.resolve("aho-corasick", None).as_deref(),
-            Some("1.1.4")
-        );
+        assert_eq!(lock.resolve("aho-corasick", None).as_deref(), Some("1.1.4"));
     }
 
     #[test]

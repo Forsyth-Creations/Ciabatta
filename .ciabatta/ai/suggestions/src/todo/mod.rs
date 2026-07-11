@@ -8,6 +8,10 @@
 //! Tasks live in a single JSON file under the user's home directory
 //! (`~/.ciabatta/todos.json`), so the list is personal and independent of which
 //! project directory you happen to be in.
+//!
+//! When the AI assistant daemon (`ciabatta ai serve`) is running, a task can be
+//! handed off to it as a long-running job: each task carries an [`AiTask`]
+//! recording its status, a live progress line, and the final answer or error.
 
 pub mod server;
 
@@ -40,6 +44,39 @@ impl Priority {
     }
 }
 
+/// Where a task stands with the AI assistant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum AiStatus {
+    /// Never handed off to the assistant.
+    #[default]
+    Idle,
+    /// Submitted; the assistant is working on it.
+    Running,
+    /// The assistant finished; see [`AiTask::answer`].
+    Done,
+    /// The assistant failed; see [`AiTask::error`].
+    Failed,
+}
+
+/// The AI-assistant side of a task: its status plus whatever the last run
+/// produced. Defaults to an empty, idle job so older todos.json files load.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct AiTask {
+    #[serde(default)]
+    pub status: AiStatus,
+    /// A short, human-readable line on what the assistant is doing right now
+    /// (updated while `status == Running`).
+    #[serde(default)]
+    pub progress: String,
+    /// The assistant's final answer (when `status == Done`).
+    #[serde(default)]
+    pub answer: String,
+    /// The failure message (when `status == Failed`).
+    #[serde(default)]
+    pub error: String,
+}
+
 /// A single task.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Todo {
@@ -52,6 +89,9 @@ pub struct Todo {
     pub priority: Priority,
     /// RFC 3339 timestamp of when the task was added.
     pub created_at: String,
+    /// The task's relationship with the AI assistant (idle by default).
+    #[serde(default)]
+    pub ai: AiTask,
 }
 
 /// The on-disk task list plus a monotonically increasing id counter, guarded by
@@ -99,6 +139,7 @@ impl Store {
             done: false,
             priority: Priority::default(),
             created_at: now_rfc3339(),
+            ai: AiTask::default(),
         };
         todos.push(todo.clone());
         save(&self.path, &todos)?;
@@ -112,21 +153,6 @@ impl Store {
             t.done = !t.done;
         }
         save(&self.path, &todos)
-    }
-
-    /// Set a task's completion state explicitly and persist. Used when the AI
-    /// finishes a task that was shipped from the todo list.
-    pub fn set_done(&self, id: u64, done: bool) -> Result<()> {
-        let mut todos = self.inner.lock().unwrap();
-        if let Some(t) = todos.iter_mut().find(|t| t.id == id) {
-            t.done = done;
-        }
-        save(&self.path, &todos)
-    }
-
-    /// A task's text by id, if it exists (used to ship a todo to the AI).
-    pub fn text_of(&self, id: u64) -> Option<String> {
-        self.inner.lock().unwrap().iter().find(|t| t.id == id).map(|t| t.text.clone())
     }
 
     /// Set a task's priority and persist.
@@ -154,6 +180,67 @@ impl Store {
     pub fn remove(&self, id: u64) -> Result<()> {
         let mut todos = self.inner.lock().unwrap();
         todos.retain(|t| t.id != id);
+        save(&self.path, &todos)
+    }
+
+    /// The text of a task, if it exists (used to build the AI prompt).
+    pub fn text_of(&self, id: u64) -> Option<String> {
+        let todos = self.inner.lock().unwrap();
+        todos.iter().find(|t| t.id == id).map(|t| t.text.clone())
+    }
+
+    /// Mark a task as handed off to the assistant and persist. Returns `false`
+    /// if the task doesn't exist or is already running (so we never launch two
+    /// jobs for the same task).
+    pub fn ai_begin(&self, id: u64) -> Result<bool> {
+        let mut todos = self.inner.lock().unwrap();
+        let Some(t) = todos.iter_mut().find(|t| t.id == id) else {
+            return Ok(false);
+        };
+        if t.ai.status == AiStatus::Running {
+            return Ok(false);
+        }
+        t.ai = AiTask {
+            status: AiStatus::Running,
+            progress: "Sent to the assistant…".to_string(),
+            answer: String::new(),
+            error: String::new(),
+        };
+        save(&self.path, &todos)?;
+        Ok(true)
+    }
+
+    /// Update the live progress line for a running task and persist.
+    pub fn ai_progress(&self, id: u64, line: &str) -> Result<()> {
+        let mut todos = self.inner.lock().unwrap();
+        if let Some(t) = todos.iter_mut().find(|t| t.id == id) {
+            if t.ai.status == AiStatus::Running {
+                t.ai.progress = line.to_string();
+            }
+        }
+        save(&self.path, &todos)
+    }
+
+    /// Record a successful AI run (answer + Done) and persist.
+    pub fn ai_done(&self, id: u64, answer: &str) -> Result<()> {
+        let mut todos = self.inner.lock().unwrap();
+        if let Some(t) = todos.iter_mut().find(|t| t.id == id) {
+            t.ai.status = AiStatus::Done;
+            t.ai.progress = String::new();
+            t.ai.answer = answer.to_string();
+            t.ai.error = String::new();
+        }
+        save(&self.path, &todos)
+    }
+
+    /// Record a failed AI run (error + Failed) and persist.
+    pub fn ai_failed(&self, id: u64, error: &str) -> Result<()> {
+        let mut todos = self.inner.lock().unwrap();
+        if let Some(t) = todos.iter_mut().find(|t| t.id == id) {
+            t.ai.status = AiStatus::Failed;
+            t.ai.progress = String::new();
+            t.ai.error = error.to_string();
+        }
         save(&self.path, &todos)
     }
 }

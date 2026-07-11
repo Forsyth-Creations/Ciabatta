@@ -1,5 +1,9 @@
 import { defineConfig } from "vite";
 import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const root = fileURLToPath(new URL(".", import.meta.url));
 
 const pkg = JSON.parse(
   readFileSync(new URL("./package.json", import.meta.url), "utf8"),
@@ -19,5 +23,14 @@ export default defineConfig({
   },
   build: {
     outDir: "dist",
+    rollupOptions: {
+      // Multi-page: the landing page plus a dedicated doc page per deploy feature.
+      input: {
+        main: resolve(root, "index.html"),
+        "deploy-env-files": resolve(root, "deploy-env-files.html"),
+        "deploy-env-select": resolve(root, "deploy-env-select.html"),
+        "deploy-conditional-steps": resolve(root, "deploy-conditional-steps.html"),
+      },
+    },
   },
 });

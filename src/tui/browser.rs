@@ -236,6 +236,7 @@ impl BrowserApp {
             // Deploy step updates don't occur in the push-on-demand browser.
             ProgressUpdate::StepStarted { .. }
             | ProgressUpdate::StepFinished { .. }
+            | ProgressUpdate::StepSkipped { .. }
             | ProgressUpdate::StepLog { .. }
             | ProgressUpdate::StepNeedsChoice { .. } => {}
         }

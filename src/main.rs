@@ -760,6 +760,13 @@ async fn run_plain(
             ProgressUpdate::StepFinished { recipe, step, ok } => {
                 println!("[{recipe}]   {} step: {step}", if ok { "✓" } else { "✗" })
             }
+            ProgressUpdate::StepSkipped {
+                recipe,
+                step,
+                reason,
+            } => {
+                println!("[{recipe}]   ⊘ skipped step: {step} ({reason})")
+            }
             ProgressUpdate::StepLog { recipe, step, line } => {
                 println!("[{recipe}]   [{step}] {line}")
             }
@@ -917,6 +924,7 @@ fn build_starter_toml(ci: Option<&str>, containers: Option<&str>) -> String {
 #
 # [recipies.web.deploy]
 # flowchart = ".ciabatta/deploys.toml"   # each entry is a series of steps
+# env_file  = ".env"                     # .env file(s) sourced before running
 #
 # ─── Credentials ───────────────────────────────────────────────────────────────
 # When a registry has no login_script, ciabatta reads per-registry credentials:
@@ -1177,12 +1185,29 @@ Deploys — a DAG of dependent script steps (`ciabatta deploy`)
   [recipies.<name>.deploy]
     flowchart = ".ciabatta/deploys.toml"   # separate file holding the steps
     entry     = "web"                       # entry to use (default: recipe name)
+    env_file  = ".env"                      # .env file(s) sourced before running
     login = "..."   pre = "..."   post = "..."   # optional phase hooks
+
+  `env_file` sources one or more `.env` files (a string or a list, relative to
+  the project root) before anything runs, so the deploy's phases and steps see
+  their `KEY=VALUE` lines. Values already resolved (CI, git, or `-e`) win, and a
+  sourced value can satisfy a `REQUIRED_ENV` entry. It may also be set on the
+  flowchart entry. A path may contain `{VAR}` placeholders to pick the file at
+  run time — `env_file = ".env.{DEPLOY_ENV}"` sources `.env.dev` or `.env.prod`
+  (pass `-e DEPLOY_ENV=dev`, or set it in the environment).
 
   The flowchart file lists steps. Each step runs a `script` (a bash file) or an
   inline `run` command, and may declare `needs` (steps that must succeed first)
   and `on_error` (jump to a recovery node on failure). Steps with satisfied
   `needs` are eligible to run; the graph must be acyclic.
+
+  A step may be skipped by condition (evaluated against the deploy's env):
+    when    = "env.DEPLOY_ENV == prod"    # run ONLY if all conditions hold
+    skip_if = "env.IN_CI == true"         # skip if ANY condition holds
+  Each takes one condition or a list (multiple criteria). Conditions are
+  `VAR == value`, `VAR != value`, bare `VAR` (truthy), or `!VAR`; the `env.`
+  prefix is optional. A skipped step counts as satisfied, so its dependents
+  still run.
 
     # .ciabatta/deploys.toml
     [web]
@@ -1210,6 +1235,7 @@ Deploys — a DAG of dependent script steps (`ciabatta deploy`)
       name = "release"
       script = "scripts/release.sh"
       needs  = ["migrate"]
+      when   = "env.DEPLOY_ENV == prod"   # only release in prod
 
   Recovery: when a step with `on_error` fails, its recovery node offers a choice
   of fix `options`. With `--gui` you pick one in the browser; otherwise (plain /

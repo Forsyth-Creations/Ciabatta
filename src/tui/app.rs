@@ -152,6 +152,15 @@ impl App {
                         .push(format!("{} {step}", if ok { "✓" } else { "✗" }));
                 }
             }
+            ProgressUpdate::StepSkipped {
+                recipe,
+                step,
+                reason,
+            } => {
+                if let Some(r) = self.find_mut(&recipe) {
+                    r.logs.push(format!("⊘ {step} (skipped: {reason})"));
+                }
+            }
             ProgressUpdate::StepLog { recipe, step, line } => {
                 if let Some(r) = self.find_mut(&recipe) {
                     r.logs.push(format!("  [{step}] {line}"));

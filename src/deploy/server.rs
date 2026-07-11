@@ -128,6 +128,19 @@ impl GuiState {
                     };
                 }
             }
+            ProgressUpdate::StepSkipped {
+                recipe,
+                step,
+                reason,
+            } => {
+                if let Some(r) = self.recipe_mut(&recipe) {
+                    if let Some(s) = r.step_mut(&step) {
+                        s.status = "skipped".into();
+                        s.logs.push(format!("skipped: {reason}"));
+                    }
+                    r.logs.push(format!("[{step}] skipped: {reason}"));
+                }
+            }
             ProgressUpdate::StepLog { recipe, step, line } => {
                 if let Some(r) = self.recipe_mut(&recipe) {
                     if let Some(s) = r.step_mut(&step) {

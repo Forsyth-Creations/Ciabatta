@@ -40,6 +40,22 @@ pub struct DeployRecipe {
     /// Override the `post-deploy` phase (default: no-op).
     pub post: Option<String>,
 
+    /// Path(s) (relative to the project root) to `.env` file(s) sourced before
+    /// the deploy runs. Each `KEY=VALUE` line is loaded into the deploy's
+    /// environment so its phases and steps can see it; values already resolved
+    /// (from the ambient environment, CI, git, or `-e` flags) take precedence,
+    /// and later files override earlier ones. Missing files are an error.
+    /// Accepts a single path (`env_file = ".env"`) or a list
+    /// (`env_file = [".env", ".env.deploy"]`). Merged with the flowchart file's
+    /// own `env_file` when a `flowchart` file is used.
+    ///
+    /// Each path may contain `{VAR}` placeholders resolved from the current
+    /// environment, so which file is sourced can be selected at run time:
+    /// `env_file = ".env.{DEPLOY_ENV}"` sources `.env.dev` or `.env.prod`
+    /// depending on `DEPLOY_ENV`.
+    #[serde(default, deserialize_with = "string_or_vec")]
+    pub env_file: Vec<String>,
+
     /// Environment variables that must be set (and non-empty) for the deploy to
     /// run. Checked before any phase executes; if any are empty/unset the deploy
     /// is aborted with an error. Merged with the flowchart file's own
@@ -50,6 +66,26 @@ pub struct DeployRecipe {
     /// Steps written inline, when not using a separate `flowchart` file.
     #[serde(default)]
     pub steps: Vec<DeployStep>,
+}
+
+/// Deserialize a field that TOML may express as either a bare string
+/// (`env_file = ".env"`) or an array (`env_file = [".env", ".env.deploy"]`) into
+/// a `Vec<String>`. Shared by `env_file` and the step conditions (`when` /
+/// `skip_if`), all of which accept one-or-many.
+fn string_or_vec<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum OneOrMany {
+        One(String),
+        Many(Vec<String>),
+    }
+    Ok(match OneOrMany::deserialize(deserializer)? {
+        OneOrMany::One(s) => vec![s],
+        OneOrMany::Many(v) => v,
+    })
 }
 
 /// A node in the deploy flowchart: either a normal step (runs an action once its
@@ -70,6 +106,19 @@ pub struct DeployStep {
     pub needs: Vec<String>,
     /// On failure, jump to this recovery node instead of aborting the deploy.
     pub on_error: Option<String>,
+
+    /// Condition(s) that must ALL hold for this step to run; if any is false the
+    /// step is skipped (and treated as satisfied, so its dependents still run).
+    /// Accepts one condition or a list. Each is evaluated against the deploy's
+    /// environment, e.g. `when = "env.DEPLOY_ENV == prod"` or
+    /// `when = ["env.DEPLOY_ENV == prod", "REGION == us-east-1"]`.
+    #[serde(default, deserialize_with = "string_or_vec")]
+    pub when: Vec<String>,
+    /// Condition(s) that skip this step when ANY holds — the inverse of `when`,
+    /// matching "skip if …". Accepts one condition or a list, e.g.
+    /// `skip_if = "env.IN_CI == true"`.
+    #[serde(default, deserialize_with = "string_or_vec")]
+    pub skip_if: Vec<String>,
 
     /// Marks this node as a recovery node: it presents `options` rather than
     /// running an action of its own.
@@ -129,6 +178,10 @@ pub struct Flowchart {
     /// before any phase executes.
     #[serde(default, rename = "REQUIRED_ENV")]
     pub required_env: Vec<String>,
+    /// `.env` file path(s) sourced before this flowchart's deploy runs. Merged
+    /// with any declared on the recipe's `[deploy]` table.
+    #[serde(default, deserialize_with = "string_or_vec")]
+    pub env_file: Vec<String>,
     #[serde(default)]
     pub steps: Vec<DeployStep>,
 }
@@ -142,6 +195,9 @@ pub struct ResolvedDeploy {
     pub post: Option<String>,
     /// Variables that must be set (non-empty) before the deploy may run.
     pub required_env: Vec<String>,
+    /// `.env` file paths (relative to the project root) to source before the
+    /// deploy runs, in the order they should be applied.
+    pub env_files: Vec<String>,
     pub steps: Vec<DeployStep>,
 }
 
@@ -150,6 +206,144 @@ impl ResolvedDeploy {
     pub fn step(&self, name: &str) -> Option<&DeployStep> {
         self.steps.iter().find(|s| s.name == name)
     }
+}
+
+/// Parse the contents of a `.env` file into ordered `KEY=VALUE` pairs.
+///
+/// Supports the common `.env` shape: blank lines and `#` comments are ignored,
+/// an optional leading `export ` is stripped, and values may be wrapped in
+/// single or double quotes (the quotes are removed). Values are otherwise taken
+/// verbatim (leading/trailing whitespace trimmed for unquoted values). Lines
+/// without an `=` are skipped.
+fn parse_env_content(content: &str) -> Vec<(String, String)> {
+    let mut pairs = Vec::new();
+    for raw in content.lines() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let line = line.strip_prefix("export ").unwrap_or(line);
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        let key = key.trim();
+        if key.is_empty() {
+            continue;
+        }
+        let value = value.trim();
+        // Strip a single pair of matching surrounding quotes, if present.
+        let value = if value.len() >= 2
+            && ((value.starts_with('"') && value.ends_with('"'))
+                || (value.starts_with('\'') && value.ends_with('\'')))
+        {
+            &value[1..value.len() - 1]
+        } else {
+            value
+        };
+        pairs.push((key.to_string(), value.to_string()));
+    }
+    pairs
+}
+
+/// Read the resolved `.env` files (relative to `root`) and merge their variables
+/// on top of `base`, returning the combined environment for the deploy.
+///
+/// Precedence: values already present and non-empty in `base` (the ambient
+/// environment, CI, git, or `-e` flags) win, so a `.env` only supplies what
+/// isn't already set. Among the files themselves, later files override earlier
+/// ones. A missing or unreadable file is an error.
+pub fn load_env_files(
+    files: &[String],
+    root: &Path,
+    base: &HashMap<String, String>,
+) -> Result<HashMap<String, String>> {
+    let mut merged = base.clone();
+    for rel in files {
+        let path = root.join(rel);
+        let content = std::fs::read_to_string(&path)
+            .with_context(|| format!("Failed to read env file '{}'", path.display()))?;
+        for (key, value) in parse_env_content(&content) {
+            // A value already resolved (and non-empty) in `base` wins over every
+            // file; but a later file may override an earlier file's value.
+            let pinned_by_base = base.get(&key).is_some_and(|v| !v.trim().is_empty());
+            if !pinned_by_base {
+                merged.insert(key, value);
+            }
+        }
+    }
+    Ok(merged)
+}
+
+/// Look up a variable's value for a condition, tolerating a leading `env.`
+/// prefix (`env.IN_CI` and `IN_CI` are equivalent). Unset variables read as "".
+fn cond_var<'a>(name: &str, env: &'a HashMap<String, String>) -> &'a str {
+    let name = name.trim().strip_prefix("env.").unwrap_or(name.trim());
+    env.get(name).map(String::as_str).unwrap_or("")
+}
+
+/// Whether a value counts as "truthy" for a bare-variable condition: set and
+/// non-empty, and not one of the common falsey words.
+fn cond_truthy(val: &str) -> bool {
+    let v = val.trim();
+    !v.is_empty() && !matches!(v.to_ascii_lowercase().as_str(), "false" | "0" | "no" | "off")
+}
+
+/// Strip a single pair of matching surrounding quotes from a comparison operand.
+fn cond_unquote(s: &str) -> &str {
+    let s = s.trim();
+    if s.len() >= 2
+        && ((s.starts_with('"') && s.ends_with('"'))
+            || (s.starts_with('\'') && s.ends_with('\'')))
+    {
+        &s[1..s.len() - 1]
+    } else {
+        s
+    }
+}
+
+/// Evaluate a single step condition against the deploy's environment.
+///
+/// Supported forms (the variable may carry an optional `env.` prefix):
+///   * `VAR == value` / `VAR != value` — string comparison of `VAR`'s value
+///     (unset reads as empty); the right side may be quoted.
+///   * `VAR` — true when `VAR` is truthy (set, non-empty, not `false`/`0`/`no`/`off`).
+///   * `!VAR` — the negation of the truthy test.
+pub fn eval_condition(cond: &str, env: &HashMap<String, String>) -> Result<bool> {
+    let cond = cond.trim();
+    if cond.is_empty() {
+        bail!("empty condition");
+    }
+    if let Some((lhs, rhs)) = cond.split_once("!=") {
+        return Ok(cond_var(lhs, env) != cond_unquote(rhs));
+    }
+    if let Some((lhs, rhs)) = cond.split_once("==") {
+        return Ok(cond_var(lhs, env) == cond_unquote(rhs));
+    }
+    if let Some(rest) = cond.strip_prefix('!') {
+        return Ok(!cond_truthy(cond_var(rest, env)));
+    }
+    Ok(cond_truthy(cond_var(cond, env)))
+}
+
+/// Decide whether a step should be skipped given the environment, returning a
+/// short human-readable reason when it should. A step is skipped if any
+/// `skip_if` condition holds, or if any `when` condition does not hold (all
+/// `when` conditions must be true to run).
+pub fn step_skip_reason(
+    step: &DeployStep,
+    env: &HashMap<String, String>,
+) -> Result<Option<String>> {
+    for cond in &step.skip_if {
+        if eval_condition(cond, env)? {
+            return Ok(Some(format!("skip_if `{cond}`")));
+        }
+    }
+    for cond in &step.when {
+        if !eval_condition(cond, env)? {
+            return Ok(Some(format!("when `{cond}` not met")));
+        }
+    }
+    Ok(None)
 }
 
 /// Resolve a recipe's deploy definition into runnable steps: load the separate
@@ -165,6 +359,9 @@ pub fn resolve_deploy(
     // Variables required by the flowchart entry (if a file is used); merged with
     // any declared on the recipe's `[deploy]` table below.
     let mut required_env: Vec<String> = Vec::new();
+    // `.env` files to source, in application order: flowchart-entry files first,
+    // then recipe-level files (so a recipe can layer overrides on top).
+    let mut env_files: Vec<String> = Vec::new();
 
     let steps = match deploy.flowchart.as_deref() {
         Some(rel) => {
@@ -204,6 +401,7 @@ pub fn resolve_deploy(
                 );
             }
             required_env.extend(chart.required_env.iter().cloned());
+            env_files.extend(chart.env_file.iter().cloned());
             chart.steps.clone()
         }
         None => deploy.steps.clone(),
@@ -217,11 +415,20 @@ pub fn resolve_deploy(
         }
     }
 
+    // Recipe-level `env_file`(s) are applied after the flowchart's, de-duplicated
+    // so the same path listed in both places is sourced once.
+    for file in deploy.env_file.iter() {
+        if !env_files.contains(file) {
+            env_files.push(file.clone());
+        }
+    }
+
     let resolved = ResolvedDeploy {
         login: deploy.login.clone(),
         pre: deploy.pre.clone(),
         post: deploy.post.clone(),
         required_env,
+        env_files,
         steps,
     };
     validate_flowchart(&resolved.steps, recipe_name)?;
@@ -371,6 +578,17 @@ pub fn validate_flowchart(steps: &[DeployStep], recipe_name: &str) -> Result<()>
                 step.name,
                 recipe_name
             );
+        }
+
+        // Conditions must be non-blank so a typo can't silently read as "run".
+        for cond in step.when.iter().chain(step.skip_if.iter()) {
+            if cond.trim().is_empty() {
+                bail!(
+                    "Step '{}' in deploy '{}' has an empty `when`/`skip_if` condition.",
+                    step.name,
+                    recipe_name
+                );
+            }
         }
 
         // Edge targets must exist.
@@ -786,6 +1004,207 @@ REQUIRED_ENV = ["API_TOKEN", "REGION"]
             .to_string();
         assert!(err.contains("both") && err.contains("inline"));
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn parse_env_content_handles_comments_quotes_and_export() {
+        let pairs = parse_env_content(
+            "# a comment\n\
+             \n\
+             export API_TOKEN=abc123\n\
+             REGION = \"us-east-1\"\n\
+             QUOTED='single val'\n\
+             EMPTY=\n\
+             noequals\n\
+             =novalue\n",
+        );
+        assert_eq!(
+            pairs,
+            vec![
+                ("API_TOKEN".to_string(), "abc123".to_string()),
+                ("REGION".to_string(), "us-east-1".to_string()),
+                ("QUOTED".to_string(), "single val".to_string()),
+                ("EMPTY".to_string(), "".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn load_env_files_layers_under_existing_and_across_files() {
+        let dir = std::env::temp_dir().join(format!("ciab_envfile_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(&dir.join("a.env"), "A=1\nB=from_a\nC=from_a\n").unwrap();
+        std::fs::write(&dir.join("b.env"), "B=from_b\n").unwrap();
+
+        // A is already resolved (and non-empty) so it must not be clobbered; B is
+        // overridden by the later file; C comes from the first file.
+        let base: HashMap<String, String> =
+            [("A".to_string(), "existing".to_string())].into_iter().collect();
+        let merged = load_env_files(
+            &["a.env".to_string(), "b.env".to_string()],
+            &dir,
+            &base,
+        )
+        .unwrap();
+        assert_eq!(merged.get("A").unwrap(), "existing");
+        assert_eq!(merged.get("B").unwrap(), "from_b");
+        assert_eq!(merged.get("C").unwrap(), "from_a");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn load_env_files_errors_on_missing_file() {
+        let err = load_env_files(&["nope.env".to_string()], Path::new("/proj"), &HashMap::new())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("nope.env"));
+    }
+
+    #[test]
+    fn resolve_collects_env_files_from_file_and_recipe() {
+        let dir = std::env::temp_dir().join(format!("ciab_flow_envf_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("deploys.toml"),
+            r#"
+[web]
+env_file = ".env.flow"
+  [[web.steps]]
+  name = "build"
+  script = "b.sh"
+"#,
+        )
+        .unwrap();
+
+        // Flowchart-entry file first, then the recipe's own (a list), de-duped.
+        let deploy = DeployRecipe {
+            flowchart: Some("deploys.toml".to_string()),
+            env_file: vec![".env.flow".to_string(), ".env.deploy".to_string()],
+            ..Default::default()
+        };
+        let resolved = resolve_deploy(&deploy, "web", &dir).unwrap();
+        assert_eq!(
+            resolved.env_files,
+            vec![".env.flow".to_string(), ".env.deploy".to_string()]
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn env_file_path_supports_var_substitution() {
+        // The engine substitutes `{VAR}` in each path before loading; here we
+        // exercise the same substitution + load pipeline directly.
+        let dir = std::env::temp_dir().join(format!("ciab_envf_sel_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(".env.dev"), "TARGET=dev-host\n").unwrap();
+        std::fs::write(dir.join(".env.prod"), "TARGET=prod-host\n").unwrap();
+
+        let env: HashMap<String, String> =
+            [("DEPLOY_ENV".to_string(), "prod".to_string())].into_iter().collect();
+        let path = crate::config::substitute_vars(".env.{DEPLOY_ENV}", &env).unwrap();
+        assert_eq!(path, ".env.prod");
+        let merged = load_env_files(&[path], &dir, &env).unwrap();
+        assert_eq!(merged.get("TARGET").unwrap(), "prod-host");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn eval_condition_covers_comparison_and_truthy_forms() {
+        let env: HashMap<String, String> = [
+            ("IN_CI", "true"),
+            ("DEPLOY_ENV", "prod"),
+            ("REGION", "us-east-1"),
+            ("FLAG_OFF", "false"),
+            ("EMPTY", ""),
+        ]
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+
+        // Equality / inequality, with and without the `env.` prefix and quotes.
+        assert!(eval_condition("env.IN_CI == true", &env).unwrap());
+        assert!(eval_condition("IN_CI == \"true\"", &env).unwrap());
+        assert!(eval_condition("DEPLOY_ENV != dev", &env).unwrap());
+        assert!(!eval_condition("DEPLOY_ENV == dev", &env).unwrap());
+        assert!(eval_condition("REGION == us-east-1", &env).unwrap());
+        // Unset variable reads as empty.
+        assert!(eval_condition("MISSING != something", &env).unwrap());
+        assert!(!eval_condition("MISSING == something", &env).unwrap());
+        // Bare truthy / negation.
+        assert!(eval_condition("IN_CI", &env).unwrap());
+        assert!(!eval_condition("FLAG_OFF", &env).unwrap());
+        assert!(!eval_condition("EMPTY", &env).unwrap());
+        assert!(eval_condition("!FLAG_OFF", &env).unwrap());
+        assert!(!eval_condition("!IN_CI", &env).unwrap());
+    }
+
+    #[test]
+    fn step_skip_reason_applies_when_and_skip_if() {
+        let ci: HashMap<String, String> =
+            [("IN_CI".to_string(), "true".to_string())].into_iter().collect();
+        let local: HashMap<String, String> = HashMap::new();
+
+        // skip_if fires only when its condition holds.
+        let step = DeployStep {
+            name: "notify".into(),
+            run: Some("true".into()),
+            skip_if: vec!["env.IN_CI == true".into()],
+            ..Default::default()
+        };
+        assert!(step_skip_reason(&step, &ci).unwrap().is_some());
+        assert!(step_skip_reason(&step, &local).unwrap().is_none());
+
+        // when requires ALL conditions; a single false one skips.
+        let step = DeployStep {
+            name: "release".into(),
+            run: Some("true".into()),
+            when: vec!["IN_CI == true".into(), "MISSING == yes".into()],
+            ..Default::default()
+        };
+        let reason = step_skip_reason(&step, &ci).unwrap().unwrap();
+        assert!(reason.contains("MISSING"));
+
+        // All when conditions met and no skip_if → runs.
+        let step = DeployStep {
+            name: "release".into(),
+            run: Some("true".into()),
+            when: vec!["IN_CI == true".into()],
+            ..Default::default()
+        };
+        assert!(step_skip_reason(&step, &ci).unwrap().is_none());
+    }
+
+    #[test]
+    fn when_skip_if_accept_string_or_list_and_reject_blank() {
+        let step: DeployStep = toml::from_str(
+            "name = \"a\"\nrun = \"true\"\nwhen = \"IN_CI\"\nskip_if = [\"A == b\", \"C\"]\n",
+        )
+        .unwrap();
+        assert_eq!(step.when, vec!["IN_CI".to_string()]);
+        assert_eq!(step.skip_if, vec!["A == b".to_string(), "C".to_string()]);
+
+        let steps = steps_from("[[steps]]\nname=\"a\"\nrun=\"true\"\nwhen=\"  \"\n");
+        assert!(
+            validate_flowchart(&steps, "web")
+                .unwrap_err()
+                .to_string()
+                .contains("empty `when`")
+        );
+    }
+
+    #[test]
+    fn env_file_accepts_string_or_list() {
+        let one: DeployRecipe = toml::from_str("env_file = \".env\"\n").unwrap();
+        assert_eq!(one.env_file, vec![".env".to_string()]);
+        let many: DeployRecipe =
+            toml::from_str("env_file = [\".env\", \".env.deploy\"]\n").unwrap();
+        assert_eq!(
+            many.env_file,
+            vec![".env".to_string(), ".env.deploy".to_string()]
+        );
     }
 
     #[test]

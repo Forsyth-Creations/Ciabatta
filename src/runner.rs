@@ -101,6 +101,14 @@ pub enum ProgressUpdate {
         step: String,
         ok: bool,
     },
+    /// A deploy step was skipped because its `when`/`skip_if` condition said so.
+    /// It counts as satisfied, so its dependents still run. `reason` is a short
+    /// explanation (e.g. ``skip_if `env.IN_CI == true` ``).
+    StepSkipped {
+        recipe: String,
+        step: String,
+        reason: String,
+    },
     /// A log line produced by a specific deploy step's action.
     StepLog {
         recipe: String,

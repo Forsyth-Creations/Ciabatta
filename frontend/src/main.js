@@ -334,6 +334,29 @@ function render() {
             <div class="fcard"><div class="fcard__icon">🧰</div><h3>Build flowcharts visually</h3><p><code>ciabatta deploy --build</code> opens a visual editor. Lay out steps, edges, and recovery options, then copy the generated TOML into your flowchart file — or paste an existing config back in to keep editing.</p></div>
           </div>
         </div>
+        <figure class="shot" style="margin-top:26px;">
+          <img src="deploy-gui-recovery.png" alt="The ciabatta deploy --gui live view: a failed migrate step routed to a recovery node with fix-it buttons." loading="lazy" />
+          <figcaption><code>ciabatta deploy web --gui</code> — a failed step routes to a recovery node, and the browser shows the fix-it buttons you click to resolve it live.</figcaption>
+        </figure>
+        <div style="margin-top:26px;">
+          <div class="deepdive">
+            <a class="deepdive__card" href="deploy-env-files.html">
+              <h4>📄 Sourcing .env files</h4>
+              <p>Load <code>KEY=VALUE</code> files into a deploy with <code>env_file</code> — one file or a list, with clear precedence.</p>
+              <span class="go">Read the guide →</span>
+            </a>
+            <a class="deepdive__card" href="deploy-env-select.html">
+              <h4>🔀 Per-environment selection</h4>
+              <p>Pick the env file at run time with a <code>{VAR}</code> placeholder: <code>.env.{DEPLOY_ENV}</code> → dev or prod.</p>
+              <span class="go">Read the guide →</span>
+            </a>
+            <a class="deepdive__card" href="deploy-conditional-steps.html">
+              <h4>⛔ Conditional steps</h4>
+              <p>Skip steps by condition with <code>when</code> / <code>skip_if</code> — single or multiple criteria.</p>
+              <span class="go">Read the guide →</span>
+            </a>
+          </div>
+        </div>
       </section>
 
       <section class="section reveal" id="commands">

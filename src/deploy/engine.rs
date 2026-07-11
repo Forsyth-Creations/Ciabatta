@@ -45,12 +45,18 @@ enum StepState {
     /// A fix ran and the branch was cleared without a retry — treated as
     /// satisfied so downstream steps proceed.
     Recovered,
+    /// A `when`/`skip_if` condition excluded the step — satisfied so downstream
+    /// steps proceed, but nothing ran.
+    Skipped,
     Failed,
 }
 
 impl StepState {
     fn satisfied(self) -> bool {
-        matches!(self, StepState::Succeeded | StepState::Recovered)
+        matches!(
+            self,
+            StepState::Succeeded | StepState::Recovered | StepState::Skipped
+        )
     }
 }
 
@@ -73,6 +79,38 @@ pub async fn run_deploy(
         .deploy_recipe()
         .ok_or_else(|| anyhow::anyhow!("Recipe '{}' has no [deploy] definition", name))?;
     let resolved = resolve_deploy(deploy, name, root)?;
+
+    // Source any configured `.env` file(s) before anything runs, layering their
+    // values under whatever is already resolved (CI / git / `-e`). The merged
+    // map is what every phase and step sees, and what the `REQUIRED_ENV` gate
+    // below is checked against — so a `.env` can satisfy required variables.
+    //
+    // Each path may contain `{VAR}` placeholders (resolved from the current
+    // environment) so which file is sourced can be selected at run time, e.g.
+    // `env_file = ".env.{DEPLOY_ENV}"` → `.env.dev` or `.env.prod`.
+    let merged_env;
+    let env_vars = if resolved.env_files.is_empty() {
+        env_vars
+    } else {
+        let mut files: Vec<String> = Vec::with_capacity(resolved.env_files.len());
+        for raw in &resolved.env_files {
+            let file = crate::config::substitute_vars(raw, env_vars).map_err(|e| {
+                anyhow::anyhow!(
+                    "Deploy '{name}' env_file '{raw}': {e}. Set the variable \
+                     (e.g. -e DEPLOY_ENV=dev) so the env file to source can be resolved."
+                )
+            })?;
+            let _ = tx
+                .send(ProgressUpdate::Log(
+                    name.to_string(),
+                    format!("Sourcing env file: {file}"),
+                ))
+                .await;
+            files.push(file);
+        }
+        merged_env = super::load_env_files(&files, root, env_vars)?;
+        &merged_env
+    };
 
     // Gate the whole flowchart on `REQUIRED_ENV`: if any required variable is
     // empty or unset, abort before running a single phase, surfacing the missing
@@ -218,6 +256,20 @@ async fn run_dag(
         // shell work (build → migrate → release); serial execution keeps their
         // logs readable and recovery prompts unambiguous.
         for step in ready {
+            // A `when`/`skip_if` condition can exclude the step; if so, mark it
+            // satisfied (so dependents proceed) and move on without running it.
+            if let Some(reason) = super::step_skip_reason(step, env_vars)? {
+                state.insert(step.name.as_str(), StepState::Skipped);
+                let _ = tx
+                    .send(ProgressUpdate::StepSkipped {
+                        recipe: recipe.to_string(),
+                        step: step.name.clone(),
+                        reason,
+                    })
+                    .await;
+                continue;
+            }
+
             let outcome = run_step_action(step, recipe, root, env_vars, dry_run, tx).await;
             match outcome {
                 Ok(()) => {

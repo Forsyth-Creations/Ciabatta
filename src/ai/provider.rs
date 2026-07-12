@@ -11,9 +11,14 @@
 //! here as provider-neutral [`Turn`]s and translated to each wire shape at
 //! request time. No SDK is used — just `reqwest` and JSON.
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+
+/// How long to wait on a single request before giving up. Hosted APIs answer in
+/// seconds; a local model loading weights on the first call can take much longer,
+/// hence the generous ceiling.
+const REQUEST_TIMEOUT_SECS: u64 = 600;
 
 /// Which wire format to speak.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -130,7 +135,7 @@ impl Provider {
         // often can't present a CA-trusted certificate; `tls_verify = false`
         // lets the user opt out of verification for exactly those cases.
         let mut builder = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(600));
+            .timeout(std::time::Duration::from_secs(REQUEST_TIMEOUT_SECS));
         if !cfg.tls_verify {
             builder = builder.danger_accept_invalid_certs(true);
         }
@@ -145,6 +150,36 @@ impl Provider {
             api_key,
             client,
         })
+    }
+
+    /// Turn a low-level transport failure into a message that says *why* the
+    /// request never got an answer — the difference between "timed out",
+    /// "nothing is listening", and "the host doesn't resolve" is exactly what a
+    /// stuck "thinking" spinner otherwise hides.
+    fn send_error(&self, err: reqwest::Error) -> anyhow::Error {
+        let target = match self.kind {
+            ProviderKind::Claude => "the Claude API",
+            ProviderKind::OpenAi => "the AI endpoint",
+        };
+        let where_ = format!("{target} at {}", self.endpoint);
+        let detail = if err.is_timeout() {
+            format!(
+                "no response from {where_} within {REQUEST_TIMEOUT_SECS}s (the request timed out). \
+                 The server accepted the connection but never replied — a local model may still be \
+                 loading its weights, or the endpoint is wrong."
+            )
+        } else if err.is_connect() {
+            format!(
+                "could not connect to {where_}. Check the endpoint is correct and reachable — \
+                 for a local model, is the server running and listening on that port? \
+                 (A self-signed certificate needs `tls_verify = false` in the [ai] config.)"
+            )
+        } else if err.is_request() {
+            format!("could not send the request to {where_}: {err}")
+        } else {
+            format!("request to {where_} failed: {err}")
+        };
+        anyhow!(detail)
     }
 
     /// A short human-readable label for status lines.
@@ -244,13 +279,19 @@ impl Provider {
             .json(&body)
             .send()
             .await
-            .context("Request to the Claude API failed")?;
+            .map_err(|e| self.send_error(e))?;
 
         let status = resp.status();
-        let payload: Value = resp
-            .json()
+        let raw = resp
+            .text()
             .await
-            .context("Claude API returned a non-JSON response")?;
+            .map_err(|e| self.send_error(e))?;
+        let payload: Value = serde_json::from_str(&raw).map_err(|e| {
+            anyhow!(
+                "Claude API returned a non-JSON response ({status}): {e}\n{}",
+                snippet(&raw)
+            )
+        })?;
         if !status.is_success() {
             let msg = payload["error"]["message"].as_str().unwrap_or("unknown error");
             bail!("Claude API error ({status}): {msg}");
@@ -361,16 +402,17 @@ impl Provider {
         if !self.api_key.is_empty() {
             req = req.header("Authorization", format!("Bearer {}", self.api_key));
         }
-        let resp = req
-            .send()
-            .await
-            .context("Request to the OpenAI-compatible endpoint failed")?;
+        let resp = req.send().await.map_err(|e| self.send_error(e))?;
 
         let status = resp.status();
-        let payload: Value = resp
-            .json()
-            .await
-            .context("The OpenAI-compatible endpoint returned a non-JSON response")?;
+        let raw = resp.text().await.map_err(|e| self.send_error(e))?;
+        let payload: Value = serde_json::from_str(&raw).map_err(|e| {
+            anyhow!(
+                "the AI endpoint at {} returned a non-JSON response ({status}): {e}\n{}",
+                self.endpoint,
+                snippet(&raw)
+            )
+        })?;
         if !status.is_success() {
             let msg = payload["error"]["message"].as_str().unwrap_or("unknown error");
             bail!("AI endpoint error ({status}): {msg}");
@@ -393,5 +435,21 @@ impl Provider {
             });
         }
         Ok(out)
+    }
+}
+
+/// A trimmed, single-line preview of a response body for error messages — enough
+/// to recognise an HTML error page or a proxy notice without dumping kilobytes.
+fn snippet(body: &str) -> String {
+    let trimmed = body.trim();
+    if trimmed.is_empty() {
+        return "(empty response body)".to_string();
+    }
+    let flat: String = trimmed.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flat.chars().count() > 300 {
+        let head: String = flat.chars().take(300).collect();
+        format!("body: {head}…")
+    } else {
+        format!("body: {flat}")
     }
 }

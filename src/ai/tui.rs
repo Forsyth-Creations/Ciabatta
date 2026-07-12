@@ -16,7 +16,7 @@
 
 use std::io;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use crossterm::{
@@ -61,6 +61,8 @@ struct App {
     entries: Vec<ChatEntry>,
     input: String,
     busy: bool,
+    /// When the current `busy` request began, for the elapsed "thinking" clock.
+    busy_since: Option<Instant>,
     /// Lines scrolled up from the bottom of the conversation.
     scroll_up: u16,
     /// Topmost reachable `scroll_up`, measured on the last frame; scrolling is
@@ -113,6 +115,7 @@ async fn chat_loop(
         entries: Vec::new(),
         input: String::new(),
         busy: false,
+        busy_since: None,
         scroll_up: 0,
         chat_top: 0,
         suggestions: Vec::new(),
@@ -220,6 +223,7 @@ async fn chat_loop(
                             app.push(Speaker::You, question.clone());
                             app.scroll_up = 0; // sending snaps back to the newest message
                             app.busy = true;
+                            app.busy_since = Some(Instant::now());
                             let assistant = assistant.clone();
                             let tx = tx.clone();
                             tokio::spawn(async move {
@@ -256,6 +260,7 @@ async fn chat_loop(
                     }
                     Some(AiEvent::Answer(a)) => {
                         app.busy = false;
+                        app.busy_since = None;
                         app.push(Speaker::Assistant, a);
                         let pending = assistant.brain.pending().len();
                         if pending > 0 {
@@ -269,6 +274,7 @@ async fn chat_loop(
                     }
                     Some(AiEvent::Error(e)) => {
                         app.busy = false;
+                        app.busy_since = None;
                         app.push(Speaker::Error, e);
                     }
                     None => break,
@@ -480,8 +486,21 @@ fn render_chat(f: &mut Frame, area: Rect, app: &mut App) {
         }
     }
     if app.busy {
+        // Show a live elapsed clock so a stalled request reads as stalled rather
+        // than as a frozen UI, and hint at the cause once it runs unusually long.
+        let elapsed = app.busy_since.map(|t| t.elapsed().as_secs()).unwrap_or(0);
+        let text = if elapsed >= 30 {
+            format!(
+                "      … thinking ({elapsed}s) — still waiting on the model; if it's a local one it \
+                 may be loading, otherwise check the endpoint is reachable. Times out at 600s."
+            )
+        } else if elapsed >= 1 {
+            format!("      … thinking ({elapsed}s)")
+        } else {
+            "      … thinking".to_string()
+        };
         lines.push(Line::from(Span::styled(
-            "      … thinking",
+            text,
             Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
         )));
     }

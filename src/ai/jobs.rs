@@ -223,7 +223,9 @@ impl Jobs {
                 }
                 Err(e) => {
                     j.status = JobStatus::Failed;
-                    j.error = Some(e.to_string());
+                    // Full context chain, so a failed job records *why* (timeout,
+                    // refused connection, …) not just a generic message.
+                    j.error = Some(format!("{e:#}"));
                 }
             }
         });

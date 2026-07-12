@@ -16,9 +16,9 @@ const PLATFORMS = [
 ];
 
 const INSTALL_TABS = [
+  { id: "quick", label: "Linux / macOS", cmd: "curl -fsSL https://forsyth-creations.github.io/Ciabatta/install.sh | sh", note: "Detects your OS and CPU, then installs the matching prebuilt binary. No Rust toolchain needed." },
+  { id: "windows", label: "Windows", cmd: "irm https://forsyth-creations.github.io/Ciabatta/install.ps1 | iex", note: "Run in PowerShell — downloads the binary and adds it to your PATH." },
   { id: "cargo", label: "cargo", cmd: "cargo install ciabatta", note: "From crates.io — needs a Rust toolchain." },
-  { id: "linux", label: "Linux", cmd: "tar xzf ciabatta-linux-x86_64.tar.gz && sudo mv ciabatta /usr/local/bin/", note: "Prebuilt static binary — no glibc requirement." },
-  { id: "macos", label: "macOS", cmd: "tar xzf ciabatta-macos-aarch64.tar.gz && sudo mv ciabatta /usr/local/bin/", note: "Swap in the x86_64 archive on Intel Macs." },
   { id: "source", label: "source", cmd: `cargo install --git ${REPO}`, note: "Build straight from the main branch." },
 ];
 
@@ -198,7 +198,7 @@ function render() {
             <a class="btn btn--primary" href="#install">Get Ciabatta</a>
             <a class="btn btn--ghost" href="${REPO}">View source</a>
           </div>
-          <p class="hero__hint"><b>cargo install ciabatta</b> · or grab a static binary</p>
+          <p class="hero__hint"><b>curl -fsSL https://forsyth-creations.github.io/Ciabatta/install.sh | sh</b> · any OS, any CPU</p>
         </div>
         ${terminalHTML()}
       </section>

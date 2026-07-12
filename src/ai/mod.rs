@@ -235,7 +235,10 @@ impl Assistant {
                 Err(e) => {
                     // Drop the failed exchange so the session stays usable.
                     history.pop();
-                    let _ = events.send(AiEvent::Error(e.to_string())).await;
+                    // `{:#}` walks the whole context chain, so the UI shows the
+                    // underlying cause (timeout, refused connection, bad body)
+                    // rather than just a generic "request failed".
+                    let _ = events.send(AiEvent::Error(format!("{e:#}"))).await;
                     return Err(e);
                 }
             };

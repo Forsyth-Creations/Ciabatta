@@ -21,8 +21,20 @@ if ($env:CIABATTA_VERSION) {
     $url = "https://github.com/$repo/releases/latest/download/$asset"
 }
 
+# If ciabatta is already installed and on PATH, update that copy in place
+# (unless the user pinned a directory) so we don't leave a stale binary behind.
+$existingDir = $null
+$existing = Get-Command ciabatta -CommandType Application -ErrorAction SilentlyContinue |
+    Select-Object -First 1
+if ($existing) {
+    $existingDir = Split-Path -Parent $existing.Source
+}
+
 $installDir = if ($env:CIABATTA_INSTALL_DIR) {
     $env:CIABATTA_INSTALL_DIR
+} elseif ($existingDir) {
+    Write-Host "updating existing install at $existingDir ..."
+    $existingDir
 } else {
     Join-Path $env:LOCALAPPDATA "Programs\ciabatta"
 }

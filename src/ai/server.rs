@@ -78,10 +78,11 @@ struct PrunePayload {
 /// Bind the daemon on `127.0.0.1:port`, spawn its accept loop, and return the
 /// base URL. The server lives as long as the process.
 pub async fn spawn(assistant: Arc<Assistant>, jobs: Arc<Jobs>, port: u16) -> Result<String> {
-    let listener = TcpListener::bind(("127.0.0.1", port)).await.map_err(|e| {
-        anyhow::anyhow!("Failed to bind 127.0.0.1:{port} ({e}). Try a different --port.")
+    let host = crate::config::bind_host();
+    let listener = TcpListener::bind((host.as_str(), port)).await.map_err(|e| {
+        anyhow::anyhow!("Failed to bind {host}:{port} ({e}). Try a different --port.")
     })?;
-    let url = format!("http://127.0.0.1:{port}/");
+    let url = format!("http://{host}:{port}/");
 
     // One question at a time: /api/ask serializes on this lock so concurrent
     // callers can't interleave a single conversation history.

@@ -313,8 +313,9 @@ pub async fn serve_gui(
     // Fail fast on a bad flowchart before we bind a port or open a browser.
     let state = Arc::new(Mutex::new(initial_state(&config, &root, &names, dry_run)?));
 
-    let listener = TcpListener::bind(("127.0.0.1", port)).await.map_err(|e| {
-        anyhow::anyhow!("Failed to bind 127.0.0.1:{port} ({e}). Try a different --port.")
+    let host = crate::config::bind_host();
+    let listener = TcpListener::bind((host.as_str(), port)).await.map_err(|e| {
+        anyhow::anyhow!("Failed to bind {host}:{port} ({e}). Try a different --port.")
     })?;
 
     // Broadcast bus carrying recovery choices from the browser to the engine.
@@ -357,7 +358,7 @@ pub async fn serve_gui(
         });
     }
 
-    let url = format!("http://127.0.0.1:{port}");
+    let url = format!("http://{host}:{port}");
     println!("\nDeploy view ready at {url}");
     println!("Press Ctrl-C to stop.");
     open_browser(&url);
@@ -440,11 +441,12 @@ struct ChoiceBody {
 /// Serve the visual flowchart builder at `http://127.0.0.1:port`. Authoring only
 /// — it needs no project and runs nothing.
 pub async fn serve_builder(port: u16) -> Result<()> {
-    let listener = TcpListener::bind(("127.0.0.1", port)).await.map_err(|e| {
-        anyhow::anyhow!("Failed to bind 127.0.0.1:{port} ({e}). Try a different --port.")
+    let host = crate::config::bind_host();
+    let listener = TcpListener::bind((host.as_str(), port)).await.map_err(|e| {
+        anyhow::anyhow!("Failed to bind {host}:{port} ({e}). Try a different --port.")
     })?;
 
-    let url = format!("http://127.0.0.1:{port}");
+    let url = format!("http://{host}:{port}");
     println!("\nFlowchart builder ready at {url}");
     println!("Design your pipeline, then copy the TOML into a flowchart file.");
     println!("Press Ctrl-C to stop.");

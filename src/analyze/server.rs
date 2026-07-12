@@ -11,13 +11,15 @@ use tokio::net::{TcpListener, TcpStream};
 /// The embedded single-page app (HTML + CSS + JS, no external assets).
 const INDEX_HTML: &str = include_str!("index.html");
 
-/// Serve the graph on `127.0.0.1:port` until the process is interrupted.
+/// Serve the graph on the configured bind host and `port` until the process is
+/// interrupted.
 pub async fn serve(graph_json: String, port: u16) -> Result<()> {
-    let listener = TcpListener::bind(("127.0.0.1", port)).await.map_err(|e| {
-        anyhow::anyhow!("Failed to bind 127.0.0.1:{port} ({e}). Try a different --port.")
+    let host = crate::config::bind_host();
+    let listener = TcpListener::bind((host.as_str(), port)).await.map_err(|e| {
+        anyhow::anyhow!("Failed to bind {host}:{port} ({e}). Try a different --port.")
     })?;
 
-    println!("\nAnalyze view ready at http://127.0.0.1:{port}");
+    println!("\nAnalyze view ready at http://{host}:{port}");
     println!("Press Ctrl-C to stop.");
 
     let json = std::sync::Arc::new(graph_json);

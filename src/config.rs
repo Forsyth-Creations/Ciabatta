@@ -6,6 +6,27 @@ use std::path::{Path, PathBuf};
 pub const CIABATTA_DIR: &str = ".ciabatta";
 pub const CONFIG_FILE: &str = "ciabatta.toml";
 
+/// Environment variable overriding the interface every ciabatta web server binds
+/// to. Defaults to loopback; set it to `0.0.0.0` to expose the servers outside a
+/// container (e.g. `CIABATTA_BIND_HOST=0.0.0.0`).
+pub const BIND_HOST_ENV: &str = "CIABATTA_BIND_HOST";
+/// The default bind interface: loopback only, so servers aren't exposed unless
+/// the operator opts in via [`BIND_HOST_ENV`].
+pub const DEFAULT_BIND_HOST: &str = "127.0.0.1";
+
+/// The interface ciabatta's web servers (deploy `--gui`/`--build`, analyze,
+/// todo, and the ai daemon) bind to.
+///
+/// Reads [`BIND_HOST_ENV`], falling back to [`DEFAULT_BIND_HOST`] when it's unset
+/// or empty. Set `CIABATTA_BIND_HOST=0.0.0.0` to reach the servers from outside a
+/// container.
+pub fn bind_host() -> String {
+    match std::env::var(BIND_HOST_ENV) {
+        Ok(v) if !v.trim().is_empty() => v.trim().to_string(),
+        _ => DEFAULT_BIND_HOST.to_string(),
+    }
+}
+
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
 pub struct CiabattaConfig {
     pub system: Option<SystemConfig>,

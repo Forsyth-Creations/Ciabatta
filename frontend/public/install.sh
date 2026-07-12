@@ -88,9 +88,21 @@ sudo_install_to() {
     sudo mkdir -p "$dir" && sudo mv -f "$tmp/$BIN" "$dir/$BIN" && sudo chmod 755 "$dir/$BIN"
 }
 
+# If ciabatta is already installed on PATH, update that copy in place (unless
+# the user pinned a directory) so we don't leave a stale binary shadowing the
+# new one from a different location.
+existing_dir=""
+if command -v "$BIN" >/dev/null 2>&1; then
+    existing_dir="$(CDPATH= cd -- "$(dirname -- "$(command -v "$BIN")")" && pwd)"
+fi
+
 if [ -n "${CIABATTA_INSTALL_DIR:-}" ]; then
     dest="$CIABATTA_INSTALL_DIR"
     install_to "$dest" || sudo_install_to "$dest" || err "cannot write to $dest"
+elif [ -n "$existing_dir" ]; then
+    dest="$existing_dir"
+    say "updating existing install at $dest …"
+    install_to "$dest" || sudo_install_to "$dest" || err "cannot update $dest"
 else
     dest="/usr/local/bin"
     if install_to "$dest" || sudo_install_to "$dest"; then

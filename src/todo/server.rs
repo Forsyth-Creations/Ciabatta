@@ -26,11 +26,12 @@ const INDEX_HTML: &str = include_str!("index.html");
 /// `ai_port` is where the `ciabatta ai` daemon is expected to be listening, so
 /// the app can offer to ship tasks to it.
 pub async fn serve(store: Arc<Store>, port: u16, ai_port: u16) -> Result<()> {
-    let listener = TcpListener::bind(("127.0.0.1", port)).await.map_err(|e| {
-        anyhow::anyhow!("Failed to bind 127.0.0.1:{port} ({e}). Try a different --port.")
+    let host = crate::config::bind_host();
+    let listener = TcpListener::bind((host.as_str(), port)).await.map_err(|e| {
+        anyhow::anyhow!("Failed to bind {host}:{port} ({e}). Try a different --port.")
     })?;
 
-    println!("\nTodo app ready at http://127.0.0.1:{port}");
+    println!("\nTodo app ready at http://{host}:{port}");
     println!("Ship-to-AI targets the ciabatta ai daemon on port {ai_port}.");
     println!("Press Ctrl-C to stop.");
 

@@ -86,14 +86,6 @@ pub struct AiConfig {
     /// images; the assistant can only use images listed here.
     #[serde(default)]
     pub images: Vec<String>,
-    /// Command that proves the project still builds/tests after the assistant
-    /// changes code (e.g. `cargo build`, `cargo test`, `npm run build`). When
-    /// set, the agent loop won't finish a code-changing task until this passes,
-    /// feeding any failure back so the model fixes it. When omitted, the loop
-    /// auto-detects a sensible command from the project's manifests; set it to
-    /// an empty string to disable the verification gate entirely.
-    #[serde(default)]
-    pub verify: Option<String>,
 }
 
 impl Default for AiConfig {

@@ -1017,30 +1017,6 @@ impl ToolBox {
         Ok((output.status.success(), clip(&out, 16_000)))
     }
 
-    /// The configured post-change verification command (`[ai] verify` in
-    /// ciabatta.toml), if any. The agent loop runs this after the model has
-    /// changed code, to prove the project still builds/tests before accepting
-    /// the answer. Returns `None` (verification skipped) when unset or blank.
-    pub fn verify_command(&self) -> Option<String> {
-        self.config
-            .ai
-            .as_ref()
-            .and_then(|a| a.verify.as_ref())
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-    }
-
-    /// Run the verification command, reporting whether it passed and its
-    /// output. A failure to even launch the command counts as a failed
-    /// verification (with the error as the output) rather than an error, so the
-    /// loop can hand the failure back to the model instead of aborting.
-    pub async fn run_verify(&self, command: &str) -> (bool, String) {
-        match self.shell(command).await {
-            Ok(result) => result,
-            Err(e) => (false, format!("{e:#}")),
-        }
-    }
-
 
     // ─── deps ─────────────────────────────────────────────────────────────────
 

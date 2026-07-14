@@ -925,7 +925,6 @@ pub fn run_setup(root: &Path) -> Result<()> {
         api_key_env: Some(api_key_env),
         tls_verify,
         images,
-        verify: None,
     };
 
     write_ai_config(root, &ai)?;

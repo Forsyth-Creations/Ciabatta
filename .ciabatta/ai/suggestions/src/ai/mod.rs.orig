@@ -246,7 +246,7 @@ impl Assistant {
                 error paths) and update them too — a task is finished only when the whole \
                 project still builds and passes. If verification keeps failing you will be \
                 told; use its output to find and fix the real cause.\n\
-             7. When several tool calls are independent (e.g. reading three files), issue \
+             6. When several tool calls are independent (e.g. reading three files), issue \
                 them in ONE turn so they run together; only serialize calls that depend on an \
                 earlier result.\n\
              \n\
@@ -925,7 +925,6 @@ pub fn run_setup(root: &Path) -> Result<()> {
         api_key_env: Some(api_key_env),
         tls_verify,
         images,
-        verify: None,
     };
 
     write_ai_config(root, &ai)?;

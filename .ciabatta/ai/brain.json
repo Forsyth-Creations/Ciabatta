@@ -1,29 +1,29 @@
 {
-  "confidence": 30.40799999999995,
-  "interactions": 19,
+  "confidence": 30.80799999999995,
+  "interactions": 23,
   "architectures": {
     "ai": {
-      "knowledge": 11.45,
+      "knowledge": 13.300000000000011,
       "description": "AI brain, provider integration, tools, and chat server/TUI",
       "files": {
         ".ciabatta/ciabatta.toml": 1.0,
-        "AI.md": 1.25,
+        "AI.md": 1.5,
         "src/ai/brain.rs": 1.25,
-        "src/ai/burnin.rs": 1.0,
+        "src/ai/burnin.rs": 2.25,
         "src/ai/index.html": 1.0,
-        "src/ai/mod.rs": 3.75,
-        "src/ai/provider.rs": 1.25,
+        "src/ai/mod.rs": 5.0,
+        "src/ai/provider.rs": 1.5,
         "src/ai/server.rs": 3.5,
-        "src/ai/tools.rs": 2.25,
-        "src/ai/tui.rs": 1.0,
+        "src/ai/tools.rs": 3.75,
+        "src/ai/tui.rs": 1.75,
         "src/git.rs": 1.0
       }
     },
     "analyze": {
-      "knowledge": 3.5,
+      "knowledge": 4.55,
       "description": "Codebase scanning, requirements detection, and caching",
       "files": {
-        "src/ai/burnin.rs": 1.0,
+        "src/ai/burnin.rs": 2.25,
         "src/analyze/cache.rs": 1.0,
         "src/analyze/index.html": 1.0,
         "src/analyze/mod.rs": 1.0,
@@ -43,38 +43,45 @@
         "src/git.rs": 2.75
       }
     },
+    "burn-in": {
+      "knowledge": 1.0,
+      "description": "",
+      "files": {
+        "src/ai/burnin.rs": 1.0
+      }
+    },
     "cli": {
-      "knowledge": 5.1999999999999975,
+      "knowledge": 5.249999999999997,
       "description": "Command-line entrypoint, argument parsing, config, and CI metadata handling",
       "files": {
         "install/install.ps1": 1.0,
         "install/install.sh": 1.5,
-        "src/cli.rs": 3.0,
+        "src/cli.rs": 3.25,
         "src/configure.rs": 1.0,
         "src/main.rs": 3.0,
         "src/watch/mod.rs": 1.0
       }
     },
     "config": {
-      "knowledge": 5.799999999999999,
+      "knowledge": 5.899999999999999,
       "description": "",
       "files": {
         ".ciabatta/ciabatta.toml": 1.0,
         ".yarnrc.yml": 1.0,
         "Cargo.toml": 1.75,
         "frontend/vite.config.js": 1.25,
-        "src/config.rs": 2.25,
+        "src/config.rs": 2.75,
         "src/configure.rs": 1.0,
         "src/deploy/mod.rs": 1.25,
         "src/environment.rs": 1.0
       }
     },
     "core": {
-      "knowledge": 6.099999999999998,
+      "knowledge": 6.349999999999997,
       "description": "",
       "files": {
         "src/ai/brain.rs": 1.25,
-        "src/ai/mod.rs": 1.5,
+        "src/ai/mod.rs": 2.75,
         "src/deploy/engine.rs": 1.25,
         "src/git.rs": 2.75,
         "src/main.rs": 2.0,
@@ -98,11 +105,11 @@
       }
     },
     "docs": {
-      "knowledge": 2.0999999999999996,
+      "knowledge": 2.1999999999999993,
       "description": "",
       "files": {
-        "AI.md": 1.25,
-        "README.md": 2.25
+        "AI.md": 1.5,
+        "README.md": 2.5
       }
     },
     "frontend": {
@@ -158,13 +165,13 @@
       }
     },
     "sandbox": {
-      "knowledge": 3.649999999999999,
+      "knowledge": 4.049999999999998,
       "description": "",
       "files": {
         "Dockerfile": 1.0,
         "docker-compose.yml": 1.25,
-        "src/ai/tools.rs": 2.25,
-        "src/config.rs": 1.25
+        "src/ai/tools.rs": 3.75,
+        "src/config.rs": 1.75
       }
     },
     "ship-to-ai": {
@@ -186,17 +193,17 @@
       }
     },
     "tools": {
-      "knowledge": 1.55,
+      "knowledge": 1.8500000000000003,
       "description": "",
       "files": {
-        "src/ai/tools.rs": 2.25
+        "src/ai/tools.rs": 3.75
       }
     },
     "tui": {
-      "knowledge": 2.5,
+      "knowledge": 2.6499999999999995,
       "description": "Terminal UI app, browser, and rendering",
       "files": {
-        "src/ai/tui.rs": 1.0,
+        "src/ai/tui.rs": 1.75,
         "src/tui/app.rs": 1.0,
         "src/tui/browser.rs": 1.0,
         "src/tui/mod.rs": 1.0,
@@ -271,7 +278,8 @@
     ],
     "src/ai/burnin.rs": [
       "ai",
-      "analyze"
+      "analyze",
+      "burn-in"
     ],
     "src/ai/index.html": [
       "ai",

@@ -1244,15 +1244,13 @@ fn render_chat(f: &mut Frame, area: Rect, app: &mut App) {
     }
 
     // Wrap-aware autoscroll: estimate rendered height, then hold the view
-    // `scroll_up` lines above the bottom. The estimate must use the SAME word
-    // wrapping ratatui applies (`Wrap { trim: false }`); a plain character-count
-    // divide under-counts and leaves the view a few lines short of the bottom.
+    // `scroll_up` lines above the bottom.
     let width = area.width.saturating_sub(2).max(1) as usize;
     let total: usize = lines
         .iter()
         .map(|l| {
-            let content: String = l.spans.iter().map(|s| s.content.as_ref()).collect();
-            word_wrapped_rows(&content, width)
+            let len: usize = l.spans.iter().map(|s| s.content.chars().count()).sum();
+            len.div_ceil(width).max(1)
         })
         .sum();
     let visible = area.height.saturating_sub(2) as usize;

@@ -15,6 +15,9 @@
 
 pub mod brain;
 pub mod burnin;
+pub mod compaction;
+pub mod edit;
+pub mod pdf;
 pub mod jobs;
 pub mod provider;
 pub mod server;
@@ -44,6 +47,9 @@ pub enum AiEvent {
     /// The assistant proposed a code change (diff included), for the front
     /// end to display — and, in edit mode, to collect the user's verdict on.
     Suggestion(tools::ChangeSuggestion),
+    /// The assistant's working plan changed (the full checklist), for the front
+    /// end to render live progress on a multi-step task.
+    Plan(Vec<tools::PlanItem>),
     /// The final answer for the current question.
     Answer(String),
     /// The loop failed.
@@ -106,6 +112,13 @@ pub struct Assistant {
 /// Cap on model⇄tool round trips per question, so a confused model can't spin.
 const MAX_TOOL_ROUNDS: usize = 20;
 
+/// System prompt for generating a short conversation title (adapted from
+/// opencode). The model must reply with only the title, one line.
+const TITLE_SYSTEM: &str = "You generate a short title for a coding conversation, to help the user \
+    find it later. Output ONLY the title: a single line, at most 50 characters, no quotes, no \
+    trailing punctuation, no explanation. Focus on what the user wants to do. Keep filenames, \
+    technical terms, and numbers exact. Never mention tools. Always output something meaningful.";
+
 impl Assistant {
     pub fn new(root: &Path, config: &CiabattaConfig) -> Result<Arc<Self>> {
         Self::with_conversation(root, config, Conversation::new(root))
@@ -145,6 +158,14 @@ impl Assistant {
         self.conversation.lock().await.id.clone()
     }
 
+    /// Abandon the current conversation and start a fresh one, keeping the same
+    /// brain and mind map. Returns the new conversation id. Used by `/new`.
+    pub async fn start_new_conversation(&self) -> String {
+        let mut conv = self.conversation.lock().await;
+        *conv = Conversation::new(&self.toolbox.root);
+        conv.id.clone()
+    }
+
     /// The current working mode (plan / edit / auto-accept).
     pub fn mode(&self) -> Mode {
         self.toolbox.mode()
@@ -166,7 +187,7 @@ impl Assistant {
     }
 
     /// The system prompt, rebuilt per question so it always reflects the
-    /// current confidence persona and mind map.
+    /// current mind map.
     fn system_prompt(&self) -> String {
         let mode_rules = match self.mode() {
             Mode::Plan => {
@@ -190,29 +211,48 @@ impl Assistant {
             "You are the ciabatta AI assistant: an AI pair developer embedded in a \
              command-line tool, working inside one project on the user's machine.\n\
              \n\
-             Your current ability level for THIS project is {confidence:.0}/100. Act like a \
-             {persona}.\n\
-             \n\
              {mode_rules}\n\
              \n\
              How to work:\n\
              1. Prefer `suggest_files` (the architecture mind map) to locate code: it returns \
                 exactly what is needed. Use `search_code` (grep/ripgrep) when the map is thin \
-                or you need everything that mentions a term.\n\
+                or you need everything that mentions a term. To follow third-party or \
+                cross-package dependencies, use `deps` — it traverses the dependency graph built \
+                by static analysis (which package a file belongs to, a package's dependencies, \
+                and what depends on a given library).\n\
              2. As you traverse files, call `tag_file` to record which architecture(s) each \
                 file belongs to (a file can have several tags). The user confirms tags, so \
                 keep them short, lowercase, and reusable (e.g. 'auth', 'frontend', 'deploy').\n\
-             3. Use `sandbox_run` when you need to execute anything — it is your safe space.\n\
-             4. Keep answers grounded in files you actually read; cite paths.\n\
-             5. Be concise. Lead with the answer, then the supporting detail.\n\
+             3. For any task that takes 3+ distinct steps, call `update_plan` to lay out a \
+                checklist, and update it as you go — one step 'in_progress' at a time, and \
+                mark steps done the moment they are actually done. Skip it for simple \
+                questions.\n\
+             4. To change an existing file, use `edit_file` (replace just the text that \
+                changes) — do NOT re-emit the whole file. Reserve `propose_change` for new \
+                files or a genuine full rewrite. Read a file before you edit it. Never create \
+                a file when editing an existing one will do.\n\
+             5. To build, test, lint, or run the project for real, use `run_command` — it runs \
+                locally in the project root with the machine's installed toolchains (cargo, \
+                python, node, npm, make, …). Reserve `sandbox_run` for untrusted or throwaway \
+                experiments in an isolated container.\n\
+             6. When several tool calls are independent (e.g. reading three files), issue \
+                them in ONE turn so they run together; only serialize calls that depend on an \
+                earlier result.\n\
+             \n\
+             Judgment: prioritize technical accuracy over agreement. If the user is mistaken \
+             or an approach is flawed, say so plainly and explain why — respectful correction \
+             beats false validation. When unsure, investigate with the tools before \
+             asserting; don't guess.\n\
+             \n\
+             Answers: keep answers grounded in files you actually read, and cite paths as \
+             `path:line`. Be concise — lead with the answer, then supporting detail. Your \
+             output is shown in a terminal; use plain, compact Markdown.\n\
              \n\
              Boundary: you may only read and write files inside this project workspace and \
              /tmp (your scratch space for bespoke, throwaway files). Anything outside those \
              is off-limits and tool calls to it will be refused.\n\
              \n\
              Current architecture map:\n{map}",
-            confidence = self.brain.confidence(),
-            persona = self.brain.persona(),
             map = self.brain.summary_for_prompt(),
         )
     }
@@ -227,6 +267,12 @@ impl Assistant {
         let mut conversation = self.conversation.lock().await;
         let history = &mut conversation.turns;
         history.push(Turn::User(question.to_string()));
+
+        // Keep long sessions inside the context window: fold older turns into a
+        // summary before we start spending model rounds on this question.
+        if let Some(note) = compaction::maybe_compact(&self.provider, history).await {
+            let _ = events.send(AiEvent::Status(note)).await;
+        }
 
         let mut answer = String::new();
         for round in 0..MAX_TOOL_ROUNDS {
@@ -253,14 +299,28 @@ impl Assistant {
             history.push(Turn::Assistant(turn));
 
             let changes_before = self.toolbox.changes_len();
-            let mut results = Vec::with_capacity(calls.len());
             for call in &calls {
                 let _ = events.send(AiEvent::Status(ToolBox::describe(call))).await;
-                results.push(self.toolbox.execute(call).await);
             }
+            // Independent read-only calls in one round can run together; anything
+            // that mutates state (edits, tags, the plan, the sandbox) stays
+            // sequential so ordering and diffs are deterministic.
+            let results = if calls.len() > 1 && calls.iter().all(|c| ToolBox::is_read_only(&c.name)) {
+                futures::future::join_all(calls.iter().map(|c| self.toolbox.execute(c))).await
+            } else {
+                let mut results = Vec::with_capacity(calls.len());
+                for call in &calls {
+                    results.push(self.toolbox.execute(call).await);
+                }
+                results
+            };
             // Surface any change proposals this round produced, diff and all.
             for suggestion in self.toolbox.changes_since(changes_before) {
                 let _ = events.send(AiEvent::Suggestion(suggestion)).await;
+            }
+            // If the plan changed this round, push the updated checklist.
+            if calls.iter().any(|c| c.name == "update_plan") {
+                let _ = events.send(AiEvent::Plan(self.toolbox.plan())).await;
             }
             history.push(Turn::ToolResults(results));
 
@@ -272,12 +332,41 @@ impl Assistant {
         }
 
         let _ = self.brain.record_interaction();
+        let _ = events.send(AiEvent::Answer(answer.clone())).await;
+
+        // On the first exchange, generate a concise title so the conversation is
+        // easy to find in `ciabatta ai resume`. Best-effort: a failure just
+        // leaves the fallback (first user line) that `save` derives.
+        let is_first = conversation
+            .turns
+            .iter()
+            .filter(|t| matches!(t, Turn::User(_)))
+            .count()
+            == 1;
+        if is_first
+            && conversation.title.is_empty()
+            && !answer.is_empty()
+            && let Some(title) = self.generate_title(question).await
+        {
+            conversation.title = title;
+        }
+
         // Persist the whole exchange so the session can be resumed later.
         if let Err(e) = conversation.save() {
             tracing::debug!("failed to save conversation: {e}");
         }
-        let _ = events.send(AiEvent::Answer(answer.clone())).await;
         Ok(answer)
+    }
+
+    /// Ask the model for a short title summarizing the opening question.
+    /// Returns `None` on any error or an empty result.
+    async fn generate_title(&self, first_question: &str) -> Option<String> {
+        let prompt: String = first_question.chars().take(2000).collect();
+        let turn = Turn::User(prompt);
+        let reply = self.provider.chat(TITLE_SYSTEM, &[turn], &[]).await.ok()?;
+        let line = reply.text.lines().find(|l| !l.trim().is_empty())?;
+        let title: String = line.trim().trim_matches('"').chars().take(60).collect();
+        (!title.is_empty()).then_some(title)
     }
 
     /// Files the assistant touched while answering the last question.
@@ -363,6 +452,156 @@ pub async fn run_resume(
     }
     println!("\nResume one with:  ciabatta ai resume <id>");
     println!("Or continue the latest with:  ciabatta ai --continue");
+    println!("Delete one with:  ciabatta ai delete <id>   ·   clear all:  ciabatta ai clear");
+    Ok(())
+}
+
+/// Default look-back window for `/report` and `ciabatta ai report`.
+pub const DEFAULT_REPORT_DAYS: u64 = 7;
+
+/// Build the agent prompt for a "what changed" report over the past `days`
+/// days, embedding the repo's git activity. Public so the TUI `/report` command
+/// can reuse it.
+pub fn report_prompt(root: &Path, days: u64) -> Result<String> {
+    let activity = crate::git::changes_since(root, days)?;
+    Ok(format!(
+        "Report on what changed in this repository over the past {days} day(s). Base it on the \
+         git activity below. Group the changes by theme or area (feature, fix, refactor, docs, \
+         etc.), lead with the most significant, and call out anything risky or worth a closer \
+         look. Be concise. If a change needs context to explain, read the relevant file.\n\n\
+         === git activity ===\n{activity}"
+    ))
+}
+
+/// `ciabatta ai report [days] [--pdf [FILE]]`: summarize what changed in the
+/// repo over the past N days (default 7), from git history plus the assistant.
+/// Prints the summary, and — when `pdf` is set — also writes it to a PDF.
+pub async fn run_report(
+    root: &Path,
+    config: &CiabattaConfig,
+    days: Option<u64>,
+    mode: Mode,
+    pdf: Option<String>,
+) -> Result<()> {
+    let days = days.unwrap_or(DEFAULT_REPORT_DAYS).clamp(1, 3650);
+    let activity = crate::git::changes_since(root, days)?;
+    let prompt = report_prompt(root, days)?;
+
+    let assistant = Assistant::new(root, config)?;
+    assistant.set_mode(mode);
+    eprintln!(
+        "provider: {} · report over the past {days} day(s)",
+        assistant.provider.label()
+    );
+
+    let (tx, mut rx) = mpsc::channel::<AiEvent>(64);
+    let printer = tokio::spawn(async move {
+        while let Some(ev) = rx.recv().await {
+            if let AiEvent::Status(s) = ev {
+                eprintln!("  {s}");
+            }
+        }
+    });
+    let answer = assistant.ask(&prompt, tx).await?;
+    let _ = printer.await;
+    println!("\n{answer}");
+
+    if let Some(spec) = pdf {
+        let path = pdf_report_path(&spec, days);
+        pdf::write_report(&path, days, &answer, &activity)?;
+        println!("\nSaved PDF report to {}", path.display());
+    }
+    Ok(())
+}
+
+/// Resolve where to write a report PDF: an explicit path if given, otherwise a
+/// dated default in the current directory.
+fn pdf_report_path(spec: &str, days: u64) -> std::path::PathBuf {
+    let spec = spec.trim();
+    if !spec.is_empty() {
+        return std::path::PathBuf::from(spec);
+    }
+    let _ = days;
+    let name = format!("ciabatta-report-{}.pdf", chrono::Local::now().format("%Y%m%d-%H%M%S"));
+    std::env::current_dir().unwrap_or_default().join(name)
+}
+
+/// Build the prompt for a quick "connect this tag" pass. The named architecture
+/// has already been registered on the map; the agent's job is to find the files
+/// that belong to it and propose the connections with `tag_file`.
+pub fn tag_pass_prompt(name: &str, description: &str) -> String {
+    let name = name.trim().to_lowercase();
+    let desc = if description.trim().is_empty() {
+        String::new()
+    } else {
+        format!(" It is described as: {}.", description.trim())
+    };
+    format!(
+        "The user just added a new architecture tag to the mind map: '{name}'.{desc}\n\n\
+         Do a QUICK pass over this codebase to find the files that belong to '{name}', and call \
+         `tag_file` on each one to connect it (with '{name}' among its tags). Use `suggest_files` \
+         and `search_code` to locate candidates; only read a file when you must to be sure. Aim \
+         for the clearly-relevant files, not everything — precision over volume. Your tags are \
+         proposed for the user to confirm. When done, briefly list the files you tagged and why."
+    )
+}
+
+/// `ciabatta ai tag <name> [description...]`: register a user-submitted
+/// architecture tag on the mind map, then run a quick AI pass to connect the
+/// files that belong to it (proposed for confirmation).
+pub async fn run_tag(
+    root: &Path,
+    config: &CiabattaConfig,
+    name: &str,
+    description: &str,
+    mode: Mode,
+) -> Result<()> {
+    let name = name.trim();
+    if name.is_empty() {
+        anyhow::bail!("give a tag name, e.g. `ciabatta ai tag auth \"login and sessions\"`");
+    }
+    // Register the architecture up front so it appears on the map immediately,
+    // even before the AI finds files for it.
+    Brain::open(root)?.set_architecture(name, description)?;
+    println!("Added architecture '{}' to the mind map.", name.to_lowercase());
+    println!("Running a quick pass to find files that belong to it…\n");
+
+    let prompt = tag_pass_prompt(name, description);
+    run_ask(root, config, &prompt, mode, Resume::None).await
+}
+
+/// `ciabatta ai delete <id>`: remove one saved conversation.
+pub fn run_delete(root: &Path, id: &str) -> Result<()> {
+    if session::delete(root, id)? {
+        println!("Deleted conversation {id}.");
+    } else {
+        println!("No saved conversation '{id}'. See `ciabatta ai resume` for the list.");
+    }
+    Ok(())
+}
+
+/// `ciabatta ai clear [--yes]`: remove every saved conversation for the project.
+pub fn run_clear(root: &Path, yes: bool) -> Result<()> {
+    let saved = session::list(root)?;
+    if saved.is_empty() {
+        println!("No saved conversations to clear.");
+        return Ok(());
+    }
+    if !yes {
+        eprint!(
+            "Delete all {} saved conversation(s) for this project? This cannot be undone. [y/N] ",
+            saved.len()
+        );
+        std::io::stderr().flush()?;
+        let mut line = String::new();
+        std::io::stdin().read_line(&mut line)?;
+        if !line.trim().eq_ignore_ascii_case("y") {
+            println!("Cancelled — nothing deleted.");
+            return Ok(());
+        }
+    }
+    let removed = session::clear(root)?;
+    println!("Deleted {removed} conversation(s).");
     Ok(())
 }
 
@@ -488,7 +727,10 @@ pub async fn run_ask(
                 AiEvent::Suggestion(c) => {
                     eprintln!("\n  ✏ {} change for {}:\n{}", c.state.label(), c.file, c.diff);
                 }
-                AiEvent::Answer(_) | AiEvent::Error(_) => {}
+                AiEvent::Plan(items) if !items.is_empty() => {
+                    eprintln!("\n  📋 plan:\n{}", tools::render_plan(&items));
+                }
+                AiEvent::Plan(_) | AiEvent::Answer(_) | AiEvent::Error(_) => {}
             }
         }
     });

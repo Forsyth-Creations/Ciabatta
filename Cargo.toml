@@ -31,3 +31,4 @@ glob = "0.3"
 chrono = { version = "0.4", features = ["serde"] }
 serde_json = "1"
 rustfmt = "0.10.0"
+owo-colors = "4.3.0"

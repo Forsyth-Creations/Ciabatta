@@ -1,21 +1,22 @@
 {
-  "confidence": 43.51999999999998,
-  "interactions": 8,
+  "confidence": 30.40799999999995,
+  "interactions": 19,
   "architectures": {
     "ai": {
-      "knowledge": 9.350000000000001,
+      "knowledge": 11.45,
       "description": "AI brain, provider integration, tools, and chat server/TUI",
       "files": {
         ".ciabatta/ciabatta.toml": 1.0,
-        "AI.md": 1.0,
+        "AI.md": 1.25,
         "src/ai/brain.rs": 1.25,
         "src/ai/burnin.rs": 1.0,
         "src/ai/index.html": 1.0,
-        "src/ai/mod.rs": 2.5,
+        "src/ai/mod.rs": 3.75,
         "src/ai/provider.rs": 1.25,
         "src/ai/server.rs": 3.5,
         "src/ai/tools.rs": 2.25,
-        "src/ai/tui.rs": 1.0
+        "src/ai/tui.rs": 1.0,
+        "src/git.rs": 1.0
       }
     },
     "analyze": {
@@ -32,95 +33,87 @@
       }
     },
     "build": {
-      "knowledge": 4.1,
+      "knowledge": 4.349999999999999,
       "description": "",
       "files": {
-        "Cargo.toml": 1.25,
-        "frontend/vite.config.js": 1.0,
+        "Cargo.toml": 1.75,
+        "frontend/vite.config.js": 1.25,
         "src/deploy/builder.html": 1.0,
         "src/environment.rs": 1.0,
-        "src/git.rs": 2.25
+        "src/git.rs": 2.75
       }
     },
     "cli": {
-      "knowledge": 3.7999999999999985,
+      "knowledge": 5.1999999999999975,
       "description": "Command-line entrypoint, argument parsing, config, and CI metadata handling",
       "files": {
         "install/install.ps1": 1.0,
-        "install/install.sh": 1.0,
-        "src/cli.rs": 1.75,
+        "install/install.sh": 1.5,
+        "src/cli.rs": 3.0,
         "src/configure.rs": 1.0,
-        "src/main.rs": 2.75
+        "src/main.rs": 3.0,
+        "src/watch/mod.rs": 1.0
       }
     },
     "config": {
-      "knowledge": 5.55,
+      "knowledge": 5.799999999999999,
       "description": "",
       "files": {
         ".ciabatta/ciabatta.toml": 1.0,
         ".yarnrc.yml": 1.0,
-        "Cargo.toml": 1.25,
-        "frontend/vite.config.js": 1.0,
-        "src/ci.rs": 1.0,
-        "src/config.rs": 2.0,
+        "Cargo.toml": 1.75,
+        "frontend/vite.config.js": 1.25,
+        "src/config.rs": 2.25,
         "src/configure.rs": 1.0,
-        "src/deploy/mod.rs": 1.0,
+        "src/deploy/mod.rs": 1.25,
         "src/environment.rs": 1.0
       }
     },
     "core": {
-      "knowledge": 5.899999999999999,
+      "knowledge": 6.099999999999998,
       "description": "",
       "files": {
         "src/ai/brain.rs": 1.25,
-        "src/ai/mod.rs": 1.25,
+        "src/ai/mod.rs": 1.5,
         "src/deploy/engine.rs": 1.25,
-        "src/git.rs": 2.25,
-        "src/main.rs": 1.75,
+        "src/git.rs": 2.75,
+        "src/main.rs": 2.0,
         "src/registry/mod.rs": 1.0,
         "src/runner.rs": 1.25
       }
     },
     "deploy": {
-      "knowledge": 5.05,
+      "knowledge": 6.249999999999999,
       "description": "Deployment engine and build/deploy server",
       "files": {
         "Dockerfile": 1.0,
-        "docker-compose.yml": 1.0,
+        "docker-compose.yml": 1.25,
         "install/install.ps1": 1.0,
-        "install/install.sh": 1.0,
-        "src/ci.rs": 1.0,
+        "install/install.sh": 1.5,
         "src/deploy/builder.html": 1.0,
         "src/deploy/engine.rs": 1.25,
         "src/deploy/index.html": 1.0,
-        "src/deploy/mod.rs": 1.0,
+        "src/deploy/mod.rs": 2.25,
         "src/deploy/server.rs": 1.0
       }
     },
     "docs": {
-      "knowledge": 2.0,
+      "knowledge": 2.0999999999999996,
       "description": "",
       "files": {
-        "AI.md": 1.0,
-        "README.md": 2.0
-      }
-    },
-    "entrypoint": {
-      "knowledge": 1.6500000000000001,
-      "description": "",
-      "files": {
-        "src/main.rs": 2.75
+        "AI.md": 1.25,
+        "README.md": 2.25
       }
     },
     "frontend": {
-      "knowledge": 13.250000000000002,
+      "knowledge": 13.450000000000005,
       "description": "Vite-based web frontend UI",
       "files": {
         ".yarnrc.yml": 1.0,
         "frontend/index.html": 1.0,
         "frontend/src/main.js": 1.0,
         "frontend/src/style.css": 1.0,
-        "frontend/vite.config.js": 1.0,
+        "frontend/vite.config.js": 1.25,
         "src/ai/index.html": 1.0,
         "src/ai/server.rs": 3.5,
         "src/analyze/index.html": 1.0,
@@ -128,23 +121,23 @@
         "src/deploy/builder.html": 1.0,
         "src/deploy/index.html": 1.0,
         "src/deploy/server.rs": 1.0,
-        "src/todo/index.html": 3.5,
-        "src/todo/server.rs": 2.25,
+        "src/todo/index.html": 4.0,
+        "src/todo/server.rs": 2.5,
         "src/watch/index.html": 1.0
       }
     },
     "git": {
-      "knowledge": 1.0,
+      "knowledge": 2.1,
       "description": "",
       "files": {
-        "src/git.rs": 1.0
+        "src/git.rs": 2.5
       }
     },
     "manifest": {
-      "knowledge": 2.05,
+      "knowledge": 2.1499999999999995,
       "description": "",
       "files": {
-        "Cargo.toml": 2.25,
+        "Cargo.toml": 2.75,
         "src/analyze/scan.rs": 1.0
       }
     },
@@ -165,31 +158,31 @@
       }
     },
     "sandbox": {
-      "knowledge": 3.55,
+      "knowledge": 3.649999999999999,
       "description": "",
       "files": {
         "Dockerfile": 1.0,
-        "docker-compose.yml": 1.0,
+        "docker-compose.yml": 1.25,
         "src/ai/tools.rs": 2.25,
-        "src/config.rs": 1.0
+        "src/config.rs": 1.25
       }
     },
     "ship-to-ai": {
-      "knowledge": 6.1499999999999995,
+      "knowledge": 6.299999999999999,
       "description": "",
       "files": {
         "src/ai/server.rs": 2.25,
-        "src/todo/index.html": 2.25,
-        "src/todo/server.rs": 2.25
+        "src/todo/index.html": 2.75,
+        "src/todo/server.rs": 2.5
       }
     },
     "todo": {
-      "knowledge": 6.799999999999999,
+      "knowledge": 6.949999999999998,
       "description": "Todo tracking module with its own server view",
       "files": {
-        "src/todo/index.html": 3.5,
+        "src/todo/index.html": 4.0,
         "src/todo/mod.rs": 2.5,
-        "src/todo/server.rs": 3.5
+        "src/todo/server.rs": 3.75
       }
     },
     "tools": {
@@ -211,11 +204,11 @@
       }
     },
     "watch": {
-      "knowledge": 1.5,
+      "knowledge": 2.55,
       "description": "File/artifact watching module and its server",
       "files": {
         "src/watch/index.html": 1.0,
-        "src/watch/mod.rs": 1.0,
+        "src/watch/mod.rs": 2.25,
         "src/watch/server.rs": 1.0
       }
     }
@@ -326,10 +319,6 @@
       "analyze",
       "frontend"
     ],
-    "src/ci.rs": [
-      "config",
-      "deploy"
-    ],
     "src/cli.rs": [
       "cli"
     ],
@@ -368,14 +357,14 @@
       "config"
     ],
     "src/git.rs": [
+      "ai",
       "build",
       "core",
       "git"
     ],
     "src/main.rs": [
       "cli",
-      "core",
-      "entrypoint"
+      "core"
     ],
     "src/registry/artifactory.rs": [
       "registry"
@@ -433,6 +422,7 @@
       "watch"
     ],
     "src/watch/mod.rs": [
+      "cli",
       "watch"
     ],
     "src/watch/server.rs": [
@@ -446,6 +436,404 @@
       "positive": true,
       "files_used": 1,
       "note": ""
+    },
+    {
+      "at": "2026-07-13T23:37:27.325158816-04:00",
+      "positive": false,
+      "files_used": 0,
+      "note": "tui"
     }
-  ]
+  ],
+  "dependencies": {
+    "root": "/home/forsythcreations/git/ForsythCreations/ciabatta",
+    "generated_at": "2026-07-14T04:02:14.319345347+00:00",
+    "nodes": [
+      {
+        "id": "ext:crates.io:anyhow",
+        "label": "anyhow",
+        "category": "external",
+        "ecosystem": "crates.io",
+        "version": "1.0.103",
+        "req": "1"
+      },
+      {
+        "id": "ext:crates.io:chrono",
+        "label": "chrono",
+        "category": "external",
+        "ecosystem": "crates.io",
+        "version": "0.4.45",
+        "req": "0.4"
+      },
+      {
+        "id": "ext:crates.io:clap",
+        "label": "clap",
+        "category": "external",
+        "ecosystem": "crates.io",
+        "version": "4.6.1",
+        "req": "4"
+      },
+      {
+        "id": "ext:crates.io:crossterm",
+        "label": "crossterm",
+        "category": "external",
+        "ecosystem": "crates.io",
+        "version": "0.28.1",
+        "req": "0.28"
+      },
+      {
+        "id": "ext:crates.io:futures",
+        "label": "futures",
+        "category": "external",
+        "ecosystem": "crates.io",
+        "version": "0.3.32",
+        "req": "0.3"
+      },
+      {
+        "id": "ext:crates.io:glob",
+        "label": "glob",
+        "category": "external",
+        "ecosystem": "crates.io",
+        "version": "0.3.3",
+        "req": "0.3"
+      },
+      {
+        "id": "ext:crates.io:owo-colors",
+        "label": "owo-colors",
+        "category": "external",
+        "ecosystem": "crates.io",
+        "version": "4.3.0"
+      },
+      {
+        "id": "ext:crates.io:ratatui",
+        "label": "ratatui",
+        "category": "external",
+        "ecosystem": "crates.io",
+        "version": "0.29.0",
+        "req": "0.29"
+      },
+      {
+        "id": "ext:crates.io:regex",
+        "label": "regex",
+        "category": "external",
+        "ecosystem": "crates.io",
+        "version": "1.12.4",
+        "req": "1"
+      },
+      {
+        "id": "ext:crates.io:reqwest",
+        "label": "reqwest",
+        "category": "external",
+        "ecosystem": "crates.io",
+        "version": "0.12.28",
+        "req": "0.12"
+      },
+      {
+        "id": "ext:crates.io:rustfmt",
+        "label": "rustfmt",
+        "category": "external",
+        "ecosystem": "crates.io",
+        "version": "0.10.0"
+      },
+      {
+        "id": "ext:crates.io:serde",
+        "label": "serde",
+        "category": "external",
+        "ecosystem": "crates.io",
+        "version": "1.0.228",
+        "req": "1"
+      },
+      {
+        "id": "ext:crates.io:serde_json",
+        "label": "serde_json",
+        "category": "external",
+        "ecosystem": "crates.io",
+        "version": "1.0.150",
+        "req": "1"
+      },
+      {
+        "id": "ext:crates.io:tokio",
+        "label": "tokio",
+        "category": "external",
+        "ecosystem": "crates.io",
+        "version": "1.52.3",
+        "req": "1"
+      },
+      {
+        "id": "ext:crates.io:toml",
+        "label": "toml",
+        "category": "external",
+        "ecosystem": "crates.io",
+        "version": "0.8.23",
+        "req": "0.8"
+      },
+      {
+        "id": "ext:crates.io:tracing",
+        "label": "tracing",
+        "category": "external",
+        "ecosystem": "crates.io",
+        "version": "0.1.44",
+        "req": "0.1"
+      },
+      {
+        "id": "ext:crates.io:tracing-subscriber",
+        "label": "tracing-subscriber",
+        "category": "external",
+        "ecosystem": "crates.io",
+        "version": "0.3.23",
+        "req": "0.3"
+      },
+      {
+        "id": "ext:dockerhub:rust",
+        "label": "rust",
+        "category": "external",
+        "ecosystem": "dockerhub",
+        "version": "1-bookworm"
+      },
+      {
+        "id": "ext:npm:turbo",
+        "label": "turbo",
+        "category": "external",
+        "ecosystem": "npm",
+        "version": "^2.0.0"
+      },
+      {
+        "id": "ext:npm:vite",
+        "label": "vite",
+        "category": "external",
+        "ecosystem": "npm",
+        "version": "^5.0.0"
+      },
+      {
+        "id": "int:npm:ciabatta",
+        "label": "ciabatta",
+        "category": "internal",
+        "ecosystem": "npm",
+        "version": "0.1.0",
+        "source": "package.json",
+        "is_workspace": true,
+        "workspace": "int:npm:ciabatta"
+      },
+      {
+        "id": "int:npm:ciabatta-frontend",
+        "label": "ciabatta-frontend",
+        "category": "internal",
+        "ecosystem": "npm",
+        "version": "0.1.1",
+        "source": "frontend/package.json",
+        "workspace": "int:npm:ciabatta"
+      },
+      {
+        "id": "int:npm:ciabatta-rust",
+        "label": "ciabatta-rust",
+        "category": "internal",
+        "ecosystem": "npm",
+        "version": "0.1.0",
+        "source": "src/package.json",
+        "workspace": "int:npm:ciabatta"
+      },
+      {
+        "id": "int:root",
+        "label": "ciabatta",
+        "category": "internal",
+        "ecosystem": "repository"
+      },
+      {
+        "id": "int:rust:ciabatta",
+        "label": "ciabatta",
+        "category": "internal",
+        "ecosystem": "rust",
+        "version": "0.1.17",
+        "license": "MIT",
+        "source": "Cargo.toml"
+      },
+      {
+        "id": "pub:crates.io",
+        "label": "crates.io",
+        "category": "publish",
+        "ecosystem": "crates.io",
+        "source": "Cargo.toml"
+      },
+      {
+        "id": "pub:registry:nexus",
+        "label": "nexus",
+        "category": "publish",
+        "ecosystem": "nexus",
+        "source": "recipe:ciabatta_binary",
+        "ciabatta_managed": true
+      }
+    ],
+    "edges": [
+      {
+        "from": "ext:crates.io:anyhow",
+        "to": "int:rust:ciabatta"
+      },
+      {
+        "from": "ext:crates.io:chrono",
+        "to": "int:rust:ciabatta"
+      },
+      {
+        "from": "ext:crates.io:clap",
+        "to": "int:rust:ciabatta"
+      },
+      {
+        "from": "ext:crates.io:crossterm",
+        "to": "int:rust:ciabatta"
+      },
+      {
+        "from": "ext:crates.io:futures",
+        "to": "int:rust:ciabatta"
+      },
+      {
+        "from": "ext:crates.io:glob",
+        "to": "int:rust:ciabatta"
+      },
+      {
+        "from": "ext:crates.io:owo-colors",
+        "to": "int:rust:ciabatta"
+      },
+      {
+        "from": "ext:crates.io:ratatui",
+        "to": "int:rust:ciabatta"
+      },
+      {
+        "from": "ext:crates.io:regex",
+        "to": "int:rust:ciabatta"
+      },
+      {
+        "from": "ext:crates.io:reqwest",
+        "to": "int:rust:ciabatta"
+      },
+      {
+        "from": "ext:crates.io:rustfmt",
+        "to": "int:rust:ciabatta"
+      },
+      {
+        "from": "ext:crates.io:serde",
+        "to": "int:rust:ciabatta"
+      },
+      {
+        "from": "ext:crates.io:serde_json",
+        "to": "int:rust:ciabatta"
+      },
+      {
+        "from": "ext:crates.io:tokio",
+        "to": "int:rust:ciabatta"
+      },
+      {
+        "from": "ext:crates.io:toml",
+        "to": "int:rust:ciabatta"
+      },
+      {
+        "from": "ext:crates.io:tracing",
+        "to": "int:rust:ciabatta"
+      },
+      {
+        "from": "ext:crates.io:tracing-subscriber",
+        "to": "int:rust:ciabatta"
+      },
+      {
+        "from": "ext:dockerhub:rust",
+        "to": "int:root"
+      },
+      {
+        "from": "ext:npm:turbo",
+        "to": "int:npm:ciabatta"
+      },
+      {
+        "from": "ext:npm:vite",
+        "to": "int:npm:ciabatta-frontend"
+      },
+      {
+        "from": "int:npm:ciabatta",
+        "to": "int:npm:ciabatta-frontend"
+      },
+      {
+        "from": "int:npm:ciabatta",
+        "to": "int:npm:ciabatta-rust"
+      },
+      {
+        "from": "int:npm:ciabatta",
+        "to": "int:root"
+      },
+      {
+        "from": "int:npm:ciabatta-frontend",
+        "to": "int:root"
+      },
+      {
+        "from": "int:npm:ciabatta-rust",
+        "to": "int:root"
+      },
+      {
+        "from": "int:rust:ciabatta",
+        "to": "int:root"
+      },
+      {
+        "from": "int:rust:ciabatta",
+        "to": "pub:crates.io"
+      },
+      {
+        "from": "int:rust:ciabatta",
+        "to": "pub:registry:nexus"
+      }
+    ],
+    "files": [
+      {
+        "path": "Cargo.toml",
+        "kind": "Cargo.toml",
+        "ecosystem": "rust",
+        "bytes": 1093,
+        "hash": "065fab529f9353c4",
+        "package": "int:rust:ciabatta"
+      },
+      {
+        "path": "Dockerfile",
+        "kind": "Dockerfile",
+        "ecosystem": "docker",
+        "bytes": 1778,
+        "hash": "5eeefb6e14a07aaa"
+      },
+      {
+        "path": "frontend/package.json",
+        "kind": "package.json",
+        "ecosystem": "npm",
+        "bytes": 287,
+        "hash": "854296c87ef5a701",
+        "package": "int:npm:ciabatta-frontend"
+      },
+      {
+        "path": "frontend/public/install.sh",
+        "kind": "install.sh",
+        "ecosystem": "shell",
+        "bytes": 4569,
+        "hash": "9bcbf8060b278514"
+      },
+      {
+        "path": "install/install.sh",
+        "kind": "install.sh",
+        "ecosystem": "shell",
+        "bytes": 648,
+        "hash": "3553b132d498c367"
+      },
+      {
+        "path": "package.json",
+        "kind": "package.json",
+        "ecosystem": "npm",
+        "bytes": 537,
+        "hash": "6956a7fad9fb9a76",
+        "package": "int:npm:ciabatta",
+        "workspace_members": [
+          "frontend",
+          "src"
+        ]
+      },
+      {
+        "path": "src/package.json",
+        "kind": "package.json",
+        "ecosystem": "npm",
+        "bytes": 333,
+        "hash": "b8bd2ad5937fc1e6",
+        "package": "int:npm:ciabatta-rust"
+      }
+    ]
+  }
 }

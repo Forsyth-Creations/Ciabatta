@@ -101,6 +101,36 @@ impl Conversation {
     }
 }
 
+/// Delete one saved conversation by id. Returns whether a file was removed.
+pub fn delete(root: &Path, id: &str) -> Result<bool> {
+    let path = conversations_dir(root).join(format!("{id}.json"));
+    match std::fs::remove_file(&path) {
+        Ok(()) => Ok(true),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(e).with_context(|| format!("Failed to delete {}", path.display())),
+    }
+}
+
+/// Delete every saved conversation for a project. Returns how many were removed.
+pub fn clear(root: &Path) -> Result<usize> {
+    let dir = conversations_dir(root);
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(e) => e,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(e) => return Err(e).with_context(|| format!("Failed to read {}", dir.display())),
+    };
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) == Some("json") {
+            std::fs::remove_file(&path)
+                .with_context(|| format!("Failed to delete {}", path.display()))?;
+            removed += 1;
+        }
+    }
+    Ok(removed)
+}
+
 /// Every saved conversation for a project, newest first.
 pub fn list(root: &Path) -> Result<Vec<ConversationSummary>> {
     let dir = conversations_dir(root);
@@ -189,6 +219,37 @@ mod tests {
 
         // latest() returns it too.
         assert_eq!(Conversation::latest(&root).unwrap().unwrap().id, id);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn delete_removes_one_and_clear_removes_all() {
+        let root = temp_root();
+
+        // Two saved conversations.
+        let mut a = Conversation::new(&root);
+        a.turns.push(Turn::User("first".into()));
+        a.save().unwrap();
+        let id_a = a.id.clone();
+        // Ensure a distinct id (ids are timestamp-derived).
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let mut b = Conversation::new(&root);
+        b.turns.push(Turn::User("second".into()));
+        b.save().unwrap();
+        assert_eq!(list(&root).unwrap().len(), 2);
+
+        // Delete one by id.
+        assert!(delete(&root, &id_a).unwrap());
+        assert_eq!(list(&root).unwrap().len(), 1);
+        // Deleting a missing id reports false, not an error.
+        assert!(!delete(&root, "does-not-exist").unwrap());
+
+        // Clear removes the rest and reports the count.
+        assert_eq!(clear(&root).unwrap(), 1);
+        assert!(list(&root).unwrap().is_empty());
+        // Clearing an empty store is a no-op returning 0.
+        assert_eq!(clear(&root).unwrap(), 0);
 
         let _ = std::fs::remove_dir_all(&root);
     }

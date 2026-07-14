@@ -3,11 +3,20 @@
 //! One screen: a header with the live confidence gauge, the conversation, a
 //! banner for pending tag confirmations, and an input line.
 //!
+//! The input box accepts pasted text (including multi-line code) intact via
+//! bracketed paste, and grows to fit it. Typing `/` opens a command menu
+//! (↑↓ to select, Tab to complete, Enter to run).
+//!
 //! Keys:
-//!   Enter        send the typed question
+//!   Enter        send the typed question (or run a /command)
+//!   Alt/Shift-Enter   insert a newline (compose a multi-line message)
 //!   Shift-Tab         cycle the mode: plan → edit → auto-accept
 //!   Ctrl-A / Ctrl-X   apply / reject the first pending change proposal
+//!   Ctrl-Z            undo the most recently applied change
 //!   Ctrl-O            open the suggested changes as diffs in VS Code
+//!   Ctrl-T            release/recapture the mouse for text selection & copy
+//!
+//! Typed `/commands`: /help, /new, /clear, /plan, /edit, /auto, /mode, /map.
 //!   Ctrl-Y / Ctrl-N   accept / reject the first pending tag proposal
 //!   Ctrl-G / Ctrl-B   rate the last answer good / bad (trains confidence)
 //!   PageUp/PageDown · Up/Down · mouse wheel   scroll the conversation
@@ -21,8 +30,8 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use crossterm::{
     event::{
-        DisableMouseCapture, EnableMouseCapture, Event, EventStream, KeyCode, KeyEventKind,
-        KeyModifiers, MouseEventKind,
+        DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture, Event,
+        EventStream, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind,
     },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
@@ -50,12 +59,84 @@ enum Speaker {
     Error,
     /// A unified diff of a proposed change; rendered with +/- coloring.
     Diff,
+    /// The startup bread mascot, drawn in warm crust colors with no prefix.
+    Banner,
 }
+
+/// Mascot palette: golden crust, pale crumb, and dark-baked face features.
+/// (Truecolor; terminals without it degrade to the nearest ANSI color.)
+const CRUST: Color = Color::Rgb(0xE7, 0xB6, 0x5A);
+const CRUMB: Color = Color::Rgb(0xF6, 0xE3, 0xB8);
+const FACE: Color = Color::Rgb(0x7A, 0x4A, 0x1E);
+
+
+/// Split one mascot line into colored spans by classifying each character:
+/// letters are crumb, the eyes/smile are the dark face, everything else crust.
+fn banner_spans(line: &str) -> Vec<Span<'static>> {
+    let class = |c: char| -> Color {
+        if c.is_ascii_alphabetic() {
+            CRUMB
+        } else if matches!(c, '•' | '‿' | '^' | 'ᵕ' | 'o') {
+            FACE
+        } else {
+            CRUST
+        }
+    };
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    let mut run = String::new();
+    let mut run_color: Option<Color> = None;
+    for ch in line.chars() {
+        let color = class(ch);
+        if run_color != Some(color) && !run.is_empty() {
+            spans.push(Span::styled(std::mem::take(&mut run), Style::default().fg(run_color.unwrap())));
+        }
+        run_color = Some(color);
+        run.push(ch);
+    }
+    if let Some(color) = run_color {
+        spans.push(Span::styled(run, Style::default().fg(color)));
+    }
+    spans
+}
+
+/// Color for inline `code` spans in rendered assistant Markdown.
+const CODE: Color = Color::Rgb(0x9C, 0xDC, 0xFE);
+
+/// Frames for the "thinking" spinner (a spinning braille dot).
+const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+
+/// How long the typewriter "wipe" that reveals a fresh answer runs, in seconds.
+const REVEAL_SECS: f32 = 0.6;
 
 struct ChatEntry {
     speaker: Speaker,
     text: String,
 }
+
+/// One entry in the `/` command menu.
+struct SlashCommand {
+    name: &'static str,
+    args: &'static str,
+    help: &'static str,
+}
+
+/// Commands offered in the `/` menu, in display order.
+const SLASH_COMMANDS: &[SlashCommand] = &[
+    SlashCommand { name: "report", args: "[days]", help: "summarize repo changes (^S saves a PDF)" },
+    SlashCommand { name: "tag", args: "<name> [desc]", help: "add a mind-map tag; AI connects files" },
+    SlashCommand { name: "burn", args: "[review] [n]", help: "learn the whole codebase into the mind map" },
+    SlashCommand { name: "analyze", args: "", help: "add dependency analysis to the mind map" },
+    SlashCommand { name: "new", args: "", help: "start a fresh conversation" },
+    SlashCommand { name: "list", args: "", help: "list saved conversations" },
+    SlashCommand { name: "delete", args: "[id]", help: "delete a conversation (current if no id)" },
+    SlashCommand { name: "clear", args: "", help: "clear the screen" },
+    SlashCommand { name: "plan", args: "", help: "switch to plan mode" },
+    SlashCommand { name: "edit", args: "", help: "switch to edit mode" },
+    SlashCommand { name: "auto", args: "", help: "switch to auto-accept mode" },
+    SlashCommand { name: "mode", args: "", help: "show the current mode" },
+    SlashCommand { name: "map", args: "", help: "show the mind-map URL" },
+    SlashCommand { name: "help", args: "", help: "list commands" },
+];
 
 struct App {
     entries: Vec<ChatEntry>,
@@ -71,6 +152,20 @@ struct App {
     /// Change proposals seen this session (newest last), for Ctrl-O.
     suggestions: Vec<ChangeSuggestion>,
     graph_url: Option<String>,
+    /// Highlighted row in the `/` command menu.
+    slash_index: usize,
+    /// The most recent assistant answer, for saving as a PDF with Ctrl-S.
+    last_answer: Option<String>,
+    /// True after a `/report` is launched, until its answer arrives — used to
+    /// show the "save as PDF" hint only for reports.
+    report_pending: bool,
+    /// Look-back window of the last report, stamped into the PDF title.
+    last_report_days: u64,
+    /// When the newest assistant answer arrived, driving its typewriter reveal.
+    reveal_since: Option<Instant>,
+    /// Whether the terminal's mouse is captured (wheel scrolls the chat). Toggle
+    /// it off with Ctrl-T to hand the mouse back for native text selection/copy.
+    mouse_capture: bool,
 }
 
 impl App {
@@ -83,10 +178,57 @@ impl App {
         });
     }
 
+    /// Insert pasted text into the input at the (end-of-line) cursor. Newlines
+    /// are kept so multi-line code lands intact; CRLF/CR are normalized to LF so
+    /// it renders as clean lines. Ignored while a request is in flight.
+    fn paste(&mut self, data: &str) {
+        if self.busy {
+            return;
+        }
+        self.input.push_str(&data.replace("\r\n", "\n").replace('\r', "\n"));
+        self.slash_index = 0;
+    }
+
+    /// Whether the `/` command menu should be shown: the input is a bare command
+    /// name being typed (a leading `/`, no whitespace yet) and we're idle.
+    fn slash_active(&self) -> bool {
+        !self.busy && self.input.starts_with('/') && !self.input.contains(char::is_whitespace)
+    }
+
+    /// Commands matching the typed prefix, in menu order.
+    fn slash_matches(&self) -> Vec<&'static SlashCommand> {
+        let token = self.input.trim_start_matches('/').to_lowercase();
+        SLASH_COMMANDS.iter().filter(|c| c.name.starts_with(&token)).collect()
+    }
+
+    /// The currently highlighted command, if the menu is active and non-empty.
+    fn slash_selected(&self) -> Option<&'static SlashCommand> {
+        let matches = self.slash_matches();
+        matches.get(self.slash_index.min(matches.len().saturating_sub(1))).copied()
+    }
+
+    /// Move the menu highlight, wrapping around.
+    fn slash_move(&mut self, delta: i32) {
+        let n = self.slash_matches().len() as i32;
+        if n == 0 {
+            return;
+        }
+        let cur = (self.slash_index.min(n as usize - 1)) as i32;
+        self.slash_index = (cur + delta).rem_euclid(n) as usize;
+    }
+
     /// Scroll up (`+`) or down (`-`), clamped to the conversation.
     fn scroll_by(&mut self, delta: i32) {
         self.scroll_up = (i32::from(self.scroll_up) + delta).clamp(0, i32::from(self.chat_top))
             as u16;
+    }
+
+    /// True while the newest answer is still wiping in — used to keep redraws
+    /// running smoothly for the duration of the animation, then relax.
+    fn reveal_active(&self) -> bool {
+        self.reveal_since
+            .map(|t| t.elapsed().as_secs_f32() < REVEAL_SECS)
+            .unwrap_or(false)
     }
 }
 
@@ -94,14 +236,22 @@ impl App {
 pub async fn run(assistant: Arc<Assistant>, graph_url: Option<String>) -> Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    // Bracketed paste makes the terminal deliver a paste as one `Event::Paste`
+    // string instead of a burst of keystrokes — without it, newlines in pasted
+    // code arrive as Enter presses and submit the paste line by line.
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture, EnableBracketedPaste)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
     let result = chat_loop(&mut terminal, assistant, graph_url).await;
 
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), DisableMouseCapture, LeaveAlternateScreen)?;
+    execute!(
+        terminal.backend_mut(),
+        DisableBracketedPaste,
+        DisableMouseCapture,
+        LeaveAlternateScreen
+    )?;
     terminal.show_cursor()?;
     result
 }
@@ -120,6 +270,12 @@ async fn chat_loop(
         chat_top: 0,
         suggestions: Vec::new(),
         graph_url,
+        slash_index: 0,
+        last_answer: None,
+        report_pending: false,
+        last_report_days: super::DEFAULT_REPORT_DAYS,
+        reveal_since: None,
+        mouse_capture: true,
     };
     app.push(
         Speaker::Status,
@@ -164,12 +320,19 @@ async fn chat_loop(
     loop {
         terminal.draw(|f| render(f, &mut app, &assistant))?;
 
-        let sleep = tokio::time::sleep(Duration::from_millis(120));
+        // Redraw briskly while something is animating (the thinking spinner or a
+        // fresh answer wiping in), and idle back to a slow tick otherwise.
+        let tick = if app.busy || app.reveal_active() { 66 } else { 250 };
+        let sleep = tokio::time::sleep(Duration::from_millis(tick));
         tokio::select! {
             maybe_event = event_stream.next() => {
                 let Some(Ok(event)) = maybe_event else { break };
                 let key = match event {
                     Event::Key(key) => key,
+                    Event::Paste(data) => {
+                        app.paste(&data);
+                        continue;
+                    }
                     Event::Mouse(mouse) => {
                         match mouse.kind {
                             MouseEventKind::ScrollUp => app.scroll_by(3),
@@ -194,7 +357,30 @@ async fn chat_loop(
 
                     (KeyCode::Char('a'), true) => resolve_first_change(&mut app, &assistant, true),
                     (KeyCode::Char('x'), true) => resolve_first_change(&mut app, &assistant, false),
+                    (KeyCode::Char('z'), true) => revert_last_change(&mut app, &assistant),
+                    (KeyCode::Char('s'), true) => save_report_pdf(&mut app, &assistant),
                     (KeyCode::Char('o'), true) => open_diffs_in_vscode(&mut app),
+                    // Release/recapture the mouse so text can be selected and
+                    // copied with the terminal's own selection (mouse capture
+                    // otherwise swallows drags to drive wheel scrolling).
+                    (KeyCode::Char('t'), true) => {
+                        app.mouse_capture = !app.mouse_capture;
+                        let _ = if app.mouse_capture {
+                            execute!(terminal.backend_mut(), EnableMouseCapture)
+                        } else {
+                            execute!(terminal.backend_mut(), DisableMouseCapture)
+                        };
+                        app.push(
+                            Speaker::Status,
+                            if app.mouse_capture {
+                                "mouse captured — wheel scrolls the chat; Ctrl-T to release for \
+                                 text selection".to_string()
+                            } else {
+                                "mouse released — drag to select & copy; Ctrl-T to re-enable wheel \
+                                 scroll (Shift-drag also selects while captured)".to_string()
+                            },
+                        );
+                    }
                     (KeyCode::BackTab, _) => {
                         let mode = assistant.mode().next();
                         assistant.set_mode(mode);
@@ -211,16 +397,140 @@ async fn chat_loop(
 
                     (KeyCode::PageUp, _) => app.scroll_by(5),
                     (KeyCode::PageDown, _) => app.scroll_by(-5),
+                    // Up/Down drive the slash menu when it's open, else scroll.
+                    (KeyCode::Up, _) if app.slash_active() => app.slash_move(-1),
+                    (KeyCode::Down, _) if app.slash_active() => app.slash_move(1),
                     (KeyCode::Up, _) => app.scroll_by(1),
                     (KeyCode::Down, _) => app.scroll_by(-1),
                     (KeyCode::Home, _) => app.scroll_up = app.chat_top,
                     (KeyCode::End, _) => app.scroll_up = 0,
 
+                    // Tab completes the highlighted command (with a trailing
+                    // space) so arguments can be typed before sending.
+                    (KeyCode::Tab, _) if app.slash_active() => {
+                        if let Some(c) = app.slash_selected() {
+                            app.input = format!("/{} ", c.name);
+                        }
+                    }
+
+                    // Alt/Shift+Enter inserts a newline instead of sending, so a
+                    // multi-line message can be composed by hand (paste keeps its
+                    // own newlines regardless).
+                    (KeyCode::Enter, _)
+                        if key.modifiers.intersects(KeyModifiers::ALT | KeyModifiers::SHIFT) =>
+                    {
+                        app.input.push('\n');
+                    }
                     (KeyCode::Enter, _) => {
-                        let question = app.input.trim().to_string();
-                        if !question.is_empty() && !app.busy {
+                        // With the menu open, Enter runs the highlighted command;
+                        // otherwise it sends whatever was typed.
+                        let line = match app.slash_selected() {
+                            Some(c) if app.slash_active() => format!("/{}", c.name),
+                            _ => app.input.trim().to_string(),
+                        };
+                        if line.is_empty() || app.busy {
+                            // nothing to send / still working
+                        } else if let Some(cmd) = line.strip_prefix('/') {
                             app.input.clear();
-                            app.push(Speaker::You, question.clone());
+                            // /report and /tag drive the agent, so they need the
+                            // same streaming path as a question.
+                            match cmd.split_whitespace().next() {
+                                Some("report") => {
+                                    let arg = cmd.trim_start_matches("report").trim();
+                                    let days = arg.split_whitespace().next().and_then(|d| d.parse::<u64>().ok());
+                                    let days = days.unwrap_or(super::DEFAULT_REPORT_DAYS).clamp(1, 3650);
+                                    match super::report_prompt(&assistant.toolbox.root, days) {
+                                        Ok(prompt) => {
+                                            app.push(Speaker::You, format!("/report {days}"));
+                                            app.scroll_up = 0;
+                                            app.busy = true;
+                                            app.busy_since = Some(Instant::now());
+                                            app.report_pending = true;
+                                            app.last_report_days = days;
+                                            let assistant = assistant.clone();
+                                            let tx = tx.clone();
+                                            tokio::spawn(async move {
+                                                let _ = assistant.ask(&prompt, tx).await;
+                                            });
+                                        }
+                                        Err(e) => app.push(Speaker::Error, e.to_string()),
+                                    }
+                                }
+                                Some("tag") => {
+                                    let rest = cmd.trim_start_matches("tag").trim();
+                                    let mut it = rest.splitn(2, char::is_whitespace);
+                                    let name = it.next().unwrap_or("").trim();
+                                    let desc = it.next().unwrap_or("").trim();
+                                    if name.is_empty() {
+                                        app.push(Speaker::Status, "usage: /tag <name> [description]".to_string());
+                                    } else if let Err(e) = assistant.brain.set_architecture(name, desc) {
+                                        app.push(Speaker::Error, e.to_string());
+                                    } else {
+                                        app.push(Speaker::Status, format!("added architecture '{}' — finding files…", name.to_lowercase()));
+                                        let prompt = super::tag_pass_prompt(name, desc);
+                                        app.push(Speaker::You, format!("/tag {name}"));
+                                        app.scroll_up = 0;
+                                        app.busy = true;
+                                        app.busy_since = Some(Instant::now());
+                                        let assistant = assistant.clone();
+                                        let tx = tx.clone();
+                                        tokio::spawn(async move {
+                                            let _ = assistant.ask(&prompt, tx).await;
+                                        });
+                                    }
+                                }
+                                Some("burn") | Some("burnin") => {
+                                    // Learn the whole codebase in one pass. Flags:
+                                    // `review` queues tags for confirmation; a bare
+                                    // number caps how many files are scanned.
+                                    let rest = cmd.split_once(char::is_whitespace).map(|x| x.1).unwrap_or("");
+                                    let review = rest
+                                        .split_whitespace()
+                                        .any(|t| t == "review" || t == "--review");
+                                    let limit = rest.split_whitespace().find_map(|t| t.parse::<usize>().ok());
+                                    app.push(Speaker::You, format!("/burn{}", if review { " review" } else { "" }));
+                                    app.push(Speaker::Status, format!(
+                                        "🔥 burn-in starting — surveying then tagging every source \
+                                         file{}. This runs many model calls; progress streams below.",
+                                        if review { " (review: tags queue for Ctrl-Y / Ctrl-N)" } else { "" }
+                                    ));
+                                    app.scroll_up = 0;
+                                    app.busy = true;
+                                    app.busy_since = Some(Instant::now());
+                                    let assistant = assistant.clone();
+                                    let tx = tx.clone();
+                                    let root = assistant.toolbox.root.clone();
+                                    tokio::spawn(async move {
+                                        match super::burnin::burn_core(&assistant, &root, review, limit, &tx).await {
+                                            Ok(summary) => { let _ = tx.send(AiEvent::Answer(summary)).await; }
+                                            Err(e) => { let _ = tx.send(AiEvent::Error(format!("{e:#}"))).await; }
+                                        }
+                                    });
+                                }
+                                Some("analyze") | Some("analyse") => {
+                                    // Fold the static dependency analysis into the
+                                    // mind map on demand (also part of burn-in).
+                                    app.push(Speaker::You, "/analyze".to_string());
+                                    app.push(Speaker::Status, "🔬 running static analysis to add \
+                                        dependencies to the mind map…".to_string());
+                                    app.scroll_up = 0;
+                                    app.busy = true;
+                                    app.busy_since = Some(Instant::now());
+                                    let assistant = assistant.clone();
+                                    let tx = tx.clone();
+                                    let root = assistant.toolbox.root.clone();
+                                    tokio::spawn(async move {
+                                        match super::burnin::scan_dependencies(&assistant, &root, &tx).await {
+                                            Ok(summary) => { let _ = tx.send(AiEvent::Answer(summary)).await; }
+                                            Err(e) => { let _ = tx.send(AiEvent::Error(format!("{e:#}"))).await; }
+                                        }
+                                    });
+                                }
+                                _ => handle_slash(&mut app, &assistant, cmd).await,
+                            }
+                        } else {
+                            app.input.clear();
+                            app.push(Speaker::You, line.clone());
                             app.scroll_up = 0; // sending snaps back to the newest message
                             app.busy = true;
                             app.busy_since = Some(Instant::now());
@@ -228,12 +538,18 @@ async fn chat_loop(
                             let tx = tx.clone();
                             tokio::spawn(async move {
                                 // Errors also arrive as AiEvent::Error.
-                                let _ = assistant.ask(&question, tx).await;
+                                let _ = assistant.ask(&line, tx).await;
                             });
                         }
                     }
-                    (KeyCode::Backspace, _) => { app.input.pop(); }
-                    (KeyCode::Char(c), false) => app.input.push(c),
+                    (KeyCode::Backspace, _) => {
+                        app.input.pop();
+                        app.slash_index = 0;
+                    }
+                    (KeyCode::Char(c), false) => {
+                        app.input.push(c);
+                        app.slash_index = 0;
+                    }
                     _ => {}
                 }
             }
@@ -258,10 +574,22 @@ async fn chat_loop(
                         app.push(Speaker::Status, "Ctrl-O opens the diff in VS Code".to_string());
                         app.suggestions.push(s);
                     }
+                    Some(AiEvent::Plan(items)) => {
+                        if !items.is_empty() {
+                            let list = super::tools::render_plan(&items);
+                            app.push(Speaker::Status, format!("plan\n{list}"));
+                        }
+                    }
                     Some(AiEvent::Answer(a)) => {
                         app.busy = false;
                         app.busy_since = None;
+                        app.last_answer = Some(a.clone());
+                        app.reveal_since = Some(Instant::now());
                         app.push(Speaker::Assistant, a);
+                        if app.report_pending {
+                            app.report_pending = false;
+                            app.push(Speaker::Status, "Ctrl-S saves this report as a PDF".to_string());
+                        }
                         let pending = assistant.brain.pending().len();
                         if pending > 0 {
                             app.push(Speaker::Status, format!(
@@ -284,6 +612,99 @@ async fn chat_loop(
         }
     }
     Ok(())
+}
+
+/// Handle a `/command` typed into the input. Unknown commands print the help.
+async fn handle_slash(app: &mut App, assistant: &Assistant, cmd: &str) {
+    let mut parts = cmd.split_whitespace();
+    let name = parts.next().unwrap_or("").to_lowercase();
+    match name.as_str() {
+        "help" | "?" => app.push(
+            Speaker::Status,
+            "commands:\n\
+             /new              start a fresh conversation (keeps the mind map)\n\
+             /report [days]    summarize what changed in the repo (default 7 days)\n\
+             /burn [review] [n]  learn the whole codebase into the mind map (review = confirm tags)\n\
+             /analyze          add static dependency analysis to the mind map (deps tool)\n\
+             /list             list saved conversations for this project\n\
+             /delete [id]      delete a saved conversation (current if no id)\n\
+             /clear            clear the screen (keeps the conversation)\n\
+             /plan /edit /auto   switch mode\n\
+             /mode             show the current mode\n\
+             /map              show the live mind-map URL\n\
+             /help             this list\n\
+             (resume saved conversations at launch: `ciabatta ai resume`)"
+                .to_string(),
+        ),
+        "new" => {
+            let id = assistant.start_new_conversation().await;
+            app.entries.clear();
+            app.suggestions.clear();
+            app.scroll_up = 0;
+            app.push(Speaker::Status, format!("started a new conversation ({id})"));
+        }
+        "clear" => {
+            app.entries.clear();
+            app.scroll_up = 0;
+            app.push(Speaker::Status, "screen cleared".to_string());
+        }
+        "list" => {
+            let root = &assistant.toolbox.root;
+            match super::session::list(root) {
+                Ok(saved) if saved.is_empty() => {
+                    app.push(Speaker::Status, "no saved conversations yet".to_string())
+                }
+                Ok(saved) => {
+                    let current = assistant.conversation_id().await;
+                    let mut out = String::from("saved conversations (newest first):");
+                    for s in saved {
+                        let here = if s.id == current { " ← current" } else { "" };
+                        let when = s.updated_at.split('T').next().unwrap_or(&s.updated_at);
+                        out.push_str(&format!("\n  {} [{when}] {} — {}{here}", s.id, s.turns, s.title));
+                    }
+                    app.push(Speaker::Status, out);
+                }
+                Err(e) => app.push(Speaker::Error, e.to_string()),
+            }
+        }
+        "delete" | "del" | "rm" => {
+            let root = assistant.toolbox.root.clone();
+            // Delete the named conversation, or the current one (then start anew).
+            let (id, was_current) = match parts.next() {
+                Some(id) => (id.to_string(), id == assistant.conversation_id().await),
+                None => (assistant.conversation_id().await, true),
+            };
+            match super::session::delete(&root, &id) {
+                Ok(true) => {
+                    app.push(Speaker::Status, format!("deleted conversation {id}"));
+                    if was_current {
+                        let new_id = assistant.start_new_conversation().await;
+                        app.entries.clear();
+                        app.suggestions.clear();
+                        app.scroll_up = 0;
+                        app.push(Speaker::Status, format!("started a new conversation ({new_id})"));
+                    }
+                }
+                Ok(false) => app.push(Speaker::Status, format!("no saved conversation '{id}'")),
+                Err(e) => app.push(Speaker::Error, e.to_string()),
+            }
+        }
+        "plan" | "edit" | "auto" | "auto-accept" => {
+            if let Ok(mode) = Mode::parse(&name) {
+                assistant.set_mode(mode);
+                app.push(Speaker::Status, format!("mode → {}", mode.label()));
+            }
+        }
+        "mode" => app.push(Speaker::Status, format!("mode is {}", assistant.mode().label())),
+        "map" => match &app.graph_url {
+            Some(url) => app.push(Speaker::Status, format!("live mind map: {url}")),
+            None => app.push(Speaker::Status, "the mind-map server isn't running".to_string()),
+        },
+        other => app.push(
+            Speaker::Status,
+            format!("unknown command '/{other}' — try /help"),
+        ),
+    }
 }
 
 /// Accept or reject the oldest pending tag proposal.
@@ -331,6 +752,36 @@ fn resolve_first_change(app: &mut App, assistant: &Assistant, accept: bool) {
                 )
             },
         ),
+        Err(e) => app.push(Speaker::Error, e.to_string()),
+    }
+}
+
+/// Save the most recent assistant answer (typically a `/report`) to a PDF in
+/// the project root.
+fn save_report_pdf(app: &mut App, assistant: &Assistant) {
+    let Some(answer) = app.last_answer.clone() else {
+        app.push(Speaker::Status, "nothing to save yet — run /report first".to_string());
+        return;
+    };
+    let name = format!("ciabatta-report-{}.pdf", chrono::Local::now().format("%Y%m%d-%H%M%S"));
+    let path = assistant.toolbox.root.join(&name);
+    // Include the git activity as an appendix so the PDF stands on its own.
+    let activity = crate::git::changes_since(&assistant.toolbox.root, app.last_report_days)
+        .unwrap_or_default();
+    match super::pdf::write_report(&path, app.last_report_days, &answer, &activity) {
+        Ok(()) => app.push(Speaker::Status, format!("📄 saved report to {}", path.display())),
+        Err(e) => app.push(Speaker::Error, e.to_string()),
+    }
+}
+
+/// Undo the most recently applied change, restoring the file from its snapshot.
+fn revert_last_change(app: &mut App, assistant: &Assistant) {
+    match assistant.toolbox.revert_last_applied() {
+        Ok(Some(c)) => app.push(
+            Speaker::Status,
+            format!("↩ reverted change to {} (restored from snapshot)", c.file),
+        ),
+        Ok(None) => app.push(Speaker::Status, "nothing to undo — no applied changes".to_string()),
         Err(e) => app.push(Speaker::Error, e.to_string()),
     }
 }
@@ -388,12 +839,32 @@ fn rate(app: &mut App, assistant: &Assistant, positive: bool) {
     }
 }
 
+/// Most content rows the input box grows to before it scrolls internally, so a
+/// big paste can't crowd out the conversation.
+const MAX_INPUT_ROWS: u16 = 12;
+
+/// How many terminal rows a string occupies once wrapped to `inner_w` columns,
+/// counting each logical line as `floor(len / width) + 1` rows. With this
+/// convention the end-of-input cursor always sits at row `rows - 1`.
+fn wrapped_rows(text: &str, inner_w: usize) -> u16 {
+    let inner_w = inner_w.max(1);
+    text.split('\n')
+        .map(|l| l.chars().count() / inner_w + 1)
+        .sum::<usize>()
+        .min(u16::MAX as usize) as u16
+}
+
 fn render(f: &mut Frame, app: &mut App, assistant: &Assistant) {
-    let [header, chat, pending_area, input, hints] = Layout::vertical([
+    // Grow the input box to fit multi-line/pasted content, up to a cap.
+    let input_rows = wrapped_rows(&app.input, f.area().width.saturating_sub(2) as usize)
+        .clamp(1, MAX_INPUT_ROWS)
+        + 2; // borders
+    let [header, chat, pending_area, menu, input, hints] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Min(3),
         Constraint::Length(pending_height(assistant)),
-        Constraint::Length(3),
+        Constraint::Length(slash_menu_height(app)),
+        Constraint::Length(input_rows),
         Constraint::Length(1),
     ])
     .areas(f.area());
@@ -401,8 +872,53 @@ fn render(f: &mut Frame, app: &mut App, assistant: &Assistant) {
     render_header(f, header, assistant);
     render_chat(f, chat, app);
     render_pending(f, pending_area, assistant);
+    render_slash_menu(f, menu, app);
     render_input(f, input, app);
     render_hints(f, hints, app);
+}
+
+/// Height of the `/` command menu: one row per match (capped) plus a border,
+/// or zero when the menu isn't active.
+fn slash_menu_height(app: &App) -> u16 {
+    if !app.slash_active() {
+        return 0;
+    }
+    match app.slash_matches().len() {
+        0 => 0,
+        n => (n as u16).min(6) + 2,
+    }
+}
+
+/// Render the `/` command menu with the highlighted row.
+fn render_slash_menu(f: &mut Frame, area: Rect, app: &App) {
+    if area.height == 0 {
+        return;
+    }
+    let matches = app.slash_matches();
+    let sel = app.slash_index.min(matches.len().saturating_sub(1));
+    let rows = area.height.saturating_sub(2) as usize;
+    let lines: Vec<Line> = matches
+        .iter()
+        .take(rows)
+        .enumerate()
+        .map(|(i, c)| {
+            let label = format!(" /{}{} ", c.name, if c.args.is_empty() { String::new() } else { format!(" {}", c.args) });
+            let label_style = if i == sel {
+                Style::default().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::Yellow)
+            };
+            Line::from(vec![
+                Span::styled(label, label_style),
+                Span::styled(format!("  {}", c.help), Style::default().fg(Color::DarkGray)),
+            ])
+        })
+        .collect();
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" commands — ↑↓ select · Tab complete · Enter run ")
+        .border_style(Style::default().fg(Color::DarkGray));
+    f.render_widget(Paragraph::new(lines).block(block), area);
 }
 
 fn render_header(f: &mut Frame, area: Rect, assistant: &Assistant) {
@@ -446,20 +962,157 @@ fn gauge_color(confidence: f64) -> Color {
     }
 }
 
+/// Render one line of assistant Markdown into styled spans, applying the
+/// inline emphasis the model tends to emit. Block prefixes (`#` headings,
+/// `-`/`*`/`+` bullets) are handled first, then the remainder is parsed for
+/// inline `**bold**`, `*italic*`/`_italic_`, and `` `code` ``.
+fn render_markdown_line(line: &str, base: Style) -> Vec<Span<'static>> {
+    let trimmed = line.trim_start();
+    let indent = &line[..line.len() - trimmed.len()];
+
+    // `#`..`######` + space → a bold heading with the markers dropped.
+    let hashes = trimmed.chars().take_while(|&c| c == '#').count();
+    if (1..=6).contains(&hashes) && trimmed[hashes..].starts_with(' ') {
+        let mut spans = vec![Span::styled(indent.to_string(), base)];
+        spans.extend(inline_md(trimmed[hashes..].trim_start(), base.add_modifier(Modifier::BOLD)));
+        return spans;
+    }
+
+    // A leading `-`, `*`, or `+` followed by a space → a bullet glyph. (The
+    // trailing-space check keeps `*italic*` and `**bold**` out of this branch.)
+    for marker in ['-', '*', '+'] {
+        if let Some(rest) = trimmed.strip_prefix(marker)
+            && let Some(item) = rest.strip_prefix(' ')
+        {
+            let mut spans = vec![Span::styled(format!("{indent}• "), base.fg(CRUST))];
+            spans.extend(inline_md(item, base));
+            return spans;
+        }
+    }
+
+    inline_md(line, base)
+}
+
+/// Parse inline Markdown emphasis in one line into styled spans, stripping the
+/// markers. Bold/italic nest (parsed recursively); inline code is verbatim.
+/// Unmatched or space-hugging markers are left as literal text, so prose like
+/// `2 * 3` or a dangling `**` during the typewriter reveal renders unharmed.
+fn inline_md(text: &str, base: Style) -> Vec<Span<'static>> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    let mut buf = String::new();
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+
+        // Inline code: `...` — verbatim, no emphasis parsed inside.
+        if c == '`'
+            && let Some(close) = find_delim_close(&chars, i + 1, '`', 1, false)
+        {
+            push_buf(&mut buf, &mut spans, base);
+            spans.push(Span::styled(chars[i + 1..close].iter().collect::<String>(), base.fg(CODE)));
+            i = close + 1;
+            continue;
+        }
+
+        // Bold: **...** or __...__ (the delimiter must hug non-space text).
+        if (c == '*' || c == '_')
+            && chars.get(i + 1) == Some(&c)
+            && chars.get(i + 2).is_some_and(|n| !n.is_whitespace() && *n != c)
+            && let Some(close) = find_delim_close(&chars, i + 2, c, 2, true)
+        {
+            push_buf(&mut buf, &mut spans, base);
+            let inner: String = chars[i + 2..close].iter().collect();
+            spans.extend(inline_md(&inner, base.add_modifier(Modifier::BOLD)));
+            i = close + 2;
+            continue;
+        }
+
+        // Italic: *...* or _..._.
+        if (c == '*' || c == '_')
+            && chars.get(i + 1).is_some_and(|n| !n.is_whitespace() && *n != c)
+            && let Some(close) = find_delim_close(&chars, i + 1, c, 1, true)
+        {
+            push_buf(&mut buf, &mut spans, base);
+            let inner: String = chars[i + 1..close].iter().collect();
+            spans.extend(inline_md(&inner, base.add_modifier(Modifier::ITALIC)));
+            i = close + 1;
+            continue;
+        }
+
+        buf.push(c);
+        i += 1;
+    }
+    push_buf(&mut buf, &mut spans, base);
+    if spans.is_empty() {
+        spans.push(Span::styled(String::new(), base));
+    }
+    spans
+}
+
+/// Find the closing delimiter run (`len` copies of `d`) at/after `from`. When
+/// `strict` (emphasis), the run must not be extended by another `d` and its
+/// inner neighbor must be non-whitespace; when false (code), any next `d` wins.
+fn find_delim_close(chars: &[char], from: usize, d: char, len: usize, strict: bool) -> Option<usize> {
+    let mut i = from;
+    while i + len <= chars.len() {
+        let is_run = chars[i..i + len].iter().all(|&x| x == d);
+        let not_extended = !strict || chars.get(i + len) != Some(&d);
+        let inner_ok = i > from && (!strict || !chars[i - 1].is_whitespace());
+        if is_run && not_extended && inner_ok {
+            return Some(i);
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Flush the plain-text accumulator into a styled span, if non-empty.
+fn push_buf(buf: &mut String, spans: &mut Vec<Span<'static>>, style: Style) {
+    if !buf.is_empty() {
+        spans.push(Span::styled(std::mem::take(buf), style));
+    }
+}
+
 fn render_chat(f: &mut Frame, area: Rect, app: &mut App) {
+    // The newest assistant answer is revealed with a left-to-right typewriter
+    // wipe; find it so we can trim its text to the current reveal point.
+    let last_assistant = app.entries.iter().rposition(|e| e.speaker == Speaker::Assistant);
+    let reveal = app.reveal_since.map(|t| t.elapsed().as_secs_f32());
+
     let mut lines: Vec<Line> = Vec::new();
-    for entry in &app.entries {
+    for (idx, entry) in app.entries.iter().enumerate() {
         let (prefix, style) = match entry.speaker {
             Speaker::You => ("you ▸ ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
             Speaker::Assistant => ("ai  ▸ ", Style::default().fg(Color::Yellow)),
             Speaker::Status | Speaker::Diff => ("      ", Style::default().fg(Color::DarkGray)),
             Speaker::Error => ("err ▸ ", Style::default().fg(Color::Red)),
+            Speaker::Banner => ("   ", Style::default().fg(CRUST).add_modifier(Modifier::BOLD)),
         };
-        for (i, raw) in entry.text.lines().enumerate() {
-            let head = if i == 0 { prefix } else { "      " };
+
+        // Substitute a partially-revealed copy for the answer being typed in.
+        let revealed = match reveal {
+            Some(e) if Some(idx) == last_assistant && e < REVEAL_SECS => {
+                let total = entry.text.chars().count();
+                let shown = ((total as f32) * (e / REVEAL_SECS)).ceil() as usize;
+                let mut s: String = entry.text.chars().take(shown).collect();
+                s.push('▌'); // a block caret at the leading edge of the wipe
+                Some(s)
+            }
+            _ => None,
+        };
+        let text = revealed.as_deref().unwrap_or(&entry.text);
+
+        for (i, raw) in text.lines().enumerate() {
+            let head = match entry.speaker {
+                Speaker::Banner => "   ",
+                _ if i == 0 => prefix,
+                _ => "      ",
+            };
             let body_style = match entry.speaker {
                 Speaker::Status => Style::default().fg(Color::DarkGray),
                 Speaker::Error => Style::default().fg(Color::Red),
+                Speaker::Banner => Style::default().fg(CRUST),
                 // Diff lines get git-style coloring by their first character.
                 Speaker::Diff => {
                     if raw.starts_with("+++") || raw.starts_with("---") {
@@ -476,10 +1129,22 @@ fn render_chat(f: &mut Frame, area: Rect, app: &mut App) {
                 }
                 _ => Style::default(),
             };
-            lines.push(Line::from(vec![
-                Span::styled(head, style),
-                Span::styled(raw.to_string(), body_style),
-            ]));
+            if entry.speaker == Speaker::Banner {
+                // The loaf is colored per-character (crust / crumb / face).
+                let mut spans = vec![Span::raw(head)];
+                spans.extend(banner_spans(raw));
+                lines.push(Line::from(spans));
+            } else if entry.speaker == Speaker::Assistant {
+                // The AI answers in Markdown — render its inline emphasis.
+                let mut spans = vec![Span::styled(head, style)];
+                spans.extend(render_markdown_line(raw, body_style));
+                lines.push(Line::from(spans));
+            } else {
+                lines.push(Line::from(vec![
+                    Span::styled(head, style),
+                    Span::styled(raw.to_string(), body_style),
+                ]));
+            }
         }
         if entry.speaker == Speaker::Assistant {
             lines.push(Line::default());
@@ -488,21 +1153,29 @@ fn render_chat(f: &mut Frame, area: Rect, app: &mut App) {
     if app.busy {
         // Show a live elapsed clock so a stalled request reads as stalled rather
         // than as a frozen UI, and hint at the cause once it runs unusually long.
-        let elapsed = app.busy_since.map(|t| t.elapsed().as_secs()).unwrap_or(0);
+        let millis = app.busy_since.map(|t| t.elapsed().as_millis()).unwrap_or(0);
+        let elapsed = millis / 1000;
+        let spin = SPINNER[(millis / 90) as usize % SPINNER.len()];
         let text = if elapsed >= 30 {
             format!(
-                "      … thinking ({elapsed}s) — still waiting on the model; if it's a local one it \
+                "thinking ({elapsed}s) — still waiting on the model; if it's a local one it \
                  may be loading, otherwise check the endpoint is reachable. Times out at 600s."
             )
         } else if elapsed >= 1 {
-            format!("      … thinking ({elapsed}s)")
+            format!("thinking ({elapsed}s)")
         } else {
-            "      … thinking".to_string()
+            "thinking".to_string()
         };
-        lines.push(Line::from(Span::styled(
-            text,
-            Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
-        )));
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("   {spin}  "),
+                Style::default().fg(CRUST).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                text,
+                Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
+            ),
+        ]));
     }
 
     // Wrap-aware autoscroll: estimate rendered height, then hold the view
@@ -575,6 +1248,14 @@ fn render_pending(f: &mut Frame, area: Rect, assistant: &Assistant) {
 }
 
 fn render_input(f: &mut Frame, area: Rect, app: &App) {
+    let inner_w = area.width.saturating_sub(2).max(1) as usize;
+    let inner_h = area.height.saturating_sub(2).max(1);
+
+    // Keep the newest line (and the cursor) in view when the input is taller
+    // than the box.
+    let content_rows = wrapped_rows(&app.input, inner_w);
+    let scroll = content_rows.saturating_sub(inner_h);
+
     let input = Paragraph::new(app.input.as_str())
         .block(
             Block::default()
@@ -586,18 +1267,23 @@ fn render_input(f: &mut Frame, area: Rect, app: &App) {
                     Color::Yellow
                 })),
         )
-        .wrap(Wrap { trim: false });
+        .wrap(Wrap { trim: false })
+        .scroll((scroll, 0));
     f.render_widget(input, area);
+
     if !app.busy {
-        // Put the cursor at the end of the typed text (single-line input).
-        let x = area.x + 1 + (app.input.chars().count() as u16).min(area.width.saturating_sub(3));
-        f.set_cursor_position((x, area.y + 1));
+        // Cursor sits at the end of the input: last logical line for the column,
+        // total wrapped rows for the row, adjusted by the internal scroll.
+        let last_len = app.input.rsplit('\n').next().unwrap_or("").chars().count();
+        let col = (last_len % inner_w) as u16;
+        let row = content_rows.saturating_sub(1).saturating_sub(scroll);
+        f.set_cursor_position((area.x + 1 + col, area.y + 1 + row));
     }
 }
 
 fn render_hints(f: &mut Frame, area: Rect, app: &App) {
     let mut hint = String::from(
-        " Enter send · S-Tab mode · ^A/^X change · ^O vscode · ^Y/^N tags · ^G/^B rate · wheel/PgUp scroll · Esc quit",
+        " Enter send · / commands · A-Enter newline · S-Tab mode · ^A/^X change · ^Z undo · ^S pdf · ^O vscode · ^Y/^N tags · ^T select · Esc quit",
     );
     if let Some(url) = &app.graph_url {
         hint.push_str(&format!(" · map: {url}"));
@@ -606,4 +1292,59 @@ fn render_hints(f: &mut Frame, area: Rect, app: &App) {
         Paragraph::new(Span::styled(hint, Style::default().fg(Color::DarkGray))),
         area,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The visible text of a set of spans, with all markup stripped.
+    fn plain(spans: &[Span]) -> String {
+        spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    #[test]
+    fn emphasis_strips_markers_and_applies_modifiers() {
+        let spans = inline_md("a **bold** and *italic* text", Style::default());
+        assert_eq!(plain(&spans), "a bold and italic text");
+        let bold = spans.iter().find(|s| s.content.as_ref() == "bold").unwrap();
+        assert!(bold.style.add_modifier.contains(Modifier::BOLD));
+        let italic = spans.iter().find(|s| s.content.as_ref() == "italic").unwrap();
+        assert!(italic.style.add_modifier.contains(Modifier::ITALIC));
+    }
+
+    #[test]
+    fn underscore_emphasis_works_too() {
+        let spans = inline_md("__b__ and _i_", Style::default());
+        assert_eq!(plain(&spans), "b and i");
+        assert!(spans.iter().find(|s| s.content.as_ref() == "b").unwrap().style.add_modifier.contains(Modifier::BOLD));
+        assert!(spans.iter().find(|s| s.content.as_ref() == "i").unwrap().style.add_modifier.contains(Modifier::ITALIC));
+    }
+
+    #[test]
+    fn literal_and_unclosed_markers_are_left_alone() {
+        // A lone `*` around spaces is arithmetic, not emphasis.
+        assert_eq!(plain(&inline_md("2 * 3 = 6", Style::default())), "2 * 3 = 6");
+        // An unterminated run (e.g. mid-reveal) renders verbatim.
+        assert_eq!(plain(&inline_md("**oops unclosed", Style::default())), "**oops unclosed");
+    }
+
+    #[test]
+    fn inline_code_is_verbatim_and_colored() {
+        let spans = inline_md("run `cargo **test**` now", Style::default());
+        assert_eq!(plain(&spans), "run cargo **test** now");
+        let code = spans.iter().find(|s| s.content.contains("cargo")).unwrap();
+        assert_eq!(code.style.fg, Some(CODE));
+        assert!(!code.style.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn headings_and_bullets_are_reshaped() {
+        let heading = render_markdown_line("## Big Title", Style::default());
+        assert_eq!(plain(&heading), "Big Title");
+        assert!(heading.iter().any(|s| s.style.add_modifier.contains(Modifier::BOLD)));
+
+        let bullet = render_markdown_line("- an item", Style::default());
+        assert_eq!(plain(&bullet), "• an item");
+    }
 }

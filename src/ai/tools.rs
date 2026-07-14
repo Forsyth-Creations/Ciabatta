@@ -22,6 +22,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use super::Mode;
@@ -38,6 +39,8 @@ pub enum ChangeState {
     Applied,
     /// The user turned it down.
     Rejected,
+    /// Was applied, then undone — the file was restored from its snapshot.
+    Reverted,
 }
 
 impl ChangeState {
@@ -46,6 +49,7 @@ impl ChangeState {
             ChangeState::Pending => "pending",
             ChangeState::Applied => "applied",
             ChangeState::Rejected => "rejected",
+            ChangeState::Reverted => "reverted",
         }
     }
 }
@@ -68,7 +72,48 @@ pub struct ChangeSuggestion {
     pub diff: String,
     /// The model's one-line rationale.
     pub reason: String,
+    /// True when this change created a file that did not exist before, so
+    /// reverting it removes the file rather than restoring empty content.
+    pub created: bool,
     pub state: ChangeState,
+}
+
+/// One step in the assistant's working plan for the current task.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlanItem {
+    pub step: String,
+    pub status: PlanStatus,
+}
+
+/// Where a plan step stands. Exactly one step should be `InProgress` at a time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlanStatus {
+    Pending,
+    InProgress,
+    Completed,
+    Cancelled,
+}
+
+impl PlanStatus {
+    fn parse(s: &str) -> Self {
+        match s.trim().to_lowercase().as_str() {
+            "in_progress" | "in-progress" | "active" | "doing" => PlanStatus::InProgress,
+            "completed" | "done" | "complete" => PlanStatus::Completed,
+            "cancelled" | "canceled" | "skip" | "skipped" => PlanStatus::Cancelled,
+            _ => PlanStatus::Pending,
+        }
+    }
+
+    /// A checkbox-style glyph for terminal rendering.
+    pub fn glyph(self) -> &'static str {
+        match self {
+            PlanStatus::Pending => "[ ]",
+            PlanStatus::InProgress => "[~]",
+            PlanStatus::Completed => "[x]",
+            PlanStatus::Cancelled => "[-]",
+        }
+    }
 }
 
 /// Everything tool execution needs: the project, the brain, and the config.
@@ -79,11 +124,16 @@ pub struct ToolBox {
     /// Relative paths of files touched during the current question, used for
     /// the precision component of the feedback loop.
     pub files_touched: std::sync::Mutex<std::collections::BTreeSet<String>>,
+    /// Files read this session, so `edit_file` can enforce read-before-edit —
+    /// a string edit against an unseen file is almost always a guess.
+    read_files: std::sync::Mutex<std::collections::BTreeSet<String>>,
     /// The assistant's working mode (plan / edit / auto-accept), which gates
     /// what `propose_change` is allowed to do.
     mode: std::sync::Mutex<Mode>,
     /// Change proposals for this session, oldest first.
     changes: std::sync::Mutex<Vec<ChangeSuggestion>>,
+    /// The assistant's current working plan (the `update_plan` tool's state).
+    plan: std::sync::Mutex<Vec<PlanItem>>,
     /// The only directories the assistant may read from or write to: the
     /// project workspace and /tmp (its scratch space for bespoke files).
     /// Anything outside these is refused.
@@ -101,8 +151,10 @@ impl ToolBox {
             brain,
             config,
             files_touched: Default::default(),
+            read_files: Default::default(),
             mode: std::sync::Mutex::new(Mode::default()),
             changes: std::sync::Mutex::new(Vec::new()),
+            plan: std::sync::Mutex::new(Vec::new()),
             bounds,
         }
     }
@@ -136,6 +188,11 @@ impl ToolBox {
             .collect()
     }
 
+    /// The assistant's current working plan, if it has set one.
+    pub fn plan(&self) -> Vec<PlanItem> {
+        self.plan.lock().unwrap().clone()
+    }
+
     /// Apply (write to the working tree) or reject the oldest pending change
     /// for `file`, returning its updated record.
     pub fn resolve_change(&self, file: &str, accept: bool) -> Result<ChangeSuggestion> {
@@ -157,11 +214,63 @@ impl ToolBox {
         Ok(change.clone())
     }
 
+    /// Undo the most recently applied change, restoring the file from its
+    /// pre-change snapshot (or deleting it if the change had created it).
+    /// Returns the reverted record, or `None` if nothing is applied.
+    pub fn revert_last_applied(&self) -> Result<Option<ChangeSuggestion>> {
+        let mut changes = self.changes.lock().unwrap();
+        let Some(change) = changes.iter_mut().rev().find(|c| c.state == ChangeState::Applied) else {
+            return Ok(None);
+        };
+        if change.created {
+            // The change made a new file; undoing it removes the file.
+            match std::fs::remove_file(&change.target) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e).with_context(|| format!("failed to remove '{}'", change.file)),
+            }
+        } else {
+            std::fs::copy(&change.original, &change.target)
+                .with_context(|| format!("failed to restore '{}'", change.file))?;
+        }
+        change.state = ChangeState::Reverted;
+        Ok(Some(change.clone()))
+    }
+
     /// The tool specs advertised to the model. In plan mode `propose_change`
     /// is left out entirely, so the model can't even try to edit.
     pub fn specs(&self) -> Vec<ToolSpec> {
         let images = self.sandbox_images();
         let mut specs = vec![
+            ToolSpec {
+                name: "update_plan",
+                description: "Record or update your working plan for a multi-step task as a \
+                              checklist. Call this when a task needs 3+ distinct steps, and \
+                              again each time a step's status changes — keep exactly one step \
+                              'in_progress' at a time and mark steps 'completed' as soon as \
+                              they are truly done, not in a batch. Each call REPLACES the \
+                              whole list, so always pass every step. Skip it for simple, \
+                              single-step questions."
+                    .into(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "steps": {
+                            "type": "array",
+                            "description": "The complete, ordered list of steps",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "step": {"type": "string", "description": "Short, specific, actionable description"},
+                                    "status": {"type": "string", "enum": ["pending", "in_progress", "completed", "cancelled"]}
+                                },
+                                "required": ["step", "status"]
+                            }
+                        }
+                    },
+                    "required": ["steps"]
+                }),
+            },
             ToolSpec {
                 name: "search_code",
                 description: "Search file contents across the project with a regex pattern \
@@ -204,6 +313,21 @@ impl ToolBox {
                         "filter": {"type": "string", "description": "Optional substring a path must contain"}
                     },
                     "required": []
+                }),
+            },
+            ToolSpec {
+                name: "glob",
+                description: "Find files whose PATH matches a glob pattern (e.g. '**/*.rs', \
+                              'src/**/mod.rs', 'frontend/*.tsx'). Use this to locate files by \
+                              name/extension; use `search_code` to match file CONTENTS. \
+                              Returns matching relative paths."
+                    .into(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "pattern": {"type": "string", "description": "Glob pattern, relative to the project root"}
+                    },
+                    "required": ["pattern"]
                 }),
             },
             ToolSpec {
@@ -260,15 +384,76 @@ impl ToolBox {
                     "required": ["image", "command"]
                 }),
             },
+            ToolSpec {
+                name: "run_command",
+                description: "Run a shell command locally in the project root, on the user's \
+                              machine, with the real installed toolchains (cargo, rustc, python, \
+                              pip, node, npm, pytest, make, git, …). Use this to build, test, \
+                              lint, or run the project for real — e.g. `cargo build`, `cargo \
+                              test`, `python -m pytest`, `npm run build`. Combined stdout+stderr \
+                              and the exit status are returned. Commands run with your own \
+                              permissions and can modify the working tree, so prefer `sandbox_run` \
+                              for anything untrusted or throwaway. Times out after 300s."
+                    .to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "command": {"type": "string", "description": "Shell command to run in the project root"}
+                    },
+                    "required": ["command"]
+                }),
+            },
+            ToolSpec {
+                name: "deps",
+                description: "Traverse the project's dependency graph (built by static analysis \
+                              during burn-in or the `/analyze` command): third-party dependencies, \
+                              internal packages, and publish points. Call with no query for an \
+                              overview of every internal package and its dependency count; pass a \
+                              file path, package name, or dependency name to see what it depends on \
+                              (inputs) and what depends on it (outputs). Returns a 'no dependency \
+                              graph yet' message until an analysis has run."
+                    .to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string", "description": "Optional: a file path, internal package, or dependency name to focus on"}
+                    }
+                }),
+            },
         ];
         if self.mode() != Mode::Plan {
             specs.push(ToolSpec {
+                name: "edit_file",
+                description: "Change part of an EXISTING file by replacing an exact string. \
+                              PREFER THIS over propose_change for edits: you give only the \
+                              text to replace (`old`) and its replacement (`new`), not the \
+                              whole file. You must have read the file first. `old` must \
+                              appear exactly once (whitespace/indentation are matched \
+                              leniently) — include enough surrounding lines to make it \
+                              unique, or set `replace_all` to change every occurrence. Like \
+                              propose_change, the edit is shown as a diff and (in edit mode) \
+                              waits for the user to accept it."
+                    .into(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "description": "Path (relative to the project root, or absolute under /tmp) of the file to edit"},
+                        "old": {"type": "string", "description": "The exact text to replace, with enough context to be unique"},
+                        "new": {"type": "string", "description": "The text to replace it with"},
+                        "replace_all": {"type": "boolean", "description": "Replace every occurrence of `old` (default false)"},
+                        "reason": {"type": "string", "description": "One line on what this change does and why"}
+                    },
+                    "required": ["path", "old", "new"]
+                }),
+            });
+            specs.push(ToolSpec {
                 name: "propose_change",
-                description: "Propose a change to one project file (or a new file) by \
-                              giving its COMPLETE new content. The user sees the change \
-                              as a diff. In edit mode it is applied only after the user \
-                              accepts it — never assume a pending change landed. In \
-                              auto-accept mode it is written to the file immediately."
+                description: "Propose a change to one project file by giving its COMPLETE \
+                              new content. Use this for NEW files or a full rewrite; for a \
+                              localized change to an existing file, prefer `edit_file`. The \
+                              user sees the change as a diff. In edit mode it is applied \
+                              only after the user accepts it — never assume a pending change \
+                              landed. In auto-accept mode it is written immediately."
                     .into(),
                 parameters: json!({
                     "type": "object",
@@ -288,13 +473,18 @@ impl ToolBox {
     /// model gets the error text back instead so it can adapt.
     pub async fn execute(&self, call: &ToolCall) -> ToolOutput {
         let result = match call.name.as_str() {
+            "update_plan" => self.update_plan(&call.args),
             "search_code" => self.search_code(&call.args).await,
             "suggest_files" => self.suggest_files(&call.args),
             "list_files" => self.list_files(&call.args),
+            "glob" => self.glob(&call.args),
             "read_file" => self.read_file(&call.args),
             "tag_file" => self.tag_file(&call.args),
+            "edit_file" => self.edit_file(&call.args).await,
             "propose_change" => self.propose_change(&call.args).await,
             "sandbox_run" => self.sandbox_run(&call.args).await,
+            "run_command" => self.run_command(&call.args).await,
+            "deps" => self.deps(&call.args),
             other => Err(anyhow::anyhow!("unknown tool '{other}'")),
         };
         match result {
@@ -311,17 +501,31 @@ impl ToolBox {
         }
     }
 
+    /// Whether a tool only reads state, so calls to it are safe to run
+    /// concurrently with each other in one round.
+    pub fn is_read_only(name: &str) -> bool {
+        matches!(name, "search_code" | "suggest_files" | "list_files" | "glob" | "read_file" | "deps")
+    }
+
     /// A one-line human-readable description of a call, for status displays.
     pub fn describe(call: &ToolCall) -> String {
         let arg = |k: &str| call.args[k].as_str().unwrap_or("").to_string();
         match call.name.as_str() {
+            "update_plan" => "📋 update plan".to_string(),
             "search_code" => format!("🔎 search: {}", arg("pattern")),
             "suggest_files" => format!("🧠 mind map: {}", arg("topic")),
             "list_files" => "🗂  list files".to_string(),
+            "glob" => format!("🗂  glob: {}", arg("pattern")),
             "read_file" => format!("📄 read: {}", arg("path")),
             "tag_file" => format!("🏷  tag: {} ({})", arg("path"), join_tags(&call.args["tags"])),
+            "edit_file" => format!("✏  edit: {}", arg("path")),
             "propose_change" => format!("✏  change: {}", arg("path")),
             "sandbox_run" => format!("📦 sandbox [{}]: {}", arg("image"), arg("command")),
+            "run_command" => format!("⚙ run: {}", arg("command")),
+            "deps" => {
+                let q = arg("query");
+                if q.is_empty() { "🔗 dependency overview".to_string() } else { format!("🔗 deps: {q}") }
+            }
             other => format!("⚙ {other}"),
         }
     }
@@ -334,6 +538,7 @@ impl ToolBox {
     /// Forget the touched-file set (called at the start of each question).
     pub fn reset_touched(&self) {
         self.files_touched.lock().unwrap().clear();
+        self.read_files.lock().unwrap().clear();
     }
 
     fn sandbox_images(&self) -> Vec<String> {
@@ -407,6 +612,36 @@ impl ToolBox {
             .insert(rel.trim_start_matches("./").to_string());
     }
 
+    // ─── update_plan ──────────────────────────────────────────────────────────
+
+    fn update_plan(&self, args: &Value) -> Result<String> {
+        let raw = args["steps"]
+            .as_array()
+            .context("update_plan needs a 'steps' array")?;
+        let mut items = Vec::with_capacity(raw.len());
+        let mut in_progress = 0;
+        for entry in raw {
+            let step = entry["step"].as_str().unwrap_or("").trim().to_string();
+            if step.is_empty() {
+                continue;
+            }
+            let status = PlanStatus::parse(entry["status"].as_str().unwrap_or("pending"));
+            if status == PlanStatus::InProgress {
+                in_progress += 1;
+            }
+            items.push(PlanItem { step, status });
+        }
+        if items.is_empty() {
+            bail!("update_plan needs at least one non-empty step");
+        }
+        if in_progress > 1 {
+            bail!("keep exactly one step 'in_progress' at a time (found {in_progress})");
+        }
+        let rendered = render_plan(&items);
+        *self.plan.lock().unwrap() = items;
+        Ok(rendered)
+    }
+
     // ─── search_code ────────────────────────────────────────────────────────
 
     async fn search_code(&self, args: &Value) -> Result<String> {
@@ -472,6 +707,43 @@ impl ToolBox {
         Ok(clip(&listed.join("\n"), 12_000))
     }
 
+    // ─── glob ─────────────────────────────────────────────────────────────────
+
+    fn glob(&self, args: &Value) -> Result<String> {
+        let pattern = args["pattern"].as_str().context("glob needs a 'pattern'")?.trim();
+        if pattern.is_empty() {
+            bail!("empty glob pattern");
+        }
+        // Anchor the pattern at the project root and match paths there.
+        let rooted = self.root.join(pattern.trim_start_matches("./"));
+        let entries = glob::glob(&rooted.to_string_lossy())
+            .with_context(|| format!("invalid glob pattern '{pattern}'"))?;
+
+        let mut matches = Vec::new();
+        for entry in entries.flatten() {
+            // Files only, kept inside the workspace, skipping build/VCS noise.
+            if !entry.is_file() {
+                continue;
+            }
+            let Ok(rel) = entry.strip_prefix(&self.root) else {
+                continue;
+            };
+            let rel = rel.display().to_string();
+            if rel.split('/').any(|c| SKIP_DIRS.contains(&c)) {
+                continue;
+            }
+            matches.push(rel);
+            if matches.len() >= 500 {
+                break;
+            }
+        }
+        if matches.is_empty() {
+            return Ok(format!("no files match '{pattern}'"));
+        }
+        matches.sort();
+        Ok(clip(&matches.join("\n"), 12_000))
+    }
+
     // ─── read_file ──────────────────────────────────────────────────────────
 
     fn read_file(&self, args: &Value) -> Result<String> {
@@ -485,6 +757,10 @@ impl ToolBox {
 
         // Track usage: reads feed the mind map's path scores.
         self.note_touch(rel);
+        self.read_files
+            .lock()
+            .unwrap()
+            .insert(rel.trim_start_matches("./").to_string());
         let _ = self.brain.record_file_use(rel.trim_start_matches("./"));
 
         let start = args["start_line"].as_u64().map(|n| n.max(1) as usize);
@@ -525,8 +801,7 @@ impl ToolBox {
     // ─── propose_change ─────────────────────────────────────────────────────
 
     async fn propose_change(&self, args: &Value) -> Result<String> {
-        let mode = self.mode();
-        if mode == Mode::Plan {
+        if self.mode() == Mode::Plan {
             bail!("propose_change is disabled in plan mode — present your plan instead");
         }
         let raw_path = args["path"]
@@ -536,7 +811,49 @@ impl ToolBox {
             .as_str()
             .context("propose_change needs 'new_content'")?;
         let reason = args["reason"].as_str().unwrap_or("").to_string();
+        self.record_proposal(raw_path, new_content, reason).await
+    }
 
+    // ─── edit_file ────────────────────────────────────────────────────────────
+
+    /// Splice a string replacement into an existing file (see [`super::edit`]),
+    /// then record the result as a normal change proposal so it flows through
+    /// the same diff/accept path as `propose_change`.
+    async fn edit_file(&self, args: &Value) -> Result<String> {
+        if self.mode() == Mode::Plan {
+            bail!("edit_file is disabled in plan mode — present your plan instead");
+        }
+        let raw_path = args["path"].as_str().context("edit_file needs a 'path'")?;
+        let old = args["old"].as_str().context("edit_file needs 'old'")?;
+        let new = args["new"].as_str().context("edit_file needs 'new'")?;
+        let replace_all = args["replace_all"].as_bool().unwrap_or(false);
+        let reason = args["reason"].as_str().unwrap_or("").to_string();
+
+        // The file must exist and have been read this session — a string edit
+        // against unseen content is a guess.
+        let abs = self.resolve(raw_path)?;
+        if !abs.is_file() {
+            bail!("'{raw_path}' is not a file — use propose_change to create a new file");
+        }
+        let rel = raw_path.trim_start_matches("./");
+        if !self.read_files.lock().unwrap().contains(rel) {
+            bail!("read '{raw_path}' first, then edit — I won't edit a file I haven't seen this session");
+        }
+
+        let current = std::fs::read_to_string(&abs)
+            .with_context(|| format!("failed to read '{raw_path}'"))?;
+        let updated = super::edit::replace(&current, old, new, replace_all)?;
+        self.record_proposal(raw_path, &updated, reason).await
+    }
+
+    // ─── shared change recording ──────────────────────────────────────────────
+
+    /// Turn a resolved (path, full new content) into a pending change proposal:
+    /// snapshot the original, write the proposal and a unified diff under
+    /// `.ciabatta/ai/suggestions/`, apply immediately in auto-accept mode, and
+    /// record it for the front end. Shared by `propose_change` and `edit_file`.
+    async fn record_proposal(&self, raw_path: &str, new_content: &str, reason: String) -> Result<String> {
+        let mode = self.mode();
         // Confine the target to the workspace or /tmp (it may not exist yet).
         let target = self.resolve_new(raw_path)?;
         // Display relative paths for workspace files, absolute for /tmp scratch.
@@ -545,9 +862,13 @@ impl ToolBox {
             Err(_) => target.display().to_string(),
         };
 
+        let mut created = false;
         let old_content = match std::fs::read_to_string(&target) {
             Ok(s) => s,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                created = true;
+                String::new()
+            }
             Err(e) => return Err(e).with_context(|| format!("failed to read '{shown}'")),
         };
         if old_content == new_content {
@@ -590,6 +911,7 @@ impl ToolBox {
             proposed,
             diff,
             reason,
+            created,
             state: if applied { ChangeState::Applied } else { ChangeState::Pending },
         });
 
@@ -652,6 +974,169 @@ impl ToolBox {
         }
         out.push_str(&format!("\n[exit status: {}]", output.status));
         Ok(clip(&out, 16_000))
+    }
+
+    // ─── run_command ──────────────────────────────────────────────────────────
+
+    /// Run a shell command locally in the project root, so the assistant can use
+    /// the machine's real toolchains (cargo, python, node, …) to build and test.
+    /// Unlike `sandbox_run` this is not isolated and can modify the working tree.
+    async fn run_command(&self, args: &Value) -> Result<String> {
+        let command = args["command"]
+            .as_str()
+            .context("run_command needs a 'command'")?;
+
+        let fut = tokio::process::Command::new("sh")
+            .arg("-c")
+            .arg(command)
+            .current_dir(&self.root)
+            .output();
+        // Cap runtime so a hung build/test can't wedge the whole agent loop.
+        let output = match tokio::time::timeout(std::time::Duration::from_secs(300), fut).await {
+            Ok(res) => res.with_context(|| format!("failed to run: {command}"))?,
+            Err(_) => bail!("command timed out after 300s: {command}"),
+        };
+
+        let mut out = String::new();
+        out.push_str(&String::from_utf8_lossy(&output.stdout));
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if !stderr.trim().is_empty() {
+            out.push_str("\n[stderr]\n");
+            out.push_str(&stderr);
+        }
+        out.push_str(&format!("\n[exit status: {}]", output.status));
+        Ok(clip(&out, 16_000))
+    }
+
+    // ─── deps ─────────────────────────────────────────────────────────────────
+
+    /// Traverse the dependency graph captured in the brain. With no query,
+    /// summarize every internal package and its third-party dependency count;
+    /// with one, resolve it (a file resolves to its owning package) and list
+    /// what flows in (dependencies) and out (consumers / publish points).
+    fn deps(&self, args: &Value) -> Result<String> {
+        use crate::analyze::{Category, Node};
+
+        let Some(graph) = self.brain.dependencies() else {
+            bail!(
+                "no dependency graph yet — run a burn-in (`/burn`) or `/analyze` to build it \
+                 (or `ciabatta ai burn-in` / `ciabatta analyze` from the shell)"
+            );
+        };
+        // "name" or "name x.y.z" for a node.
+        let label = |n: &Node| match &n.version {
+            Some(v) => format!("{} {v}", n.label),
+            None => n.label.clone(),
+        };
+        let query = args["query"].as_str().unwrap_or("").trim();
+
+        if query.is_empty() {
+            let internals: Vec<&Node> = graph
+                .nodes
+                .iter()
+                .filter(|n| n.category == Category::Internal && n.id != "int:root")
+                .collect();
+            let external = graph.nodes.iter().filter(|n| n.category == Category::External).count();
+            let mut out = format!(
+                "Dependency graph: {} internal package(s), {external} external dependency(ies). \
+                 Query a file, package, or dependency name for detail.\n",
+                internals.len()
+            );
+            for pkg in internals {
+                let deps: Vec<String> = graph
+                    .inputs(&pkg.id)
+                    .into_iter()
+                    .filter(|n| n.category == Category::External)
+                    .map(&label)
+                    .collect();
+                let pubs: Vec<String> = graph
+                    .outputs(&pkg.id)
+                    .into_iter()
+                    .filter(|n| n.category == Category::Publish)
+                    .map(|n| n.label.clone())
+                    .collect();
+                out.push_str(&format!(
+                    "\n• {}{}",
+                    pkg.label,
+                    if pkg.is_workspace { " (workspace root)" } else { "" }
+                ));
+                if !deps.is_empty() {
+                    out.push_str(&format!("\n    depends on ({}): {}", deps.len(), join_capped(&deps, 25)));
+                }
+                if !pubs.is_empty() {
+                    out.push_str(&format!("\n    publishes to: {}", pubs.join(", ")));
+                }
+            }
+            return Ok(clip(&out, 12_000));
+        }
+
+        // Focused query: resolve a node by name, or a file path to its package.
+        let (node, via_file) = match graph.find_node(query) {
+            Some(n) => (n, false),
+            None => match graph.owner_for_file(query) {
+                Some(n) => (n, true),
+                None => bail!(
+                    "nothing in the dependency graph matches '{query}' — try a package name, \
+                     dependency name, or a file path"
+                ),
+            },
+        };
+
+        let mut out = String::new();
+        if via_file {
+            out.push_str(&format!("File '{query}' belongs to package '{}'.\n", node.label));
+        }
+        out.push_str(&format!(
+            "{} · {:?}{}",
+            node.label,
+            node.category,
+            node.version.as_deref().map(|v| format!(" {v}")).unwrap_or_default()
+        ));
+        if let Some(eco) = &node.ecosystem {
+            out.push_str(&format!(" · {eco}"));
+        }
+        out.push_str(
+            "\n(inputs = what it depends on / flows in · outputs = what depends on it / \
+             publish points)",
+        );
+
+        let tagged = |n: &Node| format!("{} [{:?}]", label(n), n.category);
+        let inputs: Vec<String> = graph
+            .inputs(&node.id)
+            .into_iter()
+            .filter(|n| n.id != "int:root")
+            .map(&tagged)
+            .collect();
+        let outputs: Vec<String> = graph
+            .outputs(&node.id)
+            .into_iter()
+            .filter(|n| n.id != "int:root")
+            .map(&tagged)
+            .collect();
+
+        if !inputs.is_empty() {
+            out.push_str(&format!("\n  inputs ({}): {}", inputs.len(), join_capped(&inputs, 40)));
+        }
+        if !outputs.is_empty() {
+            out.push_str(&format!("\n  outputs ({}): {}", outputs.len(), join_capped(&outputs, 40)));
+        }
+        if inputs.is_empty() && outputs.is_empty() {
+            out.push_str("\n  (no dependency edges recorded for this node)");
+        }
+        if !node.vulnerabilities.is_empty() {
+            let ids: Vec<String> = node.vulnerabilities.iter().map(|v| v.id.clone()).collect();
+            out.push_str(&format!("\n  ⚠ known vulnerabilities: {}", ids.join(", ")));
+        }
+        Ok(clip(&out, 12_000))
+    }
+}
+
+/// Join items with commas, capping the count with a "+N more" suffix.
+fn join_capped(items: &[String], max: usize) -> String {
+    if items.len() <= max {
+        items.join(", ")
+    } else {
+        format!("{}, +{} more", items[..max].join(", "), items.len() - max)
     }
 }
 
@@ -826,6 +1311,15 @@ fn clip(s: &str, max: usize) -> String {
     format!("{}\n… [truncated: {} of {} bytes shown]", &s[..cut], cut, s.len())
 }
 
+/// Render a plan as a checklist, one line per step.
+pub fn render_plan(items: &[PlanItem]) -> String {
+    items
+        .iter()
+        .map(|i| format!("{} {}", i.status.glyph(), i.step))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn join_tags(v: &Value) -> String {
     v.as_array()
         .map(|a| {
@@ -904,5 +1398,53 @@ mod tests {
         assert_eq!(normalize_lexical(Path::new("/a/b/../c")), PathBuf::from("/a/c"));
         // Never climbs past the root.
         assert_eq!(normalize_lexical(Path::new("/../../x")), PathBuf::from("/x"));
+    }
+
+    #[test]
+    fn update_plan_records_steps_and_rejects_double_in_progress() {
+        let (root, tb) = toolbox();
+
+        // A well-formed plan is stored and rendered as a checklist.
+        let out = tb
+            .update_plan(&json!({"steps": [
+                {"step": "read the config", "status": "completed"},
+                {"step": "add the flag", "status": "in_progress"},
+                {"step": "test it", "status": "pending"}
+            ]}))
+            .unwrap();
+        assert!(out.contains("[x] read the config"));
+        assert!(out.contains("[~] add the flag"));
+        assert_eq!(tb.plan().len(), 3);
+
+        // Two in-progress steps are refused.
+        assert!(
+            tb.update_plan(&json!({"steps": [
+                {"step": "a", "status": "in_progress"},
+                {"step": "b", "status": "in_progress"}
+            ]}))
+            .is_err()
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn edit_file_requires_a_prior_read_then_applies() {
+        let (root, tb) = toolbox();
+        tb.set_mode(Mode::AutoAccept); // apply immediately so we can assert on disk
+        let rt = tokio::runtime::Runtime::new().unwrap();
+
+        // Editing before reading is refused.
+        let args = json!({"path": "src/a.rs", "old": "fn a() {}", "new": "fn a() { todo!() }"});
+        let err = rt.block_on(tb.edit_file(&args)).unwrap_err();
+        assert!(err.to_string().contains("read"));
+
+        // Read it, then the same edit lands.
+        tb.read_file(&json!({"path": "src/a.rs"})).unwrap();
+        rt.block_on(tb.edit_file(&args)).unwrap();
+        let content = std::fs::read_to_string(root.join("src/a.rs")).unwrap();
+        assert!(content.contains("todo!()"));
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

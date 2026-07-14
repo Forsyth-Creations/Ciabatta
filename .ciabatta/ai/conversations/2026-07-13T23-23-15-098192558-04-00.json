@@ -1,0 +1,392 @@
+{
+  "id": "2026-07-13T23-23-15-098192558-04-00",
+  "title": "Ciabatta install, AI features, and deployment updates",
+  "created_at": "2026-07-13T23:23:15.098192558-04:00",
+  "updated_at": "2026-07-13T23:25:15.069241026-04:00",
+  "turns": [
+    {
+      "User": "Report on what changed in this repository over the past 10 day(s). Base it on the git activity below. Group the changes by theme or area (feature, fix, refactor, docs, etc.), lead with the most significant, and call out anything risky or worth a closer look. Be concise. If a change needs context to explain, read the relevant file.\n\n=== git activity ===\nCommits (past 10 day(s)):\n505470e 2026-07-12 Version bump (Henry Forsyth)\n4df78af 2026-07-12 Host override for Ciabatta in contianers, better install script (Henry Forsyth)\nb92b35f 2026-07-12 Updates (Henry Forsyth)\nd8fe2de 2026-07-12 Updates to be a one-line install (Henry Forsyth)\nfc3ccb6 2026-07-11 Updates to Ciabatta (Henry Forsyth)\n47757dd 2026-07-11 Better docs page and AI features (Henry Forsyth)\n522af91 2026-07-11 AI Integration updates (Henry Forsyth)\nc72354c 2026-07-08 New  command for faster debugging (Henry Forsyth)\n69d5bf5 2026-07-05 Version bump (Henry Forsyth)\n5200b02 2026-07-05 Updates to make publication easier (Henry Forsyth)\n397b7e2 2026-07-05 Merge pull request #6 from Forsyth-Creations/support-docker-and-flowcharts (Forsyth Creations)\na05e766 2026-07-05 Enforcing some env variables at deployment time (Henry Forsyth)\nab499e0 2026-07-05 Better deployment view (Henry Forsyth)\nc1c43bc 2026-07-05 A deployment schema (Henry Forsyth)\n9dd7f48 2026-07-04 Updates (Forsyth Creations)\n\nFiles changed (committed in window):\n.ciabatta/ai/brain.json                       |  451 +++++++++\n .ciabatta/ai/suggestions/src/todo/mod.rs      |  285 ++++++\n .ciabatta/ai/suggestions/src/todo/mod.rs.orig |  183 ++++\n .ciabatta/ciabatta.toml                       |    7 +\n .github/workflows/release.yml                 |    6 +-\n AI.md                                         |   15 +\n Cargo.lock                                    |    2 +-\n Cargo.toml                                    |    2 +-\n README.md                                     |  210 ++++-\n docker-compose.yml                            |    4 +\n frontend/deploy-conditional-steps.html        |   23 +\n frontend/deploy-env-files.html                |   23 +\n frontend/deploy-env-select.html               |   23 +\n frontend/public/deploy-gui-conditional.png    |  Bin 0 -> 98174 bytes\n frontend/public/deploy-gui-recovery.png       |  Bin 0 -> 76503 bytes\n frontend/public/install.ps1                   |   69 ++\n frontend/public/install.sh                    |  128 +++\n frontend/src/docs/deploy-conditional-steps.js |  115 +++\n frontend/src/docs/deploy-env-files.js         |  107 +++\n frontend/src/docs/deploy-env-select.js        |   76 ++\n frontend/src/docs/shell.js                    |  239 +++++\n frontend/src/main.js                          |  120 ++-\n frontend/src/style.css                        |   78 ++\n frontend/vite.config.js                       |   13 +\n install/install.ps1                           |   23 +\n install/install.sh                            |   21 +\n src/ai/brain.rs                               |  657 +++++++++++++\n src/ai/burnin.rs                              |  333 +++++++\n src/ai/index.html                             |  832 +++++++++++++++++\n src/ai/jobs.rs                                |  260 ++++++\n src/ai/mod.rs                                 |  772 ++++++++++++++++\n src/ai/provider.rs                            |  455 +++++++++\n src/ai/server.rs                              |  352 +++++++\n src/ai/session.rs                             |  204 ++++\n src/ai/tools.rs                               |  908 ++++++++++++++++++\n src/ai/tui.rs                                 |  609 ++++++++++++\n src/analyze/mod.rs                            |    4 +-\n src/analyze/scan.rs                           |   21 +-\n src/analyze/server.rs                         |   10 +-\n src/cli.rs                                    |  176 ++++\n src/config.rs                                 |  245 ++++-\n src/configure.rs                              |   11 +-\n src/deploy/builder.html                       |  479 ++++++++++\n src/deploy/engine.rs                          |  629 +++++++++++++\n src/deploy/index.html                         |  409 ++++++++\n src/deploy/mod.rs                             | 1235 +++++++++++++++++++++++++\n src/deploy/server.rs                          |  585 ++++++++++++\n src/main.rs                                   |  475 +++++++++-\n src/registry/browse.rs                        |   15 +-\n src/registry/docker.rs                        |   21 +-\n src/registry/ecr.rs                           |   21 +-\n src/registry/mod.rs                           |  184 +++-\n src/registry/nexus.rs                         |    8 +-\n src/runner.rs                                 |  264 +++++-\n src/todo/index.html                           |  250 ++++-\n src/todo/mod.rs                               |   81 +-\n src/todo/server.rs                            |  128 ++-\n src/tui/app.rs                                |   39 +\n src/tui/browser.rs                            |   19 +-\n src/watch/index.html                          |  460 +++++++++\n src/watch/mod.rs                              |  585 ++++++++++++\n src/watch/server.rs                           |  354 +++++++\n 62 files changed, 14177 insertions(+), 136 deletions(-)\n\nUncommitted working-tree changes:\n.ciabatta/ai/brain.json |  54 +++---\n src/ai/mod.rs           | 255 ++++++++++++++++++++++++++++-\n src/ai/session.rs       |  61 +++++++\n src/ai/tools.rs         | 352 ++++++++++++++++++++++++++++++++++++++-\n src/ai/tui.rs           | 426 ++++++++++++++++++++++++++++++++++++++++++++++--\n src/cli.rs              |  37 +++++\n src/git.rs              | 114 +++++++++++++\n src/main.rs             |   8 +\n 8 files changed, 1247 insertions(+), 60 deletions(-)"
+    },
+    {
+      "Assistant": {
+        "text": "I'll investigate the key new areas to report accurately. Let me look at the biggest new modules.",
+        "tool_calls": [
+          {
+            "id": "toolu_011WMp3H6ZzaBwrqL5fGafJz",
+            "name": "read_file",
+            "args": {
+              "end_line": 60,
+              "path": "src/ai/mod.rs",
+              "start_line": 1
+            }
+          },
+          {
+            "id": "toolu_01Y77G8JnjHKYQKdFVGdB3HA",
+            "name": "read_file",
+            "args": {
+              "end_line": 50,
+              "path": "src/deploy/mod.rs",
+              "start_line": 1
+            }
+          },
+          {
+            "id": "toolu_01XcUypT7TbeAvS9Q4v3gXX6",
+            "name": "read_file",
+            "args": {
+              "end_line": 40,
+              "path": "src/watch/mod.rs",
+              "start_line": 1
+            }
+          },
+          {
+            "id": "toolu_01UPJJPgnBLNrdhQQhMuhwAr",
+            "name": "read_file",
+            "args": {
+              "end_line": 60,
+              "path": "src/cli.rs",
+              "start_line": 1
+            }
+          }
+        ],
+        "refused": false
+      }
+    },
+    {
+      "ToolResults": [
+        {
+          "call_id": "toolu_011WMp3H6ZzaBwrqL5fGafJz",
+          "content": "    1 //! `ciabatta ai` — an AI assistant that learns your codebase.\n    2 //!\n    3 //! The assistant is a small daemon plus two front ends:\n    4 //!\n    5 //!   * an HTTP server (the \"AI assistant\" daemon) that renders the live\n    6 //!     architecture mind map in the browser and exposes a JSON API\n    7 //!   * a Ratatui chat TUI (the default way to talk to it)\n    8 //!   * `ciabatta ai ask \"...\"` for one-shot questions from the shell\n    9 //!\n   10 //! As it works, the assistant tags files with architecture labels (pending\n   11 //! your confirmation), builds a file→architecture map whose path scores grow\n   12 //! with use, and keeps a 1–100 confidence score trained by your feedback —\n   13 //! low scores behave like a junior dev, high scores like a senior dev. All of\n   14 //! that state lives in `.ciabatta/ai/brain.json`.\n   15 \n   16 pub mod brain;\n   17 pub mod burnin;\n   18 pub mod compaction;\n   19 pub mod edit;\n   20 pub mod pdf;\n   21 pub mod jobs;\n   22 pub mod provider;\n   23 pub mod server;\n   24 pub mod session;\n   25 pub mod tools;\n   26 pub mod tui;\n   27 \n   28 use std::io::Write as _;\n   29 use std::path::Path;\n   30 use std::sync::Arc;\n   31 \n   32 use anyhow::{Context, Result};\n   33 use tokio::sync::mpsc;\n   34 \n   35 use crate::config::{AiConfig, CIABATTA_DIR, CONFIG_FILE, CiabattaConfig};\n   36 use brain::Brain;\n   37 use provider::{Provider, Turn};\n   38 use session::Conversation;\n   39 use tools::ToolBox;\n   40 \n   41 /// Progress events emitted while the agent loop runs, consumed by whichever\n   42 /// front end is active (TUI, CLI, or the HTTP API).\n   43 #[derive(Debug, Clone)]\n   44 pub enum AiEvent {\n   45     /// A tool is being executed (one line, already human-readable).\n   46     Status(String),\n   47     /// The assistant proposed a code change (diff included), for the front\n   48     /// end to display — and, in edit mode, to collect the user's verdict on.\n   49     Suggestion(tools::ChangeSuggestion),\n   50     /// The assistant's working plan changed (the full checklist), for the front\n   51     /// end to render live progress on a multi-step task.\n   52     Plan(Vec<tools::PlanItem>),\n   53     /// The final answer for the current question.\n   54     Answer(String),\n   55     /// The loop failed.\n   56     Error(String),\n   57 }\n   58 \n   59 /// How much freedom the assistant has to change code.\n   60 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]\n",
+          "is_error": false
+        },
+        {
+          "call_id": "toolu_01Y77G8JnjHKYQKdFVGdB3HA",
+          "content": "    1 //! The `deploy` paradigm: a recipe direction whose main stage runs a DAG of\n    2 //! dependent script \"steps\", with `on_error` branches to recovery nodes that\n    3 //! offer a choice of fix scripts.\n    4 //!\n    5 //! This module owns the deploy config types (referenced from [`crate::config`]),\n    6 //! the loader that resolves a recipe's step DAG from a separate flowchart file,\n    7 //! the validation of that DAG, and the async engine that executes it. The live\n    8 //! web view (`--gui`) and the visual builder (`--build`) live in\n    9 //! [`server`](crate::deploy::server).\n   10 \n   11 pub mod engine;\n   12 pub mod server;\n   13 \n   14 use anyhow::{Context, Result, bail};\n   15 use serde::{Deserialize, Serialize};\n   16 use std::collections::{HashMap, HashSet};\n   17 use std::path::Path;\n   18 \n   19 pub use engine::run_deploy;\n   20 \n   21 /// The `[recipies.<name>.deploy]` sub-table: the deploy direction of a recipe.\n   22 ///\n   23 /// The step DAG itself normally lives in a separate flowchart file (via the\n   24 /// `flowchart` path and optional `entry`); the `login`/`pre`/`post` phase hooks\n   25 /// stay in the main config, mirroring the push/pull stage overrides. Inline\n   26 /// `steps` are also accepted, so a small pipeline needs no second file.\n   27 #[derive(Debug, Deserialize, Serialize, Clone, Default)]\n   28 pub struct DeployRecipe {\n   29     /// Path (relative to the project root) to a flowchart TOML file holding the\n   30     /// step DAG. When set, its `entry` table supplies the steps.\n   31     pub flowchart: Option<String>,\n   32     /// Which top-level entry of the flowchart file to use. Defaults to the\n   33     /// recipe's own name.\n   34     pub entry: Option<String>,\n   35 \n   36     /// Override the `login` phase (default: no-op for deploys).\n   37     pub login: Option<String>,\n   38     /// Override the `pre-deploy` phase (default: no-op).\n   39     pub pre: Option<String>,\n   40     /// Override the `post-deploy` phase (default: no-op).\n   41     pub post: Option<String>,\n   42 \n   43     /// Path(s) (relative to the project root) to `.env` file(s) sourced before\n   44     /// the deploy runs. Each `KEY=VALUE` line is loaded into the deploy's\n   45     /// environment so its phases and steps can see it; values already resolved\n   46     /// (from the ambient environment, CI, git, or `-e` flags) take precedence,\n   47     /// and later files override earlier ones. Missing files are an error.\n   48     /// Accepts a single path (`env_file = \".env\"`) or a list\n   49     /// (`env_file = [\".env\", \".env.deploy\"]`). Merged with the flowchart file's\n   50     /// own `env_file` when a `flowchart` file is used.\n",
+          "is_error": false
+        },
+        {
+          "call_id": "toolu_01XcUypT7TbeAvS9Q4v3gXX6",
+          "content": "    1 //! `ciabatta watch <command>` — run a command and stream its logs into a live,\n    2 //! searchable web view.\n    3 //!\n    4 //! The command runs through the shell (so pipes / `&&` / redirects work). Its\n    5 //! stdout and stderr are captured line-by-line into a bounded ring buffer, and a\n    6 //! tiny web server (see [`server`]) serves a single-page UI that polls for new\n    7 //! lines, searches the whole buffer, lets you bookmark (\"point at\") lines, and\n    8 //! fires notifications when a line matches a trigger phrase.\n    9 //!\n   10 //! Bookmarks and triggers **persist to disk** under `~/.ciabatta/watch/`, keyed\n   11 //! by the command string, so they survive restarts. Log lines themselves are\n   12 //! never persisted — they're transient and potentially huge.\n   13 \n   14 pub mod server;\n   15 \n   16 use std::collections::{HashMap, VecDeque};\n   17 use std::path::PathBuf;\n   18 use std::process::Stdio;\n   19 use std::sync::Mutex;\n   20 \n   21 use anyhow::{Context, Result};\n   22 use regex::Regex;\n   23 use serde::{Deserialize, Serialize};\n   24 \n   25 /// Recent trigger hits kept for the sidebar feed.\n   26 const MAX_HITS: usize = 1000;\n   27 \n   28 /// Which stream a captured line came from.\n   29 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]\n   30 #[serde(rename_all = \"lowercase\")]\n   31 pub enum Stream {\n   32     Stdout,\n   33     Stderr,\n   34 }\n   35 \n   36 /// A single captured line of output.\n   37 #[derive(Debug, Clone, Serialize)]\n   38 pub struct LogLine {\n   39     pub seq: u64,\n   40     pub ts: String,\n",
+          "is_error": false
+        },
+        {
+          "call_id": "toolu_01UPJJPgnBLNrdhQQhMuhwAr",
+          "content": "    1 use clap::{Parser, Subcommand};\n    2 \n    3 #[derive(Parser, Debug)]\n    4 #[command(name = \"ciabatta\", about = \"Artifact publishing made easy 🍞\", version)]\n    5 pub struct Cli {\n    6     /// Enable debug logging to stderr. Can also be enabled by setting the\n    7     /// CIABATTA_DEBUG environment variable (to any non-empty value other than\n    8     /// \"0\"/\"false\"). For finer control, set CIABATTA_LOG (e.g. `ciabatta=trace`).\n    9     #[arg(long, global = true)]\n   10     pub debug: bool,\n   11 \n   12     #[command(subcommand)]\n   13     pub command: Commands,\n   14 }\n   15 \n   16 #[derive(Subcommand, Debug)]\n   17 pub enum Commands {\n   18     /// Push one or more recipes in parallel (all if none named).\n   19     Push {\n   20         /// Recipe names to execute. Pushes all if omitted.\n   21         #[arg(name = \"RECIPE\")]\n   22         recipes: Vec<String>,\n   23 \n   24         /// Push only the recipes grouped by the named menu (repeatable). Combines\n   25         /// with any RECIPE arguments. See the [menus] config section.\n   26         #[arg(long = \"cookbook\", visible_alias = \"menu\", value_name = \"MENU\")]\n   27         cookbooks: Vec<String>,\n   28 \n   29         /// Set an environment variable (KEY=VALUE). Overrides CI-derived vars.\n   30         #[arg(short = 'e', long = \"env\", value_name = \"KEY=VALUE\")]\n   31         env: Vec<String>,\n   32 \n   33         /// Show what would happen without actually running anything.\n   34         #[arg(long)]\n   35         dry_run: bool,\n   36 \n   37         /// Disable the TUI and print progress to stdout.\n   38         #[arg(long)]\n   39         no_tui: bool,\n   40 \n   41         /// Derive CIABATTA_BRANCH/_COMMIT/_TAG/_BUILD_NUMBER from local git\n   42         /// history instead of the configured CI system.\n   43         #[arg(long)]\n   44         local: bool,\n   45 \n   46         /// Path to ciabatta.toml (overrides .ciabatta/ciabatta.toml discovery).\n   47         #[arg(short = 'c', long)]\n   48         config: Option<std::path::PathBuf>,\n   49     },\n   50 \n   51     /// Pull (download) artifacts for one or more recipes.\n   52     Pull {\n   53         #[arg(name = \"RECIPE\")]\n   54         recipes: Vec<String>,\n   55 \n   56         /// Pull only the recipes grouped by the named menu (repeatable). Combines\n   57         /// with any RECIPE arguments. See the [menus] config section.\n   58         #[arg(long = \"cookbook\", visible_alias = \"menu\", value_name = \"MENU\")]\n   59         cookbooks: Vec<String>,\n   60 \n",
+          "is_error": false
+        }
+      ]
+    },
+    {
+      "Assistant": {
+        "text": "Let me look at the CLI commands list, the uncommitted git.rs work, and the install/README changes.",
+        "tool_calls": [
+          {
+            "id": "toolu_014qPBVW87eUzRGzfx1qFEJ9",
+            "name": "search_code",
+            "args": {
+              "path": "src/cli.rs",
+              "pattern": "^    (Push|Pull|Deploy|Watch|Ai|Analyze|Configure|Browse|Shell|Init)\\b|=> \\{|Commands::"
+            }
+          },
+          {
+            "id": "toolu_01LDxd8h65yFZjgSvZDbxr4r",
+            "name": "read_file",
+            "args": {
+              "end_line": 40,
+              "path": "src/git.rs",
+              "start_line": 1
+            }
+          },
+          {
+            "id": "toolu_01GzcSb49KZuEkumm3amiUuy",
+            "name": "read_file",
+            "args": {
+              "path": "install/install.sh"
+            }
+          }
+        ],
+        "refused": false
+      }
+    },
+    {
+      "ToolResults": [
+        {
+          "call_id": "toolu_014qPBVW87eUzRGzfx1qFEJ9",
+          "content": "19:    Push {\n52:    Pull {\n81:    Deploy {\n138:    Init {\n158:    Analyze {\n220:    Watch {\n254:    Ai {\n285:    Configure {\n",
+          "is_error": false
+        },
+        {
+          "call_id": "toolu_01LDxd8h65yFZjgSvZDbxr4r",
+          "content": "    1 use anyhow::{Context, Result, bail};\n    2 use std::collections::HashMap;\n    3 use std::path::Path;\n    4 use std::process::Command;\n    5 \n    6 /// Resolve the CIABATTA_* build variables from the local git repository rooted\n    7 /// at (or containing) `root`. Used by `--local` and `ciabatta source` so the\n    8 /// same recipes work on a developer machine without a CI system.\n    9 ///\n   10 ///   CIABATTA_BRANCH        current branch (omitted when HEAD is detached)\n   11 ///   CIABATTA_COMMIT        full HEAD commit SHA\n   12 ///   CIABATTA_TAG           tag pointing exactly at HEAD, if any\n   13 ///   CIABATTA_BUILD_NUMBER  commit count reachable from HEAD (a local stand-in)\n   14 pub fn local_git_vars(root: &Path) -> Result<HashMap<String, String>> {\n   15     if run_git(root, &[\"rev-parse\", \"--is-inside-work-tree\"]).is_err() {\n   16         bail!(\n   17             \"'{}' is not inside a git repository; local mode needs local git history.\",\n   18             root.display()\n   19         );\n   20     }\n   21 \n   22     let mut vars = HashMap::new();\n   23 \n   24     // Branch: skip the literal \"HEAD\" you get in a detached-HEAD checkout.\n   25     if let Ok(branch) = run_git(root, &[\"rev-parse\", \"--abbrev-ref\", \"HEAD\"])\n   26         && !branch.is_empty()\n   27         && branch != \"HEAD\"\n   28     {\n   29         vars.insert(\"CIABATTA_BRANCH\".to_string(), branch);\n   30     }\n   31 \n   32     if let Ok(commit) = run_git(root, &[\"rev-parse\", \"HEAD\"])\n   33         && !commit.is_empty()\n   34     {\n   35         vars.insert(\"CIABATTA_COMMIT\".to_string(), commit);\n   36     }\n   37 \n   38     // Only present when HEAD is exactly a tag (the command fails otherwise).\n   39     if let Ok(tag) = run_git(root, &[\"describe\", \"--tags\", \"--exact-match\"])\n   40         && !tag.is_empty()\n",
+          "is_error": false
+        },
+        {
+          "call_id": "toolu_01GzcSb49KZuEkumm3amiUuy",
+          "content": "    1 #!/usr/bin/env bash\n    2 # Installs ciabatta to a directory on your PATH.\n    3 # Usage: ./install.sh [INSTALL_DIR]   (default: /usr/local/bin)\n    4 set -euo pipefail\n    5 \n    6 SCRIPT_DIR=\"$(cd \"$(dirname \"$0\")\" && pwd)\"\n    7 INSTALL_DIR=\"${1:-/usr/local/bin}\"\n    8 \n    9 if [ ! -d \"$INSTALL_DIR\" ]; then\n   10     echo \"error: install directory does not exist: $INSTALL_DIR\" >&2\n   11     exit 1\n   12 fi\n   13 \n   14 if [ -w \"$INSTALL_DIR\" ]; then\n   15     install -m 755 \"$SCRIPT_DIR/ciabatta\" \"$INSTALL_DIR/ciabatta\"\n   16 else\n   17     echo \"Note: $INSTALL_DIR is not writable by the current user — trying sudo\"\n   18     sudo install -m 755 \"$SCRIPT_DIR/ciabatta\" \"$INSTALL_DIR/ciabatta\"\n   19 fi\n   20 \n   21 echo \"installed: $INSTALL_DIR/ciabatta\"\n",
+          "is_error": false
+        }
+      ]
+    },
+    {
+      "Assistant": {
+        "text": "Let me check the uncommitted git.rs additions (new function) and the Ai/Shell CLI commands and Deploy command.",
+        "tool_calls": [
+          {
+            "id": "toolu_013xssYGzaQNZUmf7Xenr2QK",
+            "name": "read_file",
+            "args": {
+              "end_line": 137,
+              "path": "src/cli.rs",
+              "start_line": 81
+            }
+          },
+          {
+            "id": "toolu_01EpG1fBhA6jAaF6LQtUmRic",
+            "name": "read_file",
+            "args": {
+              "end_line": 320,
+              "path": "src/cli.rs",
+              "start_line": 254
+            }
+          },
+          {
+            "id": "toolu_01YJyCMGbtEGN7QyCuT5HW2Z",
+            "name": "read_file",
+            "args": {
+              "end_line": 114,
+              "path": "src/git.rs",
+              "start_line": 45
+            }
+          }
+        ],
+        "refused": false
+      }
+    },
+    {
+      "ToolResults": [
+        {
+          "call_id": "toolu_013xssYGzaQNZUmf7Xenr2QK",
+          "content": "   81     Deploy {\n   82         /// Recipe names to deploy. Deploys all deploy-capable recipes if omitted.\n   83         #[arg(name = \"RECIPE\")]\n   84         recipes: Vec<String>,\n   85 \n   86         /// Deploy only the recipes grouped by the named menu (repeatable).\n   87         #[arg(long = \"cookbook\", visible_alias = \"menu\", value_name = \"MENU\")]\n   88         cookbooks: Vec<String>,\n   89 \n   90         /// Set an environment variable (KEY=VALUE). Overrides CI-derived vars.\n   91         #[arg(short = 'e', long = \"env\", value_name = \"KEY=VALUE\")]\n   92         env: Vec<String>,\n   93 \n   94         /// Show what would happen without actually running anything.\n   95         #[arg(long)]\n   96         dry_run: bool,\n   97 \n   98         /// Disable the TUI and print progress to stdout.\n   99         #[arg(long)]\n  100         no_tui: bool,\n  101 \n  102         /// Derive CIABATTA_BRANCH/_COMMIT/_TAG/_BUILD_NUMBER from local git\n  103         /// history instead of the configured CI system.\n  104         #[arg(long)]\n  105         local: bool,\n  106 \n  107         /// Path to ciabatta.toml (overrides .ciabatta/ciabatta.toml discovery).\n  108         #[arg(short = 'c', long)]\n  109         config: Option<std::path::PathBuf>,\n  110 \n  111         /// Show the deploy live in a web browser (flowchart + logs + fix-it\n  112         /// buttons for recovery nodes) instead of the terminal TUI.\n  113         #[arg(long)]\n  114         gui: bool,\n  115 \n  116         /// Open a visual builder in the browser to design a flowchart TOML file.\n  117         /// Runs nothing; you copy the generated TOML into your own file.\n  118         #[arg(long, conflicts_with = \"gui\")]\n  119         build: bool,\n  120 \n  121         /// Port for the --gui / --build web view.\n  122         #[arg(short = 'p', long, default_value_t = 8088)]\n  123         port: u16,\n  124     },\n  125 \n  126     /// Print CIABATTA_* variables (resolved from local git) as shell `export`\n  127     /// lines, so you can load them into your shell: eval \"$(ciabatta source)\"\n  128     Source {\n  129         /// Set/override a variable (KEY=VALUE) in the printed output.\n  130         #[arg(short = 'e', long = \"env\", value_name = \"KEY=VALUE\")]\n  131         env: Vec<String>,\n  132     },\n  133 \n  134     /// List all available recipes defined in the config.\n  135     List,\n  136 \n  137     /// Create a .ciabatta/ directory with a starter ciabatta.toml in the current directory.\n",
+          "is_error": false
+        },
+        {
+          "call_id": "toolu_01EpG1fBhA6jAaF6LQtUmRic",
+          "content": "  254     Ai {\n  255         #[command(subcommand)]\n  256         subcommand: Option<AiCommand>,\n  257 \n  258         /// Port for the live mind-map / daemon web view.\n  259         #[arg(short = 'p', long, default_value_t = 8095, global = true)]\n  260         port: u16,\n  261 \n  262         /// Don't start the mind-map web server alongside the TUI.\n  263         #[arg(long)]\n  264         no_graph: bool,\n  265 \n  266         /// Assistant mode: plan (research only, no edits), edit (changes wait\n  267         /// for your approval), or auto (changes apply immediately).\n  268         /// Shift-Tab cycles modes inside the TUI.\n  269         #[arg(long, default_value = \"edit\", global = true)]\n  270         mode: String,\n  271 \n  272         /// Resume the most recent saved conversation instead of starting a new\n  273         /// one. Conversations are stored under .ciabatta/ai/conversations/.\n  274         #[arg(short = 'c', long = \"continue\", global = true)]\n  275         continue_last: bool,\n  276     },\n  277 \n  278     /// Configuration helpers.\n  279     Config {\n  280         #[command(subcommand)]\n  281         subcommand: ConfigCommand,\n  282     },\n  283 \n  284     /// Interactively set up your project: add registries, or auto-suggest recipes.\n  285     Configure {\n  286         #[command(subcommand)]\n  287         subcommand: Option<ConfigureCommand>,\n  288     },\n  289 }\n  290 \n  291 #[derive(Subcommand, Debug)]\n  292 pub enum AiCommand {\n  293     /// Interactively configure the assistant (Claude or an OpenAI-compatible\n  294     /// endpoint) and write the [ai] section into .ciabatta/ciabatta.toml.\n  295     Setup,\n  296 \n  297     /// Ask a one-shot question and print the answer (no TUI).\n  298     Ask {\n  299         /// The question. Everything after `ask` is captured.\n  300         #[arg(name = \"PROMPT\", trailing_var_arg = true, required = true)]\n  301         prompt: Vec<String>,\n  302     },\n  303 \n  304     /// Run only the AI assistant daemon: the live mind map plus a JSON API\n  305     /// (POST /api/ask, /api/feedback, /api/confirm).\n  306     Serve,\n  307 \n  308     /// Resume a saved conversation. With no id, lists the saved conversations\n  309     /// (stored under .ciabatta/ai/conversations/) so you can pick one.\n  310     Resume {\n  311         /// The conversation id to resume (see `ciabatta ai resume` with no id).\n  312         id: Option<String>,\n  313     },\n  314 \n  315     /// Report what changed in the repo over the past N days (default 7) by\n  316     /// summarizing git history with the assistant.\n  317     Report {\n  318         /// How many days back to look (default 7).\n  319         days: Option<u64>,\n  320 \n",
+          "is_error": false
+        },
+        {
+          "call_id": "toolu_01YJyCMGbtEGN7QyCuT5HW2Z",
+          "content": "   45     if let Ok(count) = run_git(root, &[\"rev-list\", \"--count\", \"HEAD\"])\n   46         && !count.is_empty()\n   47     {\n   48         vars.insert(\"CIABATTA_BUILD_NUMBER\".to_string(), count);\n   49     }\n   50 \n   51     Ok(vars)\n   52 }\n   53 \n   54 /// List up to `limit` commit SHAs reachable from `refname` (a branch, tag, or\n   55 /// commit), most recent first. Used by the pull best-hash fallback to walk a\n   56 /// branch's history looking for the newest commit that has a published artifact.\n   57 pub fn branch_commits(root: &Path, refname: &str, limit: usize) -> Result<Vec<String>> {\n   58     let max = limit.to_string();\n   59     let out = run_git(root, &[\"rev-list\", \"--max-count\", &max, refname])?;\n   60     Ok(out\n   61         .lines()\n   62         .map(|l| l.trim().to_string())\n   63         .filter(|l| !l.is_empty())\n   64         .collect())\n   65 }\n   66 \n   67 /// The well-known SHA of git's empty tree, used as a diff base when the repo is\n   68 /// younger than the requested window (so we can still show the full change set).\n   69 const EMPTY_TREE: &str = \"4b825dc642cb6eb9a060e54bf8d69288fbee4904\";\n   70 \n   71 /// Summarize git activity over the past `days` days as plain text: the commit\n   72 /// list, the committed diffstat for the window, and any uncommitted changes.\n   73 /// Used by `ciabatta ai report` and the TUI `/report` command to give the\n   74 /// assistant something to explain.\n   75 pub fn changes_since(root: &Path, days: u64) -> Result<String> {\n   76     if run_git(root, &[\"rev-parse\", \"--is-inside-work-tree\"]).is_err() {\n   77         bail!(\n   78             \"'{}' is not inside a git repository — a report needs local git history.\",\n   79             root.display()\n   80         );\n   81     }\n   82     let since = format!(\"--since={days} days ago\");\n   83     let before = format!(\"--before={days} days ago\");\n   84 \n   85     // Commit list within the window (short hash, date, subject, author).\n   86     let log = run_git(\n   87         root,\n   88         &[\"log\", &since, \"--pretty=format:%h %ad %s (%an)\", \"--date=short\"],\n   89     )\n   90     .unwrap_or_default();\n   91 \n   92     // Committed changes: diff from the last commit *before* the window to HEAD.\n   93     // If nothing predates the window, diff from the empty tree (full history).\n   94     let base = run_git(root, &[\"rev-list\", \"-1\", &before, \"HEAD\"]).unwrap_or_default();\n   95     let base = if base.is_empty() { EMPTY_TREE.to_string() } else { base };\n   96     let stat = run_git(root, &[\"diff\", \"--stat\", &base, \"HEAD\"]).unwrap_or_default();\n   97 \n   98     // Uncommitted working-tree changes (staged + unstaged) relative to HEAD.\n   99     let uncommitted = run_git(root, &[\"diff\", \"--stat\", \"HEAD\"]).unwrap_or_default();\n  100 \n  101     if log.is_empty() && stat.is_empty() && uncommitted.is_empty() {\n  102         return Ok(format!(\"No git activity in the past {days} day(s).\"));\n  103     }\n  104 \n  105     let mut out = String::new();\n  106     out.push_str(&format!(\"Commits (past {days} day(s)):\\n\"));\n  107     out.push_str(if log.is_empty() { \"(none)\" } else { &log });\n  108     out.push_str(\"\\n\\nFiles changed (committed in window):\\n\");\n  109     out.push_str(if stat.is_empty() { \"(none)\" } else { &stat });\n  110     if !uncommitted.is_empty() {\n  111         out.push_str(\"\\n\\nUncommitted working-tree changes:\\n\");\n  112         out.push_str(&uncommitted);\n  113     }\n  114     Ok(clip(&out, 16_000))\n",
+          "is_error": false
+        }
+      ]
+    },
+    {
+      "Assistant": {
+        "text": "I have enough to write a solid report. Let me tag the key new areas.",
+        "tool_calls": [
+          {
+            "id": "toolu_018EBL8uLoePHEWyzCVBQ6GF",
+            "name": "tag_file",
+            "args": {
+              "path": "src/watch/mod.rs",
+              "reason": "New `ciabatta watch` command: streams command logs into a live web view",
+              "tags": [
+                "watch",
+                "cli"
+              ]
+            }
+          },
+          {
+            "id": "toolu_01ArDTXimT4rTZDZBt16s9r1",
+            "name": "tag_file",
+            "args": {
+              "path": "src/deploy/mod.rs",
+              "reason": "New deploy paradigm: DAG of steps with on_error recovery, flowchart loader/validator",
+              "tags": [
+                "deploy"
+              ]
+            }
+          },
+          {
+            "id": "toolu_01FKEGMNAjcZFNeTiXAKwd5F",
+            "name": "tag_file",
+            "args": {
+              "path": "src/ai/mod.rs",
+              "reason": "AI assistant daemon: mind map, TUI, brain, tools",
+              "tags": [
+                "ai"
+              ]
+            }
+          },
+          {
+            "id": "toolu_01UxD2Gt6sHdJTsMh28k5ovi",
+            "name": "tag_file",
+            "args": {
+              "path": "src/git.rs",
+              "reason": "Added changes_since() powering `ai report` and TUI /report",
+              "tags": [
+                "git",
+                "ai"
+              ]
+            }
+          }
+        ],
+        "refused": false
+      }
+    },
+    {
+      "ToolResults": [
+        {
+          "call_id": "toolu_018EBL8uLoePHEWyzCVBQ6GF",
+          "content": "tags proposed for src/watch/mod.rs: [watch, cli] — pending the user's confirmation",
+          "is_error": false
+        },
+        {
+          "call_id": "toolu_01ArDTXimT4rTZDZBt16s9r1",
+          "content": "tags proposed for src/deploy/mod.rs: [deploy] — pending the user's confirmation",
+          "is_error": false
+        },
+        {
+          "call_id": "toolu_01FKEGMNAjcZFNeTiXAKwd5F",
+          "content": "tags proposed for src/ai/mod.rs: [ai] — pending the user's confirmation",
+          "is_error": false
+        },
+        {
+          "call_id": "toolu_01UxD2Gt6sHdJTsMh28k5ovi",
+          "content": "tags proposed for src/git.rs: [git, ai] — pending the user's confirmation",
+          "is_error": false
+        }
+      ]
+    },
+    {
+      "Assistant": {
+        "text": "# Ciabatta — last 10 days\n\nThree big new subsystems landed, plus a distribution overhaul. ~14k lines added across 62 files (much of it new code, not churn).\n\n## Major features\n\n**1. AI assistant (`ciabatta ai`)** — the largest addition (~5k lines: `src/ai/{mod,brain,tools,provider,server,session,tui,burnin,jobs}.rs` + `index.html`). A learning agent with three front ends: a Ratatui chat TUI, a browser mind-map daemon, and one-shot `ai ask`. It tags files, builds a file→architecture map, and keeps a confidence score trained by feedback, all persisted in `.ciabatta/ai/brain.json` (`src/ai/mod.rs:1`). Has plan/edit/auto modes (`src/cli.rs:266`) and can execute in a sandbox (`tools.rs`).\n\n**2. Deploy paradigm (`ciabatta deploy`)** — ~2.4k lines (`src/deploy/{mod,engine,server}.rs` + `builder.html`/`index.html`). Runs a **DAG of dependent script steps** with `on_error` branches to recovery nodes offering fix scripts (`src/deploy/mod.rs:1`). Includes a live web GUI (`--gui`) and a visual flowchart builder (`--build`), plus `.env` file sourcing and env-var enforcement at deploy time (`src/cli.rs:81`).\n\n**3. Watch (`ciabatta watch <cmd>`)** — ~1.4k lines (`src/watch/{mod,server}.rs` + `index.html`). Runs a command through the shell, captures stdout/stderr into a bounded ring buffer, and serves a searchable live log UI with bookmarks and trigger-phrase notifications. Bookmarks/triggers persist under `~/.ciabatta/watch/`; log lines are never persisted (`src/watch/mod.rs:1`).\n\n## Distribution / docs\n- **One-line install**: new `frontend/public/install.sh` + `install.ps1` served from the docs site, plus reworked `install/install.{sh,ps1}` with sudo fallback (`install/install.sh:14`).\n- **Docs site rebuilt**: `README.md` (+210 lines), new `frontend/src/docs/*` pages (deploy conditional steps, env files, env select, shell), screenshots, and `AI.md`.\n- Release workflow tweak (`.github/workflows/release.yml`), version bumps.\n\n## Fixes / refactors\n- Registry layer touched broadly (`src/registry/{mod,docker,ecr,browse,nexus}.rs`) — mostly small; `mod.rs` +184 suggests more than cosmetic changes worth a skim.\n- `src/config.rs` (+245) and `src/main.rs` (+475) grew to wire in the new deploy/ai/watch commands.\n\n## Uncommitted work (in progress — not yet landed)\n~1.2k lines across the AI subsystem plus a **new `git.rs` reporting API**:\n- `changes_since()` and `branch_commits()` added to `src/git.rs:57` — powers a new `ciabatta ai report` command and TUI `/report` (this very report).\n- Active churn in `ai/{mod,tui,tools,session}.rs` and new CLI wiring (`src/cli.rs:315`).\n\n## Worth a closer look / risk\n- **AI `tools.rs` + sandbox execution** (908 lines): the assistant can run shell commands and propose file edits. Review the sandbox boundary and auto-mode (applies changes without approval) carefully.\n- **Deploy engine** (`engine.rs`, 629 lines) executes a script DAG with recovery branches — validate the DAG cycle/error handling, since a bad flowchart could loop or run fix scripts unexpectedly.\n- **Env enforcement at deploy** and `.env` sourcing precedence (`src/deploy/mod.rs:43`) — confirm secrets from `.env` files don't get logged in the GUI/watch views.\n- The AI report feature is **still uncommitted**; the git-activity input you gave me is generated by code that isn't merged yet.\n\nOne nit: `.ciabatta/ai/suggestions/src/todo/mod.rs.orig` was committed — looks like a stray merge/backup artifact that probably shouldn't be in the repo.",
+        "tool_calls": [],
+        "refused": false
+      }
+    },
+    {
+      "User": "Save this report to a PDF"
+    },
+    {
+      "Assistant": {
+        "text": "I'll check how the AI subsystem generates PDFs — there's a `src/ai/pdf.rs` module.",
+        "tool_calls": [
+          {
+            "id": "toolu_01CKW77qjWhD9HubAQFBbVje",
+            "name": "read_file",
+            "args": {
+              "path": "src/ai/pdf.rs"
+            }
+          }
+        ],
+        "refused": false
+      }
+    },
+    {
+      "ToolResults": [
+        {
+          "call_id": "toolu_01CKW77qjWhD9HubAQFBbVje",
+          "content": "    1 //! A tiny, dependency-free PDF writer for change reports.\n    2 //!\n    3 //! Generating a real PDF normally means a heavy crate or an external tool\n    4 //! (pandoc, headless Chrome). We only need to lay plain text onto pages, so we\n    5 //! emit a minimal but valid PDF by hand: monospaced Courier (one of PDF's\n    6 //! built-in base-14 fonts, so nothing to embed), hard-wrapped to a fixed column\n    7 //! count, paginated. The result opens in any PDF viewer.\n    8 \n    9 use std::path::Path;\n   10 \n   11 use anyhow::{Context, Result};\n   12 \n   13 /// Characters per line and lines per page, tuned for Courier 10pt on US Letter\n   14 /// (612×792 pt) with comfortable margins.\n   15 const COLS: usize = 80;\n   16 const ROWS_PER_PAGE: usize = 56;\n   17 \n   18 /// Write a change report to `path` as a PDF: a title, timestamp, the assistant's\n   19 /// summary, and (when non-empty) the raw git activity as an appendix.\n   20 pub fn write_report(path: &Path, days: u64, summary: &str, activity: &str) -> Result<()> {\n   21     let mut lines: Vec<String> = Vec::new();\n   22     push_wrapped(&mut lines, &format!(\"Repository change report — past {days} day(s)\"));\n   23     push_wrapped(\n   24         &mut lines,\n   25         &format!(\"Generated {}\", chrono::Local::now().format(\"%Y-%m-%d %H:%M\")),\n   26     );\n   27     lines.push(String::new());\n   28     lines.push(\"== Summary ==\".to_string());\n   29     for line in summary.lines() {\n   30         push_wrapped(&mut lines, line);\n   31     }\n   32     if !activity.trim().is_empty() {\n   33         lines.push(String::new());\n   34         lines.push(\"== Git activity ==\".to_string());\n   35         for line in activity.lines() {\n   36             push_wrapped(&mut lines, line);\n   37         }\n   38     }\n   39 \n   40     let bytes = build_pdf(&lines);\n   41     std::fs::write(path, bytes).with_context(|| format!(\"failed to write {}\", path.display()))\n   42 }\n   43 \n   44 /// Hard-wrap one logical line to `COLS` columns, pushing each piece. Non-ASCII\n   45 /// and control characters are handled at render time; here we only split.\n   46 fn push_wrapped(out: &mut Vec<String>, line: &str) {\n   47     let line = line.replace('\\t', \"    \");\n   48     if line.is_empty() {\n   49         out.push(String::new());\n   50         return;\n   51     }\n   52     let chars: Vec<char> = line.chars().collect();\n   53     for chunk in chars.chunks(COLS) {\n   54         out.push(chunk.iter().collect());\n   55     }\n   56 }\n   57 \n   58 /// Assemble the PDF byte stream from already-wrapped text lines.\n   59 fn build_pdf(text_lines: &[String]) -> Vec<u8> {\n   60     let pages: Vec<&[String]> = if text_lines.is_empty() {\n   61         vec![&[]]\n   62     } else {\n   63         text_lines.chunks(ROWS_PER_PAGE).collect()\n   64     };\n   65     let page_count = pages.len();\n   66 \n   67     // Object 1: catalog, 2: pages, 3: font, then a (page, content) pair each.\n   68     let mut objects: Vec<String> = Vec::new();\n   69     objects.push(\"<< /Type /Catalog /Pages 2 0 R >>\".to_string());\n   70     let kids: String = (0..page_count)\n   71         .map(|p| format!(\"{} 0 R\", 4 + 2 * p))\n   72         .collect::<Vec<_>>()\n   73         .join(\" \");\n   74     objects.push(format!(\"<< /Type /Pages /Kids [{kids}] /Count {page_count} >>\"));\n   75     objects.push(\"<< /Type /Font /Subtype /Type1 /BaseFont /Courier >>\".to_string());\n   76 \n   77     for page in &pages {\n   78         let content_obj = 5 + 2 * objects_pages_so_far(&objects);\n   79         objects.push(format!(\n   80             \"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] \\\n   81              /Resources << /Font << /F1 3 0 R >> >> /Contents {content_obj} 0 R >>\"\n   82         ));\n   83 \n   84         // Start near the top; T* steps down by the leading (TL) each line.\n   85         let mut stream = String::from(\"BT\\n/F1 10 Tf\\n12 TL\\n50 760 Td\\n\");\n   86         for line in page.iter() {\n   87             stream.push('(');\n   88             stream.push_str(&escape(line));\n   89             stream.push_str(\") Tj\\nT*\\n\");\n   90         }\n   91         stream.push_str(\"ET\");\n   92         objects.push(format!(\"<< /Length {} >>\\nstream\\n{stream}\\nendstream\", stream.len()));\n   93     }\n   94 \n   95     // Serialize with a cross-reference table.\n   96     let mut out: Vec<u8> = Vec::new();\n   97     out.extend_from_slice(b\"%PDF-1.4\\n\");\n   98     let mut offsets = vec![0usize; objects.len() + 1];\n   99     for (i, body) in objects.iter().enumerate() {\n  100         let num = i + 1;\n  101         offsets[num] = out.len();\n  102         out.extend_from_slice(format!(\"{num} 0 obj\\n\").as_bytes());\n  103         out.extend_from_slice(body.as_bytes());\n  104         out.extend_from_slice(b\"\\nendobj\\n\");\n  105     }\n  106     let xref_offset = out.len();\n  107     let size = objects.len() + 1;\n  108     out.extend_from_slice(format!(\"xref\\n0 {size}\\n\").as_bytes());\n  109     out.extend_from_slice(b\"0000000000 65535 f \\n\");\n  110     for num in 1..size {\n  111         out.extend_from_slice(format!(\"{:010} 00000 n \\n\", offsets[num]).as_bytes());\n  112     }\n  113     out.extend_from_slice(\n  114         format!(\"trailer\\n<< /Size {size} /Root 1 0 R >>\\nstartxref\\n{xref_offset}\\n%%EOF\\n\")\n  115             .as_bytes(),\n  116     );\n  117     out\n  118 }\n  119 \n  120 /// How many page objects have been pushed so far (each page adds two objects,\n  121 /// after the first three fixed ones), so we can compute the next content ref.\n  122 fn objects_pages_so_far(objects: &[String]) -> usize {\n  123     // objects: [catalog, pages, font, page0, content0, page1, content1, ...]\n  124     objects.len().saturating_sub(3) / 2\n  125 }\n  126 \n  127 /// Escape a line for a PDF literal string and drop anything that isn't printable\n  128 /// ASCII (Courier's default encoding), so the stream stays valid.\n  129 fn escape(s: &str) -> String {\n  130     let mut o = String::with_capacity(s.len());\n  131     for c in s.chars() {\n  132         match c {\n  133             '\\\\' => o.push_str(\"\\\\\\\\\"),\n  134             '(' => o.push_str(\"\\\\(\"),\n  135             ')' => o.push_str(\"\\\\)\"),\n  136             c if (0x20..=0x7e).contains(&(c as u32)) => o.push(c),\n  137             // Map the common non-ASCII punctuation that shows up in prose to a\n  138             // sensible ASCII equivalent, so it reads right in Courier.\n  139             '—' | '–' => o.push('-'),\n  140             '“' | '”' | '„' => o.push('\"'),\n  141             '‘' | '’' | '‚' => o.push('\\''),\n  142             '…' => o.push_str(\"...\"),\n  143             '•' => o.push('*'),\n  144             '→' => o.push_str(\"->\"),\n  145             _ => o.push('?'),\n  146         }\n  147     }\n  148     o\n  149 }\n  150 \n  151 #[cfg(test)]\n  152 mod tests {\n  153     use super::*;\n  154 \n  155     #[test]\n  156     fn writes_a_valid_looking_pdf() {\n  157         let dir = std::env::temp_dir().join(format!(\"ciabatta-pdf-{}\", std::process::id()));\n  158         std::fs::create_dir_all(&dir).unwrap();\n  159         let path = dir.join(\"report.pdf\");\n  160 \n  161         // A long summary forces multiple pages.\n  162         let summary = (0..200).map(|i| format!(\"change number {i}\")).collect::<Vec<_>>().join(\"\\n\");\n  163         write_report(&path, 7, &summary, \"abc123 fix: thing\\n src/x.rs | 2 +-\").unwrap();\n  164 \n  165         let bytes = std::fs::read(&path).unwrap();\n  166         assert!(bytes.starts_with(b\"%PDF-1.4\"), \"missing PDF header\");\n  167         assert!(bytes.ends_with(b\"%%EOF\\n\"), \"missing EOF marker\");\n  168         // Header, xref, trailer present and multi-page.\n  169         let text = String::from_utf8_lossy(&bytes);\n  170         assert!(text.contains(\"/Type /Catalog\"));\n  171         assert!(text.contains(\"startxref\"));\n  172         assert!(text.contains(\"/Count \"));\n  173         // Parentheses in content are escaped, not raw-broken.\n  174         write_report(&path, 1, \"value is (parenthesized) here\", \"\").unwrap();\n  175         let text2 = String::from_utf8_lossy(&std::fs::read(&path).unwrap()).to_string();\n  176         assert!(text2.contains(\"\\\\(parenthesized\\\\)\"));\n  177 \n  178         // Common non-ASCII punctuation is mapped to ASCII, not dropped to '?'.\n  179         assert_eq!(escape(\"a — b … c\"), \"a - b ... c\");\n  180         assert_eq!(escape(\"“q” ‘r’\"), \"\\\"q\\\" 'r'\");\n  181 \n  182         let _ = std::fs::remove_dir_all(&dir);\n  183     }\n  184 }\n",
+          "is_error": false
+        }
+      ]
+    },
+    {
+      "Assistant": {
+        "text": "The repo has a self-contained PDF writer. I'll generate the PDF using it via a small throwaway Rust program in the sandbox. Let me check the configured images and how the module is wired.\n\nThe `pdf.rs` module depends only on `anyhow` and `chrono`. Rather than compile the whole crate, the simplest robust path is a tiny standalone Rust program that reproduces the same minimal-PDF logic (no external crates needed). Let me check available sandbox images.\n\nThe tool description says no images are configured. So I can't run a sandbox. I'll instead write the PDF directly as a file — the format is plain enough that I can emit a valid PDF by hand as a new file.\n\nLet me build the PDF content. I'll produce a valid PDF matching the same approach (Courier, hand-wrapped, paginated). The report fits comfortably on 2 pages. Let me construct it.",
+        "tool_calls": [
+          {
+            "id": "toolu_01NZvyvERRB6v4TnvPeENgR3",
+            "name": "update_plan",
+            "args": {
+              "steps": [
+                {
+                  "status": "completed",
+                  "step": "Confirm PDF generation approach (no sandbox image available)"
+                },
+                {
+                  "status": "in_progress",
+                  "step": "Author report text wrapped to 80 cols, ASCII-safe"
+                },
+                {
+                  "status": "pending",
+                  "step": "Emit a valid hand-built PDF file"
+                }
+              ]
+            }
+          }
+        ],
+        "refused": false
+      }
+    },
+    {
+      "ToolResults": [
+        {
+          "call_id": "toolu_01NZvyvERRB6v4TnvPeENgR3",
+          "content": "[x] Confirm PDF generation approach (no sandbox image available)\n[~] Author report text wrapped to 80 cols, ASCII-safe\n[ ] Emit a valid hand-built PDF file",
+          "is_error": false
+        }
+      ]
+    },
+    {
+      "Assistant": {
+        "text": "No sandbox image is configured, so I can't compile/run the crate's `pdf.rs`. Instead I'll hand-emit a valid PDF (same Courier/paginated approach the module uses). Building the raw PDF byte-for-byte by hand is error-prone, so I'll write a self-contained Python generator into `/tmp` and... but I also can't run it without a sandbox.\n\nLet me reconsider: the cleanest thing I *can* deliver is the correctly-structured PDF file itself. I'll write it directly. To keep the offsets/xref correct, I'll produce a compact single-content-stream PDF (one page object per page). Let me write it carefully as a new file at the repo root.",
+        "tool_calls": [
+          {
+            "id": "toolu_0196VogtsjGNdrCCGttKLBRt",
+            "name": "propose_change",
+            "args": {
+              "new_content": "%PDF-1.4\n1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n2 0 obj\n<< /Type /Pages /Kids [4 0 R 6 0 R] /Count 2 >>\nendobj\n3 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Courier >>\nendobj\n4 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 5 0 R >>\nendobj\n5 0 obj\n<< /Length 2560 >>\nstream\nBT\n/F1 10 Tf\n12 TL\n50 760 Td\n(Repository change report - past 10 day(s)) Tj\nT*\n(Generated by ciabatta ai) Tj\nT*\n() Tj\nT*\n(== Summary ==) Tj\nT*\n() Tj\nT*\n(Three big new subsystems landed, plus a distribution overhaul.) Tj\nT*\n(~14k lines added across 62 files, mostly new code, not churn.) Tj\nT*\n() Tj\nT*\n(MAJOR FEATURES) Tj\nT*\n() Tj\nT*\n(1. AI assistant (ciabatta ai) - largest addition, ~5k lines) Tj\nT*\n(   (src/ai/{mod,brain,tools,provider,server,session,tui}.rs).) Tj\nT*\n(   A learning agent with three front ends: a Ratatui chat TUI, a) Tj\nT*\n(   browser mind-map daemon, and one-shot 'ai ask'. Tags files,) Tj\nT*\n(   builds a file->architecture map, keeps a feedback-trained) Tj\nT*\n(   confidence score. State in .ciabatta/ai/brain.json.) Tj\nT*\n(   Has plan/edit/auto modes and can run in a sandbox.) Tj\nT*\n() Tj\nT*\n(2. Deploy paradigm (ciabatta deploy) - ~2.4k lines) Tj\nT*\n(   (src/deploy/{mod,engine,server}.rs + builder/index html).) Tj\nT*\n(   Runs a DAG of dependent script steps with on_error branches) Tj\nT*\n(   to recovery nodes offering fix scripts. Live web GUI (--gui)) Tj\nT*\n(   and a visual flowchart builder (--build). .env sourcing and) Tj\nT*\n(   env-var enforcement at deploy time.) Tj\nT*\n() Tj\nT*\n(3. Watch (ciabatta watch <cmd>) - ~1.4k lines) Tj\nT*\n(   (src/watch/{mod,server}.rs + index.html). Runs a command via) Tj\nT*\n(   the shell, captures stdout/stderr into a bounded ring buffer,) Tj\nT*\n(   serves a searchable live log UI with bookmarks and trigger) Tj\nT*\n(   notifications. Bookmarks/triggers persist; log lines do not.) Tj\nT*\n() Tj\nT*\n(DISTRIBUTION / DOCS) Tj\nT*\n() Tj\nT*\n(* One-line install: new frontend/public/install.{sh,ps1} served) Tj\nT*\n(  from the docs site; reworked install/ scripts with sudo fallback.) Tj\nT*\n(* Docs site rebuilt: README (+210), new frontend/src/docs/* pages,) Tj\nT*\n(  screenshots, AI.md. Release workflow tweak; version bumps.) Tj\nT*\nET\nendstream\nendobj\n6 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 7 0 R >>\nendobj\n7 0 obj\n<< /Length 2280 >>\nstream\nBT\n/F1 10 Tf\n12 TL\n50 760 Td\n(FIXES / REFACTORS) Tj\nT*\n() Tj\nT*\n(* Registry layer touched broadly (src/registry/*); mostly small,) Tj\nT*\n(  but mod.rs (+184) merits a skim.) Tj\nT*\n(* config.rs (+245) and main.rs (+475) grew to wire in the new) Tj\nT*\n(  deploy/ai/watch commands.) Tj\nT*\n() Tj\nT*\n(UNCOMMITTED WORK (not yet landed)) Tj\nT*\n() Tj\nT*\n(~1.2k lines across the AI subsystem plus a new git reporting API:) Tj\nT*\n(* changes_since() and branch_commits() added to src/git.rs -) Tj\nT*\n(  powers 'ciabatta ai report' and the TUI /report command.) Tj\nT*\n(* Active churn in ai/{mod,tui,tools,session}.rs and CLI wiring.) Tj\nT*\n() Tj\nT*\n(WORTH A CLOSER LOOK / RISK) Tj\nT*\n() Tj\nT*\n(* AI tools.rs + sandbox execution (908 lines): the assistant can) Tj\nT*\n(  run shell commands and edit files. Review the sandbox boundary) Tj\nT*\n(  and auto-mode (applies changes without approval).) Tj\nT*\n(* Deploy engine (629 lines) executes a script DAG with recovery) Tj\nT*\n(  branches - validate cycle/error handling; a bad flowchart could) Tj\nT*\n(  loop or run fix scripts unexpectedly.) Tj\nT*\n(* .env sourcing precedence - confirm secrets are not logged in the) Tj\nT*\n(  GUI/watch views.) Tj\nT*\n(* The AI report feature itself is still uncommitted.) Tj\nT*\n() Tj\nT*\n(NIT) Tj\nT*\n() Tj\nT*\n(.ciabatta/ai/suggestions/src/todo/mod.rs.orig was committed - a) Tj\nT*\n(stray merge/backup artifact that likely should not be in the repo.) Tj\nT*\nET\nendstream\nendobj\nxref\n0 8\n0000000000 65535 f \n0000000009 00000 n \n0000000058 00000 n \n0000000123 00000 n \n0000000198 00000 n \n0000000337 00000 n \n0000002948 00000 n \n0000003088 00000 n \ntrailer\n<< /Size 8 /Root 1 0 R >>\nstartxref\n5419\n%%EOF\n",
+              "path": "reports/change-report-10d.pdf",
+              "reason": "Save the change report as a PDF (Courier, paginated) matching src/ai/pdf.rs output style"
+            }
+          }
+        ],
+        "refused": false
+      }
+    },
+    {
+      "ToolResults": [
+        {
+          "call_id": "toolu_0196VogtsjGNdrCCGttKLBRt",
+          "content": "change proposed for reports/change-report-10d.pdf — the user sees it as a diff and must accept it before it lands. Do NOT assume it is applied; if they reject it, they will tell you what to do differently.",
+          "is_error": false
+        }
+      ]
+    },
+    {
+      "Assistant": {
+        "text": "A caveat: I hand-authored that PDF, and the `xref` byte offsets in it are estimates, not computed — a strict PDF viewer may reject it. The `/Length` values and offsets need to be exact for a guaranteed-valid file, and I can't run the crate's `pdf.rs` because no sandbox image is configured.\n\nTwo reliable ways to get a byte-perfect PDF:\n\n**Option A — use the built-in feature (recommended).** The crate already ships a correct generator (`src/ai/pdf.rs`) wired to `ciabatta ai report`. Run:\n```\nciabatta ai report 10 --pdf reports/change-report-10d.pdf\n```\nLet me confirm the exact flag:",
+        "tool_calls": [
+          {
+            "id": "toolu_01MoL2pQSJH8uYmEn26bvgZK",
+            "name": "read_file",
+            "args": {
+              "end_line": 340,
+              "path": "src/cli.rs",
+              "start_line": 315
+            }
+          }
+        ],
+        "refused": false
+      }
+    },
+    {
+      "ToolResults": [
+        {
+          "call_id": "toolu_01MoL2pQSJH8uYmEn26bvgZK",
+          "content": "  315     /// Report what changed in the repo over the past N days (default 7) by\n  316     /// summarizing git history with the assistant.\n  317     Report {\n  318         /// How many days back to look (default 7).\n  319         days: Option<u64>,\n  320 \n  321         /// Also save the report as a PDF. Give a path, or pass the flag alone\n  322         /// to write ciabatta-report-<date>.pdf in the current directory.\n  323         #[arg(long, value_name = \"FILE\", num_args = 0..=1, default_missing_value = \"\")]\n  324         pdf: Option<String>,\n  325     },\n  326 \n  327     /// Add your own architecture tag to the mind map, then let the assistant do\n  328     /// a quick pass to connect the files that belong to it.\n  329     Tag {\n  330         /// The tag / architecture name (e.g. auth, frontend, deploy).\n  331         name: String,\n  332 \n  333         /// An optional one-line description of what this architecture is.\n  334         #[arg(name = \"DESCRIPTION\", trailing_var_arg = true)]\n  335         description: Vec<String>,\n  336     },\n  337 \n  338     /// Delete a saved conversation by id (see `ciabatta ai resume` for the list).\n  339     Delete {\n  340         /// The conversation id to delete.\n",
+          "is_error": false
+        }
+      ]
+    },
+    {
+      "Assistant": {
+        "text": "Confirmed. The built-in flag is `--pdf` (`src/cli.rs:321`).\n\n## Recommendation\n\nThe report you asked for is already producible byte-perfectly by the tool itself:\n\n```\nciabatta ai report 10 --pdf reports/change-report-10d.pdf\n```\n\nThat routes through `src/ai/pdf.rs`, which computes exact `/Length` and `xref` offsets — my hand-written file at `reports/change-report-10d.pdf` has *estimated* offsets and may not open in strict viewers.\n\n**How do you want to proceed?**\n- **(A)** Run `ciabatta ai report 10 --pdf ...` yourself (guaranteed valid, and it uses the live git data). — recommended.\n- **(B)** Keep my proposed hand-built PDF as-is (accept the pending change; it *may* need offset fixes).\n- **(C)** If you configure a base image in `ciabatta.toml` `[ai] images = [...]`, I can compile a tiny program using `src/ai/pdf.rs` in the sandbox and produce a verified PDF from the report text above.\n\nI left the proposed file pending rather than claiming it's done. Let me know which route you prefer.",
+        "tool_calls": [],
+        "refused": false
+      }
+    }
+  ]
+}

@@ -78,6 +78,11 @@ pub struct BrainState {
     pub pending: Vec<PendingTag>,
     #[serde(default)]
     pub feedback: Vec<FeedbackEntry>,
+    /// A snapshot of the project's dependency graph (from `ciabatta analyze`),
+    /// captured during burn-in or via `/analyze`, so the assistant can traverse
+    /// third-party and cross-package dependencies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dependencies: Option<crate::analyze::AnalysisGraph>,
 }
 
 impl Default for BrainState {
@@ -89,6 +94,7 @@ impl Default for BrainState {
             tags: BTreeMap::new(),
             pending: Vec::new(),
             feedback: Vec::new(),
+            dependencies: None,
         }
     }
 }
@@ -129,26 +135,11 @@ impl Brain {
         self.seq.load(Ordering::Relaxed)
     }
 
-    /// The current confidence score.
+    /// The current confidence score. Derived from the mind map and user
+    /// feedback; it is surfaced in the UI only and is deliberately NOT fed
+    /// back into the system prompt (doing so worsened the model's output).
     pub fn confidence(&self) -> f64 {
         self.inner.lock().unwrap().confidence
-    }
-
-    /// The seniority persona implied by the confidence score, used to shape
-    /// the system prompt.
-    pub fn persona(&self) -> &'static str {
-        let c = self.confidence();
-        if c < 35.0 {
-            "junior developer: you are still learning this codebase — verify with \
-             searches before asserting, prefer suggesting over acting, and say so \
-             when you are unsure"
-        } else if c < 70.0 {
-            "mid-level developer: you know parts of this codebase well — use the \
-             architecture map first and fall back to searching when it is thin"
-        } else {
-            "senior developer: you know this codebase well — lead with the \
-             architecture map, be decisive, and keep exploration tight"
-        }
     }
 
     /// Run a mutation against the state, then persist and bump the sequence.
@@ -251,6 +242,17 @@ impl Brain {
                 arch.description = description.trim().to_string();
             }
         })
+    }
+
+    /// Store (or replace) the project dependency graph in the knowledge graph.
+    /// Populated by `ciabatta analyze` during burn-in or the `/analyze` command.
+    pub fn set_dependencies(&self, graph: crate::analyze::AnalysisGraph) -> Result<()> {
+        self.mutate(|s| s.dependencies = Some(graph))
+    }
+
+    /// The stored dependency graph, if one has been captured.
+    pub fn dependencies(&self) -> Option<crate::analyze::AnalysisGraph> {
+        self.inner.lock().unwrap().dependencies.clone()
     }
 
     /// Install tags directly into the map, bypassing the pending queue and
@@ -429,24 +431,26 @@ impl Brain {
     /// A compact plain-text summary of the mind map for the system prompt.
     pub fn summary_for_prompt(&self) -> String {
         let state = self.inner.lock().unwrap();
-        if state.architectures.is_empty() {
-            return "The architecture map is empty — nothing has been tagged yet.".to_string();
-        }
         let mut out = String::new();
-        for (name, arch) in &state.architectures {
-            let mut files: Vec<(&String, &f64)> = arch.files.iter().collect();
-            files.sort_by(|a, b| b.1.partial_cmp(a.1).unwrap_or(std::cmp::Ordering::Equal));
-            let top: Vec<String> = files
-                .iter()
-                .take(6)
-                .map(|(f, s)| format!("{f} ({s:.1})"))
-                .collect();
-            out.push_str(&format!(
-                "- {name} (knowledge {:.1}): {}\n",
-                arch.knowledge,
-                top.join(", ")
-            ));
+        if state.architectures.is_empty() {
+            out.push_str("The architecture map is empty — nothing has been tagged yet.\n");
+        } else {
+            for (name, arch) in &state.architectures {
+                let mut files: Vec<(&String, &f64)> = arch.files.iter().collect();
+                files.sort_by(|a, b| b.1.partial_cmp(a.1).unwrap_or(std::cmp::Ordering::Equal));
+                let top: Vec<String> = files
+                    .iter()
+                    .take(6)
+                    .map(|(f, s)| format!("{f} ({s:.1})"))
+                    .collect();
+                out.push_str(&format!(
+                    "- {name} (knowledge {:.1}): {}\n",
+                    arch.knowledge,
+                    top.join(", ")
+                ));
+            }
         }
+        out.push_str(&dependency_overview(state.dependencies.as_ref()));
         out
     }
 
@@ -520,15 +524,59 @@ impl Brain {
             }
         }
 
-        json!({
+        let mut graph = json!({
             "seq": self.seq(),
             "confidence": state.confidence,
             "interactions": state.interactions,
             "nodes": nodes,
             "edges": edges,
             "pending": state.pending,
-        })
+        });
+        // Expose the captured dependency graph under its own key so the browser
+        // view / API can traverse dependencies without disturbing the mind-map
+        // nodes and edges above.
+        if let Some(dep) = &state.dependencies {
+            graph["dependencies"] = serde_json::to_value(dep).unwrap_or(Value::Null);
+        }
+        graph
     }
+}
+
+/// A compact dependency-graph summary for the system prompt: package counts
+/// and each internal package's third-party dependency count. Empty when no
+/// dependency graph has been captured yet.
+fn dependency_overview(graph: Option<&crate::analyze::AnalysisGraph>) -> String {
+    use crate::analyze::Category;
+    let Some(g) = graph else {
+        return String::new();
+    };
+    let internals: Vec<&crate::analyze::Node> = g
+        .nodes
+        .iter()
+        .filter(|n| n.category == Category::Internal && n.id != "int:root")
+        .collect();
+    let ext = g.nodes.iter().filter(|n| n.category == Category::External).count();
+    let mut out = format!(
+        "\nDependency graph (use the `deps` tool to traverse it): {} internal package(s), \
+         {ext} external dependency(ies).\n",
+        internals.len()
+    );
+    for pkg in internals.iter().take(12) {
+        let dep_count = g
+            .inputs(&pkg.id)
+            .into_iter()
+            .filter(|n| n.category == Category::External)
+            .count();
+        out.push_str(&format!(
+            "  - {} ({dep_count} dep{})\n",
+            pkg.label,
+            if dep_count == 1 { "" } else { "s" }
+        ));
+    }
+    if internals.len() > 12 {
+        out.push_str(&format!("  … and {} more package(s)\n", internals.len() - 12));
+    }
+    out
 }
 
 /// Nudge confidence by a small delta, keeping it in 1..=100.

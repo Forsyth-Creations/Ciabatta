@@ -118,6 +118,63 @@ pub struct AnalysisGraph {
     pub files: Vec<FileInfo>,
 }
 
+impl AnalysisGraph {
+    /// Look up a node by its exact id.
+    pub fn node(&self, id: &str) -> Option<&Node> {
+        self.nodes.iter().find(|n| n.id == id)
+    }
+
+    /// Find a node by exact id or (case-insensitive) label — for callers that
+    /// name a package or dependency without knowing its internal id.
+    pub fn find_node(&self, needle: &str) -> Option<&Node> {
+        let needle = needle.trim();
+        self.nodes
+            .iter()
+            .find(|n| n.id == needle)
+            .or_else(|| self.nodes.iter().find(|n| n.label.eq_ignore_ascii_case(needle)))
+    }
+
+    /// The internal package whose manifest directory most closely contains
+    /// `file` (longest matching directory wins), if any.
+    pub fn owner_for_file(&self, file: &str) -> Option<&Node> {
+        let file = file.trim_start_matches("./");
+        self.nodes
+            .iter()
+            .filter(|n| n.category == Category::Internal)
+            .filter_map(|n| {
+                let dir = parent_dir(n.source.as_deref()?);
+                if dir.is_empty() || file == dir || file.starts_with(&format!("{dir}/")) {
+                    Some((dir.len(), n))
+                } else {
+                    None
+                }
+            })
+            .max_by_key(|(len, _)| *len)
+            .map(|(_, n)| n)
+    }
+
+    /// Nodes that flow *into* `id` (edges whose target is `id`). For an internal
+    /// package these are its dependencies (edges go external → internal → publish).
+    pub fn inputs(&self, id: &str) -> Vec<&Node> {
+        self.edges
+            .iter()
+            .filter(|e| e.to == id)
+            .filter_map(|e| self.node(&e.from))
+            .collect()
+    }
+
+    /// Nodes that `id` flows *out* to (edges whose source is `id`). For a
+    /// dependency these are the packages that consume it; for a package, its
+    /// publish points.
+    pub fn outputs(&self, id: &str) -> Vec<&Node> {
+        self.edges
+            .iter()
+            .filter(|e| e.from == id)
+            .filter_map(|e| self.node(&e.to))
+            .collect()
+    }
+}
+
 /// The nodes, edges, and file metadata contributed by scanning a single file.
 /// This is the unit that gets cached (keyed by the file's content hash).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -418,11 +475,31 @@ pub struct RequirementInputs<'a> {
     pub trace_file: Option<&'a Path>,
 }
 
-/// Build the dependency graph for `root`, using `cfg` to discover publish points.
+/// Build the dependency graph for `root`, using `cfg` to discover publish
+/// points. Prints a one-line cache summary to stderr.
 pub fn analyze(
     root: &Path,
     cfg: &CiabattaConfig,
     inputs: &RequirementInputs<'_>,
+) -> Result<AnalysisGraph> {
+    analyze_inner(root, cfg, inputs, true)
+}
+
+/// Like [`analyze`] but silent — used by the AI tools/burn-in, which run inside
+/// the alternate-screen TUI where stray stderr writes would corrupt the display.
+pub fn analyze_quiet(
+    root: &Path,
+    cfg: &CiabattaConfig,
+    inputs: &RequirementInputs<'_>,
+) -> Result<AnalysisGraph> {
+    analyze_inner(root, cfg, inputs, false)
+}
+
+fn analyze_inner(
+    root: &Path,
+    cfg: &CiabattaConfig,
+    inputs: &RequirementInputs<'_>,
+    verbose: bool,
 ) -> Result<AnalysisGraph> {
     let mut builder = GraphBuilder::default();
 
@@ -457,13 +534,15 @@ pub fn analyze(
     if let Err(e) = file_cache.save() {
         eprintln!("warning: failed to write analyze cache: {e}");
     }
-    eprintln!(
-        "cache: {} reused, {} parsed (.ciabatta/{}/{})",
-        file_cache.hits(),
-        file_cache.misses(),
-        cache::CACHE_DIR,
-        cache::CACHE_FILE,
-    );
+    if verbose {
+        eprintln!(
+            "cache: {} reused, {} parsed (.ciabatta/{}/{})",
+            file_cache.hits(),
+            file_cache.misses(),
+            cache::CACHE_DIR,
+            cache::CACHE_FILE,
+        );
+    }
 
     Ok(builder.finish(root))
 }
@@ -556,4 +635,64 @@ fn normalize_version(v: &str) -> String {
         .trim_start_matches(['^', '~', '>', '<', '=', ' '])
         .trim()
         .to_string()
+}
+
+#[cfg(test)]
+mod graph_tests {
+    use super::*;
+
+    /// A tiny graph: one internal package `app` (defined by `app/Cargo.toml`)
+    /// that depends on external `serde` and publishes to `crates.io`.
+    fn sample() -> AnalysisGraph {
+        let node = |id: &str, label: &str, cat: Category, src: Option<&str>| Node {
+            id: id.to_string(),
+            label: label.to_string(),
+            category: cat,
+            source: src.map(str::to_string),
+            ..Default::default()
+        };
+        AnalysisGraph {
+            root: ".".to_string(),
+            generated_at: String::new(),
+            nodes: vec![
+                node("int:app", "app", Category::Internal, Some("app/Cargo.toml")),
+                node("ext:crates.io:serde", "serde", Category::External, None),
+                node("pub:crates.io", "crates.io", Category::Publish, None),
+            ],
+            edges: vec![
+                Edge { from: "ext:crates.io:serde".into(), to: "int:app".into() },
+                Edge { from: "int:app".into(), to: "pub:crates.io".into() },
+            ],
+            files: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn inputs_are_dependencies_outputs_are_consumers() {
+        let g = sample();
+        // The package's inputs are its dependencies; outputs its publish points.
+        let inputs: Vec<&str> = g.inputs("int:app").iter().map(|n| n.label.as_str()).collect();
+        assert_eq!(inputs, ["serde"]);
+        let outputs: Vec<&str> = g.outputs("int:app").iter().map(|n| n.label.as_str()).collect();
+        assert_eq!(outputs, ["crates.io"]);
+        // The dependency's output is the package that consumes it.
+        let consumers: Vec<&str> = g.outputs("ext:crates.io:serde").iter().map(|n| n.label.as_str()).collect();
+        assert_eq!(consumers, ["app"]);
+    }
+
+    #[test]
+    fn owner_for_file_finds_the_containing_package() {
+        let g = sample();
+        assert_eq!(g.owner_for_file("app/src/main.rs").unwrap().id, "int:app");
+        assert_eq!(g.owner_for_file("./app/lib.rs").unwrap().id, "int:app");
+        assert!(g.owner_for_file("other/x.rs").is_none());
+    }
+
+    #[test]
+    fn find_node_matches_id_or_label() {
+        let g = sample();
+        assert_eq!(g.find_node("serde").unwrap().id, "ext:crates.io:serde");
+        assert_eq!(g.find_node("int:app").unwrap().label, "app");
+        assert!(g.find_node("nope").is_none());
+    }
 }

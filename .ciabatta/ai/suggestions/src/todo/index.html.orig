@@ -147,7 +147,6 @@
       <option value="oldest">Oldest</option>
       <option value="alpha">A–Z</option>
     </select>
-    <label for="hide-done"><input type="checkbox" id="hide-done" /> Hide done</label>
   </div>
 
   <ul class="list" id="list"></ul>
@@ -160,7 +159,6 @@
   const form = document.getElementById("add-form");
   const input = document.getElementById("add-input");
   const sortEl = document.getElementById("sort");
-  const hideDoneEl = document.getElementById("hide-done");
 
   // The latest list as received from the server, before applying the chosen
   // sort. Kept so editing can recover a task's raw (un-linkified) text.
@@ -202,13 +200,11 @@
   }
 
   function render() {
-    const sorted = sortTodos(allTodos);
-    const open = sorted.filter(t => !t.done).length;
-    countEl.textContent = sorted.length
-      ? `${open} open · ${sorted.length} total`
+    const todos = sortTodos(allTodos);
+    const open = todos.filter(t => !t.done).length;
+    countEl.textContent = todos.length
+      ? `${open} open · ${todos.length} total`
       : "";
-
-    const todos = hideDoneEl.checked ? sorted.filter(t => !t.done) : sorted;
 
     if (!todos.length) {
       listEl.innerHTML = '<div class="empty">Nothing to do. Add a task above. 🎉</div>';
@@ -296,7 +292,6 @@
   });
 
   sortEl.addEventListener("change", render);
-  hideDoneEl.addEventListener("change", render);
 
   listEl.addEventListener("click", async (e) => {
     const btn = e.target.closest("button[data-action]");

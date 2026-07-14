@@ -251,6 +251,14 @@ async fn cmd_ai(
         Some(AiCommand::Resume { id }) => {
             ai::run_resume(&root, &cfg, port, no_graph, mode, id).await
         }
+        Some(AiCommand::Report { days, pdf }) => {
+            ai::run_report(&root, &cfg, days, mode, pdf).await
+        }
+        Some(AiCommand::Tag { name, description }) => {
+            ai::run_tag(&root, &cfg, &name, &description.join(" "), mode).await
+        }
+        Some(AiCommand::Delete { id }) => ai::run_delete(&root, &id),
+        Some(AiCommand::Clear { yes }) => ai::run_clear(&root, yes),
         Some(AiCommand::Ship { task, todo }) => {
             // The task text is either given inline or pulled from a todo.
             let prompt = if let Some(id) = todo {

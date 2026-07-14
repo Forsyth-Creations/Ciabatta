@@ -312,6 +312,43 @@ pub enum AiCommand {
         id: Option<String>,
     },
 
+    /// Report what changed in the repo over the past N days (default 7) by
+    /// summarizing git history with the assistant.
+    Report {
+        /// How many days back to look (default 7).
+        days: Option<u64>,
+
+        /// Also save the report as a PDF. Give a path, or pass the flag alone
+        /// to write ciabatta-report-<date>.pdf in the current directory.
+        #[arg(long, value_name = "FILE", num_args = 0..=1, default_missing_value = "")]
+        pdf: Option<String>,
+    },
+
+    /// Add your own architecture tag to the mind map, then let the assistant do
+    /// a quick pass to connect the files that belong to it.
+    Tag {
+        /// The tag / architecture name (e.g. auth, frontend, deploy).
+        name: String,
+
+        /// An optional one-line description of what this architecture is.
+        #[arg(name = "DESCRIPTION", trailing_var_arg = true)]
+        description: Vec<String>,
+    },
+
+    /// Delete a saved conversation by id (see `ciabatta ai resume` for the list).
+    Delete {
+        /// The conversation id to delete.
+        id: String,
+    },
+
+    /// Delete every saved conversation for this project. Prompts for
+    /// confirmation unless --yes is given.
+    Clear {
+        /// Skip the confirmation prompt.
+        #[arg(long, short)]
+        yes: bool,
+    },
+
     /// Ship a task to the assistant to complete behind the scenes. It runs the
     /// full agent loop autonomously (auto-accept mode) and records the result.
     Ship {

@@ -20,9 +20,10 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use serde_json::Value;
+use tokio::sync::mpsc;
 
 use super::provider::Turn;
-use super::{Assistant, server, tools};
+use super::{AiEvent, Assistant, server, tools};
 
 /// Files per model request. Big enough to amortize the round trip, small
 /// enough that every file's head fits comfortably.
@@ -33,8 +34,8 @@ const HEAD_BYTES: usize = 1600;
 /// Cap on the paths listed in the survey prompt.
 const SURVEY_PATHS: usize = 500;
 
-/// Run the burn-in: spawn the live map, survey, traverse, then keep the map
-/// up until Ctrl-C so the result can be explored.
+/// Run the burn-in from the CLI: spawn the live map, stream progress to
+/// stdout, then keep the map up until Ctrl-C so the result can be explored.
 pub async fn run(
     assistant: Arc<Assistant>,
     root: &Path,
@@ -53,6 +54,39 @@ pub async fn run(
         "apply — tags land on the map as they're determined"
     });
 
+    // Drain the burn's progress events to stdout while it runs.
+    let (tx, mut rx) = mpsc::channel::<AiEvent>(64);
+    let printer = tokio::spawn(async move {
+        while let Some(ev) = rx.recv().await {
+            if let AiEvent::Status(s) = ev {
+                println!("  {s}");
+            }
+        }
+    });
+
+    let summary = burn_core(&assistant, root, review, limit, &tx).await;
+    drop(tx);
+    let _ = printer.await;
+    let summary = summary?;
+
+    println!("\n{summary}");
+    println!("\nThe map stays live at {url} — press Ctrl-C to finish.");
+    tokio::signal::ctrl_c().await?;
+    Ok(())
+}
+
+/// The burn-in itself: survey the project, then tag every source file batch by
+/// batch, streaming human-readable progress as `AiEvent::Status`. Returns a
+/// final summary line. Shared by the CLI (`run`) and the chat `/burn` command,
+/// neither of which this function assumes — it spawns no server and never
+/// blocks on Ctrl-C.
+pub async fn burn_core(
+    assistant: &Assistant,
+    root: &Path,
+    review: bool,
+    limit: Option<usize>,
+    events: &mpsc::Sender<AiEvent>,
+) -> Result<String> {
     let mut files = source_files(root);
     if let Some(n) = limit {
         files.truncate(n);
@@ -63,27 +97,57 @@ pub async fn run(
         root.display()
     );
 
+    // ── 0. static analysis: fold the dependency graph into the knowledge map ─
+    match scan_dependencies(assistant, root, events).await {
+        Ok(summary) => {
+            let _ = events.send(AiEvent::Status(summary)).await;
+        }
+        Err(e) => {
+            let _ = events
+                .send(AiEvent::Status(format!("dependency scan skipped ({e})")))
+                .await;
+        }
+    }
+
     // ── 1. survey: name the architecture parts ──────────────────────────────
     assistant.set_activity(Some(format!(
         "burn-in: surveying the project layout ({} files)",
         files.len()
     )));
-    println!("Surveying the project layout ({} files)…", files.len());
-    match survey(&assistant, root, &files).await {
+    let _ = events
+        .send(AiEvent::Status(format!(
+            "surveying the project layout ({} files)…",
+            files.len()
+        )))
+        .await;
+    match survey(assistant, root, &files).await {
         Ok(arches) => {
             for (name, description) in &arches {
                 assistant.brain.set_architecture(name, description)?;
-                println!("  ◆ {name} — {description}");
+                let _ = events
+                    .send(AiEvent::Status(format!("◆ {name} — {description}")))
+                    .await;
             }
         }
         // The survey improves tag consistency but isn't load-bearing: the
         // traversal can still mint architecture names on its own.
-        Err(e) => eprintln!("  survey failed ({e}) — continuing with per-file tagging"),
+        Err(e) => {
+            let _ = events
+                .send(AiEvent::Status(format!(
+                    "survey failed ({e}) — continuing with per-file tagging"
+                )))
+                .await;
+        }
     }
 
     // ── 2. traverse: tag every file, batch by batch ─────────────────────────
     let total_batches = files.len().div_ceil(BATCH_SIZE);
-    println!("\nTagging {} files in {} batches…", files.len(), total_batches);
+    let _ = events
+        .send(AiEvent::Status(format!(
+            "tagging {} files in {total_batches} batches…",
+            files.len()
+        )))
+        .await;
     let mut tagged = 0usize;
     let mut failed_batches = 0usize;
     for (i, batch) in files.chunks(BATCH_SIZE).enumerate() {
@@ -93,14 +157,25 @@ pub async fn run(
             (i * BATCH_SIZE + batch.len()),
             files.len()
         )));
-        match tag_batch(&assistant, root, batch, review).await {
+        match tag_batch(assistant, root, batch, review).await {
             Ok(n) => {
                 tagged += n;
-                println!("  [{}/{}] {} → {} tagged", i + 1, total_batches, batch[0], n);
+                let _ = events
+                    .send(AiEvent::Status(format!(
+                        "[{}/{total_batches}] {} → {n} tagged",
+                        i + 1,
+                        batch[0]
+                    )))
+                    .await;
             }
             Err(e) => {
                 failed_batches += 1;
-                eprintln!("  [{}/{}] batch failed: {e}", i + 1, total_batches);
+                let _ = events
+                    .send(AiEvent::Status(format!(
+                        "[{}/{total_batches}] batch failed: {e}",
+                        i + 1
+                    )))
+                    .await;
             }
         }
     }
@@ -111,8 +186,8 @@ pub async fn run(
         .as_array()
         .map(|n| n.iter().filter(|v| v["kind"] == "architecture").count())
         .unwrap_or(0);
-    println!(
-        "\nBurn-in complete: {tagged} of {} files tagged across {arch_count} architectures{}.",
+    let mut summary = format!(
+        "Burn-in complete: {tagged} of {} files tagged across {arch_count} architectures{}.",
         files.len(),
         if failed_batches > 0 {
             format!(" ({failed_batches} batch(es) failed)")
@@ -122,13 +197,55 @@ pub async fn run(
     );
     if review {
         let pending = assistant.brain.pending().len();
-        println!(
-            "{pending} tag proposal(s) await review — accept or reject them on the map ({url})."
-        );
+        summary.push_str(&format!(
+            "\n{pending} tag proposal(s) await review — accept or reject them on the map \
+             or with Ctrl-Y / Ctrl-N."
+        ));
     }
-    println!("The map stays live at {url} — press Ctrl-C to finish.");
-    tokio::signal::ctrl_c().await?;
-    Ok(())
+    Ok(summary)
+}
+
+/// Run ciabatta's static dependency analysis and fold the resulting graph into
+/// the knowledge graph (the brain), so the assistant — and the `deps` tool —
+/// can traverse third-party and cross-package dependencies. Returns a one-line
+/// summary of what was captured. Shared by burn-in and the `/analyze` command.
+pub async fn scan_dependencies(
+    assistant: &Assistant,
+    root: &Path,
+    events: &mpsc::Sender<AiEvent>,
+) -> Result<String> {
+    use crate::analyze::Category;
+
+    let _ = events
+        .send(AiEvent::Status("scanning dependencies (static analysis)…".to_string()))
+        .await;
+
+    // Run the (synchronous) analysis off the async worker so a large repo scan
+    // doesn't stall other tasks on this runtime thread.
+    let root = root.to_path_buf();
+    let config = assistant.toolbox.config.clone();
+    let graph = tokio::task::spawn_blocking(move || {
+        crate::analyze::analyze_quiet(&root, &config, &crate::analyze::RequirementInputs::default())
+    })
+    .await
+    .context("dependency analysis task panicked")??;
+
+    let internal = graph
+        .nodes
+        .iter()
+        .filter(|n| n.category == Category::Internal && n.id != "int:root")
+        .count();
+    let external = graph.nodes.iter().filter(|n| n.category == Category::External).count();
+    let publish = graph.nodes.iter().filter(|n| n.category == Category::Publish).count();
+    let files = graph.files.len();
+
+    assistant.brain.set_dependencies(graph)?;
+
+    Ok(format!(
+        "static analysis added to the mind map: {internal} internal package(s), {external} \
+         external dependency(ies), {publish} publish point(s), {files} manifest/source file(s) \
+         scanned — traverse them with the `deps` tool"
+    ))
 }
 
 /// Ask the model to name the project's architecture parts from the file tree

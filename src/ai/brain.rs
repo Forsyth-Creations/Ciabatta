@@ -64,6 +64,20 @@ pub struct FeedbackEntry {
     pub note: String,
 }
 
+/// A local tool command the assistant has run, remembered so later sessions
+/// know how this project builds / tests / lints / formats / runs.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolingCommand {
+    pub command: String,
+    /// Coarse category: build | test | lint | format | run | other.
+    pub category: String,
+    pub last_run: String,
+    /// Whether the command last exited successfully.
+    pub last_ok: bool,
+    #[serde(default)]
+    pub runs: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BrainState {
     /// Overall AI ability for this project, 1..=100.
@@ -78,6 +92,10 @@ pub struct BrainState {
     pub pending: Vec<PendingTag>,
     #[serde(default)]
     pub feedback: Vec<FeedbackEntry>,
+    /// Local tool commands the assistant has run (builds, lints, formats,
+    /// tests), remembered across sessions so it reuses what already works.
+    #[serde(default)]
+    pub commands: Vec<ToolingCommand>,
     /// A snapshot of the project's dependency graph (from `ciabatta analyze`),
     /// captured during burn-in or via `/analyze`, so the assistant can traverse
     /// third-party and cross-package dependencies.
@@ -94,6 +112,7 @@ impl Default for BrainState {
             tags: BTreeMap::new(),
             pending: Vec::new(),
             feedback: Vec::new(),
+            commands: Vec::new(),
             dependencies: None,
         }
     }
@@ -296,6 +315,66 @@ impl Brain {
         self.mutate(|s| s.interactions += 1)
     }
 
+    /// Remember that a local tool `command` (classified into `category`) was
+    /// run, and whether it succeeded — so later sessions know how this project
+    /// builds, lints, formats, and tests. Re-running a known command updates it
+    /// in place; the memory is bounded so it can't grow without limit.
+    pub fn record_command(&self, command: &str, category: &str, success: bool) -> Result<()> {
+        let command = command.trim().to_string();
+        if command.is_empty() {
+            return Ok(());
+        }
+        let category = category.trim().to_lowercase();
+        self.mutate(|s| {
+            if let Some(existing) = s.commands.iter_mut().find(|c| c.command == command) {
+                existing.category = category;
+                existing.last_run = now();
+                existing.last_ok = success;
+                existing.runs += 1;
+            } else {
+                s.commands.push(ToolingCommand {
+                    command,
+                    category,
+                    last_run: now(),
+                    last_ok: success,
+                    runs: 1,
+                });
+                // Keep the memory bounded: drop the oldest entries past a cap.
+                let len = s.commands.len();
+                if len > 100 {
+                    s.commands.drain(0..len - 100);
+                }
+            }
+        })
+    }
+
+    /// Whether the mind map already knows a file (it has tags or a path score
+    /// under some architecture). Used to gauge how "related" a change is.
+    pub fn knows_file(&self, file: &str) -> bool {
+        let s = self.inner.lock().unwrap();
+        s.tags.contains_key(file) || s.architectures.values().any(|a| a.files.contains_key(file))
+    }
+
+    /// Architecture tags carried by other files in the SAME directory as
+    /// `file`, most common first — used to suggest tags for a newly
+    /// created or as-yet-untagged file so the mind map keeps up with changes.
+    pub fn sibling_tags(&self, file: &str) -> Vec<String> {
+        let dir = parent_dir(file);
+        let s = self.inner.lock().unwrap();
+        let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+        for (f, tags) in &s.tags {
+            if f == file || parent_dir(f) != dir {
+                continue;
+            }
+            for t in tags {
+                *counts.entry(t.clone()).or_insert(0) += 1;
+            }
+        }
+        let mut ranked: Vec<(String, usize)> = counts.into_iter().collect();
+        ranked.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        ranked.into_iter().map(|(t, _)| t).take(3).collect()
+    }
+
     /// Record user feedback on the assistant's last answer and retrain the
     /// confidence score.
     ///
@@ -450,6 +529,7 @@ impl Brain {
                 ));
             }
         }
+        out.push_str(&tooling_overview(&state.commands));
         out.push_str(&dependency_overview(state.dependencies.as_ref()));
         out
     }
@@ -579,6 +659,43 @@ fn dependency_overview(graph: Option<&crate::analyze::AnalysisGraph>) -> String 
     out
 }
 
+/// A compact list of remembered project commands for the system prompt, so the
+/// assistant reuses the build/lint/format/test invocations it already learned
+/// instead of guessing. Empty when nothing has been run yet.
+fn tooling_overview(commands: &[ToolingCommand]) -> String {
+    if commands.is_empty() {
+        return String::new();
+    }
+    let mut out =
+        String::from("\nRemembered project commands (reuse these to build/lint/format/test):\n");
+    let mut shown = 0;
+    for cat in ["build", "test", "lint", "format", "run", "other"] {
+        let mut cmds: Vec<&ToolingCommand> = commands.iter().filter(|c| c.category == cat).collect();
+        if cmds.is_empty() {
+            continue;
+        }
+        // Prefer commands that last succeeded, then the most-run ones.
+        cmds.sort_by(|a, b| b.last_ok.cmp(&a.last_ok).then(b.runs.cmp(&a.runs)));
+        let list: Vec<String> = cmds
+            .iter()
+            .take(3)
+            .map(|c| format!("`{}`{}", c.command, if c.last_ok { "" } else { " (last failed)" }))
+            .collect();
+        out.push_str(&format!("  - {cat}: {}\n", list.join(", ")));
+        shown += 1;
+    }
+    if shown == 0 { String::new() } else { out }
+}
+
+/// The directory portion of a relative path (everything before the last `/`),
+/// or "" for a top-level file. Shared by the sibling-tag lookup.
+fn parent_dir(path: &str) -> &str {
+    match path.rfind('/') {
+        Some(i) => &path[..i],
+        None => "",
+    }
+}
+
 /// Nudge confidence by a small delta, keeping it in 1..=100.
 fn nudge(confidence: &mut f64, delta: f64) {
     *confidence = (*confidence + delta).clamp(1.0, 100.0);
@@ -692,6 +809,44 @@ mod tests {
         // Pruning the unknown reports false.
         assert!(!brain.forget_file("nope.rs").unwrap());
         assert!(!brain.forget_architecture("nope").unwrap());
+    }
+
+    #[test]
+    fn remembers_tooling_commands_and_surfaces_them() {
+        let (_dir, brain) = temp_brain();
+        brain.record_command("cargo build", "build", true).unwrap();
+        brain.record_command("cargo clippy", "lint", false).unwrap();
+        // Re-running a known command updates it in place, not a duplicate.
+        brain.record_command("cargo build", "build", true).unwrap();
+
+        let prompt = brain.summary_for_prompt();
+        assert!(prompt.contains("Remembered project commands"));
+        assert!(prompt.contains("cargo build"));
+        // A last-failed command is flagged as such.
+        assert!(prompt.contains("cargo clippy` (last failed)"));
+
+        let state = brain.inner.lock().unwrap();
+        assert_eq!(state.commands.len(), 2);
+        assert_eq!(state.commands.iter().find(|c| c.command == "cargo build").unwrap().runs, 2);
+    }
+
+    #[test]
+    fn sibling_tags_are_drawn_from_the_same_directory() {
+        let (_dir, brain) = temp_brain();
+        brain.propose_tags("src/ai/tui.rs", &["ai".into(), "ui".into()], "").unwrap();
+        brain.confirm("src/ai/tui.rs", true).unwrap();
+        brain.propose_tags("src/ai/brain.rs", &["ai".into()], "").unwrap();
+        brain.confirm("src/ai/brain.rs", true).unwrap();
+        brain.propose_tags("frontend/app.tsx", &["frontend".into()], "").unwrap();
+        brain.confirm("frontend/app.tsx", true).unwrap();
+
+        // A new file under src/ai inherits its siblings' tags, not frontend's.
+        let tags = brain.sibling_tags("src/ai/new_thing.rs");
+        assert!(tags.contains(&"ai".to_string()));
+        assert!(!tags.contains(&"frontend".to_string()));
+
+        assert!(brain.knows_file("src/ai/tui.rs"));
+        assert!(!brain.knows_file("src/ai/new_thing.rs"));
     }
 
     #[test]

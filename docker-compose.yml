@@ -23,12 +23,52 @@ services:
       - "8527:8081"
     volumes:
       - nexus-data:/nexus-data
-  local-model:
-    image: hf.co/zai-org/GLM-5.2
+  # A real llama model served over an OpenAI-compatible API (Ollama), so
+  # `ciabatta ai` can be pointed at it for end-to-end testing. It auto-pulls the
+  # model on first boot into the `ollama-models` volume, then keeps serving.
+  #
+  # Point the [ai] section of .ciabatta/ciabatta.toml at it:
+  #   provider    = "openai"
+  #   endpoint    = "http://localhost:11434"   # NB: no /v1 — ciabatta appends it
+  #   model       = "llama3.1:8b"              # match LLAMA_MODEL below
+  #   api_key_env = "OPENAI_API_KEY"           # unused by Ollama; leave unset
+  #
+  # Override the model with `LLAMA_MODEL=llama3.2:3b docker compose up llama`
+  # (llama3.1:8b and llama3.2:1b/3b all support the tool-calling the agent needs;
+  # the 3B is a lighter/faster choice on CPU-only machines).
+  llama:
+    image: ollama/ollama:latest
+    container_name: ciabatta-llama
     ports:
-      - "8080:8080"
+      - "11434:11434"
+    volumes:
+      - ollama-models:/root/.ollama
+    # Start the server, wait for it, pull the model once, then stay in the
+    # foreground serving requests.
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        ollama serve &
+        until ollama ls >/dev/null 2>&1; do sleep 1; done
+        ollama pull ${LLAMA_MODEL:-llama3.1:8b}
+        wait
+    healthcheck:
+      test: ["CMD", "ollama", "ls"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+    # For a GPU host, uncomment to run the model on the GPU (much faster):
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
 
 volumes:
   claude-config:
   cargo-cache:
   nexus-data:
+  ollama-models:

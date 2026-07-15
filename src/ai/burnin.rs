@@ -98,6 +98,15 @@ pub async fn burn_core(
     );
 
     // ── 0. static analysis: fold the dependency graph into the knowledge map ─
+    let _ = events
+        .send(AiEvent::Progress(super::BurnProgress {
+            phase: super::BurnPhase::Dependencies,
+            done: 0,
+            total: 0,
+            tagged: 0,
+            detail: "static dependency analysis…".to_string(),
+        }))
+        .await;
     match scan_dependencies(assistant, root, events).await {
         Ok(summary) => {
             let _ = events.send(AiEvent::Status(summary)).await;
@@ -119,6 +128,15 @@ pub async fn burn_core(
             "surveying the project layout ({} files)…",
             files.len()
         )))
+        .await;
+    let _ = events
+        .send(AiEvent::Progress(super::BurnProgress {
+            phase: super::BurnPhase::Survey,
+            done: 0,
+            total: 0,
+            tagged: 0,
+            detail: format!("reading {} files to name the architecture parts…", files.len()),
+        }))
         .await;
     match survey(assistant, root, &files).await {
         Ok(arches) => {
@@ -157,6 +175,17 @@ pub async fn burn_core(
             (i * BATCH_SIZE + batch.len()),
             files.len()
         )));
+        // Announce the batch BEFORE the (often slow) model call, so the live
+        // panel shows what's in flight instead of looking stalled.
+        let _ = events
+            .send(AiEvent::Progress(super::BurnProgress {
+                phase: super::BurnPhase::Tagging,
+                done: i,
+                total: total_batches,
+                tagged,
+                detail: format!("batch {}/{total_batches}: {}", i + 1, batch[0]),
+            }))
+            .await;
         match tag_batch(assistant, root, batch, review).await {
             Ok(n) => {
                 tagged += n;
@@ -178,8 +207,27 @@ pub async fn burn_core(
                     .await;
             }
         }
+        // Advance the bar once the batch has landed.
+        let _ = events
+            .send(AiEvent::Progress(super::BurnProgress {
+                phase: super::BurnPhase::Tagging,
+                done: i + 1,
+                total: total_batches,
+                tagged,
+                detail: format!("{tagged} file(s) tagged so far"),
+            }))
+            .await;
     }
     assistant.set_activity(None);
+    let _ = events
+        .send(AiEvent::Progress(super::BurnProgress {
+            phase: super::BurnPhase::Done,
+            done: total_batches,
+            total: total_batches,
+            tagged,
+            detail: "building the summary…".to_string(),
+        }))
+        .await;
 
     // ── summary ─────────────────────────────────────────────────────────────
     let arch_count = assistant.brain.graph_json()["nodes"]

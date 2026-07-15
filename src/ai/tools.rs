@@ -208,6 +208,13 @@ impl ToolBox {
             std::fs::copy(&change.proposed, &change.target)
                 .with_context(|| format!("failed to write '{}'", change.file))?;
             change.state = ChangeState::Applied;
+            // Task 6: keep the mind map in step with the change we just applied.
+            // (`reflect_change_in_map` locks only `self.brain`, so calling it
+            // while the `changes` guard is held is safe.)
+            let file = change.file.clone();
+            let applied = change.clone();
+            self.reflect_change_in_map(&file);
+            return Ok(applied);
         } else {
             change.state = ChangeState::Rejected;
         }
@@ -285,6 +292,26 @@ impl ToolBox {
                         "path": {"type": "string", "description": "Optional subdirectory or file to limit the search to"}
                     },
                     "required": ["pattern"]
+                }),
+            },
+            ToolSpec {
+                name: "find_definition",
+                description: "Find where a type or function is DEFINED (its struct / enum / \
+                              class / interface / trait / type / def / fn declaration), anywhere \
+                              in the project. Use this to follow a data structure through the \
+                              codebase: when a type has a field whose type is declared in another \
+                              file, call find_definition on that field's type to jump straight to \
+                              it, then repeat on ITS fields — this is how you trace an object \
+                              built by composition across several files instead of guessing its \
+                              shape. Returns definition sites as path:line:text."
+                    .into(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "symbol": {"type": "string", "description": "The type or function name to locate (a bare identifier)"},
+                        "path": {"type": "string", "description": "Optional subdirectory to limit the search to"}
+                    },
+                    "required": ["symbol"]
                 }),
             },
             ToolSpec {
@@ -475,6 +502,7 @@ impl ToolBox {
         let result = match call.name.as_str() {
             "update_plan" => self.update_plan(&call.args),
             "search_code" => self.search_code(&call.args).await,
+            "find_definition" => self.find_definition(&call.args).await,
             "suggest_files" => self.suggest_files(&call.args),
             "list_files" => self.list_files(&call.args),
             "glob" => self.glob(&call.args),
@@ -504,7 +532,16 @@ impl ToolBox {
     /// Whether a tool only reads state, so calls to it are safe to run
     /// concurrently with each other in one round.
     pub fn is_read_only(name: &str) -> bool {
-        matches!(name, "search_code" | "suggest_files" | "list_files" | "glob" | "read_file" | "deps")
+        matches!(
+            name,
+            "search_code"
+                | "find_definition"
+                | "suggest_files"
+                | "list_files"
+                | "glob"
+                | "read_file"
+                | "deps"
+        )
     }
 
     /// A one-line human-readable description of a call, for status displays.
@@ -513,6 +550,7 @@ impl ToolBox {
         match call.name.as_str() {
             "update_plan" => "📋 update plan".to_string(),
             "search_code" => format!("🔎 search: {}", arg("pattern")),
+            "find_definition" => format!("🔎 defn: {}", arg("symbol")),
             "suggest_files" => format!("🧠 mind map: {}", arg("topic")),
             "list_files" => "🗂  list files".to_string(),
             "glob" => format!("🗂  glob: {}", arg("pattern")),
@@ -649,6 +687,13 @@ impl ToolBox {
             .as_str()
             .context("search_code needs a 'pattern'")?;
         let scope = args["path"].as_str().unwrap_or(".");
+        self.run_search(pattern, scope).await
+    }
+
+    /// Run a regex search via ripgrep/ack/grep, confined to the project, and
+    /// return matches as `path:line:text`. Shared by `search_code` and
+    /// `find_definition`.
+    async fn run_search(&self, pattern: &str, scope: &str) -> Result<String> {
         // Keep the search inside the project.
         let scope_abs = self.resolve(scope).unwrap_or_else(|_| self.root.clone());
 
@@ -670,6 +715,42 @@ impl ToolBox {
             return Ok(format!("no matches for /{pattern}/"));
         }
         Ok(clip(&relativize(&stdout, &self.root), 12_000))
+    }
+
+    // ─── find_definition ──────────────────────────────────────────────────────
+
+    /// Locate where a type or function is DEFINED, so the assistant can follow a
+    /// data structure across files: from a field to the type it holds, to that
+    /// type's own fields, and so on. Builds a definition-keyword regex around the
+    /// symbol and searches for it.
+    async fn find_definition(&self, args: &Value) -> Result<String> {
+        let symbol = args["symbol"]
+            .as_str()
+            .context("find_definition needs a 'symbol'")?
+            .trim();
+        if symbol.is_empty() {
+            bail!("empty symbol");
+        }
+        // A bare identifier keeps the generated regex safe and predictable.
+        if !symbol.chars().all(|c| c.is_alphanumeric() || c == '_') {
+            bail!("'{symbol}' is not a plain identifier — pass just the type or function name");
+        }
+        let scope = args["path"].as_str().unwrap_or(".");
+
+        // Definition keywords across the common languages, then the symbol.
+        let keywords = "struct|enum|trait|union|type|class|interface|record|protocol|impl|\
+                        def|fn|func|function|const|val|var|namespace|module|mod|typedef";
+        let pattern = format!(r"\b({keywords})\s+{symbol}\b");
+
+        let out = self.run_search(&pattern, scope).await?;
+        if out.starts_with("no matches") {
+            return Ok(format!(
+                "no definition found for '{symbol}'. It may be defined in an unusual form, \
+                 imported from a third-party dependency, or a built-in — try `search_code` for \
+                 '{symbol}' to see where it is used, or `deps` to follow it across packages."
+            ));
+        }
+        Ok(out)
     }
 
     // ─── suggest_files ───────────────────────────────────────────────────────
@@ -875,6 +956,22 @@ impl ToolBox {
             return Ok(format!("no change — '{shown}' already has exactly that content"));
         }
 
+        // Relevance guard (task 2): a change to a file the assistant never read
+        // this session and that the mind map doesn't know is easily made by
+        // mistake. Flag it with a visible warning so the user reviews it — but
+        // still let it through (auto-accept still applies).
+        let mut reason = reason;
+        let unrelated = !self.change_is_relevant(&shown);
+        if unrelated {
+            let warn =
+                "⚠ unrelated: not read this session and not in the mind map — review carefully";
+            reason = if reason.trim().is_empty() {
+                warn.to_string()
+            } else {
+                format!("{warn}. {reason}")
+            };
+        }
+
         // Keep the proposal and a pre-change snapshot out of the working tree.
         // The snapshot key strips any leading '/' so an absolute /tmp target
         // still nests safely under the suggestions directory.
@@ -901,6 +998,8 @@ impl ToolBox {
             }
             std::fs::write(&target, new_content)
                 .with_context(|| format!("failed to write '{shown}'"))?;
+            // Task 6: keep the mind map in step with the change we just made.
+            self.reflect_change_in_map(&shown);
         }
 
         self.note_touch(&shown);
@@ -915,15 +1014,64 @@ impl ToolBox {
             state: if applied { ChangeState::Applied } else { ChangeState::Pending },
         });
 
+        let note = if unrelated {
+            format!(
+                " NOTE: {shown} wasn't read this session and isn't in the mind map — if this \
+                 file isn't actually part of the task, don't change it."
+            )
+        } else {
+            String::new()
+        };
         Ok(if applied {
-            format!("change applied to {shown} (auto-accept mode); the user saw the diff")
+            format!("change applied to {shown} (auto-accept mode); the user saw the diff.{note}")
         } else {
             format!(
                 "change proposed for {shown} — the user sees it as a diff and must accept it \
                  before it lands. Do NOT assume it is applied; if they reject it, they will \
-                 tell you what to do differently."
+                 tell you what to do differently.{note}"
             )
         })
+    }
+
+    /// Whether a change targets a file that relates to what the assistant has
+    /// been working on (task 2): a file it read this session, one the mind map
+    /// already knows, or one sitting in the same directory as such files (which
+    /// covers a sensible new file in an area under active work). Absolute (/tmp)
+    /// scratch paths are always relevant — that's the assistant's own space.
+    fn change_is_relevant(&self, shown: &str) -> bool {
+        if shown.starts_with('/') {
+            return true;
+        }
+        let key = shown.trim_start_matches("./");
+        if self.brain.knows_file(key) || !self.brain.sibling_tags(key).is_empty() {
+            return true;
+        }
+        let target_dir = dir_of(key);
+        let read = self.read_files.lock().unwrap();
+        read.contains(key) || read.iter().any(|f| dir_of(f) == target_dir)
+    }
+
+    /// Reflect an applied change into the mind map (task 6): reinforce the
+    /// file's path scores, and — for a file the map doesn't know yet — propose
+    /// tags inherited from its directory siblings (pending user confirmation),
+    /// so the architecture map keeps up with files the assistant creates/edits.
+    fn reflect_change_in_map(&self, shown: &str) {
+        // Only workspace files belong on the map; skip /tmp scratch files.
+        if shown.starts_with('/') {
+            return;
+        }
+        let key = shown.trim_start_matches("./");
+        let _ = self.brain.record_file_use(key);
+        if !self.brain.knows_file(key) {
+            let tags = self.brain.sibling_tags(key);
+            if !tags.is_empty() {
+                let _ = self.brain.propose_tags(
+                    key,
+                    &tags,
+                    "auto: changed file, inheriting tags from its directory",
+                );
+            }
+        }
     }
 
     // ─── sandbox_run ────────────────────────────────────────────────────────
@@ -985,7 +1133,12 @@ impl ToolBox {
         let command = args["command"]
             .as_str()
             .context("run_command needs a 'command'")?;
-        let (_success, output) = self.shell(command).await?;
+        let (success, output) = self.shell(command).await?;
+        // Remember tooling commands (builds, lints, formats, tests, …) so later
+        // sessions know how this project is built and checked.
+        let _ = self
+            .brain
+            .record_command(command, classify_command(command), success);
         Ok(output)
     }
 
@@ -995,7 +1148,13 @@ impl ToolBox {
     /// output, with the exit status appended. Shared by `run_command` and the
     /// loop's verification gate (`run_verify`).
     async fn shell(&self, command: &str) -> Result<(bool, String)> {
-        let fut = tokio::process::Command::new("sh")
+        // Run through the user's LOGIN shell (`-l`) so their profile is sourced
+        // and PATH additions for tools installed via nvm / asdf / corepack /
+        // `~/.local/bin` / `~/.yarn/bin` are present. A bare `sh -c` inherits the
+        // daemon's thinner environment and often can't find `yarn`, `node`, etc.
+        let shell = login_shell();
+        let fut = tokio::process::Command::new(&shell)
+            .arg("-l")
             .arg("-c")
             .arg(command)
             .current_dir(&self.root)
@@ -1275,6 +1434,45 @@ fn search_command(pattern: &str, scope: &Path) -> (String, Vec<String>) {
     }
 }
 
+/// The directory portion of a relative path (everything before the last `/`),
+/// or "" for a top-level file.
+fn dir_of(path: &str) -> &str {
+    path.rfind('/').map(|i| &path[..i]).unwrap_or("")
+}
+
+/// Classify a shell command into a coarse tooling category, so the brain can
+/// remember how the project builds / tests / lints / formats / runs. Checked in
+/// priority order (format → lint → test → build → run) so `cargo fmt` isn't
+/// mistaken for a build and `cargo clippy` isn't mistaken for a run.
+fn classify_command(command: &str) -> &'static str {
+    let c = command.to_lowercase();
+    let has = |needle: &str| c.contains(needle);
+    if has("fmt") || has("format") || has("prettier") || has("rustfmt") || has("gofmt") || has("black") {
+        "format"
+    } else if has("clippy") || has("lint") || has("eslint") || has("ruff") || has("flake8") || has(" vet") {
+        "lint"
+    } else if has("test") || has("pytest") || has("jest") || has("nextest") {
+        "test"
+    } else if has("build") || has("compile") || has("make") || has("tsc") || has("webpack") || has("vite build") {
+        "build"
+    } else if has(" run") || has("start") || has("serve") || has(" dev") {
+        "run"
+    } else {
+        "other"
+    }
+}
+
+/// The user's login shell, honoring `$SHELL` (as their terminal does) and
+/// falling back to `sh`. Used so `run_command` sees the same PATH the user has
+/// interactively — the fix for tools like `yarn` not being found.
+fn login_shell() -> String {
+    std::env::var("SHELL")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "sh".to_string())
+}
+
 fn binary_on_path(name: &str) -> bool {
     let Some(paths) = std::env::var_os("PATH") else {
         return false;
@@ -1458,6 +1656,97 @@ mod tests {
             ]}))
             .is_err()
         );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn find_definition_locates_a_type_across_files() {
+        let (root, tb) = toolbox();
+        std::fs::write(
+            root.join("src/types.rs"),
+            "pub struct Widget {\n    pub knob: Knob,\n}\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("src/knob.rs"), "pub struct Knob {\n    pub n: u8,\n}\n").unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+
+        // Following composition: Widget holds a Knob, whose definition lives in
+        // another file — find_definition points straight at it.
+        let out = rt.block_on(tb.find_definition(&json!({"symbol": "Knob"}))).unwrap();
+        assert!(out.contains("src/knob.rs"), "should locate Knob's definition file: {out}");
+        assert!(out.contains("struct Knob"));
+
+        // A non-identifier is refused; an unknown symbol gives a helpful miss.
+        assert!(rt.block_on(tb.find_definition(&json!({"symbol": "a b"}))).is_err());
+        let miss = rt.block_on(tb.find_definition(&json!({"symbol": "Nonexistent"}))).unwrap();
+        assert!(miss.contains("no definition found"));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn classify_command_buckets_common_tooling() {
+        assert_eq!(classify_command("cargo build"), "build");
+        assert_eq!(classify_command("cargo test tui::"), "test");
+        assert_eq!(classify_command("cargo clippy --all"), "lint");
+        assert_eq!(classify_command("cargo fmt"), "format");
+        assert_eq!(classify_command("yarn build"), "build");
+        assert_eq!(classify_command("npm run lint"), "lint");
+        assert_eq!(classify_command("prettier -w ."), "format");
+        assert_eq!(classify_command("git status"), "other");
+    }
+
+    #[test]
+    fn unrelated_change_is_flagged_but_still_applies() {
+        let (root, tb) = toolbox();
+        tb.set_mode(Mode::AutoAccept);
+        std::fs::write(root.join("src/unrelated.rs"), "fn old() {}\n").unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+
+        // A change to a file never read this session and unknown to the map is
+        // flagged as unrelated in its reason — but auto-accept still writes it.
+        let out = rt
+            .block_on(tb.propose_change(&json!({
+                "path": "src/unrelated.rs",
+                "new_content": "fn new() {}\n",
+                "reason": "tweak"
+            })))
+            .unwrap();
+        assert!(out.contains("wasn't read this session"));
+        let pending = tb.changes_since(0);
+        assert!(pending[0].reason.contains("⚠ unrelated"));
+        assert_eq!(std::fs::read_to_string(root.join("src/unrelated.rs")).unwrap(), "fn new() {}\n");
+
+        // Reading a file first makes a change to it count as related.
+        tb.read_file(&json!({"path": "src/a.rs"})).unwrap();
+        assert!(tb.change_is_relevant("src/a.rs"));
+        // And a sibling in the same directory is related too.
+        assert!(tb.change_is_relevant("src/sibling.rs"));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn applied_change_reflects_into_the_mind_map() {
+        let (root, tb) = toolbox();
+        tb.set_mode(Mode::AutoAccept);
+        // Give an existing sibling some tags so a new file can inherit them.
+        tb.brain.propose_tags("src/a.rs", &["core".into()], "").unwrap();
+        tb.brain.confirm("src/a.rs", true).unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+
+        rt.block_on(tb.propose_change(&json!({
+            "path": "src/b.rs",
+            "new_content": "fn b() {}\n",
+            "reason": "add b"
+        })))
+        .unwrap();
+
+        // The new file picked up its sibling's tag as a pending proposal.
+        let pending = tb.brain.pending();
+        let p = pending.iter().find(|p| p.file == "src/b.rs").expect("b.rs proposed");
+        assert!(p.tags.contains(&"core".to_string()));
 
         let _ = std::fs::remove_dir_all(&root);
     }

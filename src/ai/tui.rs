@@ -48,7 +48,7 @@ use ratatui::{
 use tokio::sync::mpsc;
 
 use super::tools::{ChangeState, ChangeSuggestion};
-use super::{AiEvent, Assistant, Mode};
+use super::{AiEvent, Assistant, BurnProgress, Mode};
 
 /// Who "said" a chat entry, which controls its styling.
 #[derive(Clone, Copy, PartialEq)]
@@ -113,6 +113,13 @@ struct ChatEntry {
     text: String,
 }
 
+/// Live state for the burn-in progress panel: the latest structured progress
+/// plus when the run started, for an elapsed clock.
+struct BurnView {
+    progress: BurnProgress,
+    started: Instant,
+}
+
 /// One entry in the `/` command menu.
 struct SlashCommand {
     name: &'static str,
@@ -166,6 +173,9 @@ struct App {
     /// Whether the terminal's mouse is captured (wheel scrolls the chat). Toggle
     /// it off with Ctrl-T to hand the mouse back for native text selection/copy.
     mouse_capture: bool,
+    /// Live burn-in progress, driving the dedicated progress panel. `None` when
+    /// no burn is running.
+    burn: Option<BurnView>,
 }
 
 impl App {
@@ -205,6 +215,23 @@ impl App {
     fn slash_selected(&self) -> Option<&'static SlashCommand> {
         let matches = self.slash_matches();
         matches.get(self.slash_index.min(matches.len().saturating_sub(1))).copied()
+    }
+
+    /// The command being typed once arguments have started (a leading `/` plus
+    /// whitespace). The selectable menu is gone by now, but we keep the matched
+    /// command's format on screen so the user can see the arguments it expects.
+    fn slash_usage(&self) -> Option<&'static SlashCommand> {
+        if self.busy || !self.input.starts_with('/') || !self.input.contains(char::is_whitespace) {
+            return None;
+        }
+        let name = self
+            .input
+            .trim_start_matches('/')
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .to_lowercase();
+        SLASH_COMMANDS.iter().find(|c| c.name == name)
     }
 
     /// Move the menu highlight, wrapping around.
@@ -276,6 +303,7 @@ async fn chat_loop(
         last_report_days: super::DEFAULT_REPORT_DAYS,
         reveal_since: None,
         mouse_capture: true,
+        burn: None,
     };
     app.push(
         Speaker::Status,
@@ -479,7 +507,7 @@ async fn chat_loop(
                                         });
                                     }
                                 }
-                                Some("burn") | Some("burnin") => {
+                                Some("burn") | Some("burnin") | Some("burn-in") => {
                                     // Learn the whole codebase in one pass. Flags:
                                     // `review` queues tags for confirmation; a bare
                                     // number caps how many files are scanned.
@@ -580,9 +608,16 @@ async fn chat_loop(
                             app.push(Speaker::Status, format!("plan\n{list}"));
                         }
                     }
+                    Some(AiEvent::Progress(p)) => {
+                        // Reuse the run's start time so the elapsed clock is
+                        // continuous across updates; stamp it on the first one.
+                        let started = app.burn.as_ref().map(|b| b.started).unwrap_or_else(Instant::now);
+                        app.burn = Some(BurnView { progress: p, started });
+                    }
                     Some(AiEvent::Answer(a)) => {
                         app.busy = false;
                         app.busy_since = None;
+                        app.burn = None; // the batch job (if any) is done
                         app.last_answer = Some(a.clone());
                         app.reveal_since = Some(Instant::now());
                         app.push(Speaker::Assistant, a);
@@ -603,6 +638,7 @@ async fn chat_loop(
                     Some(AiEvent::Error(e)) => {
                         app.busy = false;
                         app.busy_since = None;
+                        app.burn = None;
                         app.push(Speaker::Error, e);
                     }
                     None => break,
@@ -854,78 +890,14 @@ fn wrapped_rows(text: &str, inner_w: usize) -> u16 {
         .min(u16::MAX as usize) as u16
 }
 
-/// How many rows one already-composed line occupies once ratatui word-wraps it
-/// to `width` columns with `Wrap { trim: false }`. This mirrors ratatui's
-/// behavior — break at whitespace, but hard-break a single word longer than the
-/// line — so the chat's autoscroll estimate matches what actually renders.
-///
-/// A plain `len.div_ceil(width)` under-counts, because word wrapping pushes a
-/// word that won't fit onto the next row (leaving the current one short); the
-/// resulting under-estimate is exactly what made the conversation scroll a few
-/// lines short and clip its tail.
-fn word_wrapped_rows(line_len_in_words: &str, width: usize) -> usize {
-    let width = width.max(1);
-    let mut rows = 1usize;
-    let mut col = 0usize;
-    for word in split_keep_spaces(line_len_in_words) {
-        let wlen = word.chars().count();
-        if wlen == 0 {
-            continue;
-        }
-        // A word longer than the whole line is hard-broken across rows.
-        if wlen > width {
-            if col > 0 {
-                rows += 1;
-                col = 0;
-            }
-            rows += (wlen - 1) / width;
-            col = wlen % width;
-            if col == 0 {
-                col = width;
-            }
-            continue;
-        }
-        if col + wlen > width {
-            rows += 1;
-            col = wlen;
-        } else {
-            col += wlen;
-        }
-    }
-    rows.max(1)
-}
-
-/// Split into wrap tokens, keeping each run of spaces attached to the word
-/// before it so trailing spaces count toward the column like ratatui does.
-fn split_keep_spaces(s: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut cur = String::new();
-    let mut in_word = false;
-    for ch in s.chars() {
-        if ch == ' ' {
-            cur.push(ch);
-            in_word = false;
-        } else {
-            if !in_word && !cur.is_empty() && cur.ends_with(' ') {
-                out.push(std::mem::take(&mut cur));
-            }
-            cur.push(ch);
-            in_word = true;
-        }
-    }
-    if !cur.is_empty() {
-        out.push(cur);
-    }
-    out
-}
-
 fn render(f: &mut Frame, app: &mut App, assistant: &Assistant) {
     // Grow the input box to fit multi-line/pasted content, up to a cap.
     let input_rows = wrapped_rows(&app.input, f.area().width.saturating_sub(2) as usize)
         .clamp(1, MAX_INPUT_ROWS)
         + 2; // borders
-    let [header, chat, pending_area, menu, input, hints] = Layout::vertical([
+    let [header, burn, chat, pending_area, menu, input, hints] = Layout::vertical([
         Constraint::Length(1),
+        Constraint::Length(burn_height(app)),
         Constraint::Min(3),
         Constraint::Length(pending_height(assistant)),
         Constraint::Length(slash_menu_height(app)),
@@ -935,6 +907,7 @@ fn render(f: &mut Frame, app: &mut App, assistant: &Assistant) {
     .areas(f.area());
 
     render_header(f, header, assistant);
+    render_burn(f, burn, app);
     render_chat(f, chat, app);
     render_pending(f, pending_area, assistant);
     render_slash_menu(f, menu, app);
@@ -942,21 +915,49 @@ fn render(f: &mut Frame, app: &mut App, assistant: &Assistant) {
     render_hints(f, hints, app);
 }
 
-/// Height of the `/` command menu: one row per match (capped) plus a border,
-/// or zero when the menu isn't active.
+/// Height of the `/` command area: one row per match (capped) plus a border
+/// while selecting a name, a single format row once arguments are being typed,
+/// or zero when neither applies.
 fn slash_menu_height(app: &App) -> u16 {
-    if !app.slash_active() {
-        return 0;
-    }
-    match app.slash_matches().len() {
-        0 => 0,
-        n => (n as u16).min(6) + 2,
+    if app.slash_active() {
+        match app.slash_matches().len() {
+            0 => 0,
+            n => (n as u16).min(6) + 2,
+        }
+    } else if app.slash_usage().is_some() {
+        3 // one format line plus a border
+    } else {
+        0
     }
 }
 
-/// Render the `/` command menu with the highlighted row.
+/// Render the `/` command menu with the highlighted row, or — once arguments
+/// are being typed — the matched command's format so it stays on screen.
 fn render_slash_menu(f: &mut Frame, area: Rect, app: &App) {
     if area.height == 0 {
+        return;
+    }
+    if !app.slash_active() {
+        // Argument mode: show just the command being entered and its format.
+        if let Some(c) = app.slash_usage() {
+            let label = if c.args.is_empty() {
+                format!(" /{} ", c.name)
+            } else {
+                format!(" /{} {} ", c.name, c.args)
+            };
+            let line = Line::from(vec![
+                Span::styled(
+                    label,
+                    Style::default().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(format!("  {}", c.help), Style::default().fg(Color::DarkGray)),
+            ]);
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .title(" command format — Enter run ")
+                .border_style(Style::default().fg(Color::DarkGray));
+            f.render_widget(Paragraph::new(line).block(block), area);
+        }
         return;
     }
     let matches = app.slash_matches();
@@ -984,6 +985,82 @@ fn render_slash_menu(f: &mut Frame, area: Rect, app: &App) {
         .title(" commands — ↑↓ select · Tab complete · Enter run ")
         .border_style(Style::default().fg(Color::DarkGray));
     f.render_widget(Paragraph::new(lines).block(block), area);
+}
+
+/// Height of the burn-in progress panel: a bordered box with three content
+/// rows (phase clock, gauge, current step), or zero when no burn is running.
+fn burn_height(app: &App) -> u16 {
+    if app.burn.is_some() { 5 } else { 0 }
+}
+
+/// Render the live burn-in progress panel: which phase is running, an elapsed
+/// clock and spinner, a batch progress gauge, the running tagged-file count,
+/// and the current step — so a slow run reads as "working" rather than frozen.
+fn render_burn(f: &mut Frame, area: Rect, app: &App) {
+    if area.height == 0 {
+        return;
+    }
+    let Some(burn) = &app.burn else { return };
+    let p = &burn.progress;
+
+    let elapsed = burn.started.elapsed();
+    let secs = elapsed.as_secs();
+    let spin = SPINNER[(elapsed.as_millis() / 90) as usize % SPINNER.len()];
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" 🔥 burn-in ")
+        .border_style(Style::default().fg(CRUST));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let [head, gauge_area, detail] =
+        Layout::vertical([Constraint::Length(1), Constraint::Length(1), Constraint::Length(1)])
+            .areas(inner);
+
+    // Phase + spinner + elapsed clock + running tally.
+    f.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(format!("{spin} "), Style::default().fg(CRUST).add_modifier(Modifier::BOLD)),
+            Span::styled(p.phase.label(), Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                format!("  ·  {:02}:{:02} elapsed  ·  {} file(s) tagged", secs / 60, secs % 60, p.tagged),
+                Style::default().fg(Color::DarkGray),
+            ),
+        ])),
+        head,
+    );
+
+    // A real progress bar during the batched tagging phase; an indeterminate
+    // note during the single-step dependency/survey phases.
+    if p.total > 0 {
+        let ratio = (p.done as f64 / p.total as f64).clamp(0.0, 1.0);
+        f.render_widget(
+            Gauge::default()
+                .ratio(ratio)
+                .label(format!("batch {}/{}  ({:.0}%)", p.done, p.total, ratio * 100.0))
+                .gauge_style(Style::default().fg(Color::Yellow).bg(Color::Black)),
+            gauge_area,
+        );
+    } else {
+        f.render_widget(
+            Paragraph::new(Span::styled(
+                "working… (a single long step — slow on a local model)",
+                Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
+            )),
+            gauge_area,
+        );
+    }
+
+    // The current step (the file/batch in flight), truncated to fit one row.
+    f.render_widget(
+        Paragraph::new(Span::styled(
+            p.detail.clone(),
+            Style::default().fg(Color::Gray),
+        ))
+        .wrap(Wrap { trim: true }),
+        detail,
+    );
 }
 
 fn render_header(f: &mut Frame, area: Rect, assistant: &Assistant) {
@@ -1215,9 +1292,10 @@ fn render_chat(f: &mut Frame, area: Rect, app: &mut App) {
             lines.push(Line::default());
         }
     }
-    if app.busy {
+    if app.busy && app.burn.is_none() {
         // Show a live elapsed clock so a stalled request reads as stalled rather
         // than as a frozen UI, and hint at the cause once it runs unusually long.
+        // (Skipped during a burn-in, which has its own richer progress panel.)
         let millis = app.busy_since.map(|t| t.elapsed().as_millis()).unwrap_or(0);
         let elapsed = millis / 1000;
         let spin = SPINNER[(millis / 90) as usize % SPINNER.len()];
@@ -1243,18 +1321,18 @@ fn render_chat(f: &mut Frame, area: Rect, app: &mut App) {
         ]));
     }
 
-    // Wrap-aware autoscroll: estimate rendered height, then hold the view
-    // `scroll_up` lines above the bottom. The estimate must use the SAME word
-    // wrapping ratatui applies (`Wrap { trim: false }`); a plain character-count
-    // divide under-counts and leaves the view a few lines short of the bottom.
-    let width = area.width.saturating_sub(2).max(1) as usize;
-    let total: usize = lines
-        .iter()
-        .map(|l| {
-            let content: String = l.spans.iter().map(|s| s.content.as_ref()).collect();
-            word_wrapped_rows(&content, width)
-        })
-        .sum();
+    // Wrap-aware autoscroll: hold the view `scroll_up` lines above the bottom.
+    // The total height MUST match what ratatui actually renders, or the bottom
+    // lines get clipped — so we ask the Paragraph itself via `line_count`
+    // (accounting for the same `Wrap { trim: false }` word wrapping and the
+    // block's borders) rather than re-deriving the wrap by hand.
+    let inner_width = area.width.saturating_sub(2).max(1);
+    let chat = Paragraph::new(lines)
+        .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(Color::DarkGray)))
+        .wrap(Wrap { trim: false });
+    // `line_count` includes the top+bottom border rows; drop them to get the
+    // number of text lines, then hold the view against the inner height.
+    let total = chat.line_count(inner_width).saturating_sub(2);
     let visible = area.height.saturating_sub(2) as usize;
     let bottom = total.saturating_sub(visible).min(u16::MAX as usize) as u16;
     if app.scroll_up > 0 {
@@ -1266,11 +1344,7 @@ fn render_chat(f: &mut Frame, area: Rect, app: &mut App) {
     app.chat_top = bottom;
     let scroll = bottom.saturating_sub(app.scroll_up);
 
-    let chat = Paragraph::new(lines)
-        .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(Color::DarkGray)))
-        .wrap(Wrap { trim: false })
-        .scroll((scroll, 0));
-    f.render_widget(chat, area);
+    f.render_widget(chat.scroll((scroll, 0)), area);
 }
 
 /// Pending banner height: one line per waiting change or tag proposal, capped.

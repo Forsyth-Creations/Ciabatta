@@ -50,10 +50,54 @@ pub enum AiEvent {
     /// The assistant's working plan changed (the full checklist), for the front
     /// end to render live progress on a multi-step task.
     Plan(Vec<tools::PlanItem>),
+    /// Structured progress for a long batch job (burn-in), driving a dedicated
+    /// progress panel. Distinct from `Status`, which is free-form log text.
+    Progress(BurnProgress),
     /// The final answer for the current question.
     Answer(String),
     /// The loop failed.
     Error(String),
+}
+
+/// Which phase of the burn-in is running, for the live progress panel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BurnPhase {
+    /// Static dependency analysis (before any model calls).
+    Dependencies,
+    /// The survey pass that names the architecture parts.
+    Survey,
+    /// The per-file tagging batches.
+    Tagging,
+    /// Everything is finished.
+    Done,
+}
+
+impl BurnPhase {
+    /// A short human-readable label for the panel.
+    pub fn label(self) -> &'static str {
+        match self {
+            BurnPhase::Dependencies => "scanning dependencies",
+            BurnPhase::Survey => "surveying architecture",
+            BurnPhase::Tagging => "tagging files",
+            BurnPhase::Done => "complete",
+        }
+    }
+}
+
+/// A snapshot of the burn-in's progress, so the front end can show exactly what
+/// is happening (which phase, how far through, how many files tagged) rather
+/// than a bare spinner that reads as a freeze on a slow model.
+#[derive(Debug, Clone)]
+pub struct BurnProgress {
+    pub phase: BurnPhase,
+    /// Batches completed and the total. `total == 0` means indeterminate (the
+    /// dependency/survey phases, which are a single long step).
+    pub done: usize,
+    pub total: usize,
+    /// Files tagged so far across the whole run.
+    pub tagged: usize,
+    /// One short line on the current step (e.g. the file being analyzed).
+    pub detail: String,
 }
 
 /// How much freedom the assistant has to change code.
@@ -221,7 +265,11 @@ impl Assistant {
              How to work:\n\
              1. Prefer `suggest_files` (the architecture mind map) to locate code: it returns \
                 exactly what is needed. Use `search_code` (grep/ripgrep) when the map is thin \
-                or you need everything that mentions a term. To follow third-party or \
+                or you need everything that mentions a term. To understand a data structure that \
+                spans files — an object built by composition, whose fields are themselves types \
+                declared elsewhere — use `find_definition` on the type to open its declaration, \
+                then call `find_definition` again on each field's type and repeat, following the \
+                structure across files instead of guessing its shape. To follow third-party or \
                 cross-package dependencies, use `deps` — it traverses the dependency graph built \
                 by static analysis (which package a file belongs to, a package's dependencies, \
                 and what depends on a given library).\n\
@@ -235,7 +283,9 @@ impl Assistant {
              4. To change an existing file, use `edit_file` (replace just the text that \
                 changes) — do NOT re-emit the whole file. Reserve `propose_change` for new \
                 files or a genuine full rewrite. Read a file before you edit it. Never create \
-                a file when editing an existing one will do.\n\
+                a file when editing an existing one will do. Only touch files that are part of \
+                the current task — a change to a file you never read and the map doesn't know \
+                is flagged to the user as unrelated, so don't edit off-task files.\n\
              5. To build, test, lint, or run the project for real, use `run_command` — it runs \
                 locally in the project root with the machine's installed toolchains (cargo, \
                 python, node, npm, make, …). Reserve `sandbox_run` for untrusted or throwaway \
@@ -785,7 +835,7 @@ pub async fn run_ask(
                 AiEvent::Plan(items) if !items.is_empty() => {
                     eprintln!("\n  📋 plan:\n{}", tools::render_plan(&items));
                 }
-                AiEvent::Plan(_) | AiEvent::Answer(_) | AiEvent::Error(_) => {}
+                AiEvent::Progress(_) | AiEvent::Plan(_) | AiEvent::Answer(_) | AiEvent::Error(_) => {}
             }
         }
     });

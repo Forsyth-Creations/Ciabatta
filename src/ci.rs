@@ -100,7 +100,7 @@ fn ci_mappings(system: &CiSystem) -> Vec<(String, Vec<String>)> {
         CiSystem::Github => vec![
             (
                 branch_key,
-                vec!["GITHUB_REF_NAME".into(), "GITHUB_HEAD_REF".into()],
+                vec!["GITHUB_HEAD_REF".into(), "GITHUB_REF_NAME".into()],
             ),
             (commit_key, vec!["GITHUB_SHA".into()]),
             (tag_key, vec!["GITHUB_REF_NAME".into()]), // only meaningful when triggered by tag

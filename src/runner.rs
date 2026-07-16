@@ -1028,10 +1028,10 @@ mod tests {
 
         // With a tag set, the tag-based path is left untouched.
         vars.insert("CIABATTA_TAG".to_string(), "v1".to_string());
-        vars.insert("CIABATTA_PATH".to_string(), "/v1/".to_string());
+        vars.insert("CIABATTA_PATH".to_string(), "/v1".to_string());
         set_commit(&mut vars, "newer");
         assert_eq!(vars["CIABATTA_COMMIT"], "newer");
-        assert_eq!(vars["CIABATTA_PATH"], "/v1/");
+        assert_eq!(vars["CIABATTA_PATH"], "/v1");
     }
 
     #[test]

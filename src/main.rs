@@ -512,7 +512,7 @@ fn build_env_vars(
 }
 
 /// Compute the `CIABATTA_PATH` convenience variable:
-///   - a tag (CLI/env `CIABATTA_TAG`) wins → `/{CIABATTA_TAG}/`
+///   - a tag (CLI/env `CIABATTA_TAG`) wins → `/{CIABATTA_TAG}`
 ///   - otherwise → `/{CIABATTA_BRANCH}/{CIABATTA_COMMIT}`
 ///
 /// Returns `None` when there isn't enough information to build it (no tag and no
@@ -521,7 +521,7 @@ fn derive_ciabatta_path(vars: &HashMap<String, String>) -> Option<String> {
     let non_empty = |key: &str| vars.get(key).filter(|v| !v.is_empty()).cloned();
 
     if let Some(tag) = non_empty("CIABATTA_TAG") {
-        return Some(format!("/{tag}/"));
+        return Some(format!("/{tag}"));
     }
     let branch = non_empty("CIABATTA_BRANCH")?;
     let commit = non_empty("CIABATTA_COMMIT").unwrap_or_default();
@@ -1322,7 +1322,7 @@ Available substitution variables in publish_path:
   {CIABATTA_TAG}           Current tag (if any)
   {CIABATTA_BUILD_NUMBER}  CI build number
   {CIABATTA_PATH}          Convenience path, derived as:
-                             /{CIABATTA_TAG}/                      (when a tag is set)
+                             /{CIABATTA_TAG}                       (when a tag is set)
                              /{CIABATTA_BRANCH}/{CIABATTA_COMMIT}  (otherwise)
 
 These are populated automatically from the CI system defined in [system].

@@ -60,7 +60,7 @@ impl ChangeState {
 #[derive(Debug, Clone)]
 pub struct ChangeSuggestion {
     /// Display path: relative to the project root for workspace files, or an
-    /// absolute path for a bespoke file under /tmp.
+    /// absolute path for a bespoke file under the scratch dir.
     pub file: String,
     /// The resolved absolute destination the change writes to when accepted.
     pub target: PathBuf,
@@ -135,19 +135,19 @@ pub struct ToolBox {
     /// The assistant's current working plan (the `update_plan` tool's state).
     plan: std::sync::Mutex<Vec<PlanItem>>,
     /// The only directories the assistant may read from or write to: the
-    /// project workspace and /tmp (its scratch space for bespoke files).
-    /// Anything outside these is refused.
+    /// project workspace and the system scratch dir (its space for bespoke
+    /// files). Anything outside these is refused.
     bounds: Vec<PathBuf>,
 }
 
 impl ToolBox {
     pub fn new(root: PathBuf, brain: Arc<Brain>, config: CiabattaConfig) -> Self {
-        let bounds = vec![
-            root.canonicalize().unwrap_or_else(|_| root.clone()),
-            Path::new("/tmp")
-                .canonicalize()
-                .unwrap_or_else(|_| PathBuf::from("/tmp")),
-        ];
+        let mut bounds = vec![root.canonicalize().unwrap_or_else(|_| root.clone())];
+        for dir in scratch_dirs() {
+            if !bounds.contains(&dir) {
+                bounds.push(dir);
+            }
+        }
         Self {
             root,
             brain,
@@ -256,6 +256,7 @@ impl ToolBox {
     /// is left out entirely, so the model can't even try to edit.
     pub fn specs(&self) -> Vec<ToolSpec> {
         let images = self.sandbox_images();
+        let scratch = self.scratch_hint();
         let mut specs = vec![
             ToolSpec {
                 name: "update_plan",
@@ -477,7 +478,7 @@ impl ToolBox {
                 parameters: json!({
                     "type": "object",
                     "properties": {
-                        "path": {"type": "string", "description": "Path (relative to the project root, or absolute under /tmp) of the file to edit"},
+                        "path": {"type": "string", "description": format!("Path (relative to the project root, or absolute under the scratch dir {scratch}) of the file to edit")},
                         "old": {"type": "string", "description": "The exact text to replace, with enough context to be unique"},
                         "new": {"type": "string", "description": "The text to replace it with"},
                         "replace_all": {"type": "boolean", "description": "Replace every occurrence of `old` (default false)"},
@@ -498,7 +499,7 @@ impl ToolBox {
                 parameters: json!({
                     "type": "object",
                     "properties": {
-                        "path": {"type": "string", "description": "Path relative to the project root (may be a new file), or an absolute path under /tmp for a bespoke scratch file"},
+                        "path": {"type": "string", "description": format!("Path relative to the project root (may be a new file), or an absolute path under the scratch dir {scratch} for a bespoke scratch file")},
                         "new_content": {"type": "string", "description": "The complete new content of the file"},
                         "reason": {"type": "string", "description": "One line on what this change does and why"}
                     },
@@ -623,21 +624,34 @@ impl ToolBox {
     }
 
     /// True when `path` sits inside one of the assistant's allowed roots (the
-    /// project workspace or /tmp).
+    /// project workspace or the system scratch dir).
     fn within_bounds(&self, path: &Path) -> bool {
         self.bounds.iter().any(|b| path.starts_with(b))
+    }
+
+    /// A concrete scratch-directory path to show the model, so it writes bespoke
+    /// files somewhere that actually exists on this platform (e.g. `/tmp` on
+    /// Linux, `C:\Users\…\Temp` on Windows). `bounds[1]` is the system temp dir
+    /// (see `scratch_dirs`), cleaned of any Windows verbatim prefix.
+    fn scratch_hint(&self) -> String {
+        self.bounds
+            .get(1)
+            .map(|p| tool_path(p))
+            .unwrap_or_else(|| tool_path(&std::env::temp_dir()))
     }
 
     /// The one-line reason a path was refused, for a consistent error message.
     fn out_of_bounds(&self, shown: &str) -> anyhow::Error {
         anyhow::anyhow!(
             "'{shown}' is outside the assistant's allowed area — it may only read or write \
-             the project workspace and /tmp"
+             the project workspace and the scratch dir ({})",
+            self.scratch_hint()
         )
     }
 
     /// Turn a model-supplied path into an absolute path: relative paths hang
-    /// off the workspace root; absolute paths (e.g. under /tmp) are taken as-is.
+    /// off the workspace root; absolute paths (e.g. scratch files) are taken
+    /// as-is.
     fn absolutize(&self, path: &str) -> PathBuf {
         let p = path.trim();
         if Path::new(p).is_absolute() {
@@ -647,8 +661,8 @@ impl ToolBox {
         }
     }
 
-    /// Resolve a path that must already exist, confined to the workspace or
-    /// /tmp. Symlinks and `..` are resolved before the bounds check.
+    /// Resolve a path that must already exist, confined to the workspace or the
+    /// scratch dir. Symlinks and `..` are resolved before the bounds check.
     fn resolve(&self, path: &str) -> Result<PathBuf> {
         if path.trim().is_empty() {
             bail!("empty path");
@@ -664,7 +678,7 @@ impl ToolBox {
     }
 
     /// Resolve a path that may not exist yet (a file to be created), confined
-    /// to the workspace or /tmp. The deepest existing ancestor is canonicalized
+    /// to the workspace or scratch dir. The deepest existing ancestor is canonicalized
     /// for symlink safety and the remaining components are resolved lexically,
     /// so `..` can't be used to climb out of bounds.
     fn resolve_new(&self, path: &str) -> Result<PathBuf> {
@@ -749,7 +763,7 @@ impl ToolBox {
             }
             return Ok(format!("no matches for /{pattern}/"));
         }
-        Ok(clip(&relativize(&stdout, &self.root), 12_000))
+        Ok(clip(&relativize(&stdout, &self.bounds[0]), 12_000))
     }
 
     // ─── find_definition ──────────────────────────────────────────────────────
@@ -1010,11 +1024,12 @@ impl ToolBox {
         reason: String,
     ) -> Result<String> {
         let mode = self.mode();
-        // Confine the target to the workspace or /tmp (it may not exist yet).
+        // Confine the target to the workspace or scratch dir (it may not exist yet).
         let target = self.resolve_new(raw_path)?;
-        // Display relative paths for workspace files, absolute for /tmp scratch.
+        // Display relative paths for workspace files, absolute for scratch. Keep
+        // workspace paths `/`-separated so their keys match the mind map on Windows.
         let shown = match target.strip_prefix(&self.bounds[0]) {
-            Ok(rel) => rel.display().to_string(),
+            Ok(rel) => rel.display().to_string().replace('\\', "/"),
             Err(_) => target.display().to_string(),
         };
 
@@ -1050,16 +1065,20 @@ impl ToolBox {
         }
 
         // Keep the proposal and a pre-change snapshot out of the working tree.
-        // The snapshot key strips any leading '/' so an absolute /tmp target
-        // still nests safely under the suggestions directory.
+        // The snapshot key keeps only the Normal path components — dropping any
+        // root, drive prefix, or `..` — so an absolute scratch target (`/tmp/x`
+        // or `C:\Users\…\x`) still nests safely under the suggestions directory.
         let store = self
             .root
             .join(crate::config::CIABATTA_DIR)
             .join("ai")
             .join("suggestions");
-        let key = shown.trim_start_matches('/');
-        let proposed = store.join(key);
-        let original = store.join(format!("{key}.orig"));
+        let key: PathBuf = Path::new(&shown)
+            .components()
+            .filter(|c| matches!(c, std::path::Component::Normal(_)))
+            .collect();
+        let proposed = store.join(&key);
+        let original = store.join(format!("{}.orig", key.display()));
         if let Some(parent) = proposed.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -1117,10 +1136,10 @@ impl ToolBox {
     /// Whether a change targets a file that relates to what the assistant has
     /// been working on (task 2): a file it read this session, one the mind map
     /// already knows, or one sitting in the same directory as such files (which
-    /// covers a sensible new file in an area under active work). Absolute (/tmp)
+    /// covers a sensible new file in an area under active work). Absolute
     /// scratch paths are always relevant — that's the assistant's own space.
     fn change_is_relevant(&self, shown: &str) -> bool {
-        if shown.starts_with('/') {
+        if Path::new(shown).is_absolute() {
             return true;
         }
         let key = shown.trim_start_matches("./");
@@ -1137,8 +1156,8 @@ impl ToolBox {
     /// tags inherited from its directory siblings (pending user confirmation),
     /// so the architecture map keeps up with files the assistant creates/edits.
     fn reflect_change_in_map(&self, shown: &str) {
-        // Only workspace files belong on the map; skip /tmp scratch files.
-        if shown.starts_with('/') {
+        // Only workspace files belong on the map; skip scratch files.
+        if Path::new(shown).is_absolute() {
             return;
         }
         let key = shown.trim_start_matches("./");
@@ -1509,6 +1528,38 @@ async fn unified_diff(original: &Path, proposed: &Path, rel: &str) -> String {
 /// Resolve the deepest existing ancestor of `path` (following symlinks) and
 /// re-append the not-yet-existing components. Used to bounds-check a file that
 /// is about to be created.
+/// The scratch directories the assistant may read from and write to for bespoke
+/// files, in addition to the workspace. The system temp dir is the portable
+/// scratch space (e.g. `C:\Users\…\Temp` on Windows, `/tmp` or `/var/folders/…`
+/// on Unix); on Unix `/tmp` is added too, since it's the conventional scratch
+/// even when `$TMPDIR` points elsewhere.
+fn scratch_dirs() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    let tmp = std::env::temp_dir();
+    dirs.push(tmp.canonicalize().unwrap_or(tmp));
+    if cfg!(unix)
+        && let Ok(canon) = Path::new("/tmp").canonicalize()
+        && !dirs.contains(&canon)
+    {
+        dirs.push(canon);
+    }
+    dirs
+}
+
+/// Render a path for handing to an external tool, stripping Windows' `\\?\`
+/// verbatim prefix that `canonicalize` adds but tools like `grep` don't grok.
+/// A no-op on Unix and on non-verbatim paths.
+fn tool_path(p: &Path) -> String {
+    let s = p.display().to_string();
+    if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{rest}")
+    } else if let Some(rest) = s.strip_prefix(r"\\?\") {
+        rest.to_string()
+    } else {
+        s
+    }
+}
+
 fn resolve_existing_prefix(path: &Path) -> PathBuf {
     let mut existing = path.to_path_buf();
     let mut tail: Vec<std::ffi::OsString> = Vec::new();
@@ -1557,7 +1608,7 @@ fn normalize_lexical(path: &Path) -> PathBuf {
 /// Pick the best available search binary: ripgrep, then ack, then grep — the
 /// standard tools, in preference order.
 fn search_command(pattern: &str, scope: &Path) -> (String, Vec<String>) {
-    let scope = scope.display().to_string();
+    let scope = tool_path(scope);
     if binary_on_path("rg") {
         (
             "rg".into(),
@@ -1672,8 +1723,25 @@ fn binary_on_path(name: &str) -> bool {
 /// Strip the absolute project prefix out of tool output so the model (and the
 /// mind map) always deals in relative paths.
 fn relativize(text: &str, root: &Path) -> String {
-    let prefix = format!("{}/", root.display());
-    text.replace(&prefix, "")
+    let prefix = format!("{}{}", tool_path(root), std::path::MAIN_SEPARATOR);
+    text.lines()
+        .map(|line| normalize_leading_path(line.strip_prefix(&prefix).unwrap_or(line)))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Normalize backslashes to forward slashes in a match line's leading path token
+/// (everything before the first `:`, which separates path from line number), so
+/// search output reads with the same `/` separators as the rest of the tools.
+/// Match text after the line number is left untouched.
+fn normalize_leading_path(line: &str) -> String {
+    match line.find(':') {
+        Some(i) => {
+            let (path, rest) = line.split_at(i);
+            format!("{}{rest}", path.replace('\\', "/"))
+        }
+        None => line.to_string(),
+    }
 }
 
 /// Directories nobody wants the assistant crawling.
@@ -1783,11 +1851,11 @@ mod tests {
         // Workspace file resolves.
         assert!(tb.resolve("src/a.rs").is_ok());
 
-        // A real /tmp file resolves (the assistant's scratch space). Use /tmp
-        // explicitly rather than std::env::temp_dir(), which points elsewhere
-        // (e.g. /var/folders/...) on macOS and would not fall inside the bound.
+        // A file in the system scratch dir resolves (the assistant's scratch
+        // space). std::env::temp_dir() is the portable scratch root and is a
+        // bound on every platform.
         let tmp_file =
-            Path::new("/tmp").join(format!("ciabatta-bounds-{}.txt", std::process::id()));
+            std::env::temp_dir().join(format!("ciabatta-bounds-{}.txt", std::process::id()));
         std::fs::write(&tmp_file, "scratch").unwrap();
         assert!(tb.resolve(tmp_file.to_str().unwrap()).is_ok());
         let _ = std::fs::remove_file(&tmp_file);
@@ -1795,8 +1863,13 @@ mod tests {
         // Climbing out of the workspace is refused.
         assert!(tb.resolve("../../etc/passwd").is_err());
 
-        // An absolute path outside workspace and /tmp is refused.
-        assert!(tb.resolve("/etc/passwd").is_err());
+        // An absolute path outside the workspace and scratch is refused.
+        let outside = if cfg!(windows) {
+            r"C:\Windows\System32\drivers\etc\hosts"
+        } else {
+            "/etc/passwd"
+        };
+        assert!(tb.resolve(outside).is_err());
 
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -1808,17 +1881,23 @@ mod tests {
         // A new file inside the workspace is allowed.
         assert!(tb.resolve_new("src/new_module.rs").is_ok());
 
-        // A new file under /tmp is allowed.
-        assert!(tb.resolve_new("/tmp/ciabatta-bespoke.txt").is_ok());
+        // A new file under the system scratch dir is allowed.
+        let scratch = std::env::temp_dir().join("ciabatta-bespoke.txt");
+        assert!(tb.resolve_new(scratch.to_str().unwrap()).is_ok());
 
         // `..` in a not-yet-existing path can't climb out to a forbidden root.
-        // (The test workspace itself lives under /tmp, so we climb clear past it
-        // to /etc, which is outside both allowed roots.)
+        // (The test workspace lives under the scratch dir, so we climb clear past
+        // it to a system root that's outside every allowed bound.)
         assert!(
             tb.resolve_new("../../../../../../../../etc/evil.rs")
                 .is_err()
         );
-        assert!(tb.resolve_new("/etc/evil.conf").is_err());
+        let outside = if cfg!(windows) {
+            r"C:\Windows\evil.conf"
+        } else {
+            "/etc/evil.conf"
+        };
+        assert!(tb.resolve_new(outside).is_err());
 
         let _ = std::fs::remove_dir_all(&root);
     }

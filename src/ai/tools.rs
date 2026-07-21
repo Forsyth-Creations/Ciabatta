@@ -751,19 +751,93 @@ impl ToolBox {
             .args(&argv)
             .current_dir(&self.root)
             .output()
-            .await
-            .with_context(|| format!("failed to run {bin}"))?;
+            .await;
 
-        // grep-family tools exit 1 for "no matches" — that's a result, not an error.
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        if stdout.trim().is_empty() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            if !output.status.success() && !stderr.trim().is_empty() {
-                bail!("{bin}: {}", stderr.trim());
+        // Prefer the external tool's hits whenever it produced any.
+        if let Ok(output) = &output {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            if !stdout.trim().is_empty() {
+                return Ok(clip(&relativize(&stdout, &self.bounds[0]), 12_000));
             }
-            return Ok(format!("no matches for /{pattern}/"));
         }
-        Ok(clip(&relativize(&stdout, &self.bounds[0]), 12_000))
+
+        // The external tool found nothing, is missing, or mishandled this
+        // platform's paths or regex dialect (grep on Windows, notably). Retry
+        // in-process with the `regex` crate — the same engine ripgrep uses, so
+        // `\s`/`\b` and friends behave identically on every OS — so results don't
+        // hinge on which binary happens to be installed.
+        if let Some(hits) = self.search_in_process(pattern, scope) {
+            return Ok(hits);
+        }
+
+        // Nothing found either way: surface a genuine tool error if there was
+        // one, otherwise report a clean miss. grep-family tools exit 1 for "no
+        // matches" — that's a result, not an error.
+        match output {
+            Ok(output) => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                if !output.status.success() && !stderr.trim().is_empty() {
+                    bail!("{bin}: {}", stderr.trim());
+                }
+                Ok(format!("no matches for /{pattern}/"))
+            }
+            Err(e) => Err(e).with_context(|| format!("failed to run {bin}")),
+        }
+    }
+
+    /// In-process regex search over the project's files, used as a fallback when
+    /// the external search tool is missing or mishandles this platform's paths or
+    /// regex dialect. Returns `path:line:text` hits in the same forward-slash
+    /// format as the external tools, or `None` when the pattern isn't a valid
+    /// Rust regex (e.g. grep/PCRE-only syntax) or nothing matched.
+    fn search_in_process(&self, pattern: &str, scope: &str) -> Option<String> {
+        let re = regex::Regex::new(pattern).ok()?;
+
+        // Confine to an optional sub-scope, matched against forward-slash paths.
+        let scope = scope.trim().trim_start_matches("./").trim_end_matches('/');
+        let in_scope = |rel: &str| {
+            scope.is_empty()
+                || scope == "."
+                || rel == scope
+                || rel.starts_with(&format!("{scope}/"))
+        };
+
+        let mut out = String::new();
+        let mut hits = 0;
+        for rel in project_files(&self.root) {
+            let rel = rel.replace('\\', "/");
+            if !in_scope(&rel) {
+                continue;
+            }
+            let abs = self.root.join(&rel);
+            // Skip oversized files, matching the external tools' 1M cap.
+            if std::fs::metadata(&abs)
+                .map(|m| m.len() > 1_000_000)
+                .unwrap_or(true)
+            {
+                continue;
+            }
+            // Non-UTF8 (binary) files are skipped, mirroring `grep -I` / rg.
+            let Ok(text) = std::fs::read_to_string(&abs) else {
+                continue;
+            };
+            let mut per_file = 0;
+            for (i, line) in text.lines().enumerate() {
+                if re.is_match(line) {
+                    out.push_str(&format!("{rel}:{}:{line}\n", i + 1));
+                    hits += 1;
+                    per_file += 1;
+                    if per_file >= 50 {
+                        break; // mirror ripgrep's --max-count=50
+                    }
+                }
+            }
+            if hits >= 1_000 {
+                break; // overall safety cap
+            }
+        }
+
+        (!out.is_empty()).then(|| clip(out.trim_end(), 12_000))
     }
 
     // ─── find_definition ──────────────────────────────────────────────────────

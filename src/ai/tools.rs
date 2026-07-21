@@ -1786,7 +1786,8 @@ mod tests {
         // A real /tmp file resolves (the assistant's scratch space). Use /tmp
         // explicitly rather than std::env::temp_dir(), which points elsewhere
         // (e.g. /var/folders/...) on macOS and would not fall inside the bound.
-        let tmp_file = Path::new("/tmp").join(format!("ciabatta-bounds-{}.txt", std::process::id()));
+        let tmp_file =
+            Path::new("/tmp").join(format!("ciabatta-bounds-{}.txt", std::process::id()));
         std::fs::write(&tmp_file, "scratch").unwrap();
         assert!(tb.resolve(tmp_file.to_str().unwrap()).is_ok());
         let _ = std::fs::remove_file(&tmp_file);

@@ -11,6 +11,7 @@ mod registry;
 mod runner;
 mod todo;
 mod tui;
+mod usb;
 mod watch;
 
 use std::collections::HashMap;
@@ -165,6 +166,10 @@ async fn main() -> Result<()> {
             continue_last,
         } => {
             cmd_ai(subcommand, port, no_graph, mode, continue_last).await?;
+        }
+
+        Commands::Usb { port, no_open } => {
+            usb::server::serve(port, !no_open).await?;
         }
 
         Commands::Config { subcommand } => match subcommand {

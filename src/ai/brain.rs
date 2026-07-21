@@ -348,6 +348,24 @@ impl Brain {
         })
     }
 
+    /// The best remembered command in a category (build, test, lint, …), for
+    /// reuse as a verification gate: prefer one that last succeeded, then the
+    /// most-run. Returns `None` if nothing in that category has been recorded.
+    pub fn best_command(&self, category: &str) -> Option<String> {
+        let category = category.trim().to_lowercase();
+        let s = self.inner.lock().unwrap();
+        s.commands
+            .iter()
+            .filter(|c| c.category == category)
+            .max_by(|a, b| {
+                a.last_ok
+                    .cmp(&b.last_ok)
+                    .then_with(|| a.runs.cmp(&b.runs))
+                    .then_with(|| a.last_run.cmp(&b.last_run))
+            })
+            .map(|c| c.command.clone())
+    }
+
     /// Whether the mind map already knows a file (it has tags or a path score
     /// under some architecture). Used to gauge how "related" a change is.
     pub fn knows_file(&self, file: &str) -> bool {

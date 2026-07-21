@@ -448,7 +448,12 @@ impl ToolBox {
                 }),
             },
         ];
-        if self.mode() != Mode::Plan {
+        // The edit tools are always advertised, even in plan mode: keeping the
+        // tool set identical across modes lets the provider's prompt prefix stay
+        // cached (a changed tool list invalidates it) instead of rebuilding on
+        // every Shift-Tab. In plan mode both tools reject at execution time, and
+        // the mode rules tell the model not to reach for them.
+        {
             specs.push(ToolSpec {
                 name: "edit_file",
                 description: "Change part of an EXISTING file by replacing an exact string. \
@@ -499,6 +504,20 @@ impl ToolBox {
     /// Execute one tool call, never propagating errors to the caller — the
     /// model gets the error text back instead so it can adapt.
     pub async fn execute(&self, call: &ToolCall) -> ToolOutput {
+        // The provider tagged this call's arguments as unparseable JSON (usually
+        // a truncated stream). Hand back a clear error rather than running the
+        // tool with empty arguments and producing a wrong result.
+        if let Some(reason) = call.arg_parse_error() {
+            return ToolOutput {
+                call_id: call.id.clone(),
+                content: format!(
+                    "error: the arguments for `{}` were not valid JSON ({reason}) — resend the \
+                     call with complete, well-formed arguments",
+                    call.name
+                ),
+                is_error: true,
+            };
+        }
         let result = match call.name.as_str() {
             "update_plan" => self.update_plan(&call.args),
             "search_code" => self.search_code(&call.args).await,
@@ -921,10 +940,30 @@ impl ToolBox {
             bail!("read '{raw_path}' first, then edit — I won't edit a file I haven't seen this session");
         }
 
-        let current = std::fs::read_to_string(&abs)
+        let disk = std::fs::read_to_string(&abs)
             .with_context(|| format!("failed to read '{raw_path}'"))?;
-        let updated = super::edit::replace(&current, old, new, replace_all)?;
+        // Compose on top of the newest still-live proposal for this file, not the
+        // on-disk original: in edit mode earlier edits are pending (not yet
+        // written), so a second edit computed from disk would silently drop the
+        // first. Reading the latest proposed content makes chained edits stack.
+        let base = self.working_content(&abs, &disk);
+        let updated = super::edit::replace(&base, old, new, replace_all)?;
         self.record_proposal(raw_path, &updated, reason).await
+    }
+
+    /// The current working content of a file for a fresh edit: the newest
+    /// pending-or-applied proposal's proposed content if one exists, else the
+    /// on-disk text. This lets successive `edit_file` calls to the same file
+    /// build on each other even before any proposal is accepted.
+    fn working_content(&self, target: &Path, disk: &str) -> String {
+        self.changes
+            .lock()
+            .unwrap()
+            .iter()
+            .rev()
+            .find(|c| c.target == target && matches!(c.state, ChangeState::Pending | ChangeState::Applied))
+            .and_then(|c| std::fs::read_to_string(&c.proposed).ok())
+            .unwrap_or_else(|| disk.to_string())
     }
 
     // ─── shared change recording ──────────────────────────────────────────────
@@ -1187,6 +1226,37 @@ impl ToolBox {
             .and_then(|a| a.verify.as_ref())
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
+    }
+
+    /// Whether the user explicitly configured `[ai] verify` (even to an empty
+    /// string, which deliberately disables the gate). When they haven't, the
+    /// loop falls back to [`Self::derived_verify_command`].
+    pub fn verify_configured(&self) -> bool {
+        self.config.ai.as_ref().and_then(|a| a.verify.as_ref()).is_some()
+    }
+
+    /// A best-effort verification command when the user hasn't configured one:
+    /// first reuse a build/test command the assistant already ran successfully
+    /// this project (remembered in the brain), then fall back to the project's
+    /// manifest — so a code-changing task is still proven to compile even with
+    /// no `[ai] verify` set. Returns `None` when nothing sensible is known, in
+    /// which case the loop simply skips verification as before.
+    pub fn derived_verify_command(&self) -> Option<String> {
+        // Prefer what has actually worked here: a remembered build, then test.
+        if let Some(cmd) = self.brain.best_command("build").or_else(|| self.brain.best_command("test")) {
+            return Some(cmd);
+        }
+        // Otherwise infer from the project's manifest files.
+        let has = |name: &str| self.root.join(name).exists();
+        if has("Cargo.toml") {
+            Some("cargo build".to_string())
+        } else if has("go.mod") {
+            Some("go build ./...".to_string())
+        } else if has("package.json") && npm_has_build_script(&self.root) {
+            Some("npm run build".to_string())
+        } else {
+            None
+        }
     }
 
     /// Run the verification command, reporting whether it passed and its
@@ -1460,6 +1530,19 @@ fn classify_command(command: &str) -> &'static str {
     } else {
         "other"
     }
+}
+
+/// Whether `package.json` at the project root declares a `build` script, so
+/// `npm run build` is a meaningful verification command (many JS projects have
+/// no build step, and running a missing script fails spuriously).
+fn npm_has_build_script(root: &Path) -> bool {
+    let Ok(raw) = std::fs::read_to_string(root.join("package.json")) else {
+        return false;
+    };
+    serde_json::from_str::<Value>(&raw)
+        .ok()
+        .and_then(|v| v["scripts"]["build"].as_str().map(|s| !s.trim().is_empty()))
+        .unwrap_or(false)
 }
 
 /// The user's login shell, honoring `$SHELL` (as their terminal does) and
@@ -1747,6 +1830,47 @@ mod tests {
         let pending = tb.brain.pending();
         let p = pending.iter().find(|p| p.file == "src/b.rs").expect("b.rs proposed");
         assert!(p.tags.contains(&"core".to_string()));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn derived_verify_prefers_remembered_then_manifest() {
+        let (root, tb) = toolbox();
+        // No manifest, no history yet → nothing to verify with.
+        assert_eq!(tb.derived_verify_command(), None);
+        assert!(!tb.verify_configured());
+
+        // A Cargo.toml makes `cargo build` the inferred command.
+        std::fs::write(root.join("Cargo.toml"), "[package]\nname='x'\n").unwrap();
+        assert_eq!(tb.derived_verify_command().as_deref(), Some("cargo build"));
+
+        // A remembered, successful build command wins over the manifest guess.
+        tb.brain.record_command("cargo build --workspace", "build", true).unwrap();
+        assert_eq!(tb.derived_verify_command().as_deref(), Some("cargo build --workspace"));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn chained_edits_in_edit_mode_stack_instead_of_dropping() {
+        let (root, tb) = toolbox();
+        // Edit mode: proposals stay pending on disk-untouched files.
+        tb.set_mode(Mode::Edit);
+        std::fs::write(root.join("src/c.rs"), "let a = 1;\nlet b = 2;\n").unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        tb.read_file(&json!({"path": "src/c.rs"})).unwrap();
+
+        // Two edits to different lines of the same file, both pending.
+        rt.block_on(tb.edit_file(&json!({"path": "src/c.rs", "old": "let a = 1;", "new": "let a = 10;"}))).unwrap();
+        rt.block_on(tb.edit_file(&json!({"path": "src/c.rs", "old": "let b = 2;", "new": "let b = 20;"}))).unwrap();
+
+        // The newest proposal must contain BOTH edits — the second built on the
+        // first instead of reverting to the on-disk original.
+        let latest = tb.changes_since(0).pop().unwrap();
+        let proposed = std::fs::read_to_string(&latest.proposed).unwrap();
+        assert!(proposed.contains("let a = 10;"), "first edit was dropped: {proposed}");
+        assert!(proposed.contains("let b = 20;"), "second edit missing: {proposed}");
 
         let _ = std::fs::remove_dir_all(&root);
     }

@@ -34,7 +34,7 @@ use tokio::sync::mpsc;
 
 use crate::config::{AiConfig, CIABATTA_DIR, CONFIG_FILE, CiabattaConfig};
 use brain::Brain;
-use provider::{Provider, Turn};
+use provider::{AssistantTurn, Provider, Turn};
 use session::Conversation;
 use tools::ToolBox;
 
@@ -151,10 +151,15 @@ pub struct Assistant {
     /// One line on what the assistant is doing right now (burn-in progress
     /// etc.), surfaced live on the mind-map page's status pill.
     activity: std::sync::Mutex<Option<String>>,
+    /// Cap on model⇄tool round trips per question (from `[ai] max_tool_rounds`,
+    /// default [`DEFAULT_MAX_TOOL_ROUNDS`]).
+    max_rounds: usize,
 }
 
-/// Cap on model⇄tool round trips per question, so a confused model can't spin.
-const MAX_TOOL_ROUNDS: usize = 20;
+/// Default cap on model⇄tool round trips per question, so a confused model can't
+/// spin — but high enough that a real multi-file refactor isn't guillotined
+/// half-done. Overridable via `[ai] max_tool_rounds`.
+const DEFAULT_MAX_TOOL_ROUNDS: usize = 50;
 
 /// Cap on fix-then-reverify cycles after a code change, so a task whose
 /// verification can't be made to pass can't loop forever or exhaust the round
@@ -187,12 +192,17 @@ impl Assistant {
             brain.clone(),
             config.clone(),
         ));
+        let max_rounds = ai_cfg
+            .max_tool_rounds
+            .filter(|&n| n > 0)
+            .unwrap_or(DEFAULT_MAX_TOOL_ROUNDS);
         Ok(Arc::new(Self {
             provider,
             toolbox,
             brain,
             conversation: tokio::sync::Mutex::new(conversation),
             activity: std::sync::Mutex::new(None),
+            max_rounds,
         }))
     }
 
@@ -235,32 +245,36 @@ impl Assistant {
         self.activity.lock().unwrap().clone()
     }
 
-    /// The system prompt, rebuilt per question so it always reflects the
-    /// current mind map.
+    /// The system prompt. Structured as a stable prefix (identical every request
+    /// and across modes) followed by a trailing "current session context" block
+    /// holding the only volatile pieces — the working mode and the live mind
+    /// map. Keeping the prefix byte-for-byte stable lets an OpenAI-compatible
+    /// endpoint's automatic prefix cache (and any future Claude cache
+    /// breakpoint) hit, which is what makes long sessions fast and cheap enough
+    /// to actually run to completion.
     fn system_prompt(&self) -> String {
         let mode_rules = match self.mode() {
             Mode::Plan => {
                 "MODE: plan. Research only — read, search, and tag, but do NOT propose \
-                 code changes (the tool is unavailable). Finish with a concrete numbered \
-                 plan: for each step, the file and what would change and why."
+                 code changes (`edit_file` / `propose_change` are refused in this mode). \
+                 Finish with a concrete numbered plan: for each step, the file and what \
+                 would change and why."
             }
             Mode::Edit => {
-                "MODE: edit. Make code changes with `propose_change`, giving the complete \
-                 new file content. Each change is shown to the user as a diff and lands \
+                "MODE: edit. Make code changes with `edit_file` (or `propose_change` for new \
+                 files / full rewrites). Each change is shown to the user as a diff and lands \
                  only after they accept it; if they reject one, they will tell you why — \
                  take that guidance and re-propose. Briefly explain every change."
             }
             Mode::AutoAccept => {
-                "MODE: auto-accept. Changes you make with `propose_change` are written to \
-                 the working tree immediately. Be surgical: keep every file consistent \
-                 and compilable, and summarize what you changed."
+                "MODE: auto-accept. Changes you make with `edit_file` / `propose_change` are \
+                 written to the working tree immediately. Be surgical: keep every file \
+                 consistent and compilable, and summarize what you changed."
             }
         };
         format!(
             "You are the ciabatta AI assistant: an AI pair developer embedded in a \
              command-line tool, working inside one project on the user's machine.\n\
-             \n\
-             {mode_rules}\n\
              \n\
              How to work:\n\
              1. Prefer `suggest_files` (the architecture mind map) to locate code: it returns \
@@ -313,7 +327,10 @@ impl Assistant {
              /tmp (your scratch space for bespoke, throwaway files). Anything outside those \
              is off-limits and tool calls to it will be refused.\n\
              \n\
-             Current architecture map:\n{map}",
+             === Current session context ===\n\
+             {mode_rules}\n\
+             \n\
+             Architecture map:\n{map}",
             map = self.brain.summary_for_prompt(),
         )
     }
@@ -329,12 +346,6 @@ impl Assistant {
         let history = &mut conversation.turns;
         history.push(Turn::User(question.to_string()));
 
-        // Keep long sessions inside the context window: fold older turns into a
-        // summary before we start spending model rounds on this question.
-        if let Some(note) = compaction::maybe_compact(&self.provider, history).await {
-            let _ = events.send(AiEvent::Status(note)).await;
-        }
-
         let mut answer = String::new();
         // The number of change proposals before this question, so we can tell
         // whether the model actually touched code (and thus needs verifying).
@@ -342,7 +353,14 @@ impl Assistant {
         // Bounded fix-then-reverify cycles, so a task that can't be made to pass
         // can't burn the whole tool-round budget or loop forever.
         let mut verify_attempts = 0usize;
-        for round in 0..MAX_TOOL_ROUNDS {
+        for round in 0..self.max_rounds {
+            // Fold older turns into a summary if the transcript has grown past
+            // the model's budget — checked every round, since a single question
+            // can accumulate many large tool results before it finishes.
+            if let Some(note) = compaction::maybe_compact(&self.provider, history).await {
+                let _ = events.send(AiEvent::Status(note)).await;
+            }
+
             let turn = match self.provider.chat(&self.system_prompt(), history, &specs).await {
                 Ok(t) => t,
                 Err(e) => {
@@ -355,16 +373,57 @@ impl Assistant {
                     return Err(e);
                 }
             };
+            if let Some(usage) = self.provider.last_usage() {
+                let _ = events.send(AiEvent::Status(format!("tokens: {}", usage.label()))).await;
+            }
+
+            // A reply cut off at the token ceiling may carry an incomplete tool
+            // call — running it would splice truncated text. Drop the partial
+            // calls, keep the prose, and ask the model to continue.
+            if turn.truncated {
+                let _ = events
+                    .send(AiEvent::Status(
+                        "response hit the length limit — asking the assistant to continue".to_string(),
+                    ))
+                    .await;
+                history.push(Turn::Assistant(AssistantTurn {
+                    text: turn.text,
+                    ..Default::default()
+                }));
+                history.push(Turn::User(
+                    "Your previous response was cut off at the length limit before you finished. \
+                     Continue from where you stopped; if you were about to call a tool, issue the \
+                     complete call now."
+                        .to_string(),
+                ));
+                continue;
+            }
 
             if turn.refused || turn.tool_calls.is_empty() {
                 // The model wants to finish. If it changed code this session,
                 // prove the project still builds/tests before we accept the
                 // answer — and if it doesn't, hand the failure back so the model
                 // fixes it rather than shipping a broken tree.
-                let changed = self.toolbox.changes_len() > changes_at_start;
+                // Only verify when changes actually landed on disk this turn —
+                // that's auto-accept mode. In edit/plan mode proposals sit
+                // pending under `.ciabatta/ai/suggestions/` and the working tree
+                // is untouched, so building it would prove nothing (and could
+                // falsely "pass"); the user builds after accepting.
+                let changed = self.toolbox.changes_len() > changes_at_start
+                    && self.mode() == Mode::AutoAccept;
+                // Use the configured verify command; if the user set `[ai] verify`
+                // to empty they mean "no gate", so only fall back to an
+                // auto-derived command when they left it unset entirely.
+                let verify = self.toolbox.verify_command().or_else(|| {
+                    if self.toolbox.verify_configured() {
+                        None
+                    } else {
+                        self.toolbox.derived_verify_command()
+                    }
+                });
                 if changed
                     && verify_attempts < MAX_VERIFY_ATTEMPTS
-                    && let Some(cmd) = self.toolbox.verify_command()
+                    && let Some(cmd) = verify
                 {
                     verify_attempts += 1;
                     let _ = events
@@ -429,9 +488,9 @@ impl Assistant {
             }
             history.push(Turn::ToolResults(results));
 
-            if round == MAX_TOOL_ROUNDS - 1 {
+            if round == self.max_rounds - 1 {
                 answer = "I hit the tool-call limit before finishing — try narrowing the \
-                          question."
+                          question, or raise `max_tool_rounds` under [ai] in ciabatta.toml."
                     .to_string();
             }
         }
@@ -976,6 +1035,8 @@ pub fn run_setup(root: &Path) -> Result<()> {
         tls_verify,
         images,
         verify: None,
+        max_tokens: None,
+        max_tool_rounds: None,
     };
 
     write_ai_config(root, &ai)?;

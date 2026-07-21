@@ -94,6 +94,17 @@ pub struct AiConfig {
     /// an empty string to disable the verification gate entirely.
     #[serde(default)]
     pub verify: Option<String>,
+    /// Ceiling on the model's reply length per request. Claude requires an
+    /// explicit value (default 8192); for OpenAI-compatible endpoints it is only
+    /// sent when set, since some local servers reject it. Raise it if large
+    /// edits or plans are being truncated mid-tool-call.
+    #[serde(default)]
+    pub max_tokens: Option<u64>,
+    /// Cap on model⇄tool round trips per question (default 50). A large refactor
+    /// spanning many files can exceed the default; raise it for long autonomous
+    /// tasks, lower it to fail fast on a confused model.
+    #[serde(default)]
+    pub max_tool_rounds: Option<usize>,
 }
 
 impl Default for AiConfig {
@@ -106,6 +117,8 @@ impl Default for AiConfig {
             tls_verify: true,
             images: Vec::new(),
             verify: None,
+            max_tokens: None,
+            max_tool_rounds: None,
         }
     }
 }

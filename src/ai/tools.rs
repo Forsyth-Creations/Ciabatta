@@ -1717,7 +1717,36 @@ fn binary_on_path(name: &str) -> bool {
     let Some(paths) = std::env::var_os("PATH") else {
         return false;
     };
-    std::env::split_paths(&paths).any(|dir| dir.join(name).is_file())
+    std::env::split_paths(&paths).any(|dir| {
+        // A bare name (`rg`) matches directly on Unix. On Windows the executable
+        // carries an extension (`rg.exe`), so also try each PATHEXT suffix —
+        // otherwise ripgrep is never detected and we fall back to a `grep` that
+        // may not exist or handle Windows paths the same way.
+        if dir.join(name).is_file() {
+            return true;
+        }
+        executable_extensions()
+            .iter()
+            .any(|ext| dir.join(format!("{name}{ext}")).is_file())
+    })
+}
+
+/// Executable suffixes to try after a bare binary name. Empty on Unix; derived
+/// from `PATHEXT` (falling back to the usual set) on Windows.
+fn executable_extensions() -> Vec<String> {
+    if !cfg!(windows) {
+        return Vec::new();
+    }
+    std::env::var("PATHEXT")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| s.split(';').map(|e| e.trim().to_string()).collect())
+        .unwrap_or_else(|| {
+            [".COM", ".EXE", ".BAT", ".CMD"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect()
+        })
 }
 
 /// Strip the absolute project prefix out of tool output so the model (and the

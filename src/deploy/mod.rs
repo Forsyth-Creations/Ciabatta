@@ -285,15 +285,18 @@ fn cond_var<'a>(name: &str, env: &'a HashMap<String, String>) -> &'a str {
 /// non-empty, and not one of the common falsey words.
 fn cond_truthy(val: &str) -> bool {
     let v = val.trim();
-    !v.is_empty() && !matches!(v.to_ascii_lowercase().as_str(), "false" | "0" | "no" | "off")
+    !v.is_empty()
+        && !matches!(
+            v.to_ascii_lowercase().as_str(),
+            "false" | "0" | "no" | "off"
+        )
 }
 
 /// Strip a single pair of matching surrounding quotes from a comparison operand.
 fn cond_unquote(s: &str) -> &str {
     let s = s.trim();
     if s.len() >= 2
-        && ((s.starts_with('"') && s.ends_with('"'))
-            || (s.starts_with('\'') && s.ends_with('\'')))
+        && ((s.starts_with('"') && s.ends_with('"')) || (s.starts_with('\'') && s.ends_with('\'')))
     {
         &s[1..s.len() - 1]
     } else {
@@ -1038,14 +1041,11 @@ REQUIRED_ENV = ["API_TOKEN", "REGION"]
 
         // A is already resolved (and non-empty) so it must not be clobbered; B is
         // overridden by the later file; C comes from the first file.
-        let base: HashMap<String, String> =
-            [("A".to_string(), "existing".to_string())].into_iter().collect();
-        let merged = load_env_files(
-            &["a.env".to_string(), "b.env".to_string()],
-            &dir,
-            &base,
-        )
-        .unwrap();
+        let base: HashMap<String, String> = [("A".to_string(), "existing".to_string())]
+            .into_iter()
+            .collect();
+        let merged =
+            load_env_files(&["a.env".to_string(), "b.env".to_string()], &dir, &base).unwrap();
         assert_eq!(merged.get("A").unwrap(), "existing");
         assert_eq!(merged.get("B").unwrap(), "from_b");
         assert_eq!(merged.get("C").unwrap(), "from_a");
@@ -1055,9 +1055,13 @@ REQUIRED_ENV = ["API_TOKEN", "REGION"]
 
     #[test]
     fn load_env_files_errors_on_missing_file() {
-        let err = load_env_files(&["nope.env".to_string()], Path::new("/proj"), &HashMap::new())
-            .unwrap_err()
-            .to_string();
+        let err = load_env_files(
+            &["nope.env".to_string()],
+            Path::new("/proj"),
+            &HashMap::new(),
+        )
+        .unwrap_err()
+        .to_string();
         assert!(err.contains("nope.env"));
     }
 
@@ -1101,8 +1105,9 @@ env_file = ".env.flow"
         std::fs::write(dir.join(".env.dev"), "TARGET=dev-host\n").unwrap();
         std::fs::write(dir.join(".env.prod"), "TARGET=prod-host\n").unwrap();
 
-        let env: HashMap<String, String> =
-            [("DEPLOY_ENV".to_string(), "prod".to_string())].into_iter().collect();
+        let env: HashMap<String, String> = [("DEPLOY_ENV".to_string(), "prod".to_string())]
+            .into_iter()
+            .collect();
         let path = crate::config::substitute_vars(".env.{DEPLOY_ENV}", &env).unwrap();
         assert_eq!(path, ".env.prod");
         let merged = load_env_files(&[path], &dir, &env).unwrap();
@@ -1143,8 +1148,9 @@ env_file = ".env.flow"
 
     #[test]
     fn step_skip_reason_applies_when_and_skip_if() {
-        let ci: HashMap<String, String> =
-            [("IN_CI".to_string(), "true".to_string())].into_iter().collect();
+        let ci: HashMap<String, String> = [("IN_CI".to_string(), "true".to_string())]
+            .into_iter()
+            .collect();
         let local: HashMap<String, String> = HashMap::new();
 
         // skip_if fires only when its condition holds.

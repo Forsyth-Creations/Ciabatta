@@ -30,8 +30,8 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use crossterm::{
     event::{
-        DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture, Event,
-        EventStream, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind,
+        DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+        Event, EventStream, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind,
     },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
@@ -69,7 +69,6 @@ const CRUST: Color = Color::Rgb(0xE7, 0xB6, 0x5A);
 const CRUMB: Color = Color::Rgb(0xF6, 0xE3, 0xB8);
 const FACE: Color = Color::Rgb(0x7A, 0x4A, 0x1E);
 
-
 /// Split one mascot line into colored spans by classifying each character:
 /// letters are crumb, the eyes/smile are the dark face, everything else crust.
 fn banner_spans(line: &str) -> Vec<Span<'static>> {
@@ -88,7 +87,10 @@ fn banner_spans(line: &str) -> Vec<Span<'static>> {
     for ch in line.chars() {
         let color = class(ch);
         if run_color != Some(color) && !run.is_empty() {
-            spans.push(Span::styled(std::mem::take(&mut run), Style::default().fg(run_color.unwrap())));
+            spans.push(Span::styled(
+                std::mem::take(&mut run),
+                Style::default().fg(run_color.unwrap()),
+            ));
         }
         run_color = Some(color);
         run.push(ch);
@@ -129,20 +131,76 @@ struct SlashCommand {
 
 /// Commands offered in the `/` menu, in display order.
 const SLASH_COMMANDS: &[SlashCommand] = &[
-    SlashCommand { name: "report", args: "[days]", help: "summarize repo changes (^S saves a PDF)" },
-    SlashCommand { name: "tag", args: "<name> [desc]", help: "add a mind-map tag; AI connects files" },
-    SlashCommand { name: "burn", args: "[review] [n]", help: "learn the whole codebase into the mind map" },
-    SlashCommand { name: "analyze", args: "", help: "add dependency analysis to the mind map" },
-    SlashCommand { name: "new", args: "", help: "start a fresh conversation" },
-    SlashCommand { name: "list", args: "", help: "list saved conversations" },
-    SlashCommand { name: "delete", args: "[id]", help: "delete a conversation (current if no id)" },
-    SlashCommand { name: "clear", args: "", help: "clear the screen" },
-    SlashCommand { name: "plan", args: "", help: "switch to plan mode" },
-    SlashCommand { name: "edit", args: "", help: "switch to edit mode" },
-    SlashCommand { name: "auto", args: "", help: "switch to auto-accept mode" },
-    SlashCommand { name: "mode", args: "", help: "show the current mode" },
-    SlashCommand { name: "map", args: "", help: "show the mind-map URL" },
-    SlashCommand { name: "help", args: "", help: "list commands" },
+    SlashCommand {
+        name: "report",
+        args: "[days]",
+        help: "summarize repo changes (^S saves a PDF)",
+    },
+    SlashCommand {
+        name: "tag",
+        args: "<name> [desc]",
+        help: "add a mind-map tag; AI connects files",
+    },
+    SlashCommand {
+        name: "burn",
+        args: "[review] [n]",
+        help: "learn the whole codebase into the mind map",
+    },
+    SlashCommand {
+        name: "analyze",
+        args: "",
+        help: "add dependency analysis to the mind map",
+    },
+    SlashCommand {
+        name: "new",
+        args: "",
+        help: "start a fresh conversation",
+    },
+    SlashCommand {
+        name: "list",
+        args: "",
+        help: "list saved conversations",
+    },
+    SlashCommand {
+        name: "delete",
+        args: "[id]",
+        help: "delete a conversation (current if no id)",
+    },
+    SlashCommand {
+        name: "clear",
+        args: "",
+        help: "clear the screen",
+    },
+    SlashCommand {
+        name: "plan",
+        args: "",
+        help: "switch to plan mode",
+    },
+    SlashCommand {
+        name: "edit",
+        args: "",
+        help: "switch to edit mode",
+    },
+    SlashCommand {
+        name: "auto",
+        args: "",
+        help: "switch to auto-accept mode",
+    },
+    SlashCommand {
+        name: "mode",
+        args: "",
+        help: "show the current mode",
+    },
+    SlashCommand {
+        name: "map",
+        args: "",
+        help: "show the mind-map URL",
+    },
+    SlashCommand {
+        name: "help",
+        args: "",
+        help: "list commands",
+    },
 ];
 
 struct App {
@@ -195,7 +253,8 @@ impl App {
         if self.busy {
             return;
         }
-        self.input.push_str(&data.replace("\r\n", "\n").replace('\r', "\n"));
+        self.input
+            .push_str(&data.replace("\r\n", "\n").replace('\r', "\n"));
         self.slash_index = 0;
     }
 
@@ -208,13 +267,18 @@ impl App {
     /// Commands matching the typed prefix, in menu order.
     fn slash_matches(&self) -> Vec<&'static SlashCommand> {
         let token = self.input.trim_start_matches('/').to_lowercase();
-        SLASH_COMMANDS.iter().filter(|c| c.name.starts_with(&token)).collect()
+        SLASH_COMMANDS
+            .iter()
+            .filter(|c| c.name.starts_with(&token))
+            .collect()
     }
 
     /// The currently highlighted command, if the menu is active and non-empty.
     fn slash_selected(&self) -> Option<&'static SlashCommand> {
         let matches = self.slash_matches();
-        matches.get(self.slash_index.min(matches.len().saturating_sub(1))).copied()
+        matches
+            .get(self.slash_index.min(matches.len().saturating_sub(1)))
+            .copied()
     }
 
     /// The command being typed once arguments have started (a leading `/` plus
@@ -246,8 +310,8 @@ impl App {
 
     /// Scroll up (`+`) or down (`-`), clamped to the conversation.
     fn scroll_by(&mut self, delta: i32) {
-        self.scroll_up = (i32::from(self.scroll_up) + delta).clamp(0, i32::from(self.chat_top))
-            as u16;
+        self.scroll_up =
+            (i32::from(self.scroll_up) + delta).clamp(0, i32::from(self.chat_top)) as u16;
     }
 
     /// True while the newest answer is still wiping in — used to keep redraws
@@ -266,7 +330,12 @@ pub async fn run(assistant: Arc<Assistant>, graph_url: Option<String>) -> Result
     // Bracketed paste makes the terminal deliver a paste as one `Event::Paste`
     // string instead of a burst of keystrokes — without it, newlines in pasted
     // code arrive as Enter presses and submit the paste line by line.
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture, EnableBracketedPaste)?;
+    execute!(
+        stdout,
+        EnterAlternateScreen,
+        EnableMouseCapture,
+        EnableBracketedPaste
+    )?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
@@ -323,7 +392,11 @@ async fn chat_loop(
     if !transcript.is_empty() {
         app.push(
             Speaker::Status,
-            format!("resumed conversation {} — {} earlier turns below", assistant.conversation_id().await, transcript.len()),
+            format!(
+                "resumed conversation {} — {} earlier turns below",
+                assistant.conversation_id().await,
+                transcript.len()
+            ),
         );
         for turn in &transcript {
             match turn {
@@ -350,7 +423,11 @@ async fn chat_loop(
 
         // Redraw briskly while something is animating (the thinking spinner or a
         // fresh answer wiping in), and idle back to a slow tick otherwise.
-        let tick = if app.busy || app.reveal_active() { 66 } else { 250 };
+        let tick = if app.busy || app.reveal_active() {
+            66
+        } else {
+            250
+        };
         let sleep = tokio::time::sleep(Duration::from_millis(tick));
         tokio::select! {
             maybe_event = event_stream.next() => {
@@ -796,16 +873,25 @@ fn resolve_first_change(app: &mut App, assistant: &Assistant, accept: bool) {
 /// the project root.
 fn save_report_pdf(app: &mut App, assistant: &Assistant) {
     let Some(answer) = app.last_answer.clone() else {
-        app.push(Speaker::Status, "nothing to save yet — run /report first".to_string());
+        app.push(
+            Speaker::Status,
+            "nothing to save yet — run /report first".to_string(),
+        );
         return;
     };
-    let name = format!("ciabatta-report-{}.pdf", chrono::Local::now().format("%Y%m%d-%H%M%S"));
+    let name = format!(
+        "ciabatta-report-{}.pdf",
+        chrono::Local::now().format("%Y%m%d-%H%M%S")
+    );
     let path = assistant.toolbox.root.join(&name);
     // Include the git activity as an appendix so the PDF stands on its own.
     let activity = crate::git::changes_since(&assistant.toolbox.root, app.last_report_days)
         .unwrap_or_default();
     match super::pdf::write_report(&path, app.last_report_days, &answer, &activity) {
-        Ok(()) => app.push(Speaker::Status, format!("📄 saved report to {}", path.display())),
+        Ok(()) => app.push(
+            Speaker::Status,
+            format!("📄 saved report to {}", path.display()),
+        ),
         Err(e) => app.push(Speaker::Error, e.to_string()),
     }
 }
@@ -817,7 +903,10 @@ fn revert_last_change(app: &mut App, assistant: &Assistant) {
             Speaker::Status,
             format!("↩ reverted change to {} (restored from snapshot)", c.file),
         ),
-        Ok(None) => app.push(Speaker::Status, "nothing to undo — no applied changes".to_string()),
+        Ok(None) => app.push(
+            Speaker::Status,
+            "nothing to undo — no applied changes".to_string(),
+        ),
         Err(e) => app.push(Speaker::Error, e.to_string()),
     }
 }
@@ -825,7 +914,10 @@ fn revert_last_change(app: &mut App, assistant: &Assistant) {
 /// Open every suggested change (latest per file) as a VS Code diff tab.
 fn open_diffs_in_vscode(app: &mut App) {
     if app.suggestions.is_empty() {
-        app.push(Speaker::Status, "no suggested changes to open yet".to_string());
+        app.push(
+            Speaker::Status,
+            "no suggested changes to open yet".to_string(),
+        );
         return;
     }
     let mut latest: std::collections::BTreeMap<String, &ChangeSuggestion> =
@@ -855,7 +947,10 @@ fn open_diffs_in_vscode(app: &mut App) {
     } else {
         app.push(
             Speaker::Status,
-            format!("opened {opened} diff{} in VS Code", if opened == 1 { "" } else { "s" }),
+            format!(
+                "opened {opened} diff{} in VS Code",
+                if opened == 1 { "" } else { "s" }
+            ),
         );
     }
 }
@@ -948,9 +1043,15 @@ fn render_slash_menu(f: &mut Frame, area: Rect, app: &App) {
             let line = Line::from(vec![
                 Span::styled(
                     label,
-                    Style::default().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(Color::Black)
+                        .bg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
                 ),
-                Span::styled(format!("  {}", c.help), Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    format!("  {}", c.help),
+                    Style::default().fg(Color::DarkGray),
+                ),
             ]);
             let block = Block::default()
                 .borders(Borders::ALL)
@@ -968,15 +1069,29 @@ fn render_slash_menu(f: &mut Frame, area: Rect, app: &App) {
         .take(rows)
         .enumerate()
         .map(|(i, c)| {
-            let label = format!(" /{}{} ", c.name, if c.args.is_empty() { String::new() } else { format!(" {}", c.args) });
+            let label = format!(
+                " /{}{} ",
+                c.name,
+                if c.args.is_empty() {
+                    String::new()
+                } else {
+                    format!(" {}", c.args)
+                }
+            );
             let label_style = if i == sel {
-                Style::default().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(Color::Yellow)
             };
             Line::from(vec![
                 Span::styled(label, label_style),
-                Span::styled(format!("  {}", c.help), Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    format!("  {}", c.help),
+                    Style::default().fg(Color::DarkGray),
+                ),
             ])
         })
         .collect();
@@ -1014,17 +1129,33 @@ fn render_burn(f: &mut Frame, area: Rect, app: &App) {
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    let [head, gauge_area, detail] =
-        Layout::vertical([Constraint::Length(1), Constraint::Length(1), Constraint::Length(1)])
-            .areas(inner);
+    let [head, gauge_area, detail] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+    ])
+    .areas(inner);
 
     // Phase + spinner + elapsed clock + running tally.
     f.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled(format!("{spin} "), Style::default().fg(CRUST).add_modifier(Modifier::BOLD)),
-            Span::styled(p.phase.label(), Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
             Span::styled(
-                format!("  ·  {:02}:{:02} elapsed  ·  {} file(s) tagged", secs / 60, secs % 60, p.tagged),
+                format!("{spin} "),
+                Style::default().fg(CRUST).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                p.phase.label(),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!(
+                    "  ·  {:02}:{:02} elapsed  ·  {} file(s) tagged",
+                    secs / 60,
+                    secs % 60,
+                    p.tagged
+                ),
                 Style::default().fg(Color::DarkGray),
             ),
         ])),
@@ -1038,7 +1169,12 @@ fn render_burn(f: &mut Frame, area: Rect, app: &App) {
         f.render_widget(
             Gauge::default()
                 .ratio(ratio)
-                .label(format!("batch {}/{}  ({:.0}%)", p.done, p.total, ratio * 100.0))
+                .label(format!(
+                    "batch {}/{}  ({:.0}%)",
+                    p.done,
+                    p.total,
+                    ratio * 100.0
+                ))
                 .gauge_style(Style::default().fg(Color::Yellow).bg(Color::Black)),
             gauge_area,
         );
@@ -1046,7 +1182,9 @@ fn render_burn(f: &mut Frame, area: Rect, app: &App) {
         f.render_widget(
             Paragraph::new(Span::styled(
                 "working… (a single long step — slow on a local model)",
-                Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
+                Style::default()
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::ITALIC),
             )),
             gauge_area,
         );
@@ -1074,7 +1212,12 @@ fn render_header(f: &mut Frame, area: Rect, assistant: &Assistant) {
         Mode::AutoAccept => Color::Red,
     };
     let title = Paragraph::new(Line::from(vec![
-        Span::styled(" ciabatta ai ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            " ciabatta ai ",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::styled(
             format!("· {} ", assistant.provider.label()),
             Style::default().fg(Color::DarkGray),
@@ -1090,7 +1233,11 @@ fn render_header(f: &mut Frame, area: Rect, assistant: &Assistant) {
     let gauge = Gauge::default()
         .ratio((confidence / 100.0).clamp(0.0, 1.0))
         .label(format!("confidence {confidence:.0}/100"))
-        .gauge_style(Style::default().fg(gauge_color(confidence)).bg(Color::Black));
+        .gauge_style(
+            Style::default()
+                .fg(gauge_color(confidence))
+                .bg(Color::Black),
+        );
     f.render_widget(gauge, gauge_area);
 }
 
@@ -1116,7 +1263,10 @@ fn render_markdown_line(line: &str, base: Style) -> Vec<Span<'static>> {
     let hashes = trimmed.chars().take_while(|&c| c == '#').count();
     if (1..=6).contains(&hashes) && trimmed[hashes..].starts_with(' ') {
         let mut spans = vec![Span::styled(indent.to_string(), base)];
-        spans.extend(inline_md(trimmed[hashes..].trim_start(), base.add_modifier(Modifier::BOLD)));
+        spans.extend(inline_md(
+            trimmed[hashes..].trim_start(),
+            base.add_modifier(Modifier::BOLD),
+        ));
         return spans;
     }
 
@@ -1152,7 +1302,10 @@ fn inline_md(text: &str, base: Style) -> Vec<Span<'static>> {
             && let Some(close) = find_delim_close(&chars, i + 1, '`', 1, false)
         {
             push_buf(&mut buf, &mut spans, base);
-            spans.push(Span::styled(chars[i + 1..close].iter().collect::<String>(), base.fg(CODE)));
+            spans.push(Span::styled(
+                chars[i + 1..close].iter().collect::<String>(),
+                base.fg(CODE),
+            ));
             i = close + 1;
             continue;
         }
@@ -1160,7 +1313,9 @@ fn inline_md(text: &str, base: Style) -> Vec<Span<'static>> {
         // Bold: **...** or __...__ (the delimiter must hug non-space text).
         if (c == '*' || c == '_')
             && chars.get(i + 1) == Some(&c)
-            && chars.get(i + 2).is_some_and(|n| !n.is_whitespace() && *n != c)
+            && chars
+                .get(i + 2)
+                .is_some_and(|n| !n.is_whitespace() && *n != c)
             && let Some(close) = find_delim_close(&chars, i + 2, c, 2, true)
         {
             push_buf(&mut buf, &mut spans, base);
@@ -1172,7 +1327,9 @@ fn inline_md(text: &str, base: Style) -> Vec<Span<'static>> {
 
         // Italic: *...* or _..._.
         if (c == '*' || c == '_')
-            && chars.get(i + 1).is_some_and(|n| !n.is_whitespace() && *n != c)
+            && chars
+                .get(i + 1)
+                .is_some_and(|n| !n.is_whitespace() && *n != c)
             && let Some(close) = find_delim_close(&chars, i + 1, c, 1, true)
         {
             push_buf(&mut buf, &mut spans, base);
@@ -1195,7 +1352,13 @@ fn inline_md(text: &str, base: Style) -> Vec<Span<'static>> {
 /// Find the closing delimiter run (`len` copies of `d`) at/after `from`. When
 /// `strict` (emphasis), the run must not be extended by another `d` and its
 /// inner neighbor must be non-whitespace; when false (code), any next `d` wins.
-fn find_delim_close(chars: &[char], from: usize, d: char, len: usize, strict: bool) -> Option<usize> {
+fn find_delim_close(
+    chars: &[char],
+    from: usize,
+    d: char,
+    len: usize,
+    strict: bool,
+) -> Option<usize> {
     let mut i = from;
     while i + len <= chars.len() {
         let is_run = chars[i..i + len].iter().all(|&x| x == d);
@@ -1219,17 +1382,28 @@ fn push_buf(buf: &mut String, spans: &mut Vec<Span<'static>>, style: Style) {
 fn render_chat(f: &mut Frame, area: Rect, app: &mut App) {
     // The newest assistant answer is revealed with a left-to-right typewriter
     // wipe; find it so we can trim its text to the current reveal point.
-    let last_assistant = app.entries.iter().rposition(|e| e.speaker == Speaker::Assistant);
+    let last_assistant = app
+        .entries
+        .iter()
+        .rposition(|e| e.speaker == Speaker::Assistant);
     let reveal = app.reveal_since.map(|t| t.elapsed().as_secs_f32());
 
     let mut lines: Vec<Line> = Vec::new();
     for (idx, entry) in app.entries.iter().enumerate() {
         let (prefix, style) = match entry.speaker {
-            Speaker::You => ("you ▸ ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            Speaker::You => (
+                "you ▸ ",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Speaker::Assistant => ("ai  ▸ ", Style::default().fg(Color::Yellow)),
             Speaker::Status | Speaker::Diff => ("      ", Style::default().fg(Color::DarkGray)),
             Speaker::Error => ("err ▸ ", Style::default().fg(Color::Red)),
-            Speaker::Banner => ("   ", Style::default().fg(CRUST).add_modifier(Modifier::BOLD)),
+            Speaker::Banner => (
+                "   ",
+                Style::default().fg(CRUST).add_modifier(Modifier::BOLD),
+            ),
         };
 
         // Substitute a partially-revealed copy for the answer being typed in.
@@ -1258,7 +1432,9 @@ fn render_chat(f: &mut Frame, area: Rect, app: &mut App) {
                 // Diff lines get git-style coloring by their first character.
                 Speaker::Diff => {
                     if raw.starts_with("+++") || raw.starts_with("---") {
-                        Style::default().fg(Color::White).add_modifier(Modifier::BOLD)
+                        Style::default()
+                            .fg(Color::White)
+                            .add_modifier(Modifier::BOLD)
                     } else if raw.starts_with('+') {
                         Style::default().fg(Color::Green)
                     } else if raw.starts_with('-') {
@@ -1316,7 +1492,9 @@ fn render_chat(f: &mut Frame, area: Rect, app: &mut App) {
             ),
             Span::styled(
                 text,
-                Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
+                Style::default()
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::ITALIC),
             ),
         ]));
     }
@@ -1328,7 +1506,11 @@ fn render_chat(f: &mut Frame, area: Rect, app: &mut App) {
     // block's borders) rather than re-deriving the wrap by hand.
     let inner_width = area.width.saturating_sub(2).max(1);
     let chat = Paragraph::new(lines)
-        .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(Color::DarkGray)))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::DarkGray)),
+        )
         .wrap(Wrap { trim: false });
     // `line_count` includes the top+bottom border rows; drop them to get the
     // number of text lines, then hold the view against the inner height.
@@ -1381,7 +1563,10 @@ fn render_pending(f: &mut Frame, area: Rect, assistant: &Assistant) {
                 format!(" → [{}] ", p.tags.join(", ")),
                 Style::default().fg(Color::Yellow),
             ),
-            Span::styled("Ctrl-Y accept · Ctrl-N reject", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                "Ctrl-Y accept · Ctrl-N reject",
+                Style::default().fg(Color::DarkGray),
+            ),
         ])
     }));
     lines.truncate(area.height as usize);
@@ -1401,7 +1586,11 @@ fn render_input(f: &mut Frame, area: Rect, app: &App) {
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .title(if app.busy { " waiting for the model… " } else { " ask " })
+                .title(if app.busy {
+                    " waiting for the model… "
+                } else {
+                    " ask "
+                })
                 .border_style(Style::default().fg(if app.busy {
                     Color::DarkGray
                 } else {
@@ -1450,7 +1639,10 @@ mod tests {
         assert_eq!(plain(&spans), "a bold and italic text");
         let bold = spans.iter().find(|s| s.content.as_ref() == "bold").unwrap();
         assert!(bold.style.add_modifier.contains(Modifier::BOLD));
-        let italic = spans.iter().find(|s| s.content.as_ref() == "italic").unwrap();
+        let italic = spans
+            .iter()
+            .find(|s| s.content.as_ref() == "italic")
+            .unwrap();
         assert!(italic.style.add_modifier.contains(Modifier::ITALIC));
     }
 
@@ -1458,16 +1650,38 @@ mod tests {
     fn underscore_emphasis_works_too() {
         let spans = inline_md("__b__ and _i_", Style::default());
         assert_eq!(plain(&spans), "b and i");
-        assert!(spans.iter().find(|s| s.content.as_ref() == "b").unwrap().style.add_modifier.contains(Modifier::BOLD));
-        assert!(spans.iter().find(|s| s.content.as_ref() == "i").unwrap().style.add_modifier.contains(Modifier::ITALIC));
+        assert!(
+            spans
+                .iter()
+                .find(|s| s.content.as_ref() == "b")
+                .unwrap()
+                .style
+                .add_modifier
+                .contains(Modifier::BOLD)
+        );
+        assert!(
+            spans
+                .iter()
+                .find(|s| s.content.as_ref() == "i")
+                .unwrap()
+                .style
+                .add_modifier
+                .contains(Modifier::ITALIC)
+        );
     }
 
     #[test]
     fn literal_and_unclosed_markers_are_left_alone() {
         // A lone `*` around spaces is arithmetic, not emphasis.
-        assert_eq!(plain(&inline_md("2 * 3 = 6", Style::default())), "2 * 3 = 6");
+        assert_eq!(
+            plain(&inline_md("2 * 3 = 6", Style::default())),
+            "2 * 3 = 6"
+        );
         // An unterminated run (e.g. mid-reveal) renders verbatim.
-        assert_eq!(plain(&inline_md("**oops unclosed", Style::default())), "**oops unclosed");
+        assert_eq!(
+            plain(&inline_md("**oops unclosed", Style::default())),
+            "**oops unclosed"
+        );
     }
 
     #[test]
@@ -1483,7 +1697,11 @@ mod tests {
     fn headings_and_bullets_are_reshaped() {
         let heading = render_markdown_line("## Big Title", Style::default());
         assert_eq!(plain(&heading), "Big Title");
-        assert!(heading.iter().any(|s| s.style.add_modifier.contains(Modifier::BOLD)));
+        assert!(
+            heading
+                .iter()
+                .any(|s| s.style.add_modifier.contains(Modifier::BOLD))
+        );
 
         let bullet = render_markdown_line("- an item", Style::default());
         assert_eq!(plain(&bullet), "• an item");

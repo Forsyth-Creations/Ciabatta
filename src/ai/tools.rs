@@ -144,7 +144,9 @@ impl ToolBox {
     pub fn new(root: PathBuf, brain: Arc<Brain>, config: CiabattaConfig) -> Self {
         let bounds = vec![
             root.canonicalize().unwrap_or_else(|_| root.clone()),
-            Path::new("/tmp").canonicalize().unwrap_or_else(|_| PathBuf::from("/tmp")),
+            Path::new("/tmp")
+                .canonicalize()
+                .unwrap_or_else(|_| PathBuf::from("/tmp")),
         ];
         Self {
             root,
@@ -226,7 +228,11 @@ impl ToolBox {
     /// Returns the reverted record, or `None` if nothing is applied.
     pub fn revert_last_applied(&self) -> Result<Option<ChangeSuggestion>> {
         let mut changes = self.changes.lock().unwrap();
-        let Some(change) = changes.iter_mut().rev().find(|c| c.state == ChangeState::Applied) else {
+        let Some(change) = changes
+            .iter_mut()
+            .rev()
+            .find(|c| c.state == ChangeState::Applied)
+        else {
             return Ok(None);
         };
         if change.created {
@@ -234,7 +240,9 @@ impl ToolBox {
             match std::fs::remove_file(&change.target) {
                 Ok(()) => {}
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => return Err(e).with_context(|| format!("failed to remove '{}'", change.file)),
+                Err(e) => {
+                    return Err(e).with_context(|| format!("failed to remove '{}'", change.file));
+                }
             }
         } else {
             std::fs::copy(&change.original, &change.target)
@@ -574,14 +582,22 @@ impl ToolBox {
             "list_files" => "🗂  list files".to_string(),
             "glob" => format!("🗂  glob: {}", arg("pattern")),
             "read_file" => format!("📄 read: {}", arg("path")),
-            "tag_file" => format!("🏷  tag: {} ({})", arg("path"), join_tags(&call.args["tags"])),
+            "tag_file" => format!(
+                "🏷  tag: {} ({})",
+                arg("path"),
+                join_tags(&call.args["tags"])
+            ),
             "edit_file" => format!("✏  edit: {}", arg("path")),
             "propose_change" => format!("✏  change: {}", arg("path")),
             "sandbox_run" => format!("📦 sandbox [{}]: {}", arg("image"), arg("command")),
             "run_command" => format!("⚙ run: {}", arg("command")),
             "deps" => {
                 let q = arg("query");
-                if q.is_empty() { "🔗 dependency overview".to_string() } else { format!("🔗 deps: {q}") }
+                if q.is_empty() {
+                    "🔗 dependency overview".to_string()
+                } else {
+                    format!("🔗 deps: {q}")
+                }
             }
             other => format!("⚙ {other}"),
         }
@@ -787,7 +803,10 @@ impl ToolBox {
         }
         let mut out = String::new();
         for (file, score, tags) in suggestions {
-            out.push_str(&format!("{file}  (score {score:.1}; tags: {})\n", tags.join(", ")));
+            out.push_str(&format!(
+                "{file}  (score {score:.1}; tags: {})\n",
+                tags.join(", ")
+            ));
         }
         Ok(out)
     }
@@ -810,7 +829,10 @@ impl ToolBox {
     // ─── glob ─────────────────────────────────────────────────────────────────
 
     fn glob(&self, args: &Value) -> Result<String> {
-        let pattern = args["pattern"].as_str().context("glob needs a 'pattern'")?.trim();
+        let pattern = args["pattern"]
+            .as_str()
+            .context("glob needs a 'pattern'")?
+            .trim();
         if pattern.is_empty() {
             bail!("empty glob pattern");
         }
@@ -871,7 +893,12 @@ impl ToolBox {
             end.unwrap_or(lines.len()).min(lines.len()),
         );
         let mut out = String::new();
-        for (i, line) in lines.iter().enumerate().take(to).skip(from.saturating_sub(1)) {
+        for (i, line) in lines
+            .iter()
+            .enumerate()
+            .take(to)
+            .skip(from.saturating_sub(1))
+        {
             out.push_str(&format!("{:>5} {line}\n", i + 1));
         }
         Ok(clip(&out, 24_000))
@@ -937,7 +964,9 @@ impl ToolBox {
         }
         let rel = raw_path.trim_start_matches("./");
         if !self.read_files.lock().unwrap().contains(rel) {
-            bail!("read '{raw_path}' first, then edit — I won't edit a file I haven't seen this session");
+            bail!(
+                "read '{raw_path}' first, then edit — I won't edit a file I haven't seen this session"
+            );
         }
 
         let disk = std::fs::read_to_string(&abs)
@@ -961,7 +990,9 @@ impl ToolBox {
             .unwrap()
             .iter()
             .rev()
-            .find(|c| c.target == target && matches!(c.state, ChangeState::Pending | ChangeState::Applied))
+            .find(|c| {
+                c.target == target && matches!(c.state, ChangeState::Pending | ChangeState::Applied)
+            })
             .and_then(|c| std::fs::read_to_string(&c.proposed).ok())
             .unwrap_or_else(|| disk.to_string())
     }
@@ -972,7 +1003,12 @@ impl ToolBox {
     /// snapshot the original, write the proposal and a unified diff under
     /// `.ciabatta/ai/suggestions/`, apply immediately in auto-accept mode, and
     /// record it for the front end. Shared by `propose_change` and `edit_file`.
-    async fn record_proposal(&self, raw_path: &str, new_content: &str, reason: String) -> Result<String> {
+    async fn record_proposal(
+        &self,
+        raw_path: &str,
+        new_content: &str,
+        reason: String,
+    ) -> Result<String> {
         let mode = self.mode();
         // Confine the target to the workspace or /tmp (it may not exist yet).
         let target = self.resolve_new(raw_path)?;
@@ -992,7 +1028,9 @@ impl ToolBox {
             Err(e) => return Err(e).with_context(|| format!("failed to read '{shown}'")),
         };
         if old_content == new_content {
-            return Ok(format!("no change — '{shown}' already has exactly that content"));
+            return Ok(format!(
+                "no change — '{shown}' already has exactly that content"
+            ));
         }
 
         // Relevance guard (task 2): a change to a file the assistant never read
@@ -1050,7 +1088,11 @@ impl ToolBox {
             diff,
             reason,
             created,
-            state: if applied { ChangeState::Applied } else { ChangeState::Pending },
+            state: if applied {
+                ChangeState::Applied
+            } else {
+                ChangeState::Pending
+            },
         });
 
         let note = if unrelated {
@@ -1116,7 +1158,9 @@ impl ToolBox {
     // ─── sandbox_run ────────────────────────────────────────────────────────
 
     async fn sandbox_run(&self, args: &Value) -> Result<String> {
-        let image = args["image"].as_str().context("sandbox_run needs an 'image'")?;
+        let image = args["image"]
+            .as_str()
+            .context("sandbox_run needs an 'image'")?;
         let command = args["command"]
             .as_str()
             .context("sandbox_run needs a 'command'")?;
@@ -1126,7 +1170,11 @@ impl ToolBox {
             bail!(
                 "image '{image}' is not in the configured sandbox list ({}). \
                  The user controls this list via `images` under [ai] in ciabatta.toml.",
-                if images.is_empty() { "empty".to_string() } else { images.join(", ") }
+                if images.is_empty() {
+                    "empty".to_string()
+                } else {
+                    images.join(", ")
+                }
             );
         }
 
@@ -1232,7 +1280,11 @@ impl ToolBox {
     /// string, which deliberately disables the gate). When they haven't, the
     /// loop falls back to [`Self::derived_verify_command`].
     pub fn verify_configured(&self) -> bool {
-        self.config.ai.as_ref().and_then(|a| a.verify.as_ref()).is_some()
+        self.config
+            .ai
+            .as_ref()
+            .and_then(|a| a.verify.as_ref())
+            .is_some()
     }
 
     /// A best-effort verification command when the user hasn't configured one:
@@ -1243,7 +1295,11 @@ impl ToolBox {
     /// which case the loop simply skips verification as before.
     pub fn derived_verify_command(&self) -> Option<String> {
         // Prefer what has actually worked here: a remembered build, then test.
-        if let Some(cmd) = self.brain.best_command("build").or_else(|| self.brain.best_command("test")) {
+        if let Some(cmd) = self
+            .brain
+            .best_command("build")
+            .or_else(|| self.brain.best_command("test"))
+        {
             return Some(cmd);
         }
         // Otherwise infer from the project's manifest files.
@@ -1269,7 +1325,6 @@ impl ToolBox {
             Err(e) => (false, format!("{e:#}")),
         }
     }
-
 
     // ─── deps ─────────────────────────────────────────────────────────────────
 
@@ -1299,7 +1354,11 @@ impl ToolBox {
                 .iter()
                 .filter(|n| n.category == Category::Internal && n.id != "int:root")
                 .collect();
-            let external = graph.nodes.iter().filter(|n| n.category == Category::External).count();
+            let external = graph
+                .nodes
+                .iter()
+                .filter(|n| n.category == Category::External)
+                .count();
             let mut out = format!(
                 "Dependency graph: {} internal package(s), {external} external dependency(ies). \
                  Query a file, package, or dependency name for detail.\n",
@@ -1321,10 +1380,18 @@ impl ToolBox {
                 out.push_str(&format!(
                     "\n• {}{}",
                     pkg.label,
-                    if pkg.is_workspace { " (workspace root)" } else { "" }
+                    if pkg.is_workspace {
+                        " (workspace root)"
+                    } else {
+                        ""
+                    }
                 ));
                 if !deps.is_empty() {
-                    out.push_str(&format!("\n    depends on ({}): {}", deps.len(), join_capped(&deps, 25)));
+                    out.push_str(&format!(
+                        "\n    depends on ({}): {}",
+                        deps.len(),
+                        join_capped(&deps, 25)
+                    ));
                 }
                 if !pubs.is_empty() {
                     out.push_str(&format!("\n    publishes to: {}", pubs.join(", ")));
@@ -1347,13 +1414,19 @@ impl ToolBox {
 
         let mut out = String::new();
         if via_file {
-            out.push_str(&format!("File '{query}' belongs to package '{}'.\n", node.label));
+            out.push_str(&format!(
+                "File '{query}' belongs to package '{}'.\n",
+                node.label
+            ));
         }
         out.push_str(&format!(
             "{} · {:?}{}",
             node.label,
             node.category,
-            node.version.as_deref().map(|v| format!(" {v}")).unwrap_or_default()
+            node.version
+                .as_deref()
+                .map(|v| format!(" {v}"))
+                .unwrap_or_default()
         ));
         if let Some(eco) = &node.ecosystem {
             out.push_str(&format!(" · {eco}"));
@@ -1378,10 +1451,18 @@ impl ToolBox {
             .collect();
 
         if !inputs.is_empty() {
-            out.push_str(&format!("\n  inputs ({}): {}", inputs.len(), join_capped(&inputs, 40)));
+            out.push_str(&format!(
+                "\n  inputs ({}): {}",
+                inputs.len(),
+                join_capped(&inputs, 40)
+            ));
         }
         if !outputs.is_empty() {
-            out.push_str(&format!("\n  outputs ({}): {}", outputs.len(), join_capped(&outputs, 40)));
+            out.push_str(&format!(
+                "\n  outputs ({}): {}",
+                outputs.len(),
+                join_capped(&outputs, 40)
+            ));
         }
         if inputs.is_empty() && outputs.is_empty() {
             out.push_str("\n  (no dependency edges recorded for this node)");
@@ -1458,7 +1539,11 @@ fn normalize_lexical(path: &Path) -> PathBuf {
         match comp {
             Component::ParentDir => {
                 // Only climb if the last kept component is a normal directory.
-                if out.components().next_back().is_some_and(|c| matches!(c, Component::Normal(_))) {
+                if out
+                    .components()
+                    .next_back()
+                    .is_some_and(|c| matches!(c, Component::Normal(_)))
+                {
                     out.pop();
                 }
             }
@@ -1486,7 +1571,10 @@ fn search_command(pattern: &str, scope: &Path) -> (String, Vec<String>) {
             ],
         )
     } else if binary_on_path("ack") {
-        ("ack".into(), vec!["--nogroup".into(), "-H".into(), pattern.into(), scope])
+        (
+            "ack".into(),
+            vec!["--nogroup".into(), "-H".into(), pattern.into(), scope],
+        )
     } else {
         (
             "grep".into(),
@@ -1517,13 +1605,31 @@ fn dir_of(path: &str) -> &str {
 fn classify_command(command: &str) -> &'static str {
     let c = command.to_lowercase();
     let has = |needle: &str| c.contains(needle);
-    if has("fmt") || has("format") || has("prettier") || has("rustfmt") || has("gofmt") || has("black") {
+    if has("fmt")
+        || has("format")
+        || has("prettier")
+        || has("rustfmt")
+        || has("gofmt")
+        || has("black")
+    {
         "format"
-    } else if has("clippy") || has("lint") || has("eslint") || has("ruff") || has("flake8") || has(" vet") {
+    } else if has("clippy")
+        || has("lint")
+        || has("eslint")
+        || has("ruff")
+        || has("flake8")
+        || has(" vet")
+    {
         "lint"
     } else if has("test") || has("pytest") || has("jest") || has("nextest") {
         "test"
-    } else if has("build") || has("compile") || has("make") || has("tsc") || has("webpack") || has("vite build") {
+    } else if has("build")
+        || has("compile")
+        || has("make")
+        || has("tsc")
+        || has("webpack")
+        || has("vite build")
+    {
         "build"
     } else if has(" run") || has("start") || has("serve") || has(" dev") {
         "run"
@@ -1623,7 +1729,12 @@ fn clip(s: &str, max: usize) -> String {
     while !s.is_char_boundary(cut) {
         cut -= 1;
     }
-    format!("{}\n… [truncated: {} of {} bytes shown]", &s[..cut], cut, s.len())
+    format!(
+        "{}\n… [truncated: {} of {} bytes shown]",
+        &s[..cut],
+        cut,
+        s.len()
+    )
 }
 
 /// Render a plan as a checklist, one line per step.
@@ -1701,7 +1812,10 @@ mod tests {
         // `..` in a not-yet-existing path can't climb out to a forbidden root.
         // (The test workspace itself lives under /tmp, so we climb clear past it
         // to /etc, which is outside both allowed roots.)
-        assert!(tb.resolve_new("../../../../../../../../etc/evil.rs").is_err());
+        assert!(
+            tb.resolve_new("../../../../../../../../etc/evil.rs")
+                .is_err()
+        );
         assert!(tb.resolve_new("/etc/evil.conf").is_err());
 
         let _ = std::fs::remove_dir_all(&root);
@@ -1709,10 +1823,19 @@ mod tests {
 
     #[test]
     fn normalize_lexical_resolves_dotdot_without_underflow() {
-        assert_eq!(normalize_lexical(Path::new("/tmp/../etc/x")), PathBuf::from("/etc/x"));
-        assert_eq!(normalize_lexical(Path::new("/a/b/../c")), PathBuf::from("/a/c"));
+        assert_eq!(
+            normalize_lexical(Path::new("/tmp/../etc/x")),
+            PathBuf::from("/etc/x")
+        );
+        assert_eq!(
+            normalize_lexical(Path::new("/a/b/../c")),
+            PathBuf::from("/a/c")
+        );
         // Never climbs past the root.
-        assert_eq!(normalize_lexical(Path::new("/../../x")), PathBuf::from("/x"));
+        assert_eq!(
+            normalize_lexical(Path::new("/../../x")),
+            PathBuf::from("/x")
+        );
     }
 
     #[test]
@@ -1751,18 +1874,32 @@ mod tests {
             "pub struct Widget {\n    pub knob: Knob,\n}\n",
         )
         .unwrap();
-        std::fs::write(root.join("src/knob.rs"), "pub struct Knob {\n    pub n: u8,\n}\n").unwrap();
+        std::fs::write(
+            root.join("src/knob.rs"),
+            "pub struct Knob {\n    pub n: u8,\n}\n",
+        )
+        .unwrap();
         let rt = tokio::runtime::Runtime::new().unwrap();
 
         // Following composition: Widget holds a Knob, whose definition lives in
         // another file — find_definition points straight at it.
-        let out = rt.block_on(tb.find_definition(&json!({"symbol": "Knob"}))).unwrap();
-        assert!(out.contains("src/knob.rs"), "should locate Knob's definition file: {out}");
+        let out = rt
+            .block_on(tb.find_definition(&json!({"symbol": "Knob"})))
+            .unwrap();
+        assert!(
+            out.contains("src/knob.rs"),
+            "should locate Knob's definition file: {out}"
+        );
         assert!(out.contains("struct Knob"));
 
         // A non-identifier is refused; an unknown symbol gives a helpful miss.
-        assert!(rt.block_on(tb.find_definition(&json!({"symbol": "a b"}))).is_err());
-        let miss = rt.block_on(tb.find_definition(&json!({"symbol": "Nonexistent"}))).unwrap();
+        assert!(
+            rt.block_on(tb.find_definition(&json!({"symbol": "a b"})))
+                .is_err()
+        );
+        let miss = rt
+            .block_on(tb.find_definition(&json!({"symbol": "Nonexistent"})))
+            .unwrap();
         assert!(miss.contains("no definition found"));
 
         let _ = std::fs::remove_dir_all(&root);
@@ -1799,7 +1936,10 @@ mod tests {
         assert!(out.contains("wasn't read this session"));
         let pending = tb.changes_since(0);
         assert!(pending[0].reason.contains("⚠ unrelated"));
-        assert_eq!(std::fs::read_to_string(root.join("src/unrelated.rs")).unwrap(), "fn new() {}\n");
+        assert_eq!(
+            std::fs::read_to_string(root.join("src/unrelated.rs")).unwrap(),
+            "fn new() {}\n"
+        );
 
         // Reading a file first makes a change to it count as related.
         tb.read_file(&json!({"path": "src/a.rs"})).unwrap();
@@ -1815,7 +1955,9 @@ mod tests {
         let (root, tb) = toolbox();
         tb.set_mode(Mode::AutoAccept);
         // Give an existing sibling some tags so a new file can inherit them.
-        tb.brain.propose_tags("src/a.rs", &["core".into()], "").unwrap();
+        tb.brain
+            .propose_tags("src/a.rs", &["core".into()], "")
+            .unwrap();
         tb.brain.confirm("src/a.rs", true).unwrap();
         let rt = tokio::runtime::Runtime::new().unwrap();
 
@@ -1828,7 +1970,10 @@ mod tests {
 
         // The new file picked up its sibling's tag as a pending proposal.
         let pending = tb.brain.pending();
-        let p = pending.iter().find(|p| p.file == "src/b.rs").expect("b.rs proposed");
+        let p = pending
+            .iter()
+            .find(|p| p.file == "src/b.rs")
+            .expect("b.rs proposed");
         assert!(p.tags.contains(&"core".to_string()));
 
         let _ = std::fs::remove_dir_all(&root);
@@ -1846,8 +1991,13 @@ mod tests {
         assert_eq!(tb.derived_verify_command().as_deref(), Some("cargo build"));
 
         // A remembered, successful build command wins over the manifest guess.
-        tb.brain.record_command("cargo build --workspace", "build", true).unwrap();
-        assert_eq!(tb.derived_verify_command().as_deref(), Some("cargo build --workspace"));
+        tb.brain
+            .record_command("cargo build --workspace", "build", true)
+            .unwrap();
+        assert_eq!(
+            tb.derived_verify_command().as_deref(),
+            Some("cargo build --workspace")
+        );
 
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -1862,15 +2012,27 @@ mod tests {
         tb.read_file(&json!({"path": "src/c.rs"})).unwrap();
 
         // Two edits to different lines of the same file, both pending.
-        rt.block_on(tb.edit_file(&json!({"path": "src/c.rs", "old": "let a = 1;", "new": "let a = 10;"}))).unwrap();
-        rt.block_on(tb.edit_file(&json!({"path": "src/c.rs", "old": "let b = 2;", "new": "let b = 20;"}))).unwrap();
+        rt.block_on(
+            tb.edit_file(&json!({"path": "src/c.rs", "old": "let a = 1;", "new": "let a = 10;"})),
+        )
+        .unwrap();
+        rt.block_on(
+            tb.edit_file(&json!({"path": "src/c.rs", "old": "let b = 2;", "new": "let b = 20;"})),
+        )
+        .unwrap();
 
         // The newest proposal must contain BOTH edits — the second built on the
         // first instead of reverting to the on-disk original.
         let latest = tb.changes_since(0).pop().unwrap();
         let proposed = std::fs::read_to_string(&latest.proposed).unwrap();
-        assert!(proposed.contains("let a = 10;"), "first edit was dropped: {proposed}");
-        assert!(proposed.contains("let b = 20;"), "second edit missing: {proposed}");
+        assert!(
+            proposed.contains("let a = 10;"),
+            "first edit was dropped: {proposed}"
+        );
+        assert!(
+            proposed.contains("let b = 20;"),
+            "second edit missing: {proposed}"
+        );
 
         let _ = std::fs::remove_dir_all(&root);
     }

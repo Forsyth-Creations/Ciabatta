@@ -15,9 +15,11 @@ const INDEX_HTML: &str = include_str!("index.html");
 /// interrupted.
 pub async fn serve(graph_json: String, port: u16) -> Result<()> {
     let host = crate::config::bind_host();
-    let listener = TcpListener::bind((host.as_str(), port)).await.map_err(|e| {
-        anyhow::anyhow!("Failed to bind {host}:{port} ({e}). Try a different --port.")
-    })?;
+    let listener = TcpListener::bind((host.as_str(), port))
+        .await
+        .map_err(|e| {
+            anyhow::anyhow!("Failed to bind {host}:{port} ({e}). Try a different --port.")
+        })?;
 
     println!("\nAnalyze view ready at http://{host}:{port}");
     println!("Press Ctrl-C to stop.");

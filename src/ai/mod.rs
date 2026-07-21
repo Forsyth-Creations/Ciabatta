@@ -17,8 +17,8 @@ pub mod brain;
 pub mod burnin;
 pub mod compaction;
 pub mod edit;
-pub mod pdf;
 pub mod jobs;
+pub mod pdf;
 pub mod provider;
 pub mod server;
 pub mod session;
@@ -361,7 +361,11 @@ impl Assistant {
                 let _ = events.send(AiEvent::Status(note)).await;
             }
 
-            let turn = match self.provider.chat(&self.system_prompt(), history, &specs).await {
+            let turn = match self
+                .provider
+                .chat(&self.system_prompt(), history, &specs)
+                .await
+            {
                 Ok(t) => t,
                 Err(e) => {
                     // Drop the failed exchange so the session stays usable.
@@ -374,7 +378,9 @@ impl Assistant {
                 }
             };
             if let Some(usage) = self.provider.last_usage() {
-                let _ = events.send(AiEvent::Status(format!("tokens: {}", usage.label()))).await;
+                let _ = events
+                    .send(AiEvent::Status(format!("tokens: {}", usage.label())))
+                    .await;
             }
 
             // A reply cut off at the token ceiling may carry an incomplete tool
@@ -383,7 +389,8 @@ impl Assistant {
             if turn.truncated {
                 let _ = events
                     .send(AiEvent::Status(
-                        "response hit the length limit — asking the assistant to continue".to_string(),
+                        "response hit the length limit — asking the assistant to continue"
+                            .to_string(),
                     ))
                     .await;
                 history.push(Turn::Assistant(AssistantTurn {
@@ -469,7 +476,8 @@ impl Assistant {
             // Independent read-only calls in one round can run together; anything
             // that mutates state (edits, tags, the plan, the sandbox) stays
             // sequential so ordering and diffs are deterministic.
-            let results = if calls.len() > 1 && calls.iter().all(|c| ToolBox::is_read_only(&c.name)) {
+            let results = if calls.len() > 1 && calls.iter().all(|c| ToolBox::is_read_only(&c.name))
+            {
                 futures::future::join_all(calls.iter().map(|c| self.toolbox.execute(c))).await
             } else {
                 let mut results = Vec::with_capacity(calls.len());
@@ -686,7 +694,10 @@ fn pdf_report_path(spec: &str, days: u64) -> std::path::PathBuf {
         return std::path::PathBuf::from(spec);
     }
     let _ = days;
-    let name = format!("ciabatta-report-{}.pdf", chrono::Local::now().format("%Y%m%d-%H%M%S"));
+    let name = format!(
+        "ciabatta-report-{}.pdf",
+        chrono::Local::now().format("%Y%m%d-%H%M%S")
+    );
     std::env::current_dir().unwrap_or_default().join(name)
 }
 
@@ -727,7 +738,10 @@ pub async fn run_tag(
     // Register the architecture up front so it appears on the map immediately,
     // even before the AI finds files for it.
     Brain::open(root)?.set_architecture(name, description)?;
-    println!("Added architecture '{}' to the mind map.", name.to_lowercase());
+    println!(
+        "Added architecture '{}' to the mind map.",
+        name.to_lowercase()
+    );
     println!("Running a quick pass to find files that belong to it…\n");
 
     let prompt = tag_pass_prompt(name, description);
@@ -799,7 +813,9 @@ pub async fn run_ship(
     todo_id: Option<u64>,
 ) -> Result<()> {
     let jobs = jobs::Jobs::open(root, config)?;
-    let source = todo_id.map(|id| format!("todo:{id}")).unwrap_or_else(|| "cli".to_string());
+    let source = todo_id
+        .map(|id| format!("todo:{id}"))
+        .unwrap_or_else(|| "cli".to_string());
 
     eprintln!("shipping task to the assistant (running in the background)…");
     eprintln!("  task: {prompt}\n");
@@ -881,7 +897,11 @@ pub async fn run_ask(
         None => Assistant::new(root, config)?,
     };
     assistant.set_mode(mode);
-    eprintln!("provider: {} · mode: {}", assistant.provider.label(), mode.label());
+    eprintln!(
+        "provider: {} · mode: {}",
+        assistant.provider.label(),
+        mode.label()
+    );
 
     let (tx, mut rx) = mpsc::channel::<AiEvent>(64);
     let printer = tokio::spawn(async move {
@@ -889,12 +909,20 @@ pub async fn run_ask(
             match ev {
                 AiEvent::Status(s) => eprintln!("  {s}"),
                 AiEvent::Suggestion(c) => {
-                    eprintln!("\n  ✏ {} change for {}:\n{}", c.state.label(), c.file, c.diff);
+                    eprintln!(
+                        "\n  ✏ {} change for {}:\n{}",
+                        c.state.label(),
+                        c.file,
+                        c.diff
+                    );
                 }
                 AiEvent::Plan(items) if !items.is_empty() => {
                     eprintln!("\n  📋 plan:\n{}", tools::render_plan(&items));
                 }
-                AiEvent::Progress(_) | AiEvent::Plan(_) | AiEvent::Answer(_) | AiEvent::Error(_) => {}
+                AiEvent::Progress(_)
+                | AiEvent::Plan(_)
+                | AiEvent::Answer(_)
+                | AiEvent::Error(_) => {}
             }
         }
     });
@@ -950,7 +978,11 @@ fn confirm_pending_on_stdin(assistant: &Assistant) -> Result<()> {
         } else {
             format!(" — {}", p.reason)
         };
-        eprint!("  {} → [{}]{reason}  accept? [y/N] ", p.file, p.tags.join(", "));
+        eprint!(
+            "  {} → [{}]{reason}  accept? [y/N] ",
+            p.file,
+            p.tags.join(", ")
+        );
         std::io::stderr().flush()?;
         let mut line = String::new();
         std::io::stdin().read_line(&mut line)?;
@@ -994,7 +1026,11 @@ pub fn run_setup(root: &Path) -> Result<()> {
     // vLLM speaks the OpenAI wire format but is typically self-hosted, so it
     // gets a local default endpoint and no required API key.
     let (default_endpoint, default_model, default_key_env) = if provider_lc.starts_with("claude") {
-        ("https://api.anthropic.com", "claude-opus-4-8", "ANTHROPIC_API_KEY")
+        (
+            "https://api.anthropic.com",
+            "claude-opus-4-8",
+            "ANTHROPIC_API_KEY",
+        )
     } else if provider_lc == "vllm" {
         ("http://localhost:8000", "", "OPENAI_API_KEY")
     } else {

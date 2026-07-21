@@ -48,11 +48,14 @@ pub async fn run(
     println!("🔥 Burn-in: teaching the assistant this codebase");
     println!("   provider: {}", assistant.provider.label());
     println!("   live map: {url}");
-    println!("   mode:     {}\n", if review {
-        "review — tags wait for your confirmation (ghosts on the map)"
-    } else {
-        "apply — tags land on the map as they're determined"
-    });
+    println!(
+        "   mode:     {}\n",
+        if review {
+            "review — tags wait for your confirmation (ghosts on the map)"
+        } else {
+            "apply — tags land on the map as they're determined"
+        }
+    );
 
     // Drain the burn's progress events to stdout while it runs.
     let (tx, mut rx) = mpsc::channel::<AiEvent>(64);
@@ -135,7 +138,10 @@ pub async fn burn_core(
             done: 0,
             total: 0,
             tagged: 0,
-            detail: format!("reading {} files to name the architecture parts…", files.len()),
+            detail: format!(
+                "reading {} files to name the architecture parts…",
+                files.len()
+            ),
         }))
         .await;
     match survey(assistant, root, &files).await {
@@ -265,7 +271,9 @@ pub async fn scan_dependencies(
     use crate::analyze::Category;
 
     let _ = events
-        .send(AiEvent::Status("scanning dependencies (static analysis)…".to_string()))
+        .send(AiEvent::Status(
+            "scanning dependencies (static analysis)…".to_string(),
+        ))
         .await;
 
     // Run the (synchronous) analysis off the async worker so a large repo scan
@@ -273,7 +281,11 @@ pub async fn scan_dependencies(
     let root = root.to_path_buf();
     let config = assistant.toolbox.config.clone();
     let graph = tokio::task::spawn_blocking(move || {
-        crate::analyze::analyze_quiet(&root, &config, &crate::analyze::RequirementInputs::default())
+        crate::analyze::analyze_quiet(
+            &root,
+            &config,
+            &crate::analyze::RequirementInputs::default(),
+        )
     })
     .await
     .context("dependency analysis task panicked")??;
@@ -283,8 +295,16 @@ pub async fn scan_dependencies(
         .iter()
         .filter(|n| n.category == Category::Internal && n.id != "int:root")
         .count();
-    let external = graph.nodes.iter().filter(|n| n.category == Category::External).count();
-    let publish = graph.nodes.iter().filter(|n| n.category == Category::Publish).count();
+    let external = graph
+        .nodes
+        .iter()
+        .filter(|n| n.category == Category::External)
+        .count();
+    let publish = graph
+        .nodes
+        .iter()
+        .filter(|n| n.category == Category::Publish)
+        .count();
     let files = graph.files.len();
 
     assistant.brain.set_dependencies(graph)?;
@@ -298,7 +318,11 @@ pub async fn scan_dependencies(
 
 /// Ask the model to name the project's architecture parts from the file tree
 /// and manifest heads. Returns `(name, description)` pairs.
-async fn survey(assistant: &Assistant, root: &Path, files: &[String]) -> Result<Vec<(String, String)>> {
+async fn survey(
+    assistant: &Assistant,
+    root: &Path,
+    files: &[String],
+) -> Result<Vec<(String, String)>> {
     let mut prompt = String::from("Project file tree (truncated):\n");
     for f in files.iter().take(SURVEY_PATHS) {
         prompt.push_str(f);
@@ -338,7 +362,11 @@ async fn survey(assistant: &Assistant, root: &Path, files: &[String]) -> Result<
         if name.is_empty() {
             continue;
         }
-        let description = item["description"].as_str().unwrap_or("").trim().to_string();
+        let description = item["description"]
+            .as_str()
+            .unwrap_or("")
+            .trim()
+            .to_string();
         out.push((name, description));
     }
     anyhow::ensure!(!out.is_empty(), "the survey returned no architectures");
@@ -387,7 +415,9 @@ async fn tag_batch(
 
     let mut tagged = 0;
     for item in items {
-        let Some(path) = item["path"].as_str() else { continue };
+        let Some(path) = item["path"].as_str() else {
+            continue;
+        };
         // Only accept paths we actually sent — the map must never gain
         // entries the model invented.
         if !batch.iter().any(|b| b == path) {

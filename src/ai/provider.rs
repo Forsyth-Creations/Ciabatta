@@ -128,7 +128,11 @@ impl Usage {
                 n.to_string()
             }
         };
-        let mut s = format!("{} in · {} out", k(self.input_tokens), k(self.output_tokens));
+        let mut s = format!(
+            "{} in · {} out",
+            k(self.input_tokens),
+            k(self.output_tokens)
+        );
         if self.cache_read_tokens > 0 {
             s.push_str(&format!(" · {} cached", k(self.cache_read_tokens)));
         }
@@ -155,7 +159,12 @@ impl Provider {
     /// Build a provider from the `[ai]` config section, resolving the API key
     /// from the configured environment variable.
     pub fn from_config(cfg: &crate::config::AiConfig) -> Result<Self> {
-        let raw_provider = cfg.provider.as_deref().unwrap_or("claude").trim().to_lowercase();
+        let raw_provider = cfg
+            .provider
+            .as_deref()
+            .unwrap_or("claude")
+            .trim()
+            .to_lowercase();
         let kind = ProviderKind::parse(&raw_provider)?;
         let is_vllm = raw_provider == "vllm";
 
@@ -235,7 +244,10 @@ impl Provider {
     /// single hiccup doesn't abort a long-running task. Returns the final
     /// response's status and body; a retryable status that never clears is
     /// returned as-is for the caller's normal error handling.
-    async fn send_retrying(&self, req: reqwest::RequestBuilder) -> Result<(reqwest::StatusCode, String)> {
+    async fn send_retrying(
+        &self,
+        req: reqwest::RequestBuilder,
+    ) -> Result<(reqwest::StatusCode, String)> {
         let mut attempt = 0u32;
         loop {
             attempt += 1;
@@ -264,7 +276,9 @@ impl Provider {
                 Err(e) => {
                     if is_retryable_err(&e) && attempt < MAX_SEND_ATTEMPTS {
                         let delay = backoff(attempt);
-                        tracing::debug!("retrying after network error (attempt {attempt}) in {delay:?}");
+                        tracing::debug!(
+                            "retrying after network error (attempt {attempt}) in {delay:?}"
+                        );
                         tokio::time::sleep(delay).await;
                         continue;
                     }
@@ -407,14 +421,18 @@ impl Provider {
             )
         })?;
         if !status.is_success() {
-            let msg = payload["error"]["message"].as_str().unwrap_or("unknown error");
+            let msg = payload["error"]["message"]
+                .as_str()
+                .unwrap_or("unknown error");
             bail!("Claude API error ({status}): {msg}");
         }
 
         self.record_usage(Usage {
             input_tokens: payload["usage"]["input_tokens"].as_u64().unwrap_or(0),
             output_tokens: payload["usage"]["output_tokens"].as_u64().unwrap_or(0),
-            cache_read_tokens: payload["usage"]["cache_read_input_tokens"].as_u64().unwrap_or(0),
+            cache_read_tokens: payload["usage"]["cache_read_input_tokens"]
+                .as_u64()
+                .unwrap_or(0),
         });
 
         // A refusal is a successful HTTP response — check stop_reason before content.
@@ -540,7 +558,9 @@ impl Provider {
             )
         })?;
         if !status.is_success() {
-            let msg = payload["error"]["message"].as_str().unwrap_or("unknown error");
+            let msg = payload["error"]["message"]
+                .as_str()
+                .unwrap_or("unknown error");
             bail!("AI endpoint error ({status}): {msg}");
         }
 
@@ -559,7 +579,12 @@ impl Provider {
             truncated: choice["finish_reason"].as_str() == Some("length"),
             ..Default::default()
         };
-        for (i, call) in message["tool_calls"].as_array().into_iter().flatten().enumerate() {
+        for (i, call) in message["tool_calls"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .enumerate()
+        {
             let args_raw = call["function"]["arguments"].as_str().unwrap_or("{}");
             // A malformed argument blob (often a truncated stream) must not be
             // silently swallowed into an empty object — that produces a wrong,
@@ -574,7 +599,10 @@ impl Provider {
                     .as_str()
                     .map(str::to_string)
                     .unwrap_or_else(|| format!("call_{i}")),
-                name: call["function"]["name"].as_str().unwrap_or_default().to_string(),
+                name: call["function"]["name"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string(),
                 args,
             });
         }
@@ -667,10 +695,16 @@ mod tests {
     #[test]
     fn retryable_statuses_are_transient_only() {
         for code in [429u16, 500, 502, 503, 504, 529] {
-            assert!(is_retryable_status(reqwest::StatusCode::from_u16(code).unwrap()), "{code}");
+            assert!(
+                is_retryable_status(reqwest::StatusCode::from_u16(code).unwrap()),
+                "{code}"
+            );
         }
         for code in [200u16, 400, 401, 403, 404, 422] {
-            assert!(!is_retryable_status(reqwest::StatusCode::from_u16(code).unwrap()), "{code}");
+            assert!(
+                !is_retryable_status(reqwest::StatusCode::from_u16(code).unwrap()),
+                "{code}"
+            );
         }
     }
 
@@ -679,7 +713,10 @@ mod tests {
         // Always within cap + max jitter, at every attempt.
         let ceiling = RETRY_CAP + Duration::from_millis(250);
         for attempt in 1..=10 {
-            assert!(backoff(attempt) <= ceiling, "attempt {attempt} exceeded cap");
+            assert!(
+                backoff(attempt) <= ceiling,
+                "attempt {attempt} exceeded cap"
+            );
         }
         // An early retry is meaningfully shorter than the cap.
         assert!(backoff(1) < RETRY_CAP);
@@ -687,12 +724,24 @@ mod tests {
 
     #[test]
     fn context_window_scales_with_model() {
-        assert_eq!(context_window_tokens("claude-opus-4-8", ProviderKind::Claude), 200_000);
-        assert_eq!(context_window_tokens("gpt-4o", ProviderKind::OpenAi), 128_000);
-        assert_eq!(context_window_tokens("gpt-3.5-turbo", ProviderKind::OpenAi), 16_385);
+        assert_eq!(
+            context_window_tokens("claude-opus-4-8", ProviderKind::Claude),
+            200_000
+        );
+        assert_eq!(
+            context_window_tokens("gpt-4o", ProviderKind::OpenAi),
+            128_000
+        );
+        assert_eq!(
+            context_window_tokens("gpt-3.5-turbo", ProviderKind::OpenAi),
+            16_385
+        );
         // An unknown local model gets the conservative default, so we compact
         // early rather than overflow its small window.
-        assert_eq!(context_window_tokens("qwen2.5-coder", ProviderKind::OpenAi), 32_000);
+        assert_eq!(
+            context_window_tokens("qwen2.5-coder", ProviderKind::OpenAi),
+            32_000
+        );
     }
 
     #[test]
@@ -703,13 +752,21 @@ mod tests {
             args: json!({ ARG_PARSE_ERROR_KEY: "unexpected end of input" }),
         };
         assert!(bad.arg_parse_error().is_some());
-        let good = ToolCall { id: "2".into(), name: "read_file".into(), args: json!({"path": "x"}) };
+        let good = ToolCall {
+            id: "2".into(),
+            name: "read_file".into(),
+            args: json!({"path": "x"}),
+        };
         assert!(good.arg_parse_error().is_none());
     }
 
     #[test]
     fn usage_label_is_compact() {
-        let u = Usage { input_tokens: 1234, output_tokens: 340, cache_read_tokens: 1000 };
+        let u = Usage {
+            input_tokens: 1234,
+            output_tokens: 340,
+            cache_read_tokens: 1000,
+        };
         assert_eq!(u.label(), "1.2k in · 340 out · 1.0k cached");
     }
 }

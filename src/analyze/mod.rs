@@ -128,10 +128,11 @@ impl AnalysisGraph {
     /// name a package or dependency without knowing its internal id.
     pub fn find_node(&self, needle: &str) -> Option<&Node> {
         let needle = needle.trim();
-        self.nodes
-            .iter()
-            .find(|n| n.id == needle)
-            .or_else(|| self.nodes.iter().find(|n| n.label.eq_ignore_ascii_case(needle)))
+        self.nodes.iter().find(|n| n.id == needle).or_else(|| {
+            self.nodes
+                .iter()
+                .find(|n| n.label.eq_ignore_ascii_case(needle))
+        })
     }
 
     /// The internal package whose manifest directory most closely contains
@@ -660,8 +661,14 @@ mod graph_tests {
                 node("pub:crates.io", "crates.io", Category::Publish, None),
             ],
             edges: vec![
-                Edge { from: "ext:crates.io:serde".into(), to: "int:app".into() },
-                Edge { from: "int:app".into(), to: "pub:crates.io".into() },
+                Edge {
+                    from: "ext:crates.io:serde".into(),
+                    to: "int:app".into(),
+                },
+                Edge {
+                    from: "int:app".into(),
+                    to: "pub:crates.io".into(),
+                },
             ],
             files: Vec::new(),
         }
@@ -671,12 +678,24 @@ mod graph_tests {
     fn inputs_are_dependencies_outputs_are_consumers() {
         let g = sample();
         // The package's inputs are its dependencies; outputs its publish points.
-        let inputs: Vec<&str> = g.inputs("int:app").iter().map(|n| n.label.as_str()).collect();
+        let inputs: Vec<&str> = g
+            .inputs("int:app")
+            .iter()
+            .map(|n| n.label.as_str())
+            .collect();
         assert_eq!(inputs, ["serde"]);
-        let outputs: Vec<&str> = g.outputs("int:app").iter().map(|n| n.label.as_str()).collect();
+        let outputs: Vec<&str> = g
+            .outputs("int:app")
+            .iter()
+            .map(|n| n.label.as_str())
+            .collect();
         assert_eq!(outputs, ["crates.io"]);
         // The dependency's output is the package that consumes it.
-        let consumers: Vec<&str> = g.outputs("ext:crates.io:serde").iter().map(|n| n.label.as_str()).collect();
+        let consumers: Vec<&str> = g
+            .outputs("ext:crates.io:serde")
+            .iter()
+            .map(|n| n.label.as_str())
+            .collect();
         assert_eq!(consumers, ["app"]);
     }
 

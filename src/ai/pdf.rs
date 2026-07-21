@@ -19,10 +19,16 @@ const ROWS_PER_PAGE: usize = 56;
 /// summary, and (when non-empty) the raw git activity as an appendix.
 pub fn write_report(path: &Path, days: u64, summary: &str, activity: &str) -> Result<()> {
     let mut lines: Vec<String> = Vec::new();
-    push_wrapped(&mut lines, &format!("Repository change report — past {days} day(s)"));
     push_wrapped(
         &mut lines,
-        &format!("Generated {}", chrono::Local::now().format("%Y-%m-%d %H:%M")),
+        &format!("Repository change report — past {days} day(s)"),
+    );
+    push_wrapped(
+        &mut lines,
+        &format!(
+            "Generated {}",
+            chrono::Local::now().format("%Y-%m-%d %H:%M")
+        ),
     );
     lines.push(String::new());
     lines.push("== Summary ==".to_string());
@@ -71,7 +77,9 @@ fn build_pdf(text_lines: &[String]) -> Vec<u8> {
         .map(|p| format!("{} 0 R", 4 + 2 * p))
         .collect::<Vec<_>>()
         .join(" ");
-    objects.push(format!("<< /Type /Pages /Kids [{kids}] /Count {page_count} >>"));
+    objects.push(format!(
+        "<< /Type /Pages /Kids [{kids}] /Count {page_count} >>"
+    ));
     objects.push("<< /Type /Font /Subtype /Type1 /BaseFont /Courier >>".to_string());
 
     for page in &pages {
@@ -89,7 +97,10 @@ fn build_pdf(text_lines: &[String]) -> Vec<u8> {
             stream.push_str(") Tj\nT*\n");
         }
         stream.push_str("ET");
-        objects.push(format!("<< /Length {} >>\nstream\n{stream}\nendstream", stream.len()));
+        objects.push(format!(
+            "<< /Length {} >>\nstream\n{stream}\nendstream",
+            stream.len()
+        ));
     }
 
     // Serialize with a cross-reference table.
@@ -159,7 +170,10 @@ mod tests {
         let path = dir.join("report.pdf");
 
         // A long summary forces multiple pages.
-        let summary = (0..200).map(|i| format!("change number {i}")).collect::<Vec<_>>().join("\n");
+        let summary = (0..200)
+            .map(|i| format!("change number {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
         write_report(&path, 7, &summary, "abc123 fix: thing\n src/x.rs | 2 +-").unwrap();
 
         let bytes = std::fs::read(&path).unwrap();

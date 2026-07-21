@@ -24,9 +24,11 @@ const INDEX_HTML: &str = include_str!("index.html");
 /// Serve the USB sender on `bind_host:port` until the process is interrupted.
 pub async fn serve(port: u16, open: bool) -> Result<()> {
     let host = crate::config::bind_host();
-    let listener = TcpListener::bind((host.as_str(), port)).await.map_err(|e| {
-        anyhow::anyhow!("Failed to bind {host}:{port} ({e}). Try a different --port.")
-    })?;
+    let listener = TcpListener::bind((host.as_str(), port))
+        .await
+        .map_err(|e| {
+            anyhow::anyhow!("Failed to bind {host}:{port} ({e}). Try a different --port.")
+        })?;
 
     let url = format!("http://{host}:{port}");
     println!("\nUSB sender ready at {url}");

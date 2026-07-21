@@ -32,7 +32,11 @@ fn turn_len(turn: &Turn) -> usize {
     match turn {
         Turn::User(t) => t.len(),
         Turn::Assistant(a) => {
-            a.text.len() + a.tool_calls.iter().map(|c| c.name.len() + c.args.to_string().len()).sum::<usize>()
+            a.text.len()
+                + a.tool_calls
+                    .iter()
+                    .map(|c| c.name.len() + c.args.to_string().len())
+                    .sum::<usize>()
         }
         Turn::ToolResults(rs) => rs.iter().map(|r| r.content.len()).sum(),
     }
@@ -60,7 +64,11 @@ fn render(turns: &[Turn]) -> String {
                     out.push('\n');
                 }
                 for c in &a.tool_calls {
-                    out.push_str(&format!("ASSISTANT called {} {}\n", c.name, clip(&c.args.to_string(), 500)));
+                    out.push_str(&format!(
+                        "ASSISTANT called {} {}\n",
+                        c.name,
+                        clip(&c.args.to_string(), 500)
+                    ));
                 }
             }
             Turn::ToolResults(rs) => {
@@ -128,7 +136,9 @@ pub async fn maybe_compact(provider: &Provider, turns: &mut Vec<Turn>) -> Option
     let summary = match provider
         .chat(
             COMPACTION_SYSTEM,
-            &[Turn::User(format!("Summarize this earlier conversation:\n\n{rendered}"))],
+            &[Turn::User(format!(
+                "Summarize this earlier conversation:\n\n{rendered}"
+            ))],
             &[],
         )
         .await

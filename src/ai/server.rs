@@ -79,9 +79,11 @@ struct PrunePayload {
 /// base URL. The server lives as long as the process.
 pub async fn spawn(assistant: Arc<Assistant>, jobs: Arc<Jobs>, port: u16) -> Result<String> {
     let host = crate::config::bind_host();
-    let listener = TcpListener::bind((host.as_str(), port)).await.map_err(|e| {
-        anyhow::anyhow!("Failed to bind {host}:{port} ({e}). Try a different --port.")
-    })?;
+    let listener = TcpListener::bind((host.as_str(), port))
+        .await
+        .map_err(|e| {
+            anyhow::anyhow!("Failed to bind {host}:{port} ({e}). Try a different --port.")
+        })?;
     let url = format!("http://{host}:{port}/");
 
     // One question at a time: /api/ask serializes on this lock so concurrent
@@ -177,7 +179,11 @@ async fn handle(
                             "suggestions": suggestions,
                             "confidence": assistant.brain.confidence(),
                         });
-                        ("200 OK", "application/json; charset=utf-8", body.to_string().into_bytes())
+                        (
+                            "200 OK",
+                            "application/json; charset=utf-8",
+                            body.to_string().into_bytes(),
+                        )
                     }
                     Err(e) => bad_request(&e.to_string()),
                 }
@@ -194,17 +200,23 @@ async fn handle(
             Err(e) => bad_request(&e.to_string()),
         },
 
-        ("POST", "/api/confirm-all") => match serde_json::from_str::<ConfirmAllPayload>(&req.body) {
-            Ok(p) => match assistant.brain.confirm_all(p.accept) {
-                Ok(n) => ok_json(json!({"ok": true, "resolved": n})),
+        ("POST", "/api/confirm-all") => {
+            match serde_json::from_str::<ConfirmAllPayload>(&req.body) {
+                Ok(p) => match assistant.brain.confirm_all(p.accept) {
+                    Ok(n) => ok_json(json!({"ok": true, "resolved": n})),
+                    Err(e) => bad_request(&e.to_string()),
+                },
                 Err(e) => bad_request(&e.to_string()),
-            },
-            Err(e) => bad_request(&e.to_string()),
-        },
+            }
+        }
 
         ("POST", "/api/ship") => match serde_json::from_str::<ShipPayload>(&req.body) {
             Ok(p) => {
-                let source = if p.source.trim().is_empty() { "gui" } else { p.source.trim() };
+                let source = if p.source.trim().is_empty() {
+                    "gui"
+                } else {
+                    p.source.trim()
+                };
                 match jobs.ship(&p.prompt, source) {
                     Ok(id) => ok_json(json!({"ok": true, "id": id})),
                     Err(e) => bad_request(&e.to_string()),
@@ -254,7 +266,11 @@ async fn handle(
 }
 
 fn ok_json(v: serde_json::Value) -> (&'static str, &'static str, Vec<u8>) {
-    ("200 OK", "application/json; charset=utf-8", v.to_string().into_bytes())
+    (
+        "200 OK",
+        "application/json; charset=utf-8",
+        v.to_string().into_bytes(),
+    )
 }
 
 fn bad_request(msg: &str) -> (&'static str, &'static str, Vec<u8>) {

@@ -85,14 +85,23 @@ pub fn changes_since(root: &Path, days: u64) -> Result<String> {
     // Commit list within the window (short hash, date, subject, author).
     let log = run_git(
         root,
-        &["log", &since, "--pretty=format:%h %ad %s (%an)", "--date=short"],
+        &[
+            "log",
+            &since,
+            "--pretty=format:%h %ad %s (%an)",
+            "--date=short",
+        ],
     )
     .unwrap_or_default();
 
     // Committed changes: diff from the last commit *before* the window to HEAD.
     // If nothing predates the window, diff from the empty tree (full history).
     let base = run_git(root, &["rev-list", "-1", &before, "HEAD"]).unwrap_or_default();
-    let base = if base.is_empty() { EMPTY_TREE.to_string() } else { base };
+    let base = if base.is_empty() {
+        EMPTY_TREE.to_string()
+    } else {
+        base
+    };
     let stat = run_git(root, &["diff", "--stat", &base, "HEAD"]).unwrap_or_default();
 
     // Uncommitted working-tree changes (staged + unstaged) relative to HEAD.
@@ -170,13 +179,22 @@ mod tests {
 
         // A wide window captures the just-made commit.
         let report = changes_since(&root, 3650).unwrap();
-        assert!(report.contains("add greeting"), "commit subject missing:\n{report}");
-        assert!(report.contains("hello.txt"), "changed file missing:\n{report}");
+        assert!(
+            report.contains("add greeting"),
+            "commit subject missing:\n{report}"
+        );
+        assert!(
+            report.contains("hello.txt"),
+            "changed file missing:\n{report}"
+        );
 
         // Uncommitted edits show up in their own section.
         std::fs::write(root.join("hello.txt"), "hi there\n").unwrap();
         let report = changes_since(&root, 3650).unwrap();
-        assert!(report.contains("Uncommitted"), "uncommitted section missing:\n{report}");
+        assert!(
+            report.contains("Uncommitted"),
+            "uncommitted section missing:\n{report}"
+        );
 
         let _ = std::fs::remove_dir_all(&root);
     }

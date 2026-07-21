@@ -275,6 +275,22 @@ pub enum Commands {
         continue_last: bool,
     },
 
+    /// Pick a serial (USB) device in the browser and send it a file as a raw
+    /// byte stream, with an optional hex prefix prepended.
+    ///
+    /// Opens a small web app: choose a device and baud rate, pick a file (the
+    /// page shows its length in bytes), optionally type a hex prefix, and send.
+    /// The prefix is decoded from hex and written ahead of the file's bytes.
+    Usb {
+        /// Port for the local web view.
+        #[arg(short = 'p', long, default_value_t = 8091)]
+        port: u16,
+
+        /// Don't open the browser automatically.
+        #[arg(long)]
+        no_open: bool,
+    },
+
     /// Configuration helpers.
     Config {
         #[command(subcommand)]

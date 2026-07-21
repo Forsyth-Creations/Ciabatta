@@ -314,9 +314,11 @@ pub async fn serve_gui(
     let state = Arc::new(Mutex::new(initial_state(&config, &root, &names, dry_run)?));
 
     let host = crate::config::bind_host();
-    let listener = TcpListener::bind((host.as_str(), port)).await.map_err(|e| {
-        anyhow::anyhow!("Failed to bind {host}:{port} ({e}). Try a different --port.")
-    })?;
+    let listener = TcpListener::bind((host.as_str(), port))
+        .await
+        .map_err(|e| {
+            anyhow::anyhow!("Failed to bind {host}:{port} ({e}). Try a different --port.")
+        })?;
 
     // Broadcast bus carrying recovery choices from the browser to the engine.
     let (choice_tx, _) = broadcast::channel::<StepChoice>(64);
@@ -442,9 +444,11 @@ struct ChoiceBody {
 /// — it needs no project and runs nothing.
 pub async fn serve_builder(port: u16) -> Result<()> {
     let host = crate::config::bind_host();
-    let listener = TcpListener::bind((host.as_str(), port)).await.map_err(|e| {
-        anyhow::anyhow!("Failed to bind {host}:{port} ({e}). Try a different --port.")
-    })?;
+    let listener = TcpListener::bind((host.as_str(), port))
+        .await
+        .map_err(|e| {
+            anyhow::anyhow!("Failed to bind {host}:{port} ({e}). Try a different --port.")
+        })?;
 
     let url = format!("http://{host}:{port}");
     println!("\nFlowchart builder ready at {url}");

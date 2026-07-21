@@ -134,7 +134,11 @@ impl Jobs {
 
     /// Queue a task and run it to completion (used by the CLI, which then prints
     /// the result). Returns the finished job record.
-    pub async fn ship_and_wait(self: &std::sync::Arc<Self>, prompt: &str, source: &str) -> Result<Job> {
+    pub async fn ship_and_wait(
+        self: &std::sync::Arc<Self>,
+        prompt: &str,
+        source: &str,
+    ) -> Result<Job> {
         let id = self.enqueue(prompt, source)?;
         self.execute(id, prompt).await;
         self.get(id).context("job vanished after completion")
@@ -142,7 +146,12 @@ impl Jobs {
 
     /// A single job by id.
     pub fn get(&self, id: u64) -> Option<Job> {
-        self.inner.lock().unwrap().iter().find(|j| j.id == id).cloned()
+        self.inner
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|j| j.id == id)
+            .cloned()
     }
 
     /// Create a queued job record and persist it.

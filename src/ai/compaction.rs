@@ -13,14 +13,10 @@
 
 use super::provider::{AssistantTurn, Provider, Turn};
 
-/// Roughly how many characters of transcript we allow before compacting. At
-/// ~4 chars/token this is on the order of 50k tokens — comfortably inside a
-/// modern context window while leaving room for the reply and tool output.
-const COMPACT_THRESHOLD_CHARS: usize = 200_000;
-
 /// Don't bother summarizing unless the prefix we'd fold away is at least this
-/// big; below it, compaction costs a model round for no real savings.
-const MIN_PREFIX_CHARS: usize = 40_000;
+/// big; below it, compaction costs a model round for no real savings. (Even on
+/// a small-window model, folding away a few KB isn't worth a round trip.)
+const MIN_PREFIX_CHARS: usize = 20_000;
 
 /// The system prompt for the summarization pass (adapted from opencode's
 /// anchored-context summarizer).
@@ -36,7 +32,11 @@ fn turn_len(turn: &Turn) -> usize {
     match turn {
         Turn::User(t) => t.len(),
         Turn::Assistant(a) => {
-            a.text.len() + a.tool_calls.iter().map(|c| c.name.len() + c.args.to_string().len()).sum::<usize>()
+            a.text.len()
+                + a.tool_calls
+                    .iter()
+                    .map(|c| c.name.len() + c.args.to_string().len())
+                    .sum::<usize>()
         }
         Turn::ToolResults(rs) => rs.iter().map(|r| r.content.len()).sum(),
     }
@@ -64,7 +64,11 @@ fn render(turns: &[Turn]) -> String {
                     out.push('\n');
                 }
                 for c in &a.tool_calls {
-                    out.push_str(&format!("ASSISTANT called {} {}\n", c.name, clip(&c.args.to_string(), 500)));
+                    out.push_str(&format!(
+                        "ASSISTANT called {} {}\n",
+                        c.name,
+                        clip(&c.args.to_string(), 500)
+                    ));
                 }
             }
             Turn::ToolResults(rs) => {
@@ -94,7 +98,7 @@ fn clip(s: &str, max: usize) -> String {
 /// error it still shrinks the transcript with a placeholder, since a valid but
 /// lossy history beats a request that overflows the context window.
 pub async fn maybe_compact(provider: &Provider, turns: &mut Vec<Turn>) -> Option<String> {
-    if total_len(turns) < COMPACT_THRESHOLD_CHARS {
+    if total_len(turns) < provider.context_budget_chars() {
         return None;
     }
 
@@ -115,13 +119,26 @@ pub async fn maybe_compact(provider: &Provider, turns: &mut Vec<Turn>) -> Option
         return None;
     }
 
+    // Anchor the original task: keep the very first user message verbatim so the
+    // model never loses sight of the goal, even after its statement scrolls out
+    // of the summarized window.
+    let goal = turns
+        .iter()
+        .find_map(|t| match t {
+            Turn::User(text) => Some(text.clone()),
+            _ => None,
+        })
+        .unwrap_or_default();
+
     // Ask the model to summarize the prefix. Present it as a single user turn so
     // the summarized slice's own tool calls can't create wire-validity issues.
     let rendered = render(prefix);
     let summary = match provider
         .chat(
             COMPACTION_SYSTEM,
-            &[Turn::User(format!("Summarize this earlier conversation:\n\n{rendered}"))],
+            &[Turn::User(format!(
+                "Summarize this earlier conversation:\n\n{rendered}"
+            ))],
             &[],
         )
         .await
@@ -132,8 +149,13 @@ pub async fn maybe_compact(provider: &Provider, turns: &mut Vec<Turn>) -> Option
 
     let tail: Vec<Turn> = turns.split_off(keep_from);
     let mut compacted = Vec::with_capacity(tail.len() + 2);
+    let goal_line = if goal.trim().is_empty() {
+        String::new()
+    } else {
+        format!("\n\nOriginal task (verbatim, do not lose sight of this):\n{goal}")
+    };
     compacted.push(Turn::User(format!(
-        "[Summary of earlier conversation in this session]\n{summary}"
+        "[Summary of earlier conversation in this session]\n{summary}{goal_line}"
     )));
     compacted.push(Turn::Assistant(AssistantTurn {
         text: "Acknowledged — continuing from the summary above.".to_string(),

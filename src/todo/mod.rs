@@ -126,7 +126,12 @@ impl Store {
 
     /// A task's text by id, if it exists (used to ship a todo to the AI).
     pub fn text_of(&self, id: u64) -> Option<String> {
-        self.inner.lock().unwrap().iter().find(|t| t.id == id).map(|t| t.text.clone())
+        self.inner
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|t| t.id == id)
+            .map(|t| t.text.clone())
     }
 
     /// Set a task's priority and persist.

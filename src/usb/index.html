@@ -1,0 +1,335 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>ciabatta · usb</title>
+<style>
+  :root {
+    --bg: #0f1117;
+    --panel: #171a23;
+    --panel2: #1d212c;
+    --line: #262b38;
+    --muted: #6b7280;
+    --text: #e6e8ee;
+    --accent: #34d399;
+    --danger: #f87171;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; min-height: 100%; }
+  body {
+    background: var(--bg); color: var(--text);
+    font: 15px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+    display: flex; justify-content: center;
+    padding: 40px 16px;
+  }
+  main { width: 100%; max-width: 600px; }
+  header { display: flex; align-items: baseline; gap: 12px; margin-bottom: 24px; }
+  header .brand { font-size: 20px; font-weight: 700; letter-spacing: .3px; }
+  header .brand .crumb { color: var(--muted); font-weight: 400; }
+
+  .field { margin-bottom: 18px; }
+  .field label.top {
+    display: block; margin-bottom: 6px; font-size: 13px; color: var(--muted);
+  }
+  .row { display: flex; gap: 8px; align-items: center; }
+
+  select, input[type=text], input[type=number] {
+    background: var(--panel); border: 1px solid var(--line); color: var(--text);
+    border-radius: 8px; padding: 9px 11px; font: inherit; width: 100%;
+  }
+  input[type=text].hex { font-family: var(--mono); }
+  select:focus, input:focus { outline: none; border-color: var(--accent); }
+  select { cursor: pointer; }
+
+  button.ghost {
+    flex: none; background: var(--panel2); border: 1px solid var(--line); color: var(--text);
+    border-radius: 8px; padding: 9px 12px; font: inherit; cursor: pointer;
+  }
+  button.ghost:hover { border-color: var(--accent); }
+
+  .file-drop {
+    border: 1px dashed var(--line); border-radius: 10px; padding: 18px;
+    text-align: center; color: var(--muted); cursor: pointer; background: var(--panel);
+  }
+  .file-drop:hover, .file-drop.drag { border-color: var(--accent); color: var(--text); }
+  .file-drop.has-file { border-style: solid; color: var(--text); }
+  .file-drop .name { color: var(--text); font-weight: 600; word-break: break-all; }
+  .file-drop input[type=file] { display: none; }
+
+  .summary {
+    background: var(--panel2); border: 1px solid var(--line); border-radius: 10px;
+    padding: 14px 16px; margin-bottom: 18px; font-size: 14px;
+  }
+  .summary .line { display: flex; justify-content: space-between; padding: 2px 0; }
+  .summary .line .k { color: var(--muted); }
+  .summary .line .v { font-family: var(--mono); }
+  .summary .total { border-top: 1px solid var(--line); margin-top: 8px; padding-top: 8px; font-weight: 700; }
+  .summary .preview { color: var(--muted); font-family: var(--mono); font-size: 12.5px; margin-top: 8px; word-break: break-all; }
+
+  button.send {
+    width: 100%; background: var(--accent); color: #06281c; border: none; font: inherit;
+    font-weight: 700; border-radius: 10px; padding: 13px; cursor: pointer; font-size: 15px;
+  }
+  button.send:hover { filter: brightness(1.08); }
+  button.send[disabled] { opacity: .5; cursor: default; filter: none; }
+
+  .result {
+    margin-top: 16px; padding: 12px 14px; border-radius: 10px; font-size: 14px;
+    border: 1px solid var(--line); display: none; white-space: pre-wrap;
+  }
+  .result.show { display: block; }
+  .result.ok { border-color: color-mix(in srgb, var(--accent) 45%, var(--line)); color: var(--accent); }
+  .result.err { border-color: color-mix(in srgb, var(--danger) 45%, var(--line)); color: var(--danger); }
+
+  .hint { color: var(--muted); font-size: 12.5px; margin-top: 6px; }
+  .hint code { font-family: var(--mono); color: var(--text); }
+  .bad { color: var(--danger); }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <div class="brand">🍞 ciabatta <span class="crumb">· usb</span></div>
+  </header>
+
+  <div class="field">
+    <label class="top" for="port">Serial device</label>
+    <div class="row">
+      <select id="port"></select>
+      <button class="ghost" id="refresh" title="Re-scan for devices">↻</button>
+    </div>
+    <div class="hint" id="port-hint"></div>
+  </div>
+
+  <div class="field">
+    <label class="top" for="baud">Baud rate</label>
+    <select id="baud">
+      <option>9600</option>
+      <option>19200</option>
+      <option>38400</option>
+      <option>57600</option>
+      <option selected>115200</option>
+      <option>230400</option>
+      <option>460800</option>
+      <option>921600</option>
+      <option value="custom">Custom…</option>
+    </select>
+    <input type="number" id="baud-custom" placeholder="Custom baud" style="display:none;margin-top:8px;" min="1" />
+  </div>
+
+  <div class="field">
+    <label class="top">File</label>
+    <div class="file-drop" id="drop">
+      <input type="file" id="file" />
+      <div id="drop-text">Click to choose a file, or drop one here</div>
+    </div>
+  </div>
+
+  <div class="field">
+    <label class="top" for="prefix">Hex prefix (prepended before the file — optional)</label>
+    <input type="text" class="hex" id="prefix" placeholder="e.g. DEADBEEF" autocomplete="off" spellcheck="false" />
+    <div class="hint" id="prefix-hint">Whitespace and a leading <code>0x</code> are allowed.</div>
+  </div>
+
+  <div class="summary" id="summary">
+    <div class="line"><span class="k">File size</span><span class="v" id="s-file">—</span></div>
+    <div class="line"><span class="k">Prefix</span><span class="v" id="s-prefix">0 bytes</span></div>
+    <div class="line total"><span class="k">Total on the wire</span><span class="v" id="s-total">—</span></div>
+    <div class="preview" id="s-preview"></div>
+  </div>
+
+  <button class="send" id="send" disabled>Send to device</button>
+  <div class="result" id="result"></div>
+</main>
+
+<script>
+  const portEl = document.getElementById("port");
+  const portHint = document.getElementById("port-hint");
+  const baudEl = document.getElementById("baud");
+  const baudCustom = document.getElementById("baud-custom");
+  const dropEl = document.getElementById("drop");
+  const dropText = document.getElementById("drop-text");
+  const fileEl = document.getElementById("file");
+  const prefixEl = document.getElementById("prefix");
+  const prefixHint = document.getElementById("prefix-hint");
+  const sendEl = document.getElementById("send");
+  const resultEl = document.getElementById("result");
+
+  // The chosen file's bytes as a Uint8Array, or null when none is selected.
+  let fileBytes = null;
+  let fileName = "";
+
+  function fmtBytes(n) {
+    return `${n.toLocaleString()} byte${n === 1 ? "" : "s"}`;
+  }
+
+  function toHex(bytes) {
+    let s = "";
+    for (const b of bytes) s += b.toString(16).padStart(2, "0");
+    return s;
+  }
+
+  // Parse the prefix field the same way the backend does: drop whitespace and
+  // an optional 0x, require an even number of hex digits. Returns a Uint8Array
+  // or null when the field is invalid (non-hex or odd length).
+  function parsePrefix() {
+    let s = prefixEl.value.replace(/\s+/g, "");
+    if (/^0x/i.test(s)) s = s.slice(2);
+    if (s === "") return new Uint8Array();
+    if (!/^[0-9a-fA-F]*$/.test(s) || s.length % 2 !== 0) return null;
+    const out = new Uint8Array(s.length / 2);
+    for (let i = 0; i < out.length; i++) out[i] = parseInt(s.substr(i * 2, 2), 16);
+    return out;
+  }
+
+  function currentBaud() {
+    return baudEl.value === "custom" ? Number(baudCustom.value) : Number(baudEl.value);
+  }
+
+  function updateSummary() {
+    const prefix = parsePrefix();
+    const prefixBad = prefix === null;
+
+    document.getElementById("s-file").textContent =
+      fileBytes ? fmtBytes(fileBytes.length) : "—";
+
+    const sPrefix = document.getElementById("s-prefix");
+    if (prefixBad) {
+      sPrefix.textContent = "invalid hex";
+      sPrefix.classList.add("bad");
+      prefixHint.innerHTML = '<span class="bad">Prefix must be an even number of hex digits.</span>';
+    } else {
+      sPrefix.textContent = fmtBytes(prefix.length);
+      sPrefix.classList.remove("bad");
+      prefixHint.innerHTML = "Whitespace and a leading <code>0x</code> are allowed.";
+    }
+
+    const prefixLen = prefixBad ? 0 : prefix.length;
+    const fileLen = fileBytes ? fileBytes.length : 0;
+    const total = prefixLen + fileLen;
+    document.getElementById("s-total").textContent =
+      (fileBytes || prefixLen) ? fmtBytes(total) : "—";
+
+    // A short hex preview of the leading bytes (prefix then file).
+    const previewEl = document.getElementById("s-preview");
+    if (total > 0 && !prefixBad) {
+      const head = new Uint8Array(Math.min(total, 16));
+      let i = 0;
+      for (let p = 0; p < prefix.length && i < head.length; p++) head[i++] = prefix[p];
+      for (let f = 0; f < fileLen && i < head.length; f++) head[i++] = fileBytes[f];
+      const spaced = toHex(head).replace(/(..)/g, "$1 ").trim().toUpperCase();
+      previewEl.textContent = `first bytes:  ${spaced}${total > 16 ? " …" : ""}`;
+    } else {
+      previewEl.textContent = "";
+    }
+
+    const ready = !!portEl.value && !prefixBad && currentBaud() > 0 && total > 0;
+    sendEl.disabled = !ready;
+  }
+
+  async function loadPorts() {
+    portEl.innerHTML = "";
+    try {
+      const res = await fetch("/api/ports");
+      const data = await res.json();
+      const ports = data.ports || [];
+      if (!ports.length) {
+        const o = document.createElement("option");
+        o.textContent = "No serial devices found";
+        o.value = "";
+        portEl.appendChild(o);
+        portHint.textContent = "Plug in a device and press ↻. On Linux you may need to be in the 'dialout' group.";
+      } else {
+        for (const p of ports) {
+          const o = document.createElement("option");
+          o.value = p.name;
+          const bits = [p.name];
+          if (p.label) bits.push(p.label);
+          if (p.usb_id) bits.push(`(${p.usb_id})`);
+          o.textContent = bits.join("  —  ");
+          portEl.appendChild(o);
+        }
+        portHint.textContent = `${ports.length} device${ports.length === 1 ? "" : "s"} found.`;
+      }
+    } catch (e) {
+      portHint.innerHTML = `<span class="bad">Could not list devices: ${e}</span>`;
+    }
+    updateSummary();
+  }
+
+  function setFile(file) {
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      fileBytes = new Uint8Array(reader.result);
+      fileName = file.name;
+      dropEl.classList.add("has-file");
+      dropText.innerHTML = `<span class="name">${fileName}</span><br>${fmtBytes(fileBytes.length)} · click to change`;
+      updateSummary();
+    };
+    reader.readAsArrayBuffer(file);
+  }
+
+  // ─── wiring ────────────────────────────────────────────────────────────────
+  document.getElementById("refresh").addEventListener("click", loadPorts);
+  portEl.addEventListener("change", updateSummary);
+  prefixEl.addEventListener("input", updateSummary);
+  baudEl.addEventListener("change", () => {
+    baudCustom.style.display = baudEl.value === "custom" ? "block" : "none";
+    updateSummary();
+  });
+  baudCustom.addEventListener("input", updateSummary);
+
+  dropEl.addEventListener("click", () => fileEl.click());
+  fileEl.addEventListener("change", () => setFile(fileEl.files[0]));
+  dropEl.addEventListener("dragover", (e) => { e.preventDefault(); dropEl.classList.add("drag"); });
+  dropEl.addEventListener("dragleave", () => dropEl.classList.remove("drag"));
+  dropEl.addEventListener("drop", (e) => {
+    e.preventDefault();
+    dropEl.classList.remove("drag");
+    setFile(e.dataTransfer.files[0]);
+  });
+
+  sendEl.addEventListener("click", async () => {
+    const prefix = parsePrefix();
+    if (prefix === null || !fileBytes) return;
+    sendEl.disabled = true;
+    const label = sendEl.textContent;
+    sendEl.textContent = "Sending…";
+    resultEl.className = "result";
+
+    try {
+      const res = await fetch("/api/send", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          port: portEl.value,
+          baud: currentBaud(),
+          prefix: toHex(prefix),
+          data: toHex(fileBytes),
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && data.ok) {
+        resultEl.className = "result show ok";
+        resultEl.textContent = `✓ Sent ${fmtBytes(data.written)} to ${portEl.value}.`;
+      } else {
+        resultEl.className = "result show err";
+        resultEl.textContent = `✗ ${data.error || (await res.text()) || "Send failed."}`;
+      }
+    } catch (e) {
+      resultEl.className = "result show err";
+      resultEl.textContent = `✗ Could not reach the ciabatta usb server: ${e}`;
+    } finally {
+      sendEl.textContent = label;
+      updateSummary();
+    }
+  });
+
+  loadPorts();
+  updateSummary();
+</script>
+</body>
+</html>

@@ -27,9 +27,11 @@ const INDEX_HTML: &str = include_str!("index.html");
 /// the app can offer to ship tasks to it.
 pub async fn serve(store: Arc<Store>, port: u16, ai_port: u16) -> Result<()> {
     let host = crate::config::bind_host();
-    let listener = TcpListener::bind((host.as_str(), port)).await.map_err(|e| {
-        anyhow::anyhow!("Failed to bind {host}:{port} ({e}). Try a different --port.")
-    })?;
+    let listener = TcpListener::bind((host.as_str(), port))
+        .await
+        .map_err(|e| {
+            anyhow::anyhow!("Failed to bind {host}:{port} ({e}). Try a different --port.")
+        })?;
 
     println!("\nTodo app ready at http://{host}:{port}");
     println!("Ship-to-AI targets the ciabatta ai daemon on port {ai_port}.");
@@ -153,7 +155,11 @@ fn json_response(store: &Store) -> (&'static str, &'static str, Vec<u8>) {
 
 /// A JSON value as a 200 response.
 fn ok_json(v: serde_json::Value) -> (&'static str, &'static str, Vec<u8>) {
-    ("200 OK", "application/json; charset=utf-8", v.to_string().into_bytes())
+    (
+        "200 OK",
+        "application/json; charset=utf-8",
+        v.to_string().into_bytes(),
+    )
 }
 
 /// Best-effort probe of the `ciabatta ai` daemon: it answers `GET /api/jobs`
@@ -205,7 +211,10 @@ async fn ship_to_ai(
 
     match resp {
         Ok(r) if r.status().is_success() => {
-            let job = r.json::<serde_json::Value>().await.unwrap_or_else(|_| json!({}));
+            let job = r
+                .json::<serde_json::Value>()
+                .await
+                .unwrap_or_else(|_| json!({}));
             ok_json(json!({ "ok": true, "job": job }))
         }
         Ok(r) => {

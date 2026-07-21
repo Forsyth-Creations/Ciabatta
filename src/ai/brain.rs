@@ -348,6 +348,24 @@ impl Brain {
         })
     }
 
+    /// The best remembered command in a category (build, test, lint, …), for
+    /// reuse as a verification gate: prefer one that last succeeded, then the
+    /// most-run. Returns `None` if nothing in that category has been recorded.
+    pub fn best_command(&self, category: &str) -> Option<String> {
+        let category = category.trim().to_lowercase();
+        let s = self.inner.lock().unwrap();
+        s.commands
+            .iter()
+            .filter(|c| c.category == category)
+            .max_by(|a, b| {
+                a.last_ok
+                    .cmp(&b.last_ok)
+                    .then_with(|| a.runs.cmp(&b.runs))
+                    .then_with(|| a.last_run.cmp(&b.last_run))
+            })
+            .map(|c| c.command.clone())
+    }
+
     /// Whether the mind map already knows a file (it has tags or a path score
     /// under some architecture). Used to gauge how "related" a change is.
     pub fn knows_file(&self, file: &str) -> bool {
@@ -449,7 +467,13 @@ impl Brain {
             .into_iter()
             .take(limit)
             .map(|(file, score)| {
-                let tags = state.tags.get(&file).into_iter().flatten().cloned().collect();
+                let tags = state
+                    .tags
+                    .get(&file)
+                    .into_iter()
+                    .flatten()
+                    .cloned()
+                    .collect();
                 (file, score, tags)
             })
             .collect()
@@ -635,7 +659,11 @@ fn dependency_overview(graph: Option<&crate::analyze::AnalysisGraph>) -> String 
         .iter()
         .filter(|n| n.category == Category::Internal && n.id != "int:root")
         .collect();
-    let ext = g.nodes.iter().filter(|n| n.category == Category::External).count();
+    let ext = g
+        .nodes
+        .iter()
+        .filter(|n| n.category == Category::External)
+        .count();
     let mut out = format!(
         "\nDependency graph (use the `deps` tool to traverse it): {} internal package(s), \
          {ext} external dependency(ies).\n",
@@ -654,7 +682,10 @@ fn dependency_overview(graph: Option<&crate::analyze::AnalysisGraph>) -> String 
         ));
     }
     if internals.len() > 12 {
-        out.push_str(&format!("  … and {} more package(s)\n", internals.len() - 12));
+        out.push_str(&format!(
+            "  … and {} more package(s)\n",
+            internals.len() - 12
+        ));
     }
     out
 }
@@ -670,7 +701,8 @@ fn tooling_overview(commands: &[ToolingCommand]) -> String {
         String::from("\nRemembered project commands (reuse these to build/lint/format/test):\n");
     let mut shown = 0;
     for cat in ["build", "test", "lint", "format", "run", "other"] {
-        let mut cmds: Vec<&ToolingCommand> = commands.iter().filter(|c| c.category == cat).collect();
+        let mut cmds: Vec<&ToolingCommand> =
+            commands.iter().filter(|c| c.category == cat).collect();
         if cmds.is_empty() {
             continue;
         }
@@ -679,7 +711,13 @@ fn tooling_overview(commands: &[ToolingCommand]) -> String {
         let list: Vec<String> = cmds
             .iter()
             .take(3)
-            .map(|c| format!("`{}`{}", c.command, if c.last_ok { "" } else { " (last failed)" }))
+            .map(|c| {
+                format!(
+                    "`{}`{}",
+                    c.command,
+                    if c.last_ok { "" } else { " (last failed)" }
+                )
+            })
             .collect();
         out.push_str(&format!("  - {cat}: {}\n", list.join(", ")));
         shown += 1;
@@ -747,7 +785,11 @@ mod tests {
     fn confirm_installs_tags_and_scores() {
         let (_dir, brain) = temp_brain();
         brain
-            .propose_tags("src/auth.rs", &["auth".into(), "backend".into()], "handles login")
+            .propose_tags(
+                "src/auth.rs",
+                &["auth".into(), "backend".into()],
+                "handles login",
+            )
             .unwrap();
         assert_eq!(brain.pending().len(), 1);
 
@@ -762,7 +804,9 @@ mod tests {
     #[test]
     fn usage_increases_path_score() {
         let (_dir, brain) = temp_brain();
-        brain.propose_tags("src/a.rs", &["core".into()], "").unwrap();
+        brain
+            .propose_tags("src/a.rs", &["core".into()], "")
+            .unwrap();
         brain.confirm("src/a.rs", true).unwrap();
         let before = brain.suggest("core", 1)[0].1;
         brain.record_file_use("src/a.rs").unwrap();
@@ -789,7 +833,9 @@ mod tests {
             .propose_tags("src/a.rs", &["core".into(), "ui".into()], "")
             .unwrap();
         brain.confirm("src/a.rs", true).unwrap();
-        brain.propose_tags("src/b.rs", &["core".into()], "").unwrap();
+        brain
+            .propose_tags("src/b.rs", &["core".into()], "")
+            .unwrap();
         brain.confirm("src/b.rs", true).unwrap();
 
         // Untag: a.rs keeps 'core' but loses 'ui'.
@@ -827,17 +873,31 @@ mod tests {
 
         let state = brain.inner.lock().unwrap();
         assert_eq!(state.commands.len(), 2);
-        assert_eq!(state.commands.iter().find(|c| c.command == "cargo build").unwrap().runs, 2);
+        assert_eq!(
+            state
+                .commands
+                .iter()
+                .find(|c| c.command == "cargo build")
+                .unwrap()
+                .runs,
+            2
+        );
     }
 
     #[test]
     fn sibling_tags_are_drawn_from_the_same_directory() {
         let (_dir, brain) = temp_brain();
-        brain.propose_tags("src/ai/tui.rs", &["ai".into(), "ui".into()], "").unwrap();
+        brain
+            .propose_tags("src/ai/tui.rs", &["ai".into(), "ui".into()], "")
+            .unwrap();
         brain.confirm("src/ai/tui.rs", true).unwrap();
-        brain.propose_tags("src/ai/brain.rs", &["ai".into()], "").unwrap();
+        brain
+            .propose_tags("src/ai/brain.rs", &["ai".into()], "")
+            .unwrap();
         brain.confirm("src/ai/brain.rs", true).unwrap();
-        brain.propose_tags("frontend/app.tsx", &["frontend".into()], "").unwrap();
+        brain
+            .propose_tags("frontend/app.tsx", &["frontend".into()], "")
+            .unwrap();
         brain.confirm("frontend/app.tsx", true).unwrap();
 
         // A new file under src/ai inherits its siblings' tags, not frontend's.

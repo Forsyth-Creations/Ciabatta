@@ -11,6 +11,7 @@ mod registry;
 mod runner;
 mod todo;
 mod tui;
+mod usb;
 mod watch;
 
 use std::collections::HashMap;
@@ -167,6 +168,10 @@ async fn main() -> Result<()> {
             cmd_ai(subcommand, port, no_graph, mode, continue_last).await?;
         }
 
+        Commands::Usb { port, no_open } => {
+            usb::server::serve(port, !no_open).await?;
+        }
+
         Commands::Config { subcommand } => match subcommand {
             ConfigCommand::Show => {
                 let (root, cfg) = load_project(None)?;
@@ -181,7 +186,12 @@ async fn main() -> Result<()> {
             cmd_configure(subcommand)?;
         }
 
-        Commands::Todo { task, detach, port, ai_port } => {
+        Commands::Todo {
+            task,
+            detach,
+            port,
+            ai_port,
+        } => {
             cmd_todo(task, detach, port, ai_port).await?;
         }
     }
@@ -239,11 +249,17 @@ async fn cmd_ai(
     let cfg = load_config(&root)?;
     if cfg.ai.is_none() {
         eprintln!("note: no [ai] section in ciabatta.toml — run `ciabatta ai setup` to configure");
-        eprintln!("      a provider (Claude, an OpenAI-compatible endpoint, or vLLM). Trying defaults…\n");
+        eprintln!(
+            "      a provider (Claude, an OpenAI-compatible endpoint, or vLLM). Trying defaults…\n"
+        );
     }
 
     // `--continue` resumes the latest conversation for the TUI and one-shot ask.
-    let resume = if continue_last { ai::Resume::Latest } else { ai::Resume::None };
+    let resume = if continue_last {
+        ai::Resume::Latest
+    } else {
+        ai::Resume::None
+    };
 
     match subcommand {
         None => ai::run_tui(&root, &cfg, port, no_graph, mode, resume).await,
@@ -251,9 +267,7 @@ async fn cmd_ai(
         Some(AiCommand::Resume { id }) => {
             ai::run_resume(&root, &cfg, port, no_graph, mode, id).await
         }
-        Some(AiCommand::Report { days, pdf }) => {
-            ai::run_report(&root, &cfg, days, mode, pdf).await
-        }
+        Some(AiCommand::Report { days, pdf }) => ai::run_report(&root, &cfg, days, mode, pdf).await,
         Some(AiCommand::Tag { name, description }) => {
             ai::run_tag(&root, &cfg, &name, &description.join(" "), mode).await
         }

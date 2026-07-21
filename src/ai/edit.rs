@@ -31,9 +31,16 @@ const MATCHERS: &[Matcher] = &[
 /// With `replace_all`, every occurrence of the matched span is replaced.
 /// Otherwise the match must be unique. Returns an error the model can act on
 /// when the string is missing, ambiguous, or the fuzzy match is oversized.
-pub fn replace(content: &str, find: &str, replacement: &str, replace_all: bool) -> anyhow::Result<String> {
+pub fn replace(
+    content: &str,
+    find: &str,
+    replacement: &str,
+    replace_all: bool,
+) -> anyhow::Result<String> {
     if find.is_empty() {
-        anyhow::bail!("`old` is empty — give the exact text to replace (use propose_change for a whole new file)");
+        anyhow::bail!(
+            "`old` is empty — give the exact text to replace (use propose_change for a whole new file)"
+        );
     }
     if find == replacement {
         anyhow::bail!("`old` and `new` are identical — nothing to change");
@@ -145,7 +152,11 @@ fn whitespace_normalized(content: &str, find: &str) -> Vec<String> {
         return Vec::new();
     }
     let orig: Vec<&str> = content.split('\n').collect();
-    let find_lines = find.split('\n').filter(|l| !l.trim().is_empty()).count().max(1);
+    let find_lines = find
+        .split('\n')
+        .filter(|l| !l.trim().is_empty())
+        .count()
+        .max(1);
 
     let mut starts = Vec::with_capacity(orig.len());
     let mut acc = 0usize;
@@ -260,7 +271,13 @@ mod tests {
 
     #[test]
     fn exact_match_is_replaced() {
-        let out = replace("let x = 1;\nlet y = 2;\n", "let x = 1;", "let x = 42;", false).unwrap();
+        let out = replace(
+            "let x = 1;\nlet y = 2;\n",
+            "let x = 1;",
+            "let x = 42;",
+            false,
+        )
+        .unwrap();
         assert_eq!(out, "let x = 42;\nlet y = 2;\n");
     }
 
@@ -268,7 +285,13 @@ mod tests {
     fn indentation_drift_still_matches() {
         // Model supplied the body dedented; file has it indented under a fn.
         let content = "fn f() {\n    let a = 1;\n    let b = 2;\n}\n";
-        let out = replace(content, "let a = 1;\nlet b = 2;", "let a = 10;\nlet b = 20;", false).unwrap();
+        let out = replace(
+            content,
+            "let a = 1;\nlet b = 2;",
+            "let a = 10;\nlet b = 20;",
+            false,
+        )
+        .unwrap();
         assert!(out.contains("let a = 10;"));
         assert!(out.contains("let b = 20;"));
         // Original indentation of the surrounding block is untouched.
@@ -302,6 +325,8 @@ mod tests {
         content.push_str("end\n");
         let find = "start\nmiddle\nend"; // 3 lines, block-anchor would span 42
         let err = replace(&content, find, "x", false).unwrap_err();
-        assert!(err.to_string().contains("spans far more") || err.to_string().contains("not found"));
+        assert!(
+            err.to_string().contains("spans far more") || err.to_string().contains("not found")
+        );
     }
 }

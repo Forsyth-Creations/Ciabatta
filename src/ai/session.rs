@@ -66,8 +66,8 @@ impl Conversation {
         let path = conversations_dir(root).join(format!("{id}.json"));
         let raw = std::fs::read_to_string(&path)
             .with_context(|| format!("No saved conversation '{id}' ({})", path.display()))?;
-        let mut conv: Conversation =
-            serde_json::from_str(&raw).with_context(|| format!("Failed to parse {}", path.display()))?;
+        let mut conv: Conversation = serde_json::from_str(&raw)
+            .with_context(|| format!("Failed to parse {}", path.display()))?;
         conv.path = path;
         Ok(conv)
     }
@@ -84,8 +84,15 @@ impl Conversation {
     /// The title is the first user message (trimmed to one line).
     pub fn save(&mut self) -> Result<()> {
         if self.title.is_empty() {
-            if let Some(Turn::User(first)) = self.turns.iter().find(|t| matches!(t, Turn::User(_))) {
-                self.title = first.lines().next().unwrap_or("").chars().take(80).collect();
+            if let Some(Turn::User(first)) = self.turns.iter().find(|t| matches!(t, Turn::User(_)))
+            {
+                self.title = first
+                    .lines()
+                    .next()
+                    .unwrap_or("")
+                    .chars()
+                    .take(80)
+                    .collect();
             }
         }
         self.updated_at = now();
@@ -160,7 +167,11 @@ pub fn list(root: &Path) -> Result<Vec<ConversationSummary>> {
             .count();
         out.push(ConversationSummary {
             id: conv.id,
-            title: if conv.title.is_empty() { "(untitled)".into() } else { conv.title },
+            title: if conv.title.is_empty() {
+                "(untitled)".into()
+            } else {
+                conv.title
+            },
             updated_at: conv.updated_at,
             turns,
         });

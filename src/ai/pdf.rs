@@ -118,8 +118,8 @@ fn build_pdf(text_lines: &[String]) -> Vec<u8> {
     let size = objects.len() + 1;
     out.extend_from_slice(format!("xref\n0 {size}\n").as_bytes());
     out.extend_from_slice(b"0000000000 65535 f \n");
-    for num in 1..size {
-        out.extend_from_slice(format!("{:010} 00000 n \n", offsets[num]).as_bytes());
+    for &offset in &offsets[1..size] {
+        out.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
     }
     out.extend_from_slice(
         format!("trailer\n<< /Size {size} /Root 1 0 R >>\nstartxref\n{xref_offset}\n%%EOF\n")

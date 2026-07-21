@@ -2,15 +2,15 @@
 //!
 //! Every tool runs on the developer's machine and is deliberately small:
 //!
-//!   * `search_code`   — grep/ack/ripgrep passthrough ("find everything")
+//!   * `search_code` — grep/ack/ripgrep passthrough ("find everything")
 //!   * `suggest_files` — mind-map lookup ("find exactly what is needed")
-//!   * `list_files`    — bounded project tree listing
-//!   * `read_file`     — read a file (records usage into the mind map)
-//!   * `tag_file`      — propose architecture tags (pending user confirmation)
-//!   * `propose_change`— suggest new content for a file; shown to the user as
-//!                       a diff and applied per the current [`Mode`]
-//!   * `sandbox_run`   — run a command in a configured base image via
-//!                       podman/docker, giving the AI a safe space to work
+//!   * `list_files` — bounded project tree listing
+//!   * `read_file` — read a file (records usage into the mind map)
+//!   * `tag_file` — propose architecture tags (pending user confirmation)
+//!   * `propose_change` — suggest new content for a file; shown to the user as
+//!     a diff and applied per the current [`Mode`]
+//!   * `sandbox_run` — run a command in a configured base image via
+//!     podman/docker, giving the AI a safe space to work
 //!
 //! All paths are confined to the project root; sandbox images are restricted
 //! to the ones listed in the `[ai]` config section. Change proposals (and a

@@ -390,6 +390,7 @@ impl RecipeEntry {
 /// - Neither given → every recipe (the "push all" default).
 /// - Each cookbook expands to the recipe names its menu lists.
 /// - Explicit recipe names are appended.
+///
 /// Results are de-duplicated in first-seen order, so a recipe shared by two
 /// selected menus (or named alongside a menu) runs once. Errors when a named
 /// menu is undefined or lists a recipe that doesn't exist.

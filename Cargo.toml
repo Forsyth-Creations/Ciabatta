@@ -1,6 +1,6 @@
 [package]
 name = "ciabatta"
-version = "0.1.20"
+version = "0.1.21"
 edition = "2024"
 description = "A command line tool for publishing artifacts to various registries"
 license = "MIT"

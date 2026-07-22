@@ -78,6 +78,14 @@
         border-bottom: 1px solid var(--line); font-size: 12.5px; flex: none;
       }
       .logbar .spacer { margin-left: auto; }
+      .dl { display: inline-flex; align-items: center; gap: 6px; margin-right: 12px; }
+      .dl-label { color: var(--muted); }
+      .dl-num {
+        width: 68px; background: var(--panel2); color: var(--fg); border: 1px solid var(--line);
+        border-radius: 6px; padding: 4px 7px; font: inherit; font-size: 12px;
+      }
+      .dl-num:focus { outline: none; border-color: var(--accent); }
+      .logbar .seg button { padding: 4px 8px; font-size: 12px; }
       #log {
         flex: 1 1 auto; overflow: auto; padding: 8px 0;
         font: 12.5px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace;
@@ -137,15 +145,11 @@
       .addrow input:focus { outline: none; border-color: var(--accent); }
       .muted { color: var(--muted); font-size: 12.5px; }
 
-      #toasts { position: fixed; right: 16px; bottom: 16px; display: flex; flex-direction: column; gap: 8px; z-index: 50; }
-      .toast {
-        background: var(--panel2); border: 1px solid rgba(240,165,74,.5); border-left-width: 3px;
-        border-radius: 8px; padding: 10px 14px; max-width: 360px; box-shadow: 0 6px 20px rgba(0,0,0,.4);
-        animation: slidein .18s ease-out;
+      .sect.flash { animation: sectflash 1.2s ease-out; }
+      @keyframes sectflash {
+        0% { background: rgba(240,165,74,.22); }
+        100% { background: transparent; }
       }
-      .toast .t-title { color: var(--accent); font-size: 12px; font-weight: 600; margin-bottom: 3px; }
-      .toast .t-body { font: 12px/1.4 ui-monospace, Menlo, monospace; color: var(--fg); word-break: break-word; }
-      @keyframes slidein { from { transform: translateY(8px); opacity: 0; } to { transform: none; opacity: 1; } }
     </style>
   </head>
   <body>
@@ -181,6 +185,17 @@
           <label class="chk"><input type="checkbox" id="follow" checked /> follow tail</label>
           <label class="chk"><input type="checkbox" id="tsToggle" /> timestamps</label>
           <span class="spacer"></span>
+          <span class="dl">
+            <span class="dl-label">Download</span>
+            <input type="text" id="dlFrom" class="dl-num" inputmode="numeric" placeholder="from #" title="First line number (blank = start)" />
+            <input type="text" id="dlTo" class="dl-num" inputmode="numeric" placeholder="to #" title="Last line number (blank = end)" />
+            <div class="seg" id="dlStreamSeg">
+              <button data-stream="all" class="on">all</button>
+              <button data-stream="stdout">out</button>
+              <button data-stream="stderr">err</button>
+            </div>
+            <button class="btn" id="dlBtn" title="Download this range of buffered log lines">Save</button>
+          </span>
           <span id="viewMode">live</span>
         </div>
         <div id="log"><div class="placeholder">Waiting for output…</div></div>
@@ -195,7 +210,7 @@
             <label class="chk"><input type="checkbox" id="trigRegex" /> re</label>
             <button class="btn" id="trigAdd">Add</button>
           </div>
-          <div class="muted" id="notifHint" style="margin-top:8px"></div>
+          <div class="muted" id="notifHint" style="margin-top:8px">Matches appear under Recent hits (with a short sound) — no pop-ups.</div>
         </div>
         <div class="sect">
           <h2>★ Bookmarks <span class="count" id="bmCount"></span></h2>
@@ -208,8 +223,6 @@
       </aside>
     </main>
 
-    <div id="toasts"></div>
-
     <script>
       const $ = (id) => document.getElementById(id);
       const esc = (s) => s.replace(/[&<>"]/g, (c) => ({ "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;" }[c]));
@@ -221,7 +234,7 @@
       let seenHits = new Set();       // trigger_id:seq keys already notified
       let firstPoll = true;
 
-      // ── notifications ──────────────────────────────────────────────────────
+      // ── trigger notification (side panel only; a short sound, no pop-ups) ────
       let audioCtx = null;
       function ping() {
         try {
@@ -234,30 +247,15 @@
           o.start(); o.stop(audioCtx.currentTime + 0.25);
         } catch (e) {}
       }
-      function ensureNotifyPermission() {
-        if (!("Notification" in window)) return;
-        if (Notification.permission === "default") Notification.requestPermission().then(updateNotifHint);
-      }
-      function updateNotifHint() {
-        const el = $("notifHint");
-        if (!("Notification" in window)) { el.textContent = "Desktop notifications unavailable in this browser."; return; }
-        if (Notification.permission === "granted") el.textContent = "Desktop notifications on.";
-        else if (Notification.permission === "denied") el.textContent = "Desktop notifications blocked; toasts + sound still fire.";
-        else el.textContent = "Add a trigger to enable desktop notifications.";
-      }
-      function notify(pattern, text) {
-        toast(pattern, text);
-        ping();
-        if ("Notification" in window && Notification.permission === "granted") {
-          try { new Notification("⚑ " + pattern, { body: text }); } catch (e) {}
-        }
-      }
-      function toast(pattern, text) {
-        const t = document.createElement("div");
-        t.className = "toast";
-        t.innerHTML = `<div class="t-title">⚑ ${esc(pattern)}</div><div class="t-body">${esc(text)}</div>`;
-        $("toasts").appendChild(t);
-        setTimeout(() => t.remove(), 6000);
+      // Briefly flash the "Recent hits" panel so a new match is noticeable
+      // without a pop-up.
+      let hitsSect = null;
+      function flashHits() {
+        hitsSect = hitsSect || $("hits").closest(".sect");
+        if (!hitsSect) return;
+        hitsSect.classList.remove("flash");
+        void hitsSect.offsetWidth; // restart the animation
+        hitsSect.classList.add("flash");
       }
 
       // ── rendering log rows ─────────────────────────────────────────────────
@@ -325,13 +323,15 @@
       }
 
       function fireNewHits(hits, triggers) {
-        const pat = {}; for (const t of triggers) pat[t.id] = t.pattern;
+        let fresh = 0;
         for (const h of hits) {
           const key = h.trigger_id + ":" + h.seq;
           if (seenHits.has(key)) continue;
           seenHits.add(key);
-          if (!firstPoll) notify(pat[h.trigger_id] || "trigger", h.text);
+          if (!firstPoll) fresh++;
         }
+        // The hit already appears in the side panel; add a sound + flash cue.
+        if (fresh) { ping(); flashHits(); }
       }
 
       // ── sidebar renderers ──────────────────────────────────────────────────
@@ -361,7 +361,7 @@
         $("hitCount").textContent = hits.length ? hits.length : "";
         const el = $("hits");
         if (!hits.length) { el.innerHTML = '<div class="muted">No trigger matches yet.</div>'; return; }
-        el.innerHTML = hits.slice(-30).reverse().map((h) =>
+        el.innerHTML = hits.slice(-100).reverse().map((h) =>
           `<div class="item clickable" onclick="jumpTo(${h.seq}, ${JSON.stringify(h.text).replace(/"/g,'&quot;')})">`
           + `<div class="grow"><div class="sub">#${h.seq}</div><div class="title" style="font-size:12px">${esc(h.text).slice(0,90)}</div></div></div>`
         ).join("");
@@ -391,7 +391,6 @@
         const r = await fetch("/triggers", { method: "POST", body: JSON.stringify({ pattern, is_regex }) });
         if (!r.ok) { alert("Invalid trigger: " + (await r.text())); return; }
         $("trigInput").value = "";
-        ensureNotifyPermission();
         poll();
       }
 
@@ -403,7 +402,8 @@
           row.classList.add("flash");
           setTimeout(() => row.classList.remove("flash"), 1600);
         } else {
-          toast("bookmark #" + seq, snippet || "(line scrolled out of the live buffer)");
+          $("searchMeta").textContent = `#${seq} scrolled out of the live buffer`;
+          setTimeout(() => { if (!searching) $("searchMeta").textContent = ""; }, 4000);
         }
       }
 
@@ -450,9 +450,32 @@
         $("log").innerHTML = '<div class="placeholder">Loading…</div>';
       }
 
+      // ── download a segment of the buffer ───────────────────────────────────
+      let dlStream = "all";
+      $("dlStreamSeg").addEventListener("click", (e) => {
+        const b = e.target.closest("button"); if (!b) return;
+        dlStream = b.dataset.stream;
+        [...$("dlStreamSeg").children].forEach((c) => c.classList.toggle("on", c === b));
+      });
+      $("dlBtn").onclick = () => {
+        const from = ($("dlFrom").value.match(/\d+/) || [""])[0];
+        const to = ($("dlTo").value.match(/\d+/) || [""])[0];
+        const params = new URLSearchParams();
+        if (from) params.set("from", from);
+        if (to) params.set("to", to);
+        if (dlStream !== "all") params.set("stream", dlStream);
+        const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+        const range = from || to ? `-${from || "start"}_${to || "end"}` : "";
+        const a = document.createElement("a");
+        a.href = "/download?" + params.toString();
+        a.download = `watch-log${range}-${stamp}.txt`;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+      };
+
       $("tsToggle").addEventListener("change", (e) => document.body.classList.toggle("show-ts", e.target.checked));
 
-      updateNotifHint();
       poll();
       setInterval(poll, 750);
     </script>

@@ -4,8 +4,9 @@
 //! The command runs through the shell (so pipes / `&&` / redirects work). Its
 //! stdout and stderr are captured line-by-line into a bounded ring buffer, and a
 //! tiny web server (see [`server`]) serves a single-page UI that polls for new
-//! lines, searches the whole buffer, lets you bookmark ("point at") lines, and
-//! fires notifications when a line matches a trigger phrase.
+//! lines, searches the whole buffer, downloads any slice of it, lets you
+//! bookmark ("point at") lines, and lists lines matching a trigger phrase in a
+//! side panel (no browser pop-ups).
 //!
 //! Bookmarks and triggers **persist to disk** under `~/.ciabatta/watch/`, keyed
 //! by the command string, so they survive restarts. Log lines themselves are
@@ -410,6 +411,32 @@ impl WatchState {
         (out, total)
     }
 
+    /// Collect a contiguous slice of the buffer as plain text for download.
+    ///
+    /// Lines with `from <= seq <= to` are joined newline-separated; a bound of
+    /// `0` means "unbounded" on that side, so `download(0, 0, None)` returns the
+    /// whole buffer. `stream` optionally restricts to stdout/stderr.
+    fn download(&self, from: u64, to: u64, stream: Option<Stream>) -> String {
+        let inner = self.inner.lock().unwrap();
+        let mut out = String::new();
+        for line in &inner.lines {
+            if from != 0 && line.seq < from {
+                continue;
+            }
+            if to != 0 && line.seq > to {
+                continue;
+            }
+            if let Some(s) = stream
+                && line.stream != s
+            {
+                continue;
+            }
+            out.push_str(&line.text);
+            out.push('\n');
+        }
+        out
+    }
+
     /// Persist bookmarks + triggers (called while holding the lock).
     fn save(&self, inner: &Inner) {
         let data = Persisted {
@@ -565,6 +592,23 @@ mod tests {
         s.remove_bookmark(id);
         let snap = s.snapshot(0, 100);
         assert!(snap["bookmarks"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn download_range_and_stream() {
+        let s = store();
+        s.push_line(Stream::Stdout, "one".into()); // seq 1
+        s.push_line(Stream::Stderr, "two".into()); // seq 2
+        s.push_line(Stream::Stdout, "three".into()); // seq 3
+
+        // Whole buffer.
+        assert_eq!(s.download(0, 0, None), "one\ntwo\nthree\n");
+        // Inclusive range.
+        assert_eq!(s.download(2, 3, None), "two\nthree\n");
+        // Open-ended lower bound.
+        assert_eq!(s.download(0, 2, None), "one\ntwo\n");
+        // Stream filter.
+        assert_eq!(s.download(0, 0, Some(Stream::Stdout)), "one\nthree\n");
     }
 
     #[test]

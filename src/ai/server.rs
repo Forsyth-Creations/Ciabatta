@@ -2,21 +2,20 @@
 //! live architecture mind map and a JSON API.
 //!
 //! Endpoints:
-//!   * `GET  /`                  — the embedded graph page
+//!   * `GET  /` — the embedded graph page
 //!   * `GET  /api/graph?after=N` — the mind map; returns `{changed:false}`
-//!                                 while the brain's sequence is still `N`,
-//!                                 so the page can poll cheaply in real time
-//!   * `POST /api/ask`           — `{"prompt": "..."}` → run the agent loop
-//!   * `POST /api/confirm`       — `{"file": "...", "accept": true}` resolve a
-//!                                 pending tag confirmation
-//!   * `POST /api/feedback`      — `{"positive": true, "note": "..."}` train
-//!                                 the confidence score
-//!   * `POST /api/prune`         — `{"kind": "file"|"architecture"|"tag",
-//!                                 "id": "...", "tag": "..."}` remove knowledge
-//!                                 from the mind map
-//!   * `POST /api/ship`          — `{"prompt": "..."}` start a background AI
-//!                                 task; returns its id immediately
-//!   * `GET  /api/jobs`          — background task status (poll for progress)
+//!     while the brain's sequence is still `N`, so the page can poll cheaply
+//!     in real time
+//!   * `POST /api/ask` — `{"prompt": "..."}` → run the agent loop
+//!   * `POST /api/confirm` — `{"file": "...", "accept": true}` resolve a
+//!     pending tag confirmation
+//!   * `POST /api/feedback` — `{"positive": true, "note": "..."}` train
+//!     the confidence score
+//!   * `POST /api/prune` — `{"kind": "file"|"architecture"|"tag", "id": "...",
+//!     "tag": "..."}` remove knowledge from the mind map
+//!   * `POST /api/ship` — `{"prompt": "..."}` start a background AI task;
+//!     returns its id immediately
+//!   * `GET  /api/jobs` — background task status (poll for progress)
 
 use std::sync::Arc;
 

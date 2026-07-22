@@ -831,11 +831,11 @@ pub async fn run_ship(
             }
             println!("\n{}", job.answer.as_deref().unwrap_or("(done)"));
             // Reflect completed AI work back into the personal todo list.
-            if let Some(id) = todo_id {
-                if let Ok(store) = crate::todo::Store::open() {
-                    let _ = store.set_done(id, true);
-                    eprintln!("\nmarked todo #{id} done.");
-                }
+            if let Some(id) = todo_id
+                && let Ok(store) = crate::todo::Store::open()
+            {
+                let _ = store.set_done(id, true);
+                eprintln!("\nmarked todo #{id} done.");
             }
             eprintln!("\njob #{} saved — see `ciabatta ai jobs`.", job.id);
             Ok(())

@@ -83,17 +83,16 @@ impl Conversation {
     /// Persist the conversation to disk, refreshing the title and timestamp.
     /// The title is the first user message (trimmed to one line).
     pub fn save(&mut self) -> Result<()> {
-        if self.title.is_empty() {
-            if let Some(Turn::User(first)) = self.turns.iter().find(|t| matches!(t, Turn::User(_)))
-            {
-                self.title = first
-                    .lines()
-                    .next()
-                    .unwrap_or("")
-                    .chars()
-                    .take(80)
-                    .collect();
-            }
+        if self.title.is_empty()
+            && let Some(Turn::User(first)) = self.turns.iter().find(|t| matches!(t, Turn::User(_)))
+        {
+            self.title = first
+                .lines()
+                .next()
+                .unwrap_or("")
+                .chars()
+                .take(80)
+                .collect();
         }
         self.updated_at = now();
         let dir = self

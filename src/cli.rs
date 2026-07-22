@@ -233,7 +233,7 @@ pub enum Commands {
         triggers: Vec<String>,
 
         /// Cap the in-memory log buffer; older lines are dropped past this.
-        #[arg(long, default_value_t = 200_000)]
+        #[arg(long, default_value_t = 1_000_000)]
         max_lines: usize,
 
         /// Port for the local web view.

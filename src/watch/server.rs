@@ -7,6 +7,7 @@
 //! * `GET  /`            — the UI
 //! * `GET  /state.json`  — incremental poll: `?after=<seq>&limit=<n>`
 //! * `GET  /search`      — server-side search: `?q=<t1,t2>&mode=&stream=&regex=`
+//! * `GET  /download`    — buffer slice as text/plain: `?from=<seq>&to=<seq>&stream=`
 //! * `POST /bookmarks`, `/bookmarks/delete`
 //! * `POST /triggers`,  `/triggers/delete`
 
@@ -138,6 +139,17 @@ async fn handle(mut socket: TcpStream, store: &WatchState) -> Result<()> {
                 "application/json; charset=utf-8",
                 serde_json::to_vec(&json)?,
             )
+        }
+        ("GET", "/download") => {
+            let from = query.get("from").and_then(|v| v.parse().ok()).unwrap_or(0);
+            let to = query.get("to").and_then(|v| v.parse().ok()).unwrap_or(0);
+            let stream = match query.get("stream").map(String::as_str) {
+                Some("stdout") => Some(Stream::Stdout),
+                Some("stderr") => Some(Stream::Stderr),
+                _ => None,
+            };
+            let text = store.download(from, to, stream);
+            ("200 OK", "text/plain; charset=utf-8", text.into_bytes())
         }
         ("POST", "/bookmarks") => match serde_json::from_str::<AddBookmark>(&req.body) {
             Ok(p) => {

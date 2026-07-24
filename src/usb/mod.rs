@@ -15,6 +15,7 @@ use std::time::Duration;
 use anyhow::{Result, bail};
 use serde::Serialize;
 
+pub mod capture;
 pub mod server;
 
 /// How long a single serial write is allowed to block before timing out.
@@ -131,6 +132,17 @@ pub fn decode_hex(s: &str) -> Result<Vec<u8>> {
     Ok(out)
 }
 
+/// Encode bytes as a lowercase hex string (the inverse of [`decode_hex`]).
+pub fn encode_hex(bytes: &[u8]) -> String {
+    use std::fmt::Write;
+
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        let _ = write!(s, "{b:02x}");
+    }
+    s
+}
+
 /// Convert a single ASCII hex digit to its 0–15 value.
 fn nibble(c: u8) -> Result<u8> {
     match c {
@@ -143,7 +155,14 @@ fn nibble(c: u8) -> Result<u8> {
 
 #[cfg(test)]
 mod tests {
-    use super::decode_hex;
+    use super::{decode_hex, encode_hex};
+
+    #[test]
+    fn encode_hex_round_trips_with_decode() {
+        let bytes = [0xde, 0xad, 0xbe, 0xef, 0x00, 0x01];
+        assert_eq!(encode_hex(&bytes), "deadbeef0001");
+        assert_eq!(decode_hex(&encode_hex(&bytes)).unwrap(), bytes);
+    }
 
     #[test]
     fn decodes_plain_hex() {

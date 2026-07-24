@@ -218,6 +218,7 @@
       let mode = "any", streamFilter = "all";
       let searching = false;          // showing search results instead of live tail
       let searchTerms = [];
+      let searchParams = null;        // { q, mode, stream, regex } snapshot for re-querying while live
       let seenHits = new Set();       // trigger_id:seq keys already notified
       let firstPoll = true;
 
@@ -304,6 +305,7 @@
             lastSeq = s.lines[s.lines.length - 1].seq;
             if (!searching) appendLines(s.lines);
           }
+          if (searching) await refreshSearch();
           firstPoll = false;
         } catch (e) { /* server going away; keep trying */ }
       }
@@ -425,22 +427,37 @@
       async function runSearch() {
         const q = $("q").value.trim();
         if (!q) { clearSearch(); return; }
-        const regex = $("regex").checked ? "1" : "0";
-        const url = `/search?q=${encodeURIComponent(q)}&mode=${mode}&stream=${streamFilter}&regex=${regex}`;
-        const s = await (await fetch(url)).json();
+        const regex = $("regex").checked;
         searching = true;
-        searchTerms = regex === "1" ? [] : q.split(/[, ]+/).filter(Boolean);
+        searchParams = { q, mode, stream: streamFilter, regex };
+        searchTerms = regex ? [] : q.split(/[, ]+/).filter(Boolean);
         $("clearBtn").hidden = false;
         $("viewMode").textContent = "search results";
+        await refreshSearch();
+      }
+      // Re-run the active search and redraw the results. Called right after
+      // `runSearch` and then again on every poll tick while `searching` is
+      // true, so newly arrived matching lines keep appearing instead of the
+      // results view going stale/frozen once a search is active.
+      async function refreshSearch() {
+        if (!searchParams) return;
+        const { q, mode, stream, regex } = searchParams;
+        const url = `/search?q=${encodeURIComponent(q)}&mode=${mode}&stream=${stream}&regex=${regex ? "1" : "0"}`;
+        const s = await (await fetch(url)).json();
         $("searchMeta").textContent = s.total + " match" + (s.total === 1 ? "" : "es")
           + (s.capped ? " (showing first " + s.lines.length + ")" : "");
         const log = $("log");
+        const wasNearBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 40;
+        const prevScroll = log.scrollTop;
         log.innerHTML = s.lines.length
           ? s.lines.map((l) => rowHtml(l, searchTerms)).join("")
           : '<div class="placeholder">No matching lines.</div>';
+        // Preserve the reader's place across the periodic refresh, except
+        // when they were already at the bottom — then keep following.
+        log.scrollTop = wasNearBottom ? log.scrollHeight : prevScroll;
       }
       function clearSearch() {
-        searching = false; searchTerms = [];
+        searching = false; searchTerms = []; searchParams = null;
         $("clearBtn").hidden = true;
         $("viewMode").textContent = "live";
         $("searchMeta").textContent = "";

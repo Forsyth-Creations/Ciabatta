@@ -13,6 +13,7 @@
     --muted: #6b7280;
     --text: #e6e8ee;
     --accent: #34d399;
+    --accent2: #60a5fa;
     --danger: #f87171;
     --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
   }
@@ -24,10 +25,20 @@
     display: flex; justify-content: center;
     padding: 40px 16px;
   }
-  main { width: 100%; max-width: 600px; }
-  header { display: flex; align-items: baseline; gap: 12px; margin-bottom: 24px; }
+  main { width: 100%; max-width: 640px; }
+  header { display: flex; align-items: baseline; gap: 12px; margin-bottom: 20px; }
   header .brand { font-size: 20px; font-weight: 700; letter-spacing: .3px; }
   header .brand .crumb { color: var(--muted); font-weight: 400; }
+
+  .tabs { display: flex; gap: 20px; margin-bottom: 24px; border-bottom: 1px solid var(--line); }
+  .tab {
+    background: none; border: none; color: var(--muted); font: inherit; font-weight: 600;
+    padding: 10px 2px; cursor: pointer; border-bottom: 2px solid transparent;
+  }
+  .tab:hover { color: var(--text); }
+  .tab.active { color: var(--text); border-bottom-color: var(--accent); }
+  .tab-panel { display: none; }
+  .tab-panel.active { display: block; }
 
   .field { margin-bottom: 18px; }
   .field label.top {
@@ -48,6 +59,7 @@
     border-radius: 8px; padding: 9px 12px; font: inherit; cursor: pointer;
   }
   button.ghost:hover { border-color: var(--accent); }
+  button.ghost[disabled] { opacity: .5; cursor: default; }
 
   .file-drop {
     border: 1px dashed var(--line); border-radius: 10px; padding: 18px;
@@ -74,6 +86,7 @@
   }
   button.send:hover { filter: brightness(1.08); }
   button.send[disabled] { opacity: .5; cursor: default; filter: none; }
+  button.send.stop { background: var(--danger); color: #2a0d0d; }
 
   .result {
     margin-top: 16px; padding: 12px 14px; border-radius: 10px; font-size: 14px;
@@ -85,7 +98,54 @@
 
   .hint { color: var(--muted); font-size: 12.5px; margin-top: 6px; }
   .hint code { font-family: var(--mono); color: var(--text); }
+  .hint a { color: var(--accent2); }
   .bad { color: var(--danger); }
+
+  .section-title {
+    font-size: 12.5px; color: var(--muted); margin: 28px 0 12px; font-weight: 700;
+    text-transform: uppercase; letter-spacing: .05em;
+  }
+  .empty { color: var(--muted); font-size: 13.5px; padding: 8px 0; }
+
+  .frame-log {
+    max-height: 220px; overflow-y: auto; background: var(--panel); border: 1px solid var(--line);
+    border-radius: 10px; font-family: var(--mono); font-size: 12px; margin-top: 12px;
+  }
+  .frame-row {
+    display: flex; gap: 8px; padding: 5px 10px; border-bottom: 1px solid var(--line); align-items: baseline;
+  }
+  .frame-row:last-child { border-bottom: none; }
+  .frame-row .dir { flex: none; width: 78px; font-weight: 700; }
+  .frame-row .dir.app_to_device { color: var(--accent); }
+  .frame-row .dir.device_to_app { color: var(--accent2); }
+  .frame-row .t { flex: none; width: 64px; color: var(--muted); }
+  .frame-row .hex { flex: 1; word-break: break-all; }
+  .frame-row.pick { cursor: pointer; }
+  .frame-row.pick input[type=checkbox] { margin: 0 2px 0 0; }
+
+  .capture-card {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+    margin-bottom: 12px; overflow: hidden;
+  }
+  .capture-card-head {
+    display: flex; justify-content: space-between; align-items: center; padding: 12px 14px; gap: 12px;
+  }
+  .cc-title { font-weight: 700; font-family: var(--mono); font-size: 13.5px; }
+  .cc-sub { color: var(--muted); font-size: 12.5px; margin-top: 2px; }
+  .capture-card-body { border-top: 1px solid var(--line); padding: 14px; display: none; }
+  .capture-card.open .capture-card-body { display: block; }
+  .capture-card.open .toggle-btn { border-color: var(--accent); }
+
+  .dir-picker { display: flex; gap: 16px; margin-bottom: 10px; font-size: 13.5px; }
+  .dir-picker label { display: flex; gap: 6px; align-items: center; cursor: pointer; }
+
+  .replay-row { flex-wrap: wrap; margin-top: 12px; }
+  .replay-row select { width: auto; flex: 2; min-width: 140px; }
+  .replay-row input[type=number] { width: auto; flex: 1; min-width: 90px; }
+  .replay-row label.timing {
+    display: flex; gap: 6px; align-items: center; font-size: 12.5px; color: var(--muted); white-space: nowrap;
+  }
+  .action-row { margin-top: 10px; }
 </style>
 </head>
 <body>
@@ -94,57 +154,201 @@
     <div class="brand">🍞 ciabatta <span class="crumb">· usb</span></div>
   </header>
 
-  <div class="field">
-    <label class="top" for="port">Serial device</label>
-    <div class="row">
-      <select id="port"></select>
-      <button class="ghost" id="refresh" title="Re-scan for devices">↻</button>
+  <nav class="tabs">
+    <button class="tab active" data-tab="send" type="button">Send</button>
+    <button class="tab" data-tab="capture" type="button">Capture</button>
+  </nav>
+
+  <!-- ─── Send tab ──────────────────────────────────────────────────────── -->
+  <section id="tab-send" class="tab-panel active">
+    <div class="field">
+      <label class="top" for="port">Serial device</label>
+      <div class="row">
+        <select id="port"></select>
+        <button class="ghost" id="refresh" title="Re-scan for devices">↻</button>
+      </div>
+      <div class="hint" id="port-hint"></div>
     </div>
-    <div class="hint" id="port-hint"></div>
-  </div>
 
-  <div class="field">
-    <label class="top" for="baud">Baud rate</label>
-    <select id="baud">
-      <option>9600</option>
-      <option>19200</option>
-      <option>38400</option>
-      <option>57600</option>
-      <option selected>115200</option>
-      <option>230400</option>
-      <option>460800</option>
-      <option>921600</option>
-      <option value="custom">Custom…</option>
-    </select>
-    <input type="number" id="baud-custom" placeholder="Custom baud" style="display:none;margin-top:8px;" min="1" />
-  </div>
-
-  <div class="field">
-    <label class="top">File</label>
-    <div class="file-drop" id="drop">
-      <input type="file" id="file" />
-      <div id="drop-text">Click to choose a file, or drop one here</div>
+    <div class="field">
+      <label class="top" for="baud">Baud rate</label>
+      <select id="baud">
+        <option>9600</option>
+        <option>19200</option>
+        <option>38400</option>
+        <option>57600</option>
+        <option selected>115200</option>
+        <option>230400</option>
+        <option>460800</option>
+        <option>921600</option>
+        <option value="custom">Custom…</option>
+      </select>
+      <input type="number" id="baud-custom" placeholder="Custom baud" style="display:none;margin-top:8px;" min="1" />
     </div>
-  </div>
 
-  <div class="field">
-    <label class="top" for="prefix">Hex prefix (prepended before the file — optional)</label>
-    <input type="text" class="hex" id="prefix" placeholder="e.g. DEADBEEF" autocomplete="off" spellcheck="false" />
-    <div class="hint" id="prefix-hint">Whitespace and a leading <code>0x</code> are allowed.</div>
-  </div>
+    <div class="field">
+      <label class="top">File</label>
+      <div class="file-drop" id="drop">
+        <input type="file" id="file" />
+        <div id="drop-text">Click to choose a file, or drop one here</div>
+      </div>
+    </div>
 
-  <div class="summary" id="summary">
-    <div class="line"><span class="k">File size</span><span class="v" id="s-file">—</span></div>
-    <div class="line"><span class="k">Prefix</span><span class="v" id="s-prefix">0 bytes</span></div>
-    <div class="line total"><span class="k">Total on the wire</span><span class="v" id="s-total">—</span></div>
-    <div class="preview" id="s-preview"></div>
-  </div>
+    <div class="field">
+      <label class="top" for="prefix">Hex prefix (prepended before the file — optional)</label>
+      <input type="text" class="hex" id="prefix" placeholder="e.g. DEADBEEF" autocomplete="off" spellcheck="false" />
+      <div class="hint" id="prefix-hint">Whitespace and a leading <code>0x</code> are allowed.</div>
+    </div>
 
-  <button class="send" id="send" disabled>Send to device</button>
-  <div class="result" id="result"></div>
+    <div class="summary" id="summary">
+      <div class="line"><span class="k">File size</span><span class="v" id="s-file">—</span></div>
+      <div class="line"><span class="k">Prefix</span><span class="v" id="s-prefix">0 bytes</span></div>
+      <div class="line total"><span class="k">Total on the wire</span><span class="v" id="s-total">—</span></div>
+      <div class="preview" id="s-preview"></div>
+    </div>
+
+    <button class="send" id="send" disabled>Send to device</button>
+    <div class="result" id="result"></div>
+  </section>
+
+  <!-- ─── Capture tab ───────────────────────────────────────────────────── -->
+  <section id="tab-capture" class="tab-panel">
+    <div class="field">
+      <label class="top" for="cap-device-port">Real device port</label>
+      <div class="row">
+        <select id="cap-device-port" class="port-select"></select>
+        <button class="ghost" id="cap-refresh" title="Re-scan for devices">↻</button>
+      </div>
+    </div>
+
+    <div class="field">
+      <label class="top" for="cap-app-port">Ciabatta's port (virtual pair)</label>
+      <select id="cap-app-port" class="port-select"></select>
+      <div class="hint">
+        This is <strong>ciabatta's own</strong> end of a virtual null-modem pair you've
+        already set up — e.g. <a href="https://com0com.sourceforge.net/" target="_blank" rel="noopener">com0com</a>
+        on Windows, <code>socat</code>/<code>tty0tty</code> on Linux, which link two
+        <em>different</em> port names together. Point the third-party app at the
+        <strong>other</strong> port of that pair, not this one — a port can only be
+        opened by one process at a time, and ciabatta needs this one for the
+        capture. Ciabatta relays every byte between this port and the real
+        device port below, logging both directions.
+      </div>
+    </div>
+
+    <div class="field">
+      <label class="top" for="cap-baud">Baud rate (both ports)</label>
+      <select id="cap-baud">
+        <option>9600</option>
+        <option>19200</option>
+        <option>38400</option>
+        <option>57600</option>
+        <option selected>115200</option>
+        <option>230400</option>
+        <option>460800</option>
+        <option>921600</option>
+        <option value="custom">Custom…</option>
+      </select>
+      <input type="number" id="cap-baud-custom" placeholder="Custom baud" style="display:none;margin-top:8px;" min="1" />
+    </div>
+
+    <button class="send" id="cap-start">Start capture</button>
+    <button class="send stop" id="cap-stop" style="display:none;">Stop capture</button>
+    <div class="result" id="cap-result"></div>
+
+    <div id="cap-live" style="display:none;">
+      <div class="summary" id="cap-live-summary">
+        <div class="line"><span class="k">Elapsed</span><span class="v" id="cap-elapsed">0s</span></div>
+        <div class="line"><span class="k">Frames</span><span class="v" id="cap-frame-count">0</span></div>
+        <div class="line"><span class="k">App → Device</span><span class="v" id="cap-a2d-bytes">0 bytes</span></div>
+        <div class="line"><span class="k">Device → App</span><span class="v" id="cap-d2a-bytes">0 bytes</span></div>
+      </div>
+      <div class="frame-log" id="cap-live-log"></div>
+    </div>
+
+    <div class="section-title">Saved captures</div>
+    <div id="cap-list"><div class="empty">No captures yet.</div></div>
+  </section>
 </main>
 
 <script>
+  // ─── shared: ports ──────────────────────────────────────────────────────
+  let cachedPorts = [];
+
+  function fmtBytes(n) {
+    return `${n.toLocaleString()} byte${n === 1 ? "" : "s"}`;
+  }
+
+  function toHex(bytes) {
+    let s = "";
+    for (const b of bytes) s += b.toString(16).padStart(2, "0");
+    return s;
+  }
+
+  function esc(s) {
+    const d = document.createElement("div");
+    d.textContent = String(s);
+    return d.innerHTML;
+  }
+
+  function spacedHex(hex) {
+    return hex.replace(/(..)/g, "$1 ").trim().toUpperCase();
+  }
+
+  // Fill every <select class="port-select"> currently in the DOM from the
+  // cached port list, keeping each one's previous selection when possible.
+  function fillPortSelects() {
+    document.querySelectorAll("select.port-select").forEach((sel) => {
+      const prev = sel.value;
+      sel.innerHTML = "";
+      if (!cachedPorts.length) {
+        const o = document.createElement("option");
+        o.value = "";
+        o.textContent = "No serial devices found";
+        sel.appendChild(o);
+        return;
+      }
+      for (const p of cachedPorts) {
+        const o = document.createElement("option");
+        o.value = p.name;
+        const bits = [p.name];
+        if (p.label) bits.push(p.label);
+        if (p.usb_id) bits.push(`(${p.usb_id})`);
+        o.textContent = bits.join("  —  ");
+        sel.appendChild(o);
+      }
+      if (prev && cachedPorts.some((p) => p.name === prev)) sel.value = prev;
+    });
+  }
+
+  async function loadPorts() {
+    try {
+      const res = await fetch("/api/ports");
+      const data = await res.json();
+      cachedPorts = data.ports || [];
+      portHint.textContent = cachedPorts.length
+        ? `${cachedPorts.length} device${cachedPorts.length === 1 ? "" : "s"} found.`
+        : "No serial devices found. Plug in a device and press ↻. On Linux you may need to be in the 'dialout' group.";
+    } catch (e) {
+      cachedPorts = [];
+      portHint.innerHTML = `<span class="bad">Could not list devices: ${esc(e)}</span>`;
+    }
+    fillPortSelects();
+    updateSummary();
+  }
+
+  // ─── tabs ───────────────────────────────────────────────────────────────
+  document.querySelectorAll(".tab").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      document.querySelectorAll(".tab").forEach((b) => b.classList.toggle("active", b === btn));
+      document.querySelectorAll(".tab-panel").forEach((p) =>
+        p.classList.toggle("active", p.id === `tab-${btn.dataset.tab}`)
+      );
+      if (btn.dataset.tab === "capture") loadCaptures();
+    });
+  });
+
+  // ─── Send tab ───────────────────────────────────────────────────────────
   const portEl = document.getElementById("port");
   const portHint = document.getElementById("port-hint");
   const baudEl = document.getElementById("baud");
@@ -160,16 +364,6 @@
   // The chosen file's bytes as a Uint8Array, or null when none is selected.
   let fileBytes = null;
   let fileName = "";
-
-  function fmtBytes(n) {
-    return `${n.toLocaleString()} byte${n === 1 ? "" : "s"}`;
-  }
-
-  function toHex(bytes) {
-    let s = "";
-    for (const b of bytes) s += b.toString(16).padStart(2, "0");
-    return s;
-  }
 
   // Parse the prefix field the same way the backend does: drop whitespace and
   // an optional 0x, require an even number of hex digits. Returns a Uint8Array
@@ -219,44 +413,13 @@
       let i = 0;
       for (let p = 0; p < prefix.length && i < head.length; p++) head[i++] = prefix[p];
       for (let f = 0; f < fileLen && i < head.length; f++) head[i++] = fileBytes[f];
-      const spaced = toHex(head).replace(/(..)/g, "$1 ").trim().toUpperCase();
-      previewEl.textContent = `first bytes:  ${spaced}${total > 16 ? " …" : ""}`;
+      previewEl.textContent = `first bytes:  ${spacedHex(toHex(head))}${total > 16 ? " …" : ""}`;
     } else {
       previewEl.textContent = "";
     }
 
     const ready = !!portEl.value && !prefixBad && currentBaud() > 0 && total > 0;
     sendEl.disabled = !ready;
-  }
-
-  async function loadPorts() {
-    portEl.innerHTML = "";
-    try {
-      const res = await fetch("/api/ports");
-      const data = await res.json();
-      const ports = data.ports || [];
-      if (!ports.length) {
-        const o = document.createElement("option");
-        o.textContent = "No serial devices found";
-        o.value = "";
-        portEl.appendChild(o);
-        portHint.textContent = "Plug in a device and press ↻. On Linux you may need to be in the 'dialout' group.";
-      } else {
-        for (const p of ports) {
-          const o = document.createElement("option");
-          o.value = p.name;
-          const bits = [p.name];
-          if (p.label) bits.push(p.label);
-          if (p.usb_id) bits.push(`(${p.usb_id})`);
-          o.textContent = bits.join("  —  ");
-          portEl.appendChild(o);
-        }
-        portHint.textContent = `${ports.length} device${ports.length === 1 ? "" : "s"} found.`;
-      }
-    } catch (e) {
-      portHint.innerHTML = `<span class="bad">Could not list devices: ${e}</span>`;
-    }
-    updateSummary();
   }
 
   function setFile(file) {
@@ -266,13 +429,12 @@
       fileBytes = new Uint8Array(reader.result);
       fileName = file.name;
       dropEl.classList.add("has-file");
-      dropText.innerHTML = `<span class="name">${fileName}</span><br>${fmtBytes(fileBytes.length)} · click to change`;
+      dropText.innerHTML = `<span class="name">${esc(fileName)}</span><br>${fmtBytes(fileBytes.length)} · click to change`;
       updateSummary();
     };
     reader.readAsArrayBuffer(file);
   }
 
-  // ─── wiring ────────────────────────────────────────────────────────────────
   document.getElementById("refresh").addEventListener("click", loadPorts);
   portEl.addEventListener("change", updateSummary);
   prefixEl.addEventListener("input", updateSummary);
@@ -327,6 +489,315 @@
       updateSummary();
     }
   });
+
+  // ─── Capture tab ────────────────────────────────────────────────────────
+  const capDevicePortEl = document.getElementById("cap-device-port");
+  const capAppPortEl = document.getElementById("cap-app-port");
+  const capBaudEl = document.getElementById("cap-baud");
+  const capBaudCustom = document.getElementById("cap-baud-custom");
+  const capStartEl = document.getElementById("cap-start");
+  const capStopEl = document.getElementById("cap-stop");
+  const capResultEl = document.getElementById("cap-result");
+  const capLiveEl = document.getElementById("cap-live");
+  const capLiveLogEl = document.getElementById("cap-live-log");
+  const capListEl = document.getElementById("cap-list");
+
+  let activeCaptureId = null;
+  let statusTimer = null;
+
+  function capCurrentBaud() {
+    return capBaudEl.value === "custom" ? Number(capBaudCustom.value) : Number(capBaudEl.value);
+  }
+
+  capBaudEl.addEventListener("change", () => {
+    capBaudCustom.style.display = capBaudEl.value === "custom" ? "block" : "none";
+  });
+  document.getElementById("cap-refresh").addEventListener("click", loadPorts);
+
+  function dirLabel(dir) {
+    return dir === "app_to_device" ? "App → Device" : "Device → App";
+  }
+
+  function renderFrameRow(f) {
+    return `<div class="frame-row">
+      <span class="dir ${f.dir}">${dirLabel(f.dir)}</span>
+      <span class="t">${f.t_ms}ms</span>
+      <span class="hex">${esc(spacedHex(f.data))}</span>
+    </div>`;
+  }
+
+  capStartEl.addEventListener("click", async () => {
+    const device_port = capDevicePortEl.value;
+    const app_port = capAppPortEl.value;
+    const baud = capCurrentBaud();
+    if (!device_port || !app_port || !baud) return;
+    if (device_port === app_port) {
+      capResultEl.className = "result show err";
+      capResultEl.textContent = "✗ Device port and app port must be different.";
+      return;
+    }
+
+    capStartEl.disabled = true;
+    capResultEl.className = "result";
+    try {
+      const res = await fetch("/api/capture/start", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ device_port, app_port, baud }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && data.ok) {
+        activeCaptureId = data.id;
+        capStartEl.style.display = "none";
+        capStopEl.style.display = "block";
+        capLiveEl.style.display = "block";
+        capLiveLogEl.innerHTML = "";
+        statusTimer = setInterval(pollCaptureStatus, 500);
+        pollCaptureStatus();
+      } else {
+        capResultEl.className = "result show err";
+        capResultEl.textContent = `✗ ${data.error || "Could not start capture."}`;
+      }
+    } catch (e) {
+      capResultEl.className = "result show err";
+      capResultEl.textContent = `✗ Could not reach the ciabatta usb server: ${e}`;
+    } finally {
+      capStartEl.disabled = false;
+    }
+  });
+
+  async function pollCaptureStatus() {
+    if (!activeCaptureId) return;
+    try {
+      const res = await fetch(`/api/capture/status?id=${encodeURIComponent(activeCaptureId)}`);
+      const data = await res.json();
+      if (!data.running) return;
+      document.getElementById("cap-elapsed").textContent = `${(data.elapsed_ms / 1000).toFixed(1)}s`;
+      document.getElementById("cap-frame-count").textContent = data.frame_count;
+      document.getElementById("cap-a2d-bytes").textContent = fmtBytes(data.app_to_device_bytes);
+      document.getElementById("cap-d2a-bytes").textContent = fmtBytes(data.device_to_app_bytes);
+      capLiveLogEl.innerHTML = data.recent.map(renderFrameRow).join("");
+      capLiveLogEl.scrollTop = capLiveLogEl.scrollHeight;
+    } catch (e) {
+      // A transient poll failure isn't worth interrupting the capture over.
+    }
+  }
+
+  capStopEl.addEventListener("click", async () => {
+    if (!activeCaptureId) return;
+    capStopEl.disabled = true;
+    clearInterval(statusTimer);
+    try {
+      const res = await fetch("/api/capture/stop", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: activeCaptureId }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && data.ok) {
+        capResultEl.className = "result show ok";
+        capResultEl.textContent =
+          `✓ Captured ${data.frame_count} frame${data.frame_count === 1 ? "" : "s"} ` +
+          `over ${(data.duration_ms / 1000).toFixed(1)}s ` +
+          `(${fmtBytes(data.app_to_device_bytes)} app→device, ${fmtBytes(data.device_to_app_bytes)} device→app).`;
+      } else {
+        capResultEl.className = "result show err";
+        capResultEl.textContent = `✗ ${data.error || "Could not stop capture."}`;
+      }
+    } catch (e) {
+      capResultEl.className = "result show err";
+      capResultEl.textContent = `✗ Could not reach the ciabatta usb server: ${e}`;
+    } finally {
+      activeCaptureId = null;
+      capStopEl.disabled = false;
+      capStartEl.style.display = "block";
+      capStopEl.style.display = "none";
+      capLiveEl.style.display = "none";
+      loadCaptures();
+    }
+  });
+
+  async function loadCaptures() {
+    try {
+      const res = await fetch("/api/captures");
+      const data = await res.json();
+      const captures = data.captures || [];
+      if (!captures.length) {
+        capListEl.innerHTML = '<div class="empty">No captures yet.</div>';
+        return;
+      }
+      capListEl.innerHTML = captures.map(captureCardHtml).join("");
+      captures.forEach(wireCaptureCard);
+    } catch (e) {
+      capListEl.innerHTML = `<div class="empty bad">Could not list captures: ${esc(e)}</div>`;
+    }
+  }
+
+  function captureCardHtml(c) {
+    return `<div class="capture-card" id="cc-${esc(c.id)}" data-id="${esc(c.id)}">
+      <div class="capture-card-head">
+        <div>
+          <div class="cc-title">${esc(c.id)}</div>
+          <div class="cc-sub">${esc(c.device_port)} ↔ ${esc(c.app_port)} · ${c.baud} baud · ${c.frame_count} frames</div>
+        </div>
+        <div class="row">
+          <button class="ghost toggle-btn" data-act="toggle">View</button>
+          <button class="ghost" data-act="delete">Delete</button>
+        </div>
+      </div>
+      <div class="capture-card-body"></div>
+    </div>`;
+  }
+
+  function wireCaptureCard(c) {
+    // getElementById takes a raw id, not a CSS selector — no escaping needed
+    // (and escaping it would break the lookup for ids containing characters
+    // like `+`, e.g. a positive UTC offset baked into the timestamp id).
+    const card = document.getElementById(`cc-${c.id}`);
+    if (!card) return;
+
+    card.querySelector('[data-act="toggle"]').addEventListener("click", async () => {
+      const opening = !card.classList.contains("open");
+      card.classList.toggle("open", opening);
+      card.querySelector('[data-act="toggle"]').textContent = opening ? "Hide" : "View";
+      if (opening) await loadCardBody(card, c.id);
+    });
+
+    card.querySelector('[data-act="delete"]').addEventListener("click", async () => {
+      if (!confirm(`Delete capture ${c.id}? This can't be undone.`)) return;
+      await fetch("/api/captures/delete", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: c.id }),
+      });
+      loadCaptures();
+    });
+  }
+
+
+  async function loadCardBody(card, id) {
+    const body = card.querySelector(".capture-card-body");
+    body.innerHTML = '<div class="empty">Loading…</div>';
+    let session;
+    try {
+      const res = await fetch(`/api/captures/frames?id=${encodeURIComponent(id)}`);
+      session = await res.json();
+      if (!res.ok) throw new Error(session.error || "Could not load capture.");
+    } catch (e) {
+      body.innerHTML = `<div class="empty bad">✗ ${esc(e)}</div>`;
+      return;
+    }
+
+    body.innerHTML = `
+      <div class="dir-picker">
+        <label><input type="radio" name="dir-${esc(id)}" value="app_to_device" checked> App → Device</label>
+        <label><input type="radio" name="dir-${esc(id)}" value="device_to_app"> Device → App</label>
+      </div>
+      <div class="frame-log frames-view"></div>
+      <div class="row replay-row">
+        <select class="port-select replay-port"></select>
+        <input type="number" class="replay-baud" value="${session.baud}" min="1" />
+        <label class="timing"><input type="checkbox" class="honor-timing" checked> honor timing</label>
+        <button class="ghost" data-act="replay">Replay selected</button>
+        <button class="ghost" data-act="export">Export to Rust</button>
+      </div>
+      <div class="result action-row" data-role="action-result"></div>
+    `;
+    fillPortSelects();
+
+    const framesView = body.querySelector(".frames-view");
+    const dirRadios = body.querySelectorAll(`input[name="dir-${id}"]`);
+
+    function renderFrames() {
+      const dir = body.querySelector(`input[name="dir-${id}"]:checked`).value;
+      const rows = session.frames
+        .map((f, i) => [i, f])
+        .filter(([, f]) => f.dir === dir);
+      if (!rows.length) {
+        framesView.innerHTML = '<div class="empty">No frames on this side.</div>';
+        return;
+      }
+      framesView.innerHTML = rows
+        .map(
+          ([i, f]) => `<label class="frame-row pick">
+            <input type="checkbox" class="frame-check" data-idx="${i}" checked>
+            <span class="t">${f.t_ms}ms</span>
+            <span class="hex">${esc(spacedHex(f.data))}</span>
+          </label>`
+        )
+        .join("");
+    }
+
+    dirRadios.forEach((r) => r.addEventListener("change", renderFrames));
+    renderFrames();
+
+    function selectedIndices() {
+      return Array.from(framesView.querySelectorAll(".frame-check:checked")).map((el) =>
+        Number(el.dataset.idx)
+      );
+    }
+    function currentDir() {
+      return body.querySelector(`input[name="dir-${id}"]:checked`).value;
+    }
+
+    const actionResult = body.querySelector('[data-role="action-result"]');
+    const showAction = (ok, msg) => {
+      actionResult.className = `result show action-row ${ok ? "ok" : "err"}`;
+      actionResult.textContent = `${ok ? "✓" : "✗"} ${msg}`;
+    };
+
+    body.querySelector('[data-act="replay"]').addEventListener("click", async () => {
+      const port = body.querySelector(".replay-port").value;
+      const baud = Number(body.querySelector(".replay-baud").value);
+      const honor_timing = body.querySelector(".honor-timing").checked;
+      const frame_indices = selectedIndices();
+      if (!port || !frame_indices.length) {
+        showAction(false, "Pick a target port and at least one frame.");
+        return;
+      }
+      try {
+        const res = await fetch("/api/replay", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ id, direction: currentDir(), frame_indices, port, baud, honor_timing }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (res.ok && data.ok) showAction(true, `Wrote ${fmtBytes(data.written)} to ${port}.`);
+        else showAction(false, data.error || "Replay failed.");
+      } catch (e) {
+        showAction(false, `Could not reach the ciabatta usb server: ${e}`);
+      }
+    });
+
+    body.querySelector('[data-act="export"]').addEventListener("click", async () => {
+      const frame_indices = selectedIndices();
+      if (!frame_indices.length) {
+        showAction(false, "Select at least one frame to export.");
+        return;
+      }
+      try {
+        const res = await fetch("/api/export/rust", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ id, direction: currentDir(), frame_indices }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!(res.ok && data.ok)) {
+          showAction(false, data.error || "Export failed.");
+          return;
+        }
+        const blob = new Blob([data.code], { type: "text/x-rust" });
+        const a = document.createElement("a");
+        a.href = URL.createObjectURL(blob);
+        a.download = `${id}_${currentDir()}.rs`;
+        a.click();
+        URL.revokeObjectURL(a.href);
+        showAction(true, `Downloaded ${a.download}.`);
+      } catch (e) {
+        showAction(false, `Could not reach the ciabatta usb server: ${e}`);
+      }
+    });
+  }
 
   loadPorts();
   updateSummary();

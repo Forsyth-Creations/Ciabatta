@@ -1013,8 +1013,12 @@ impl ToolBox {
         // Confine the target to the workspace or /tmp (it may not exist yet).
         let target = self.resolve_new(raw_path)?;
         // Display relative paths for workspace files, absolute for /tmp scratch.
+        // Normalize to forward slashes: mind-map keys and `dir_of` are '/'-based,
+        // so a Windows `src\b.rs` key would otherwise never match its siblings.
         let shown = match target.strip_prefix(&self.bounds[0]) {
-            Ok(rel) => rel.display().to_string(),
+            Ok(rel) => rel
+                .to_string_lossy()
+                .replace(std::path::MAIN_SEPARATOR, "/"),
             Err(_) => target.display().to_string(),
         };
 
@@ -1776,6 +1780,8 @@ mod tests {
         (root, tb)
     }
 
+    // Unix-only: the /tmp scratch space and /etc refusal cases are Unix paths.
+    #[cfg(unix)]
     #[test]
     fn resolve_allows_workspace_and_tmp_but_refuses_outside() {
         let (root, tb) = toolbox();
@@ -1802,6 +1808,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    // Unix-only: the /tmp scratch space and /etc refusal cases are Unix paths.
+    #[cfg(unix)]
     #[test]
     fn resolve_new_confines_creatable_paths() {
         let (root, tb) = toolbox();
@@ -1869,6 +1877,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    // Unix-only: exercises the grep-family search, whose path handling doesn't
+    // survive Windows' `\\?\`-prefixed canonical paths.
+    #[cfg(unix)]
     #[test]
     fn find_definition_locates_a_type_across_files() {
         let (root, tb) = toolbox();

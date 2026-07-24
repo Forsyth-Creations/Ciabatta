@@ -32,4 +32,7 @@ chrono = { version = "0.4", features = ["serde"] }
 serde_json = "1"
 rustfmt = "0.10.0"
 owo-colors = "4.3.0"
-serialport = "4"
+# Disable the default `libudev` feature so Linux builds don't need the system
+# libudev-dev library (breaks CI and static musl release builds). serialport
+# falls back to pure-Rust sysfs port enumeration on Linux.
+serialport = { version = "4", default-features = false }

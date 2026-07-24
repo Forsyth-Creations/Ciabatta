@@ -8,9 +8,9 @@
 //!   * `read_file`     — read a file (records usage into the mind map)
 //!   * `tag_file`      — propose architecture tags (pending user confirmation)
 //!   * `propose_change`— suggest new content for a file; shown to the user as
-//!                       a diff and applied per the current [`Mode`]
+//!     a diff and applied per the current [`Mode`]
 //!   * `sandbox_run`   — run a command in a configured base image via
-//!                       podman/docker, giving the AI a safe space to work
+//!     podman/docker, giving the AI a safe space to work
 //!
 //! All paths are confined to the project root; sandbox images are restricted
 //! to the ones listed in the `[ai]` config section. Change proposals (and a

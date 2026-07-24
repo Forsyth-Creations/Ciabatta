@@ -772,7 +772,7 @@ async fn run_plain(
                 done,
                 total,
             } => {
-                let pct = if total > 0 { done * 100 / total } else { 0 };
+                let pct = (done * 100).checked_div(total).unwrap_or(0);
                 println!("[{recipe}]   {done}/{total} files ({pct}%)");
             }
             ProgressUpdate::Log(name, line) => println!("[{name}] {line}"),

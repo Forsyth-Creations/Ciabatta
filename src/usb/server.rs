@@ -6,9 +6,9 @@
 //! * `GET  /`                    — the UI
 //! * `GET  /api/ports`           — enumerate serial ports for the picker
 //! * `POST /api/send`            — decode the hex prefix + file, write them
-//!                                  to a port
+//!   to a port
 //! * `POST /api/capture/start`   — open two ports and start relaying/logging
-//!                                  traffic between them (see [`super::capture`])
+//!   traffic between them (see [`super::capture`])
 //! * `POST /api/capture/stop`    — stop a running capture and persist it
 //! * `GET  /api/capture/status`  — live snapshot of a running capture
 //! * `GET  /api/captures`        — list saved captures
@@ -16,7 +16,7 @@
 //! * `POST /api/captures/delete` — delete a saved capture
 //! * `POST /api/replay`          — replay one direction's frames to a port
 //! * `POST /api/export/rust`     — render one direction's frames as a
-//!                                  paste-able `.rs` snippet
+//!   paste-able `.rs` snippet
 //!
 //! The file arrives as a hex string in the `/api/send` JSON body, so binary
 //! never has to survive the (text-oriented) request reader, and no base64

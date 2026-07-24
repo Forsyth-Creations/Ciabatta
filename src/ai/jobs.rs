@@ -111,7 +111,7 @@ impl Jobs {
     /// A snapshot of every job, newest first.
     pub fn list(&self) -> Vec<Job> {
         let mut jobs = self.inner.lock().unwrap().clone();
-        jobs.sort_by(|a, b| b.id.cmp(&a.id));
+        jobs.sort_by_key(|j| std::cmp::Reverse(j.id));
         jobs
     }
 

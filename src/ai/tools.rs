@@ -1783,9 +1783,12 @@ mod tests {
         // Workspace file resolves.
         assert!(tb.resolve("src/a.rs").is_ok());
 
-        // A real /tmp file resolves (the assistant's scratch space).
+        // A real /tmp file resolves (the assistant's scratch space). Use /tmp
+        // literally rather than `env::temp_dir()`: on macOS the latter is
+        // `/var/folders/...`, outside the allowed roots, whereas the assistant's
+        // scratch space is always /tmp (which macOS canonicalizes to /private/tmp).
         let tmp_file =
-            std::env::temp_dir().join(format!("ciabatta-bounds-{}.txt", std::process::id()));
+            PathBuf::from("/tmp").join(format!("ciabatta-bounds-{}.txt", std::process::id()));
         std::fs::write(&tmp_file, "scratch").unwrap();
         assert!(tb.resolve(tmp_file.to_str().unwrap()).is_ok());
         let _ = std::fs::remove_file(&tmp_file);

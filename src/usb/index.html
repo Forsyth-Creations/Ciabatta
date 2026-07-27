@@ -139,8 +139,77 @@
   .dir-picker { display: flex; gap: 16px; margin-bottom: 10px; font-size: 13.5px; }
   .dir-picker label { display: flex; gap: 6px; align-items: center; cursor: pointer; }
 
+  /* ─── check mode ──────────────────────────────────────────────────────── */
+  .check-banner {
+    display: flex; justify-content: space-between; align-items: flex-start; gap: 12px;
+    background: color-mix(in srgb, var(--accent2) 10%, var(--panel));
+    border: 1px solid color-mix(in srgb, var(--accent2) 45%, var(--line));
+    border-radius: 10px; padding: 12px 14px; margin-bottom: 18px;
+  }
+  .check-banner .cb-title { font-weight: 700; color: var(--accent2); font-size: 13.5px; }
+  .check-banner .cb-sub { color: var(--muted); font-size: 12.5px; margin-top: 3px; }
+  .check-banner .cb-sub .id { font-family: var(--mono); color: var(--text); }
+  .check-banner .cb-dirs { margin-top: 10px; display: flex; gap: 8px; align-items: center; font-size: 12.5px; color: var(--muted); }
+  .check-banner .cb-dirs select { width: auto; padding: 5px 8px; font-size: 12.5px; }
+
+  .cc-badge {
+    display: inline-block; margin-left: 8px; padding: 1px 6px; border-radius: 999px;
+    font-size: 11px; font-weight: 700; font-family: ui-sans-serif, system-ui, sans-serif;
+    color: var(--accent2); border: 1px solid color-mix(in srgb, var(--accent2) 45%, var(--line));
+  }
+
+  .diff-panel {
+    margin-top: 16px; border: 1px solid var(--line); border-radius: 10px;
+    background: var(--panel); overflow: hidden; display: none;
+  }
+  .diff-panel.show { display: block; }
+  .diff-verdict { padding: 13px 15px; font-weight: 700; border-bottom: 1px solid var(--line); }
+  .diff-verdict.ok { color: var(--accent); background: color-mix(in srgb, var(--accent) 8%, transparent); }
+  .diff-verdict.err { color: var(--danger); background: color-mix(in srgb, var(--danger) 8%, transparent); }
+  .diff-verdict .sub { display: block; font-weight: 400; font-size: 12.5px; color: var(--muted); margin-top: 3px; }
+
+  .diff-dir { border-bottom: 1px solid var(--line); }
+  .diff-dir:last-child { border-bottom: none; }
+  .diff-dir-head {
+    display: flex; justify-content: space-between; align-items: baseline; gap: 10px;
+    padding: 10px 15px; font-size: 13px; font-weight: 700;
+  }
+  .diff-dir-head .stat { font-weight: 400; font-size: 12px; color: var(--muted); font-family: var(--mono); }
+  .diff-dir-head .tick { color: var(--accent); }
+  .diff-dir-head .cross { color: var(--danger); }
+
+  .diff-ops { font-family: var(--mono); font-size: 12px; max-height: 300px; overflow-y: auto; }
+  .diff-op { display: flex; gap: 10px; padding: 3px 15px; align-items: baseline; }
+  .diff-op .off { flex: none; width: 66px; color: var(--muted); }
+  .diff-op .sign { flex: none; width: 10px; font-weight: 700; }
+  .diff-op .hex { flex: 1; word-break: break-all; }
+  .diff-op .asc { flex: none; width: 18ch; color: var(--muted); white-space: pre; overflow: hidden; }
+  .diff-op.equal { color: var(--muted); }
+  .diff-op.removed { background: color-mix(in srgb, var(--danger) 13%, transparent); color: var(--danger); }
+  .diff-op.added { background: color-mix(in srgb, var(--accent) 13%, transparent); color: var(--accent); }
+  .diff-op .elided { color: var(--muted); font-style: italic; }
+  .diff-note { padding: 8px 15px; color: var(--muted); font-size: 12px; border-top: 1px solid var(--line); }
+
   .replay-row { flex-wrap: wrap; margin-top: 12px; }
   .replay-row select { width: auto; flex: 2; min-width: 140px; }
+  .port-pick { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 8px; }
+  .port-pick .port-custom { font-family: var(--mono); font-size: 13px; }
+  .replay-row .port-pick { flex: 2; min-width: 140px; }
+  .replay-row .port-pick select { width: 100%; flex: none; min-width: 0; }
+
+  /* Setup commands shown when a port is typed in rather than enumerated. */
+  .port-setup { display: none; margin-top: 10px; }
+  .port-setup.show { display: block; }
+  .port-setup .ps-title { color: var(--muted); font-size: 12.5px; margin-bottom: 6px; }
+  .port-setup .ps-row { display: flex; gap: 8px; align-items: stretch; margin-bottom: 6px; }
+  .port-setup pre {
+    flex: 1; margin: 0; background: var(--panel2); border: 1px solid var(--line);
+    border-radius: 8px; padding: 10px 12px; font-family: var(--mono); font-size: 12px;
+    color: var(--text); white-space: pre-wrap; word-break: break-all;
+  }
+  .port-setup button.copy { flex: none; padding: 6px 10px; font-size: 12px; align-self: flex-start; }
+  .port-setup .ps-note { color: var(--muted); font-size: 12px; margin-top: 6px; }
+  .port-setup .ps-note code { font-family: var(--mono); color: var(--text); }
   .replay-row input[type=number] { width: auto; flex: 1; min-width: 90px; }
   .replay-row label.timing {
     display: flex; gap: 6px; align-items: center; font-size: 12.5px; color: var(--muted); white-space: nowrap;
@@ -164,7 +233,7 @@
     <div class="field">
       <label class="top" for="port">Serial device</label>
       <div class="row">
-        <select id="port"></select>
+        <select id="port" class="port-select"></select>
         <button class="ghost" id="refresh" title="Re-scan for devices">↻</button>
       </div>
       <div class="hint" id="port-hint"></div>
@@ -213,12 +282,32 @@
 
   <!-- ─── Capture tab ───────────────────────────────────────────────────── -->
   <section id="tab-capture" class="tab-panel">
+    <div class="check-banner" id="check-banner" style="display:none;">
+      <div>
+        <div class="cb-title">Check mode</div>
+        <div class="cb-sub">
+          Re-run the same command through the relay. When you stop, this capture is
+          compared byte for byte against <span class="id" id="check-baseline"></span>.
+        </div>
+        <div class="cb-dirs">
+          <label for="check-directions">Must match on</label>
+          <select id="check-directions">
+            <option value="both">Both directions</option>
+            <option value="app_to_device">App → Device only</option>
+            <option value="device_to_app">Device → App only</option>
+          </select>
+        </div>
+      </div>
+      <button class="ghost" id="check-cancel">Cancel</button>
+    </div>
+
     <div class="field">
       <label class="top" for="cap-device-port">Real device port</label>
       <div class="row">
         <select id="cap-device-port" class="port-select"></select>
         <button class="ghost" id="cap-refresh" title="Re-scan for devices">↻</button>
       </div>
+      <div class="port-setup" id="cap-device-setup"></div>
     </div>
 
     <div class="field">
@@ -234,6 +323,7 @@
         capture. Ciabatta relays every byte between this port and the real
         device port below, logging both directions.
       </div>
+      <div class="port-setup" id="cap-app-setup"></div>
     </div>
 
     <div class="field">
@@ -255,6 +345,7 @@
     <button class="send" id="cap-start">Start capture</button>
     <button class="send stop" id="cap-stop" style="display:none;">Stop capture</button>
     <div class="result" id="cap-result"></div>
+    <div class="diff-panel" id="check-result"></div>
 
     <div id="cap-live" style="display:none;">
       <div class="summary" id="cap-live-summary">
@@ -274,6 +365,8 @@
 <script>
   // ─── shared: ports ──────────────────────────────────────────────────────
   let cachedPorts = [];
+  // The OS ciabatta runs on (not the browser's), for the setup-hint commands.
+  let cachedPlatform = "linux";
 
   function fmtBytes(n) {
     return `${n.toLocaleString()} byte${n === 1 ? "" : "s"}`;
@@ -295,6 +388,159 @@
     return hex.replace(/(..)/g, "$1 ").trim().toUpperCase();
   }
 
+  // Sentinel option value meaning "use the typed path instead".
+  const CUSTOM_PORT = "__custom__";
+
+  // Give `sel` a paired text field for typing a device path, creating it (and
+  // the flex wrapper holding both) on first use. Port enumeration only sees
+  // /sys/class/tty entries on Linux and /dev nodes elsewhere, so virtual pairs
+  // made with socat — which live under /dev/pts — never show up in the list
+  // and have to be entered by hand.
+  function customInputFor(sel) {
+    let wrap = sel.closest(".port-pick");
+    if (!wrap) {
+      wrap = document.createElement("div");
+      wrap.className = "port-pick";
+      sel.parentNode.insertBefore(wrap, sel);
+      wrap.appendChild(sel);
+
+      const input = document.createElement("input");
+      input.type = "text";
+      input.className = "port-custom";
+      input.placeholder = "/dev/pts/3, /dev/ttyUSB0, COM8…";
+      input.autocomplete = "off";
+      input.spellcheck = false;
+      input.style.display = "none";
+      wrap.appendChild(input);
+
+      sel.addEventListener("change", () => syncCustomPort(sel, true));
+      input.addEventListener("input", () => onPortChanged(sel));
+    }
+    return wrap.querySelector(".port-custom");
+  }
+
+  // Show the typed-path field only while "Other…" is selected.
+  function syncCustomPort(sel, focus) {
+    const input = customInputFor(sel);
+    const show = sel.value === CUSTOM_PORT;
+    input.style.display = show ? "block" : "none";
+    if (show && focus) input.focus();
+    onPortChanged(sel);
+  }
+
+  // Anything that changes which port a picker designates funnels through here.
+  function onPortChanged(sel) {
+    if (sel.id === "port") updateSummary();
+    updatePortSetupHints();
+  }
+
+  // The port a picker currently designates, from either the list or the
+  // typed-path field. Use this everywhere instead of reading `sel.value`.
+  function portValue(sel) {
+    if (!sel) return "";
+    return sel.value === CUSTOM_PORT ? customInputFor(sel).value.trim() : sel.value;
+  }
+
+  // Point a picker at `name`, falling back to the typed-path field for a port
+  // that isn't listed (or is currently held by a capture).
+  function setPortValue(sel, name) {
+    if (!name) return;
+    if (cachedPorts.some((p) => p.name === name && !p.busy_capture)) {
+      sel.value = name;
+    } else {
+      sel.value = CUSTOM_PORT;
+      customInputFor(sel).value = name;
+    }
+    syncCustomPort(sel, false);
+  }
+
+  // ─── virtual-pair setup hints ───────────────────────────────────────────
+  // A typed-in port usually doesn't exist yet: it's one end of a virtual
+  // null-modem pair the user still has to create. Rather than let them find
+  // that out from "No such file or directory", show the exact command.
+
+  // A name for the other end of the pair. com0com ports are numbered, so
+  // COM8 pairs with COM9; a path just gets a "-peer" sibling.
+  function peerName(port) {
+    const com = /^(COM)(\d+)$/i.exec(port);
+    if (com) return `${com[1]}${Number(com[2]) + 1}`;
+    return `${port}-peer`;
+  }
+
+  // The commands creating `port` as one end of a pair, plus who should use
+  // the other end. Returns "" when there's nothing to set up.
+  function portSetupHtml(port, peerUser) {
+    // An enumerated port is a real device that already exists.
+    if (!port || cachedPorts.some((p) => p.name === port)) return "";
+
+    const peer = peerName(port);
+    const cmds = [];
+    let note;
+
+    if (cachedPlatform === "windows") {
+      cmds.push(
+        `"C:\\Program Files (x86)\\com0com\\setupc.exe" install PortName=${port} PortName=${peer}`
+      );
+      note =
+        `Run from an elevated Command Prompt (com0com's setupc.exe). It creates both ports at ` +
+        `once — ciabatta opens <code>${esc(port)}</code>, and ${peerUser} uses <code>${esc(peer)}</code>.`;
+    } else if (/^\/dev\//.test(port)) {
+      // Links under /dev need root to create, and the nodes would come out
+      // root-owned — unusable by ciabatta running as you — so user=/mode=
+      // are part of the working command, not an afterthought.
+      cmds.push(
+        `sudo socat -d -d \\\n  pty,raw,echo=0,link=${port},user=$USER,mode=660 \\\n` +
+          `  pty,raw,echo=0,link=${peer},user=$USER,mode=660 &`
+      );
+      note =
+        `<code>/dev</code> is root-owned, so this needs <code>sudo</code>; ` +
+        `<code>user=</code>/<code>mode=</code> hand the nodes back to you. Leave socat running ` +
+        `for the whole capture — it <em>is</em> the pair. ciabatta opens ` +
+        `<code>${esc(port)}</code>; ${peerUser} uses <code>${esc(peer)}</code>. ` +
+        `A path in your home directory avoids needing root at all.`;
+    } else {
+      cmds.push(`socat -d -d pty,raw,echo=0,link=${port} pty,raw,echo=0,link=${peer} &`);
+      note =
+        `Leave socat running for the whole capture — it <em>is</em> the pair. ` +
+        `ciabatta opens <code>${esc(port)}</code>; ${peerUser} uses <code>${esc(peer)}</code>.`;
+    }
+
+    const rows = cmds
+      .map(
+        (c) => `<div class="ps-row"><pre>${esc(c)}</pre>
+          <button class="ghost copy" type="button">Copy</button></div>`
+      )
+      .join("");
+
+    return `<div class="ps-title">${esc(port)} doesn't exist yet — create it with:</div>
+      ${rows}<div class="ps-note">${note}</div>`;
+  }
+
+  function updatePortSetupHints() {
+    const targets = [
+      [capDevicePortEl, document.getElementById("cap-device-setup"), "your stand-in device"],
+      [capAppPortEl, document.getElementById("cap-app-setup"), "the third-party app"],
+    ];
+    for (const [sel, box, peerUser] of targets) {
+      if (!sel || !box) continue;
+      // Only for hand-typed ports; an enumerated pick needs no setup.
+      const html = sel.value === CUSTOM_PORT ? portSetupHtml(portValue(sel), peerUser) : "";
+      box.innerHTML = html;
+      box.classList.toggle("show", !!html);
+    }
+  }
+
+  // The command blocks are re-rendered on every keystroke, so delegate.
+  document.addEventListener("click", (e) => {
+    const btn = e.target.closest(".port-setup .copy");
+    if (!btn || !navigator.clipboard) return;
+    const text = btn.parentNode.querySelector("pre").textContent;
+    navigator.clipboard.writeText(text).then(() => {
+      btn.textContent = "Copied";
+      setTimeout(() => (btn.textContent = "Copy"), 1200);
+    });
+  });
+
   // Fill every <select class="port-select"> currently in the DOM from the
   // cached port list, keeping each one's previous selection when possible.
   function fillPortSelects() {
@@ -305,8 +551,10 @@
         const o = document.createElement("option");
         o.value = "";
         o.textContent = "No serial devices found";
+        // Disabled, so the "Other…" entry below becomes the default and a
+        // machine with nothing enumerable is still usable.
+        o.disabled = true;
         sel.appendChild(o);
-        return;
       }
       for (const p of cachedPorts) {
         const o = document.createElement("option");
@@ -314,10 +562,26 @@
         const bits = [p.name];
         if (p.label) bits.push(p.label);
         if (p.usb_id) bits.push(`(${p.usb_id})`);
+        // A port the relay holds can't be opened by anything else, so offer it
+        // as unselectable rather than letting the open fail later.
+        if (p.busy_capture) bits.push("· in use by capture");
         o.textContent = bits.join("  —  ");
+        o.disabled = !!p.busy_capture;
         sel.appendChild(o);
       }
-      if (prev && cachedPorts.some((p) => p.name === prev)) sel.value = prev;
+      const custom = document.createElement("option");
+      custom.value = CUSTOM_PORT;
+      custom.textContent = "Other…  —  type a device path";
+      sel.appendChild(custom);
+
+      const stillFree = cachedPorts.some((p) => p.name === prev && !p.busy_capture);
+      if (prev === CUSTOM_PORT || (prev && stillFree)) sel.value = prev;
+      // Never leave a disabled option showing as the selection.
+      if (sel.selectedOptions[0] && sel.selectedOptions[0].disabled) {
+        const free = Array.from(sel.options).find((o) => !o.disabled);
+        sel.value = free ? free.value : "";
+      }
+      syncCustomPort(sel, false);
     });
   }
 
@@ -326,15 +590,26 @@
       const res = await fetch("/api/ports");
       const data = await res.json();
       cachedPorts = data.ports || [];
-      portHint.textContent = cachedPorts.length
-        ? `${cachedPorts.length} device${cachedPorts.length === 1 ? "" : "s"} found.`
-        : "No serial devices found. Plug in a device and press ↻. On Linux you may need to be in the 'dialout' group.";
+      cachedPlatform = data.platform || cachedPlatform;
+      const busy = cachedPorts.filter((p) => p.busy_capture).length;
+      if (!cachedPorts.length) {
+        portHint.textContent =
+          "No serial devices found. Plug in a device and press ↻. On Linux you may need to be in the 'dialout' group.";
+      } else if (busy) {
+        portHint.textContent =
+          `${cachedPorts.length} device${cachedPorts.length === 1 ? "" : "s"} found; ` +
+          `${busy} held by a running capture. To feed the relay from here, send to the ` +
+          `other end of the virtual pair — not the port the capture opened.`;
+      } else {
+        portHint.textContent = `${cachedPorts.length} device${cachedPorts.length === 1 ? "" : "s"} found.`;
+      }
     } catch (e) {
       cachedPorts = [];
       portHint.innerHTML = `<span class="bad">Could not list devices: ${esc(e)}</span>`;
     }
     fillPortSelects();
     updateSummary();
+    updatePortSetupHints();
   }
 
   // ─── tabs ───────────────────────────────────────────────────────────────
@@ -418,7 +693,7 @@
       previewEl.textContent = "";
     }
 
-    const ready = !!portEl.value && !prefixBad && currentBaud() > 0 && total > 0;
+    const ready = !!portValue(portEl) && !prefixBad && currentBaud() > 0 && total > 0;
     sendEl.disabled = !ready;
   }
 
@@ -457,6 +732,7 @@
   sendEl.addEventListener("click", async () => {
     const prefix = parsePrefix();
     if (prefix === null || !fileBytes) return;
+    const target = portValue(portEl);
     sendEl.disabled = true;
     const label = sendEl.textContent;
     sendEl.textContent = "Sending…";
@@ -467,7 +743,7 @@
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          port: portEl.value,
+          port: target,
           baud: currentBaud(),
           prefix: toHex(prefix),
           data: toHex(fileBytes),
@@ -476,7 +752,7 @@
       const data = await res.json().catch(() => ({}));
       if (res.ok && data.ok) {
         resultEl.className = "result show ok";
-        resultEl.textContent = `✓ Sent ${fmtBytes(data.written)} to ${portEl.value}.`;
+        resultEl.textContent = `✓ Sent ${fmtBytes(data.written)} to ${target}.`;
       } else {
         resultEl.className = "result show err";
         resultEl.textContent = `✗ ${data.error || (await res.text()) || "Send failed."}`;
@@ -501,9 +777,16 @@
   const capLiveEl = document.getElementById("cap-live");
   const capLiveLogEl = document.getElementById("cap-live-log");
   const capListEl = document.getElementById("cap-list");
+  const checkBannerEl = document.getElementById("check-banner");
+  const checkBaselineEl = document.getElementById("check-baseline");
+  const checkDirectionsEl = document.getElementById("check-directions");
+  const checkResultEl = document.getElementById("check-result");
 
   let activeCaptureId = null;
   let statusTimer = null;
+  // The saved capture the next run will be validated against, or null when
+  // capturing normally.
+  let checkBaselineId = null;
 
   function capCurrentBaud() {
     return capBaudEl.value === "custom" ? Number(capBaudCustom.value) : Number(capBaudEl.value);
@@ -526,9 +809,161 @@
     </div>`;
   }
 
+  // ─── check mode ─────────────────────────────────────────────────────────
+  // Arm the next capture as a validation run against a saved one: the same
+  // ports and baud are pre-selected so the two are actually comparable, and
+  // the baseline id rides along to /api/capture/start.
+  function enterCheckMode(c) {
+    checkBaselineId = c.id;
+    checkBaselineEl.textContent = c.id;
+    checkBannerEl.style.display = "flex";
+    capStartEl.textContent = "Start check run";
+
+    setPortValue(capDevicePortEl, c.device_port);
+    setPortValue(capAppPortEl, c.app_port);
+    setCapBaud(c.baud);
+
+    capResultEl.className = "result";
+    checkResultEl.className = "diff-panel";
+    checkResultEl.innerHTML = "";
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }
+
+  function exitCheckMode() {
+    checkBaselineId = null;
+    checkBannerEl.style.display = "none";
+    capStartEl.textContent = "Start capture";
+  }
+
+  // Select `baud` in the picker, falling back to the custom field for a rate
+  // that isn't one of the presets.
+  function setCapBaud(baud) {
+    const preset = Array.from(capBaudEl.options).some((o) => o.value === String(baud));
+    capBaudEl.value = preset ? String(baud) : "custom";
+    capBaudCustom.style.display = preset ? "none" : "block";
+    if (!preset) capBaudCustom.value = baud;
+  }
+
+  document.getElementById("check-cancel").addEventListener("click", exitCheckMode);
+
+  function hexToBytes(hex) {
+    const out = new Uint8Array(hex.length / 2);
+    for (let i = 0; i < out.length; i++) out[i] = parseInt(hex.substr(i * 2, 2), 16);
+    return out;
+  }
+
+  function toAscii(bytes) {
+    let s = "";
+    for (const b of bytes) s += b >= 0x20 && b < 0x7f ? String.fromCharCode(b) : ".";
+    return s;
+  }
+
+  function fmtOffset(n) {
+    return `0x${n.toString(16).padStart(4, "0")}`;
+  }
+
+  const BYTES_PER_LINE = 16;
+  const DIFF_SIGNS = { equal: " ", removed: "−", added: "+" };
+
+  function diffLine(kind, offset, bytes) {
+    return `<div class="diff-op ${kind}">
+      <span class="off">${fmtOffset(offset)}</span>
+      <span class="sign">${DIFF_SIGNS[kind]}</span>
+      <span class="hex">${spacedHex(toHex(bytes))}</span>
+      <span class="asc">${esc(toAscii(bytes))}</span>
+    </div>`;
+  }
+
+  function elidedLine(text) {
+    return `<div class="diff-op"><span class="off"></span><span class="sign"></span>
+      <span class="hex elided">${esc(text)}</span></div>`;
+  }
+
+  // One diff op as hex-dump lines. Long equal runs are elided down to a head
+  // and tail — the point of the view is the *differences* — and any run the
+  // server capped (`len` > the bytes it shipped) says how much it left out.
+  function renderDiffOp(op) {
+    const bytes = hexToBytes(op.data);
+    const complete = bytes.length >= op.len;
+    // Removals and equal runs are located in the baseline; additions only
+    // exist in the new run, so they're numbered against it.
+    const base = op.kind === "added" ? op.actual_offset : op.baseline_offset;
+
+    const lines = [];
+    const emit = (from, to) => {
+      for (let i = from; i < to; i += BYTES_PER_LINE) {
+        lines.push(diffLine(op.kind, base + i, bytes.slice(i, Math.min(i + BYTES_PER_LINE, to))));
+      }
+    };
+
+    if (op.kind === "equal" && op.len > 4 * BYTES_PER_LINE) {
+      const tail = complete ? BYTES_PER_LINE : 0;
+      emit(0, 2 * BYTES_PER_LINE);
+      lines.push(elidedLine(`… ${(op.len - 2 * BYTES_PER_LINE - tail).toLocaleString()} identical bytes …`));
+      if (tail) emit(op.len - tail, op.len);
+    } else {
+      const shown = Math.min(bytes.length, 16 * BYTES_PER_LINE);
+      emit(0, shown);
+      if (op.len > shown) lines.push(elidedLine(`… ${(op.len - shown).toLocaleString()} more bytes …`));
+    }
+    return lines.join("");
+  }
+
+  function renderComparison(cmp) {
+    const verdict = cmp.matches
+      ? `<div class="diff-verdict ok">✓ Identical — this run matches <span class="id">${esc(cmp.baseline_id)}</span>.
+           <span class="sub">Every compared direction carried exactly the same bytes.</span></div>`
+      : `<div class="diff-verdict err">✗ Differs from <span class="id">${esc(cmp.baseline_id)}</span>.
+           <span class="sub">− red is what the baseline had · + green is what this run did instead.</span></div>`;
+
+    const dirs = cmp.directions
+      .map((d) => {
+        const mark = d.matches ? '<span class="tick">✓</span>' : '<span class="cross">✗</span>';
+        const where = d.matches ? "" : ` · first difference at ${fmtOffset(d.first_diff_offset)}`;
+        const head = `<div class="diff-dir-head">
+          <span>${mark} ${dirLabel(d.dir)}</span>
+          <span class="stat">${d.baseline_len} → ${d.actual_len} bytes${where}</span>
+        </div>`;
+
+        if (d.matches) return `<div class="diff-dir">${head}</div>`;
+
+        const notes = [];
+        if (d.coarse) {
+          notes.push("The differing region was too large to align byte by byte, so it's shown as one bulk replacement.");
+        }
+        if (d.ops_truncated) notes.push("Diff truncated — more differences follow.");
+
+        return `<div class="diff-dir">${head}
+          <div class="diff-ops">${d.ops.map(renderDiffOp).join("")}</div>
+          ${notes.map((n) => `<div class="diff-note">${esc(n)}</div>`).join("")}
+        </div>`;
+      })
+      .join("");
+
+    return verdict + dirs;
+  }
+
+  // Diff two saved captures and render the result into `panel`.
+  async function runCompare(baseline_id, actual_id, directions, panel) {
+    panel.className = "diff-panel show";
+    panel.innerHTML = '<div class="diff-verdict">Comparing…</div>';
+    try {
+      const res = await fetch("/api/compare", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ baseline_id, actual_id, directions }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && data.ok) panel.innerHTML = renderComparison(data);
+      else panel.innerHTML = `<div class="diff-verdict err">✗ ${esc(data.error || (await res.text()) || "Comparison failed.")}</div>`;
+    } catch (e) {
+      panel.innerHTML = `<div class="diff-verdict err">✗ Could not reach the ciabatta usb server: ${esc(e)}</div>`;
+    }
+  }
+
   capStartEl.addEventListener("click", async () => {
-    const device_port = capDevicePortEl.value;
-    const app_port = capAppPortEl.value;
+    const device_port = portValue(capDevicePortEl);
+    const app_port = portValue(capAppPortEl);
     const baud = capCurrentBaud();
     if (!device_port || !app_port || !baud) return;
     if (device_port === app_port) {
@@ -539,11 +974,13 @@
 
     capStartEl.disabled = true;
     capResultEl.className = "result";
+    checkResultEl.className = "diff-panel";
+    checkResultEl.innerHTML = "";
     try {
       const res = await fetch("/api/capture/start", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ device_port, app_port, baud }),
+        body: JSON.stringify({ device_port, app_port, baud, baseline_id: checkBaselineId }),
       });
       const data = await res.json().catch(() => ({}));
       if (res.ok && data.ok) {
@@ -554,6 +991,8 @@
         capLiveLogEl.innerHTML = "";
         statusTimer = setInterval(pollCaptureStatus, 500);
         pollCaptureStatus();
+        // The relay now owns both ports; re-mark them in every picker.
+        loadPorts();
       } else {
         capResultEl.className = "result show err";
         capResultEl.textContent = `✗ ${data.error || "Could not start capture."}`;
@@ -600,6 +1039,11 @@
           `✓ Captured ${data.frame_count} frame${data.frame_count === 1 ? "" : "s"} ` +
           `over ${(data.duration_ms / 1000).toFixed(1)}s ` +
           `(${fmtBytes(data.app_to_device_bytes)} app→device, ${fmtBytes(data.device_to_app_bytes)} device→app).`;
+        // A check run: validate it against its baseline straight away. Check
+        // mode stays armed so the run can simply be repeated.
+        if (data.baseline_id) {
+          runCompare(data.baseline_id, data.id, checkDirectionsEl.value, checkResultEl);
+        }
       } else {
         capResultEl.className = "result show err";
         capResultEl.textContent = `✗ ${data.error || "Could not stop capture."}`;
@@ -613,6 +1057,7 @@
       capStartEl.style.display = "block";
       capStopEl.style.display = "none";
       capLiveEl.style.display = "none";
+      loadPorts();
       loadCaptures();
     }
   });
@@ -634,14 +1079,18 @@
   }
 
   function captureCardHtml(c) {
+    const badge = c.baseline_id
+      ? `<span class="cc-badge" title="Recorded as a check against ${esc(c.baseline_id)}">check</span>`
+      : "";
     return `<div class="capture-card" id="cc-${esc(c.id)}" data-id="${esc(c.id)}">
       <div class="capture-card-head">
         <div>
-          <div class="cc-title">${esc(c.id)}</div>
+          <div class="cc-title">${esc(c.id)}${badge}</div>
           <div class="cc-sub">${esc(c.device_port)} ↔ ${esc(c.app_port)} · ${c.baud} baud · ${c.frame_count} frames</div>
         </div>
         <div class="row">
           <button class="ghost toggle-btn" data-act="toggle">View</button>
+          <button class="ghost" data-act="check" title="Re-run the same command and validate it against this capture">Check</button>
           <button class="ghost" data-act="delete">Delete</button>
         </div>
       </div>
@@ -662,6 +1111,8 @@
       card.querySelector('[data-act="toggle"]').textContent = opening ? "Hide" : "View";
       if (opening) await loadCardBody(card, c.id);
     });
+
+    card.querySelector('[data-act="check"]').addEventListener("click", () => enterCheckMode(c));
 
     card.querySelector('[data-act="delete"]').addEventListener("click", async () => {
       if (!confirm(`Delete capture ${c.id}? This can't be undone.`)) return;
@@ -702,8 +1153,21 @@
         <button class="ghost" data-act="export">Export to Rust</button>
       </div>
       <div class="result action-row" data-role="action-result"></div>
+      ${session.baseline_id
+        ? `<div class="row action-row">
+             <button class="ghost" data-act="compare">Compare with baseline (${esc(session.baseline_id)})</button>
+           </div>
+           <div class="diff-panel" data-role="diff"></div>`
+        : ""}
     `;
     fillPortSelects();
+
+    const compareBtn = body.querySelector('[data-act="compare"]');
+    if (compareBtn) {
+      compareBtn.addEventListener("click", () =>
+        runCompare(session.baseline_id, id, "both", body.querySelector('[data-role="diff"]'))
+      );
+    }
 
     const framesView = body.querySelector(".frames-view");
     const dirRadios = body.querySelectorAll(`input[name="dir-${id}"]`);
@@ -747,7 +1211,7 @@
     };
 
     body.querySelector('[data-act="replay"]').addEventListener("click", async () => {
-      const port = body.querySelector(".replay-port").value;
+      const port = portValue(body.querySelector(".replay-port"));
       const baud = Number(body.querySelector(".replay-baud").value);
       const honor_timing = body.querySelector(".honor-timing").checked;
       const frame_indices = selectedIndices();

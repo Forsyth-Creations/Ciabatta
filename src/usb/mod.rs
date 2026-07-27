@@ -9,6 +9,10 @@
 //! The file is uploaded from the browser as a hex string (see [`server`]), so
 //! both the prefix and the file body arrive as hex and are decoded here. That
 //! keeps everything on one safe text code path and needs no extra dependency.
+//!
+//! The same web app also hosts the man-in-the-middle sniffer: [`capture`]
+//! relays and logs a serial conversation, and [`compare`] validates a later
+//! run of the same command against one of those captures.
 
 use std::time::Duration;
 
@@ -16,6 +20,7 @@ use anyhow::{Result, bail};
 use serde::Serialize;
 
 pub mod capture;
+pub mod compare;
 pub mod server;
 
 /// How long a single serial write is allowed to block before timing out.

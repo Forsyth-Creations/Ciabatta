@@ -20,12 +20,12 @@
 //! mirroring how `ciabatta ai` stores conversations
 //! (see [`crate::ai::session`]).
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write as _;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -38,6 +38,12 @@ use super::WRITE_TIMEOUT;
 /// How long a relay thread's blocking read may wait before it re-checks
 /// whether the capture has been stopped.
 const RELAY_READ_TIMEOUT: Duration = Duration::from_millis(100);
+
+/// How long [`CaptureManager::stop`] waits for the relay threads to notice the
+/// stop flag and exit. Past this it abandons them rather than blocking: a
+/// thread stuck in a serial call that can't time out must never be able to
+/// wedge the server (see the note on flush in [`spawn_relay`]).
+const STOP_JOIN_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Which side of the relay a [`Frame`] came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -67,11 +73,15 @@ pub struct CaptureSession {
     pub device_port: String,
     pub app_port: String,
     pub baud: u32,
+    /// The capture this one was recorded to be checked against, if it was
+    /// started in "check" mode (see [`super::compare`]).
+    #[serde(default)]
+    pub baseline_id: Option<String>,
     #[serde(default)]
     pub frames: Vec<Frame>,
     /// Absolute path this session persists to (not serialized).
     #[serde(skip)]
-    path: PathBuf,
+    pub(crate) path: PathBuf,
 }
 
 /// A one-line summary of a saved capture, for listings/pickers.
@@ -82,6 +92,8 @@ pub struct CaptureSummary {
     pub app_port: String,
     pub baud: u32,
     pub frame_count: usize,
+    /// Set when this capture was recorded as a check against another one.
+    pub baseline_id: Option<String>,
 }
 
 impl CaptureSession {
@@ -145,6 +157,7 @@ pub fn list(root: &Path) -> Result<Vec<CaptureSummary>> {
             app_port: session.app_port,
             baud: session.baud,
             frame_count: session.frames.len(),
+            baseline_id: session.baseline_id,
         });
     }
     // created_at is an RFC3339 string; lexical sort is chronological.
@@ -294,10 +307,14 @@ struct RunningCapture {
     device_port: String,
     app_port: String,
     baud: u32,
+    baseline_id: Option<String>,
     frames: Arc<Mutex<Vec<Frame>>>,
     stop_flag: Arc<AtomicBool>,
     started: Instant,
     handles: Vec<JoinHandle<()>>,
+    /// Disconnects once every relay thread has dropped its sender, i.e. once
+    /// they've all exited. Lets `stop` wait with a timeout, which `join` can't.
+    done: mpsc::Receiver<()>,
 }
 
 /// Shared server state: every currently-running capture, keyed by id.
@@ -317,7 +334,29 @@ impl CaptureManager {
     ///
     /// `app_port` must be ciabatta's own end of a virtual null-modem pair,
     /// not the port the third-party tool connects to (see the module docs).
-    pub fn start(&self, device_port: &str, app_port: &str, baud: u32) -> Result<String> {
+    ///
+    /// `baseline_id` marks this as a "check" run against an earlier capture:
+    /// it's recorded on the session so the two can be compared once the
+    /// capture stops (see [`super::compare`]). It has no effect on relaying.
+    pub fn start(
+        &self,
+        device_port: &str,
+        app_port: &str,
+        baud: u32,
+        baseline_id: Option<String>,
+    ) -> Result<String> {
+        if device_port == app_port {
+            bail!("The device port and ciabatta's port must be two different ports.");
+        }
+        if same_pair(device_port, app_port) {
+            bail!(
+                "{device_port} and {app_port} look like the two ends of a single virtual pair. \
+                 Relaying between them feeds ciabatta's own output straight back into its input, \
+                 which loops forever and fills the capture with echoes. A capture needs the two \
+                 ends of *different* pairs — one facing the app, one facing the device."
+            );
+        }
+
         let device_read = serialport::new(device_port, baud)
             .timeout(RELAY_READ_TIMEOUT)
             .open()
@@ -338,6 +377,7 @@ impl CaptureManager {
         let frames = Arc::new(Mutex::new(Vec::new()));
         let stop_flag = Arc::new(AtomicBool::new(true));
         let started = Instant::now();
+        let (done_tx, done) = mpsc::channel();
 
         let h1 = spawn_relay(
             device_read,
@@ -346,6 +386,7 @@ impl CaptureManager {
             frames.clone(),
             stop_flag.clone(),
             started,
+            done_tx.clone(),
         );
         let h2 = spawn_relay(
             app_read,
@@ -354,7 +395,11 @@ impl CaptureManager {
             frames.clone(),
             stop_flag.clone(),
             started,
+            done_tx.clone(),
         );
+        // Only the relay threads may keep the channel alive, or it would never
+        // report them as finished.
+        drop(done_tx);
 
         self.running.lock().unwrap().insert(
             id.clone(),
@@ -363,10 +408,12 @@ impl CaptureManager {
                 device_port: device_port.to_string(),
                 app_port: app_port.to_string(),
                 baud,
+                baseline_id,
                 frames,
                 stop_flag,
                 started,
                 handles: vec![h1, h2],
+                done,
             },
         );
 
@@ -415,8 +462,23 @@ impl CaptureManager {
         };
 
         running.stop_flag.store(false, Ordering::Relaxed);
-        for h in running.handles {
-            let _ = h.join();
+
+        // The threads drop their senders as they exit, so a disconnect means
+        // both are done and joining is instant. A timeout means one is stuck
+        // in a serial call; abandon it rather than hanging the request, and
+        // say so — it keeps its port open, so that port stays unavailable
+        // until this process exits.
+        match running.done.recv_timeout(STOP_JOIN_TIMEOUT) {
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                for h in running.handles {
+                    let _ = h.join();
+                }
+            }
+            _ => eprintln!(
+                "usb capture {id}: a relay thread did not stop within {:?} and was abandoned; \
+                 {} / {} may stay busy until ciabatta exits.",
+                STOP_JOIN_TIMEOUT, running.device_port, running.app_port,
+            ),
         }
 
         let frames = finalize_frames(running.frames.lock().unwrap().clone());
@@ -427,11 +489,29 @@ impl CaptureManager {
             device_port: running.device_port,
             app_port: running.app_port,
             baud: running.baud,
+            baseline_id: running.baseline_id,
             frames,
             path: captures_dir(root).join(format!("{id}.json")),
         };
         session.save()?;
         Ok(session)
+    }
+
+    /// Every port currently held open by a running capture, mapped to the id
+    /// of the capture holding it.
+    ///
+    /// A serial port accepts a single open handle, so a capture's two ports
+    /// can't be opened by anything else — including ciabatta's own Send tab —
+    /// until it stops. Callers use this to say so up front rather than letting
+    /// the OS surface a bare "Device or resource busy".
+    pub fn busy_ports(&self) -> BTreeMap<String, String> {
+        let map = self.running.lock().unwrap();
+        let mut out = BTreeMap::new();
+        for (id, running) in map.iter() {
+            out.insert(running.device_port.clone(), id.clone());
+            out.insert(running.app_port.clone(), id.clone());
+        }
+        out
     }
 
     /// Best-effort: stop every running capture (e.g. on server shutdown).
@@ -441,6 +521,15 @@ impl CaptureManager {
             let _ = self.stop(root, &id);
         }
     }
+}
+
+/// Whether two port names are the two ends of one virtual pair, going by the
+/// `-peer` suffix the UI's setup hints suggest. Only catches that convention —
+/// a pair named any other way still can't be detected from the names alone —
+/// but it's the shape users land on most often, and getting it wrong builds a
+/// relay that talks only to itself.
+fn same_pair(a: &str, b: &str) -> bool {
+    a.strip_suffix("-peer") == Some(b) || b.strip_suffix("-peer") == Some(a)
 }
 
 /// Sort captured frames into chronological order. The two relay threads push
@@ -461,8 +550,11 @@ fn spawn_relay(
     frames: Arc<Mutex<Vec<Frame>>>,
     stop_flag: Arc<AtomicBool>,
     started: Instant,
+    // Held for the thread's lifetime purely so dropping it signals the exit.
+    _done: mpsc::Sender<()>,
 ) -> JoinHandle<()> {
     thread::spawn(move || {
+        let _done = _done;
         let mut buf = [0u8; 4096];
         while stop_flag.load(Ordering::Relaxed) {
             match reader.read(&mut buf) {
@@ -472,7 +564,14 @@ fn spawn_relay(
                     if writer.write_all(&data).is_err() {
                         break;
                     }
-                    let _ = writer.flush();
+                    // Deliberately no flush(): serialport's flush is tcdrain(),
+                    // which waits for the peer to consume everything queued and
+                    // — unlike read/write, which poll with the port timeout —
+                    // cannot time out. Against a virtual pair whose other end
+                    // isn't being drained it blocks forever, wedging this
+                    // thread and any stop() waiting to join it. write_all has
+                    // already handed the bytes to the kernel, which transmits
+                    // them asynchronously; a relay wants exactly that.
                     frames.lock().unwrap().push(Frame {
                         t_ms: started.elapsed().as_millis() as u64,
                         dir,
@@ -496,7 +595,7 @@ fn now() -> String {
 
 /// (De)serialize `Vec<u8>` as a lowercase hex string, matching the rest of
 /// `usb`'s hex convention (see [`super::decode_hex`]/[`super::encode_hex`]).
-mod hex_data {
+pub(super) mod hex_data {
     use serde::{Deserialize, Deserializer, Serializer};
 
     pub fn serialize<S: Serializer>(bytes: &[u8], s: S) -> Result<S::Ok, S::Error> {
@@ -567,6 +666,7 @@ mod tests {
             device_port: "COM5".to_string(),
             app_port: "COM7".to_string(),
             baud: 115200,
+            baseline_id: None,
             frames: vec![
                 frame(0, Direction::AppToDevice, &[0xaa, 0x01]),
                 frame(10, Direction::DeviceToApp, &[0x55]),
@@ -600,6 +700,7 @@ mod tests {
             device_port: "COM1".into(),
             app_port: "COM2".into(),
             baud: 9600,
+            baseline_id: None,
             frames: vec![
                 frame(0, Direction::AppToDevice, &[1]),
                 frame(1, Direction::DeviceToApp, &[2]),
@@ -628,6 +729,7 @@ mod tests {
             device_port: "COM5".into(),
             app_port: "COM7".into(),
             baud: 115200,
+            baseline_id: None,
             frames: vec![
                 frame(0, Direction::AppToDevice, &[0xaa]),
                 frame(5, Direction::DeviceToApp, &[0xbb]),
@@ -649,6 +751,37 @@ mod tests {
         // of the frame in between that got filtered out.
         assert!(code.contains("(0, &[0xAA]),"));
         assert!(code.contains("(20, &[0xCC]),"));
+    }
+
+    #[test]
+    fn same_pair_spots_the_two_ends_of_one_virtual_pair() {
+        assert!(same_pair("/dev/cia", "/dev/cia-peer"));
+        assert!(same_pair("/dev/cia-peer", "/dev/cia"));
+        assert!(same_pair("COM8", "COM8-peer"));
+
+        // Genuinely different pairs, which is what a capture needs.
+        assert!(!same_pair("/dev/app", "/dev/dev"));
+        assert!(!same_pair("/dev/app-peer", "/dev/dev-peer"));
+        assert!(!same_pair("COM8", "COM9"));
+        // Not a suffix match, just a shared prefix.
+        assert!(!same_pair("/dev/cia", "/dev/cia2-peer"));
+    }
+
+    #[test]
+    fn start_rejects_a_self_relay_without_touching_a_port() {
+        let manager = CaptureManager::new();
+
+        let err = manager
+            .start("/dev/nope", "/dev/nope", 9600, None)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("two different ports"), "{err}");
+
+        let err = manager
+            .start("/dev/cia", "/dev/cia-peer", 9600, None)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("single virtual pair"), "{err}");
     }
 
     #[test]

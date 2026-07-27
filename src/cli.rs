@@ -281,6 +281,11 @@ pub enum Commands {
     /// Opens a small web app: choose a device and baud rate, pick a file (the
     /// page shows its length in bytes), optionally type a hex prefix, and send.
     /// The prefix is decoded from hex and written ahead of the file's bytes.
+    ///
+    /// The Capture tab sniffs a conversation between a third-party app and a
+    /// device by relaying it through a virtual serial pair, then replays it,
+    /// exports it as Rust, or re-runs it in "check" mode to validate that the
+    /// same command still produces the same bytes.
     Usb {
         /// Port for the local web view.
         #[arg(short = 'p', long, default_value_t = 8091)]

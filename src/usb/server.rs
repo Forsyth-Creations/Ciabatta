@@ -17,6 +17,8 @@
 //! * `POST /api/replay`          — replay one direction's frames to a port
 //! * `POST /api/export/rust`     — render one direction's frames as a
 //!   paste-able `.rs` snippet
+//! * `POST /api/compare`         — "check" mode: diff one saved capture
+//!   against another (see [`super::compare`])
 //!
 //! The file arrives as a hex string in the `/api/send` JSON body, so binary
 //! never has to survive the (text-oriented) request reader, and no base64
@@ -32,7 +34,7 @@ use serde_json::json;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
-use super::capture;
+use super::{capture, compare};
 
 /// The embedded single-page app (HTML + CSS + JS, no external assets).
 const INDEX_HTML: &str = include_str!("index.html");
@@ -105,6 +107,11 @@ struct CaptureStartPayload {
     /// third-party tool connects to; that must be the pair's other port.
     app_port: String,
     baud: u32,
+    /// Set to run in "check" mode: the id of the saved capture this run is
+    /// meant to reproduce. Recorded on the session so `/api/compare` can diff
+    /// the two once the capture stops.
+    #[serde(default)]
+    baseline_id: Option<String>,
 }
 
 /// A JSON payload carrying just an id (`capture/stop`, `captures/delete`).
@@ -145,6 +152,23 @@ struct ExportPayload {
     frame_indices: Option<Vec<usize>>,
 }
 
+/// The `/api/compare` request body.
+#[derive(Deserialize)]
+struct ComparePayload {
+    /// The saved capture that defines "correct".
+    baseline_id: String,
+    /// The saved capture to validate against it.
+    actual_id: String,
+    /// `both` (default), `app_to_device`, or `device_to_app` — which side(s)
+    /// have to agree for the check to pass.
+    #[serde(default = "default_both")]
+    directions: String,
+}
+
+fn default_both() -> String {
+    "both".to_string()
+}
+
 async fn handle(mut socket: TcpStream, manager: Arc<capture::CaptureManager>) -> Result<()> {
     let Some(req) = read_request(&mut socket).await? else {
         return Ok(());
@@ -155,11 +179,8 @@ async fn handle(mut socket: TcpStream, manager: Arc<capture::CaptureManager>) ->
         ("GET", "/") | ("GET", "/index.html") => {
             ("200 OK", "text/html; charset=utf-8", INDEX_HTML.into())
         }
-        ("GET", "/api/ports") => match super::list_ports() {
-            Ok(ports) => ok_json(json!({ "ports": ports })),
-            Err(e) => bad_request(&e.to_string()),
-        },
-        ("POST", "/api/send") => send(&req.body).await,
+        ("GET", "/api/ports") => ports_json(&manager),
+        ("POST", "/api/send") => send(&manager, &req.body).await,
 
         ("POST", "/api/capture/start") => capture_start(manager, &req.body).await,
         ("POST", "/api/capture/stop") => capture_stop(manager, &req.body).await,
@@ -169,6 +190,7 @@ async fn handle(mut socket: TcpStream, manager: Arc<capture::CaptureManager>) ->
         ("POST", "/api/captures/delete") => captures_delete(&req.body).await,
         ("POST", "/api/replay") => capture_replay(&req.body).await,
         ("POST", "/api/export/rust") => capture_export(&req.body).await,
+        ("POST", "/api/compare") => capture_compare(&req.body).await,
 
         _ => (
             "404 Not Found",
@@ -180,13 +202,75 @@ async fn handle(mut socket: TcpStream, manager: Arc<capture::CaptureManager>) ->
     write_response(&mut socket, status, content_type, &body).await
 }
 
+/// Handle `GET /api/ports`: the picker's device list, with each port flagged
+/// when a running capture is holding it open.
+fn ports_json(manager: &capture::CaptureManager) -> (&'static str, &'static str, Vec<u8>) {
+    let ports = match super::list_ports() {
+        Ok(p) => p,
+        Err(e) => return bad_request(&e.to_string()),
+    };
+
+    let busy = manager.busy_ports();
+    let items: Vec<serde_json::Value> = ports
+        .into_iter()
+        .map(|p| {
+            let holder = busy.get(&p.name);
+            json!({
+                "name": p.name,
+                "label": p.label,
+                "usb_id": p.usb_id,
+                "is_usb": p.is_usb,
+                // The capture holding this port open, if any.
+                "busy_capture": holder,
+            })
+        })
+        .collect();
+
+    // The page tailors its virtual-pair setup instructions to this, and it has
+    // to be the *server's* OS: the ports live wherever ciabatta runs, which
+    // isn't necessarily where the browser is.
+    ok_json(json!({ "ports": items, "platform": platform() }))
+}
+
+/// The OS ciabatta is running on, for the UI's setup hints.
+fn platform() -> &'static str {
+    if cfg!(target_os = "windows") {
+        "windows"
+    } else if cfg!(target_os = "macos") {
+        "macos"
+    } else if cfg!(target_os = "linux") {
+        "linux"
+    } else {
+        "other"
+    }
+}
+
 /// Handle `POST /api/send`: parse the payload, then run the blocking serial
 /// write on a blocking thread so the async runtime isn't stalled.
-async fn send(body: &str) -> (&'static str, &'static str, Vec<u8>) {
+async fn send(
+    manager: &capture::CaptureManager,
+    body: &str,
+) -> (&'static str, &'static str, Vec<u8>) {
     let payload: SendPayload = match serde_json::from_str(body) {
         Ok(p) => p,
         Err(e) => return bad_request(&e.to_string()),
     };
+
+    // Opening a port the relay owns can only fail with a bare "Device or
+    // resource busy", which doesn't hint at the cause. Say what's really
+    // going on, and where the bytes should go instead.
+    if let Some(capture_id) = manager.busy_ports().get(&payload.port) {
+        return ok_json(json!({
+            "ok": false,
+            "error": format!(
+                "{} is held open by the running capture {capture_id}. A serial port allows \
+                 only one open handle, so the relay owns both of its ports until you stop \
+                 it. Send to the other end of the virtual pair instead — the port a \
+                 third-party app would use.",
+                payload.port
+            ),
+        }));
+    }
 
     let result = tokio::task::spawn_blocking(move || {
         super::send(&payload.port, payload.baud, &payload.prefix, &payload.data)
@@ -212,7 +296,12 @@ async fn capture_start(
     };
 
     let result = tokio::task::spawn_blocking(move || {
-        manager.start(&payload.device_port, &payload.app_port, payload.baud)
+        manager.start(
+            &payload.device_port,
+            &payload.app_port,
+            payload.baud,
+            payload.baseline_id,
+        )
     })
     .await;
 
@@ -254,6 +343,9 @@ async fn capture_stop(
             ok_json(json!({
                 "ok": true,
                 "id": session.id,
+                // Present when this was a check run; the UI follows up with
+                // POST /api/compare to diff it against the baseline.
+                "baseline_id": session.baseline_id,
                 "frame_count": session.frames.len(),
                 "duration_ms": duration_ms,
                 "app_to_device_bytes": app_to_device_bytes,
@@ -319,6 +411,7 @@ async fn captures_list() -> (&'static str, &'static str, Vec<u8>) {
                         "app_port": s.app_port,
                         "baud": s.baud,
                         "frame_count": s.frame_count,
+                        "baseline_id": s.baseline_id,
                     })
                 })
                 .collect();
@@ -421,6 +514,51 @@ async fn capture_export(body: &str) -> (&'static str, &'static str, Vec<u8>) {
         Ok(Ok(code)) => ok_json(json!({ "ok": true, "code": code })),
         Ok(Err(e)) => ok_json(json!({ "ok": false, "error": e.to_string() })),
         Err(e) => bad_request(&format!("export task panicked: {e}")),
+    }
+}
+
+/// Handle `POST /api/compare`: load both saved captures and diff their byte
+/// streams, direction by direction.
+async fn capture_compare(body: &str) -> (&'static str, &'static str, Vec<u8>) {
+    let payload: ComparePayload = match serde_json::from_str(body) {
+        Ok(p) => p,
+        Err(e) => return bad_request(&e.to_string()),
+    };
+    let dirs = match parse_directions(&payload.directions) {
+        Ok(d) => d,
+        Err(e) => return bad_request(&e),
+    };
+
+    let result = tokio::task::spawn_blocking(move || {
+        let root = cwd_root();
+        let baseline = capture::CaptureSession::load(&root, &payload.baseline_id)?;
+        let actual = capture::CaptureSession::load(&root, &payload.actual_id)?;
+        anyhow::Ok(compare::compare(&baseline, &actual, &dirs))
+    })
+    .await;
+
+    match result {
+        Ok(Ok(comparison)) => match serde_json::to_value(&comparison) {
+            Ok(mut v) => {
+                v["ok"] = json!(true);
+                ok_json(v)
+            }
+            Err(e) => bad_request(&e.to_string()),
+        },
+        Ok(Err(e)) => ok_json(json!({ "ok": false, "error": e.to_string() })),
+        Err(e) => bad_request(&format!("compare task panicked: {e}")),
+    }
+}
+
+/// Parse the `directions` field of a compare request into the directions to
+/// check: `both` covers each side, otherwise a single [`parse_direction`].
+fn parse_directions(s: &str) -> Result<Vec<capture::Direction>, String> {
+    match s {
+        "both" => Ok(vec![
+            capture::Direction::AppToDevice,
+            capture::Direction::DeviceToApp,
+        ]),
+        other => parse_direction(other).map(|d| vec![d]),
     }
 }
 

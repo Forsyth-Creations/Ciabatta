@@ -151,8 +151,12 @@ pub struct Provider {
     /// OpenAI-compatible endpoints only when the user configured one).
     max_tokens: u64,
     max_tokens_configured: bool,
+    tls_verify: bool,
     /// Token usage from the most recent request, for the front end's status.
     last_usage: Mutex<Option<Usage>>,
+    /// Best-effort size estimate of the latest outbound prompt so timeout
+    /// diagnostics can flag likely context pressure.
+    last_request_pressure: Mutex<Option<RequestPressure>>,
 }
 
 impl Provider {
@@ -219,7 +223,9 @@ impl Provider {
             client,
             max_tokens: cfg.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS).max(1),
             max_tokens_configured: cfg.max_tokens.is_some(),
+            tls_verify: cfg.tls_verify,
             last_usage: Mutex::new(None),
+            last_request_pressure: Mutex::new(None),
         })
     }
 
@@ -231,12 +237,13 @@ impl Provider {
     /// How many characters of transcript to keep before compacting, sized to the
     /// model's context window rather than a fixed constant — so a small local
     /// model (8–32k tokens) compacts long before it overflows, while a
-    /// large-window hosted model isn't compacted needlessly. Roughly half the
-    /// window (at ~4 chars/token), leaving room for the system prompt, tool
-    /// definitions, the reply, and fresh tool output.
+    /// large-window hosted model isn't compacted needlessly. Roughly a third of
+    /// the window (at ~4 chars/token), leaving generous room for the system
+    /// prompt, tool definitions, the reply, and fresh tool output so requests
+    /// stay fast and avoid context-pressure stalls.
     pub fn context_budget_chars(&self) -> usize {
         let window_tokens = context_window_tokens(&self.model, self.kind);
-        (window_tokens / 2) * 4
+        (window_tokens / 3) * 4
     }
 
     /// Send a prepared request, retrying transient failures (rate-limits, 5xx,
@@ -282,9 +289,91 @@ impl Provider {
                         tokio::time::sleep(delay).await;
                         continue;
                     }
+                    if e.is_timeout() {
+                        return Err(self.timeout_error_with_spot_checks(e).await);
+                    }
                     return Err(self.send_error(e));
                 }
             }
+        }
+    }
+
+    /// When a request times out, run quick spot checks to distinguish a down
+    /// endpoint from a slow but reachable model and to flag likely context
+    /// pressure from oversized prompts.
+    async fn timeout_error_with_spot_checks(&self, err: reqwest::Error) -> anyhow::Error {
+        let target = match self.kind {
+            ProviderKind::Claude => "the Claude API",
+            ProviderKind::OpenAi => "the AI endpoint",
+        };
+        let where_ = format!("{target} at {}", self.endpoint);
+        let mut detail = format!(
+            "no response from {where_} within {REQUEST_TIMEOUT_SECS}s (the request timed out)."
+        );
+        match self.quick_endpoint_probe().await {
+            Probe::Reachable(status) => {
+                detail.push_str(&format!(
+                    " Spot-check: endpoint is reachable now (probe status {status}). \
+                     The model is likely overloaded, still loading, or stuck processing this request."
+                ));
+            }
+            Probe::Unreachable(reason) => {
+                detail.push_str(&format!(
+                    " Spot-check: endpoint probe failed ({reason}), so this is likely a server/network availability problem."
+                ));
+            }
+            Probe::Unknown(reason) => {
+                detail.push_str(&format!(
+                    " Spot-check: couldn't conclusively probe endpoint health ({reason})."
+                ));
+            }
+        }
+        if let Some(p) = *self.last_request_pressure.lock().unwrap()
+            && let Some(hint) = context_pressure_hint(p, &self.model)
+        {
+            detail.push(' ');
+            detail.push_str(&hint);
+        }
+        if !err.is_timeout() {
+            detail.push_str(&format!(" Original error: {err}"));
+        }
+        anyhow!(detail)
+    }
+
+    /// Lightweight endpoint probe used only after timeouts.
+    async fn quick_endpoint_probe(&self) -> Probe {
+        let path = match self.kind {
+            ProviderKind::Claude => "/v1/messages",
+            ProviderKind::OpenAi => "/v1/models",
+        };
+        let mut builder = reqwest::Client::builder().timeout(Duration::from_secs(6));
+        if !self.tls_verify {
+            builder = builder.danger_accept_invalid_certs(true);
+        }
+        let client = match builder.build() {
+            Ok(c) => c,
+            Err(e) => return Probe::Unknown(format!("failed to build probe client: {e}")),
+        };
+        let mut req = client.get(format!("{}{}", self.endpoint, path));
+        match self.kind {
+            ProviderKind::Claude => {
+                req = req.header("anthropic-version", "2023-06-01");
+                if !self.api_key.is_empty() {
+                    req = req.header("x-api-key", &self.api_key);
+                }
+            }
+            ProviderKind::OpenAi => {
+                if !self.api_key.is_empty() {
+                    req = req.bearer_auth(&self.api_key);
+                }
+            }
+        }
+        match req.send().await {
+            Ok(resp) => Probe::Reachable(resp.status()),
+            Err(e) if e.is_connect() => Probe::Unreachable("connection failed".to_string()),
+            Err(e) if e.is_timeout() => Probe::Unreachable("probe timed out".to_string()),
+            Err(e) if e.is_request() => Probe::Unreachable(format!("request failed: {e}")),
+            Err(e) => Probe::Unknown(e.to_string()),
         }
     }
 
@@ -333,6 +422,7 @@ impl Provider {
         turns: &[Turn],
         tools: &[ToolSpec],
     ) -> Result<AssistantTurn> {
+        self.record_request_pressure(system, turns, tools);
         match self.kind {
             ProviderKind::Claude => self.chat_claude(system, turns, tools).await,
             ProviderKind::OpenAi => self.chat_openai(system, turns, tools).await,
@@ -619,12 +709,34 @@ impl Provider {
     fn record_usage(&self, usage: Usage) {
         *self.last_usage.lock().unwrap() = Some(usage);
     }
+
+    /// Store a coarse request-size estimate for timeout diagnostics.
+    fn record_request_pressure(&self, system: &str, turns: &[Turn], tools: &[ToolSpec]) {
+        let approx_input_tokens = estimate_request_chars(system, turns, tools) / 4;
+        let window_tokens = context_window_tokens(&self.model, self.kind);
+        *self.last_request_pressure.lock().unwrap() = Some(RequestPressure {
+            approx_input_tokens,
+            window_tokens,
+        });
+    }
 }
 
 /// Reserved key marking a tool call whose arguments failed to parse as JSON, so
 /// the tool executor can turn it into an actionable error instead of running
 /// with empty arguments. See [`ToolCall::arg_parse_error`].
 pub const ARG_PARSE_ERROR_KEY: &str = "__arg_parse_error__";
+
+#[derive(Debug, Clone, Copy)]
+struct RequestPressure {
+    approx_input_tokens: usize,
+    window_tokens: usize,
+}
+
+enum Probe {
+    Reachable(reqwest::StatusCode),
+    Unreachable(String),
+    Unknown(String),
+}
 
 impl ToolCall {
     /// If this call's arguments failed to parse (a malformed or truncated blob),
@@ -728,6 +840,48 @@ fn token_count(n: usize) -> String {
     }
 }
 
+/// If the prompt likely consumed most of the model window, return a concise
+/// hint for timeout errors.
+fn context_pressure_hint(pressure: RequestPressure, model: &str) -> Option<String> {
+    if pressure.window_tokens == 0 {
+        return None;
+    }
+    let pct = pressure.approx_input_tokens.saturating_mul(100) / pressure.window_tokens;
+    if pct < 80 {
+        return None;
+    }
+    Some(format!(
+        "Prompt size was about {} of {} tokens (~{}%) for `{model}`; this is near the context limit. \
+         Ciabatta will compact history aggressively, but consider a larger-window model or a smaller request.",
+        token_count(pressure.approx_input_tokens),
+        token_count(pressure.window_tokens),
+        pct
+    ))
+}
+
+/// Coarse character estimate for one outbound request body.
+fn estimate_request_chars(system: &str, turns: &[Turn], tools: &[ToolSpec]) -> usize {
+    let turns_chars: usize = turns
+        .iter()
+        .map(|t| match t {
+            Turn::User(text) => text.len(),
+            Turn::Assistant(a) => {
+                a.text.len()
+                    + a.tool_calls
+                        .iter()
+                        .map(|c| c.name.len() + c.args.to_string().len())
+                        .sum::<usize>()
+            }
+            Turn::ToolResults(results) => results.iter().map(|r| r.content.len()).sum(),
+        })
+        .sum();
+    let tools_chars: usize = tools
+        .iter()
+        .map(|t| t.name.len() + t.description.len() + t.parameters.to_string().len())
+        .sum();
+    system.len() + turns_chars + tools_chars
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -805,6 +959,31 @@ mod tests {
             ProviderKind::OpenAi
         )
         .is_none());
+    }
+
+    #[test]
+    fn context_pressure_hint_flags_large_prompts() {
+        let hint = context_pressure_hint(
+            RequestPressure {
+                approx_input_tokens: 15_000,
+                window_tokens: 16_000,
+            },
+            "gpt-3.5-turbo",
+        );
+        assert!(hint.is_some());
+        assert!(hint.unwrap().contains("~93%"));
+    }
+
+    #[test]
+    fn context_pressure_hint_ignores_small_prompts() {
+        let hint = context_pressure_hint(
+            RequestPressure {
+                approx_input_tokens: 2_000,
+                window_tokens: 32_000,
+            },
+            "gpt-4o",
+        );
+        assert!(hint.is_none());
     }
 
     #[test]

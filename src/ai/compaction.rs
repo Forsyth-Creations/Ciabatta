@@ -16,7 +16,7 @@ use super::provider::{AssistantTurn, Provider, Turn};
 /// Don't bother summarizing unless the prefix we'd fold away is at least this
 /// big; below it, compaction costs a model round for no real savings. (Even on
 /// a small-window model, folding away a few KB isn't worth a round trip.)
-const MIN_PREFIX_CHARS: usize = 20_000;
+const MIN_PREFIX_CHARS: usize = 8_000;
 
 /// The system prompt for the summarization pass (adapted from opencode's
 /// anchored-context summarizer).

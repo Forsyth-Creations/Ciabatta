@@ -159,7 +159,7 @@ pub struct Assistant {
 /// Default cap on model⇄tool round trips per question, so a confused model can't
 /// spin — but high enough that a real multi-file refactor isn't guillotined
 /// half-done. Overridable via `[ai] max_tool_rounds`.
-const DEFAULT_MAX_TOOL_ROUNDS: usize = 50;
+const DEFAULT_MAX_TOOL_ROUNDS: usize = 100;
 
 /// Cap on fix-then-reverify cycles after a code change, so a task whose
 /// verification can't be made to pass can't loop forever or exhaust the round

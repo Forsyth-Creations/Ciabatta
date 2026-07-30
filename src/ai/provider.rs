@@ -424,6 +424,9 @@ impl Provider {
             let msg = payload["error"]["message"]
                 .as_str()
                 .unwrap_or("unknown error");
+            if let Some(hint) = context_window_overflow_hint(msg, &self.model, self.kind) {
+                bail!("Claude API error ({status}): {msg}\n{hint}");
+            }
             bail!("Claude API error ({status}): {msg}");
         }
 
@@ -561,6 +564,9 @@ impl Provider {
             let msg = payload["error"]["message"]
                 .as_str()
                 .unwrap_or("unknown error");
+            if let Some(hint) = context_window_overflow_hint(msg, &self.model, self.kind) {
+                bail!("AI endpoint error ({status}): {msg}\n{hint}");
+            }
             bail!("AI endpoint error ({status}): {msg}");
         }
 
@@ -688,6 +694,40 @@ fn context_window_tokens(model: &str, kind: ProviderKind) -> usize {
     32_000
 }
 
+/// If an API error message indicates the request exceeded the model context
+/// window, return an actionable hint.
+fn context_window_overflow_hint(
+    message: &str,
+    model: &str,
+    kind: ProviderKind,
+) -> Option<String> {
+    let m = message.to_lowercase();
+    let overflow = m.contains("context_length_exceeded")
+        || m.contains("maximum context length")
+        || m.contains("context window")
+        || m.contains("prompt is too long")
+        || m.contains("input is too long")
+        || m.contains("too many tokens")
+        || (m.contains("tokens") && m.contains("maximum"));
+    if !overflow {
+        return None;
+    }
+    let window = context_window_tokens(model, kind);
+    Some(format!(
+        "The request likely exceeded this model's context window (about {} tokens for `{model}`). \
+         Use a larger-context model, trim the request, or increase history compaction.",
+        token_count(window)
+    ))
+}
+
+fn token_count(n: usize) -> String {
+    if n >= 1000 {
+        format!("{:.0}k", n as f64 / 1000.0)
+    } else {
+        n.to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -742,6 +782,29 @@ mod tests {
             context_window_tokens("qwen2.5-coder", ProviderKind::OpenAi),
             32_000
         );
+    }
+
+    #[test]
+    fn context_window_overflow_hint_is_detected() {
+        let hint = context_window_overflow_hint(
+            "This model's maximum context length is 16384 tokens. Please reduce your prompt.",
+            "gpt-3.5-turbo",
+            ProviderKind::OpenAi,
+        );
+        assert!(hint.is_some());
+        let text = hint.unwrap();
+        assert!(text.contains("16k"));
+        assert!(text.contains("gpt-3.5-turbo"));
+    }
+
+    #[test]
+    fn context_window_overflow_hint_ignores_unrelated_errors() {
+        assert!(context_window_overflow_hint(
+            "rate limit exceeded, please retry later",
+            "gpt-4o",
+            ProviderKind::OpenAi
+        )
+        .is_none());
     }
 
     #[test]

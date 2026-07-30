@@ -100,7 +100,7 @@ pub struct AiConfig {
     /// edits or plans are being truncated mid-tool-call.
     #[serde(default)]
     pub max_tokens: Option<u64>,
-    /// Cap on model⇄tool round trips per question (default 50). A large refactor
+    /// Cap on model⇄tool round trips per question (default 100). A large refactor
     /// spanning many files can exceed the default; raise it for long autonomous
     /// tasks, lower it to fail fast on a confused model.
     #[serde(default)]

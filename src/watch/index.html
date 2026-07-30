@@ -213,6 +213,15 @@
     <script>
       const $ = (id) => document.getElementById(id);
       const esc = (s) => s.replace(/[&<>"]/g, (c) => ({ "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;" }[c]));
+      const ANSI_RE = /\x1b\[([0-9;]*)m/g;
+      const ANSI_16 = [
+        "#1f2329", "#ef5f6b", "#46c17a", "#f0a54a",
+        "#4aa3f0", "#d38af3", "#4dd0e1", "#d9dee6",
+      ];
+      const ANSI_16_BRIGHT = [
+        "#8b949e", "#ff8c94", "#7ee787", "#f9c97f",
+        "#79c0ff", "#f2ccff", "#9feaf9", "#ffffff",
+      ];
 
       let lastSeq = 0;
       let mode = "any", streamFilter = "all";
@@ -262,16 +271,102 @@
       }
 
       // ── rendering log rows ─────────────────────────────────────────────────
-      function rowHtml(l, terms) {
-        let txt = esc(l.text);
-        if (terms && terms.length) {
-          for (const term of terms) {
-            try {
-              const re = new RegExp("(" + term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + ")", "gi");
-              txt = txt.replace(re, "<mark>$1</mark>");
-            } catch (e) {}
+      function highlightEscaped(text, terms) {
+        let out = esc(text);
+        if (!terms || !terms.length) return out;
+        for (const term of terms) {
+          try {
+            const re = new RegExp("(" + term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + ")", "gi");
+            out = out.replace(re, "<mark>$1</mark>");
+          } catch (e) {}
+        }
+        return out;
+      }
+      function color256(n) {
+        if (n < 0 || n > 255 || !Number.isFinite(n)) return null;
+        if (n < 16) return n < 8 ? ANSI_16[n] : ANSI_16_BRIGHT[n - 8];
+        if (n >= 232) {
+          const v = 8 + (n - 232) * 10;
+          const h = v.toString(16).padStart(2, "0");
+          return `#${h}${h}${h}`;
+        }
+        const x = n - 16;
+        const r = Math.floor(x / 36), g = Math.floor((x % 36) / 6), b = x % 6;
+        const map = [0, 95, 135, 175, 215, 255];
+        return `rgb(${map[r]}, ${map[g]}, ${map[b]})`;
+      }
+      function applySgr(state, rawCodes) {
+        const codes = rawCodes.length ? rawCodes : ["0"];
+        for (let i = 0; i < codes.length; i++) {
+          const c = Number(codes[i] || 0);
+          if (c === 0) {
+            state.fg = null; state.bg = null; state.bold = false; state.dim = false;
+            state.italic = false; state.underline = false; state.strike = false;
+          } else if (c === 1) state.bold = true;
+          else if (c === 2) state.dim = true;
+          else if (c === 3) state.italic = true;
+          else if (c === 4) state.underline = true;
+          else if (c === 9) state.strike = true;
+          else if (c === 22) { state.bold = false; state.dim = false; }
+          else if (c === 23) state.italic = false;
+          else if (c === 24) state.underline = false;
+          else if (c === 29) state.strike = false;
+          else if (c === 39) state.fg = null;
+          else if (c === 49) state.bg = null;
+          else if (c >= 30 && c <= 37) state.fg = ANSI_16[c - 30];
+          else if (c >= 90 && c <= 97) state.fg = ANSI_16_BRIGHT[c - 90];
+          else if (c >= 40 && c <= 47) state.bg = ANSI_16[c - 40];
+          else if (c >= 100 && c <= 107) state.bg = ANSI_16_BRIGHT[c - 100];
+          else if ((c === 38 || c === 48) && i + 1 < codes.length) {
+            const target = c === 38 ? "fg" : "bg";
+            const mode = Number(codes[i + 1]);
+            if (mode === 5 && i + 2 < codes.length) {
+              const col = color256(Number(codes[i + 2]));
+              if (col) state[target] = col;
+              i += 2;
+            } else if (mode === 2 && i + 4 < codes.length) {
+              const r = Math.max(0, Math.min(255, Number(codes[i + 2])));
+              const g = Math.max(0, Math.min(255, Number(codes[i + 3])));
+              const b = Math.max(0, Math.min(255, Number(codes[i + 4])));
+              if ([r, g, b].every(Number.isFinite)) state[target] = `rgb(${r}, ${g}, ${b})`;
+              i += 4;
+            }
           }
         }
+      }
+      function styleAttr(state) {
+        const style = [];
+        if (state.fg) style.push(`color:${state.fg}`);
+        if (state.bg) style.push(`background-color:${state.bg}`);
+        if (state.bold) style.push("font-weight:700");
+        if (state.dim) style.push("opacity:.75");
+        if (state.italic) style.push("font-style:italic");
+        const deco = [];
+        if (state.underline) deco.push("underline");
+        if (state.strike) deco.push("line-through");
+        if (deco.length) style.push(`text-decoration:${deco.join(" ")}`);
+        return style.join(";");
+      }
+      function ansiHtml(text, terms) {
+        let out = "";
+        let last = 0;
+        const state = { fg: null, bg: null, bold: false, dim: false, italic: false, underline: false, strike: false };
+        for (const m of text.matchAll(ANSI_RE)) {
+          if (m.index > last) {
+            const chunk = highlightEscaped(text.slice(last, m.index), terms);
+            const style = styleAttr(state);
+            out += style ? `<span style="${style}">${chunk}</span>` : chunk;
+          }
+          applySgr(state, m[1].split(";"));
+          last = m.index + m[0].length;
+        }
+        const tail = highlightEscaped(text.slice(last), terms);
+        const style = styleAttr(state);
+        out += style ? `<span style="${style}">${tail}</span>` : tail;
+        return out;
+      }
+      function rowHtml(l, terms) {
+        const txt = ansiHtml(l.text, terms);
         const ts = l.ts ? l.ts.replace("T", " ").slice(0, 19) : "";
         return `<div class="row ${l.stream}" id="line-${l.seq}" data-seq="${l.seq}">`
           + `<span class="seq">${l.seq}</span>`

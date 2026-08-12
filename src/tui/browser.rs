@@ -233,7 +233,7 @@ impl BrowserApp {
                 }
                 self.status_msg = Some(format!("✗ {} failed: {}", name, err));
             }
-            // Deploy step updates don't occur in the push-on-demand browser.
+            // Run step updates don't occur in the push-on-demand browser.
             ProgressUpdate::StepStarted { .. }
             | ProgressUpdate::StepFinished { .. }
             | ProgressUpdate::StepSkipped { .. }
@@ -292,9 +292,9 @@ fn build_recipe_rows(
     let mut rows: Vec<_> = config
         .recipes
         .iter()
-        // Deploy-only recipes have no push/pull action; the browser drives
-        // push/pull, so leave them out (they run via `ciabatta deploy`).
-        .filter(|(_, entry)| !entry.is_deploy_only())
+        // Run-only recipes have no push/pull action; the browser drives
+        // push/pull, so leave them out (they go through `ciabatta run`).
+        .filter(|(_, entry)| !entry.is_run_only())
         .map(|(name, entry)| {
             let push = entry.push_recipe();
             let kind: &'static str = if entry.push.is_some() || entry.pull.is_some() {

@@ -11,7 +11,6 @@
 pub mod cache;
 pub mod requirements;
 pub mod scan;
-pub mod server;
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};

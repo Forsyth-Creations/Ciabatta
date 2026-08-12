@@ -1,18 +1,34 @@
 name: CI
 
+# One workflow for everything. Ordinary pushes and PRs run the test matrix and
+# a website build; a `v*` tag additionally cuts the release, publishes the
+# crate, and deploys the website to GitHub Pages.
 on:
   push:
     branches: ["**"]
+    tags: ["v*"]
   pull_request:
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  # A superseded branch build is worth cancelling; a half-finished release is not.
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+permissions:
+  contents: read
 
 jobs:
   test:
     name: Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    # A hung test should fail the leg, not sit on a runner until GitHub's 6h cap.
+    timeout-minutes: 30
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
 
@@ -34,14 +50,280 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
 
+      - name: Enable Corepack
+        run: corepack enable
+
+      - uses: actions/setup-node@v6
+        with:
+          cache: yarn
+          cache-dependency-path: yarn.lock
+
+      - run: yarn install --immutable
+
+      # The daemon embeds the built web app with include_dir!, so the bundle has
+      # to exist before cargo runs — otherwise the binary compiles against the
+      # "run yarn build" placeholder that build.rs drops in, and a couple of
+      # daemon tests assert against the real asset tree. `ciabatta-rust` depends
+      # on `ciabatta-tool-frontend`, so turbo orders the two for us rather than
+      # us hand-rolling the sequence here.
+      - name: Build the web app, then the binary
+        run: yarn turbo run build --filter=ciabatta-rust
+
       - name: Check formatting
         run: cargo fmt --check
 
       - name: Clippy
-        run: cargo clippy -- -D warnings
-
-      - name: Build
-        run: cargo build --release
+        run: cargo clippy --all-targets --all-features -- -D warnings
 
       - name: Test
         run: cargo test --release
+
+  # The public website. Built on every push so a break shows up with the change
+  # that caused it, in parallel with the Rust matrix above — but only *published*
+  # for a tagged release, which is the job at the bottom of this file.
+  website:
+    name: Website
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Enable Corepack
+        run: corepack enable
+
+      - uses: actions/setup-node@v6
+        with:
+          cache: yarn
+          cache-dependency-path: yarn.lock
+
+      - run: yarn install --immutable
+
+      - run: yarn turbo run build --filter=ciabatta-frontend
+
+      - name: Upload pages artifact
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: frontend/dist
+
+  # ---------------------------------------------------------------------------
+  # Everything below here runs only for a `v*` tag.
+  # ---------------------------------------------------------------------------
+
+  # Cargo.toml is the source of truth for the version. Bump it in the release
+  # commit before tagging; this job guards against tagging a stale version.
+  verify:
+    name: Verify version matches tag
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check Cargo.toml version == tag
+        run: |
+          CARGO_VERSION="$(grep -m1 '^version = ' Cargo.toml | sed -E 's/version = "(.*)"/\1/')"
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          echo "Cargo.toml version: $CARGO_VERSION"
+          echo "Tag version:        $TAG_VERSION"
+          if [ "$CARGO_VERSION" != "$TAG_VERSION" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match Cargo.toml version $CARGO_VERSION. Bump Cargo.toml before tagging."
+            exit 1
+          fi
+
+  build:
+    name: Build ${{ matrix.target }}
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: [verify, test]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      matrix:
+        include:
+          # Linux builds target musl so the binaries are fully static with no
+          # glibc dependency -- they run on any Linux distro, old or new.
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-latest
+            artifact: ciabatta
+            archive: ciabatta-linux-x86_64.tar.gz
+            use_cross: true
+
+          - target: aarch64-unknown-linux-musl
+            runner: ubuntu-latest
+            artifact: ciabatta
+            archive: ciabatta-linux-aarch64.tar.gz
+            use_cross: true
+
+          - target: x86_64-apple-darwin
+            runner: macos-latest
+            artifact: ciabatta
+            archive: ciabatta-macos-x86_64.tar.gz
+
+          - target: aarch64-apple-darwin
+            runner: macos-latest
+            artifact: ciabatta
+            archive: ciabatta-macos-aarch64.tar.gz
+
+          - target: x86_64-pc-windows-msvc
+            runner: windows-latest
+            artifact: ciabatta.exe
+            archive: ciabatta-windows-x86_64.zip
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross
+        if: matrix.use_cross
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cross
+
+      - name: Cache cargo dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      # Build the web app before cargo, on every target: the daemon embeds it at
+      # compile time. This runs on the host even for the musl legs — `cross`
+      # mounts the checkout into its container, so the dist/ produced here is
+      # visible to the build inside.
+      - name: Enable Corepack
+        run: corepack enable
+
+      - uses: actions/setup-node@v6
+        with:
+          cache: yarn
+          cache-dependency-path: yarn.lock
+
+      - run: yarn install --immutable
+
+      - name: Build the web app
+        run: yarn turbo run build --filter=ciabatta-tool-frontend
+
+      - name: Verify the real bundle will be embedded
+        shell: bash
+        run: |
+          # build.rs substitutes a placeholder page when the bundle is missing.
+          # Shipping that would produce a release whose UI just says "run yarn
+          # build", so fail loudly here instead.
+          if grep -q 'ciabatta-placeholder-bundle' tool_frontend/dist/index.html; then
+            echo "::error::tool_frontend/dist holds the build.rs placeholder, not the built app."
+            exit 1
+          fi
+          test -d tool_frontend/dist/assets
+
+      # Not `turbo run build` here: the release legs cross-compile to a specific
+      # --target, which the package's plain `cargo build --release` script can't
+      # express. The bundle it depends on was built by the step above.
+      - name: Build release binary
+        shell: bash
+        run: |
+          if [ "${{ matrix.use_cross }}" = "true" ]; then
+            cross build --release --target ${{ matrix.target }}
+          else
+            cargo build --release --target ${{ matrix.target }}
+          fi
+
+      - name: Package (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          cp target/${{ matrix.target }}/release/${{ matrix.artifact }} .
+          cp install/install.sh .
+          tar czf ${{ matrix.archive }} ${{ matrix.artifact }} install.sh
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Copy-Item target/${{ matrix.target }}/release/${{ matrix.artifact }} .
+          Copy-Item install\install.ps1 .
+          Compress-Archive -Path ${{ matrix.artifact }}, install.ps1 -DestinationPath ${{ matrix.archive }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.archive }}
+          path: ${{ matrix.archive }}
+
+  release:
+    name: Create GitHub Release
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: artifacts/*
+
+  publish:
+    name: Publish to crates.io
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      # The crate carries tool_frontend/dist (see `include` in Cargo.toml), so
+      # the bundle has to be built here too or the published crate ships the
+      # placeholder page.
+      - name: Enable Corepack
+        run: corepack enable
+
+      - uses: actions/setup-node@v6
+        with:
+          cache: yarn
+          cache-dependency-path: yarn.lock
+
+      - run: yarn install --immutable
+
+      - name: Build the web app
+        run: yarn turbo run build --filter=ciabatta-tool-frontend
+
+      - name: Publish to crates.io
+        run: cargo publish --allow-dirty
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+  # The website goes live with the release it documents, not with every push to
+  # a branch.
+  deploy-pages:
+    name: Deploy website to GitHub Pages
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: [website, release]
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Setup Pages
+        uses: actions/configure-pages@v6
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v5

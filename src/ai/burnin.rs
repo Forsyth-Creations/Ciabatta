@@ -23,7 +23,7 @@ use serde_json::Value;
 use tokio::sync::mpsc;
 
 use super::provider::Turn;
-use super::{AiEvent, Assistant, server, tools};
+use super::{AiEvent, Assistant, tools};
 
 /// Files per model request. Big enough to amortize the round trip, small
 /// enough that every file's head fits comfortably.
@@ -43,8 +43,15 @@ pub async fn run(
     review: bool,
     limit: Option<usize>,
 ) -> Result<()> {
-    let jobs = super::jobs::Jobs::open(root, &assistant.toolbox.config)?;
-    let url = server::spawn(assistant.clone(), jobs, port).await?;
+    // The map is served by the ciabatta daemon; burn-in just points at it.
+    let url = match crate::daemon::connect(Some(port)).await {
+        Ok(session) => session.page_url("/ai"),
+        // Losing the live view shouldn't abort a long burn-in.
+        Err(e) => {
+            tracing::warn!("could not reach the ciabatta daemon for the live map: {e:#}");
+            "(daemon unavailable — run `ciabatta daemon serve` to watch live)".to_string()
+        }
+    };
     println!("🔥 Burn-in: teaching the assistant this codebase");
     println!("   provider: {}", assistant.provider.label());
     println!("   live map: {url}");

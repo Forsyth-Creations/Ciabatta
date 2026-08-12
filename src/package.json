@@ -9,5 +9,8 @@
     "build": "cargo build --release",
     "test": "cargo test --all",
     "clean": "cargo clean"
+  },
+  "dependencies": {
+    "ciabatta-tool-frontend": "workspace:*"
   }
 }

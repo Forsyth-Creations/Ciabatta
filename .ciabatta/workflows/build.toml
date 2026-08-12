@@ -1,0 +1,21 @@
+# Build ciabatta: the web app first, then the binary that embeds it.
+#
+# Run it with `ciabatta build`, see the graph with `ciabatta build --graph`.
+
+description = "Build the daemon web app and the ciabatta binary"
+owner       = "Henry Forsyth"
+requires    = ["cargo"]
+
+[[steps]]
+name        = "frontend"
+description = "Build tool_frontend/dist, which build.rs embeds into the binary"
+run         = "yarn turbo run build --filter=ciabatta-tool-frontend"
+requires    = ["yarn"]
+timeout     = "10m"
+
+[[steps]]
+name        = "binary"
+description = "Compile the ciabatta CLI"
+run         = "cargo build"
+needs       = ["frontend"]
+timeout     = "20m"

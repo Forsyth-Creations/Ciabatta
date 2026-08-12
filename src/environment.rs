@@ -7,6 +7,8 @@
 //!     pass `--local` or `-e CIABATTA_BRANCH=…` on every invocation.
 //!   * anything else (or unset) → resolve from the configured CI system.
 
+pub mod cache;
+
 use std::collections::HashMap;
 use std::path::Path;
 

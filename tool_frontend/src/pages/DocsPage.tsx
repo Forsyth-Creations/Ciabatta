@@ -1,0 +1,1062 @@
+/**
+ * The manual, shipped inside the app.
+ *
+ * Docs live here rather than only in the README because of where this app runs:
+ * it is embedded in the `ciabatta` binary and served by a daemon on loopback,
+ * often on a machine that is mid-build, offline, or running a version that
+ * isn't whatever `main` says today. Documentation that ships in the same
+ * bundle as the UI can't drift from the UI, and is readable without leaving
+ * the tab.
+ *
+ * Scope is deliberately "how do I use this app, and what is the API underneath
+ * it" — not a copy of the README's install/CLI material, which belongs with the
+ * CLI. Where a page has a CLI equivalent, this says so and stops there.
+ *
+ * The section list drives both the table of contents and the body, so a new
+ * section can't be added to one and forgotten in the other.
+ */
+
+import {
+  Alert,
+  Box,
+  Chip,
+  Divider,
+  Grid2 as Grid,
+  List,
+  ListItemButton,
+  ListItemText,
+  Stack,
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableRow,
+  Typography,
+} from "@mui/material";
+import { Link } from "@tanstack/react-router";
+import { Fragment } from "react";
+import type { ReactNode } from "react";
+
+import { PageHeader } from "../components/Page";
+import { useHealth } from "../api/queries";
+import { monoFontStack } from "../theme";
+
+/** Clears the fixed app bar when the browser jumps to an anchor. */
+const ANCHOR_OFFSET = 84;
+
+// ─── Small typographic helpers ──────────────────────────────────────────────
+
+/** Inline code: paths, endpoints, commands mentioned mid-sentence. */
+function C({ children }: { children: ReactNode }) {
+  return (
+    <Box
+      component="code"
+      sx={{
+        fontFamily: monoFontStack,
+        fontSize: "0.875em",
+        px: 0.5,
+        py: 0.125,
+        borderRadius: 0.5,
+        bgcolor: "action.hover",
+        wordBreak: "break-word",
+      }}
+    >
+      {children}
+    </Box>
+  );
+}
+
+/** A block of shell or TOML to copy. */
+function Pre({ children }: { children: string }) {
+  return (
+    <Box
+      component="pre"
+      sx={{
+        fontFamily: monoFontStack,
+        fontSize: 13,
+        lineHeight: 1.6,
+        p: 1.5,
+        my: 2,
+        borderRadius: 1,
+        border: 1,
+        borderColor: "divider",
+        bgcolor: "action.hover",
+        overflowX: "auto",
+      }}
+    >
+      {children}
+    </Box>
+  );
+}
+
+function P({ children }: { children: ReactNode }) {
+  return (
+    <Typography variant="body2" sx={{ mb: 1.5, maxWidth: "78ch", lineHeight: 1.7 }}>
+      {children}
+    </Typography>
+  );
+}
+
+function Bullets({ items }: { items: ReactNode[] }) {
+  return (
+    <Box component="ul" sx={{ pl: 3, mb: 2, maxWidth: "78ch" }}>
+      {items.map((item, index) => (
+        <Typography key={index} component="li" variant="body2" sx={{ mb: 0.75, lineHeight: 1.7 }}>
+          {item}
+        </Typography>
+      ))}
+    </Box>
+  );
+}
+
+function SubHeading({ children }: { children: ReactNode }) {
+  return (
+    <Typography variant="h3" sx={{ mt: 3, mb: 1 }}>
+      {children}
+    </Typography>
+  );
+}
+
+// ─── The API reference table ────────────────────────────────────────────────
+
+interface Endpoint {
+  method: "GET" | "POST" | "DELETE";
+  path: string;
+  note: string;
+}
+
+interface EndpointGroup {
+  name: string;
+  /** Whether these routes want a `?project=<id>` (or a `project` field). */
+  scoped: boolean;
+  endpoints: Endpoint[];
+}
+
+const ENDPOINTS: EndpointGroup[] = [
+  {
+    name: "Daemon",
+    scoped: false,
+    endpoints: [
+      { method: "GET", path: "/api/health", note: "Liveness, version, pid. The one route with no token." },
+      { method: "POST", path: "/api/shutdown", note: "Ask the daemon to exit gracefully." },
+      { method: "GET", path: "/api/projects", note: "Registered checkouts, newest first." },
+      { method: "POST", path: "/api/projects", note: "Register a checkout by path." },
+      { method: "DELETE", path: "/api/projects/{id}", note: "Forget a checkout. The files are untouched." },
+    ],
+  },
+  {
+    name: "Todo",
+    scoped: false,
+    endpoints: [
+      { method: "GET", path: "/api/todos", note: "The whole list." },
+      { method: "POST", path: "/api/todos", note: "Add a task." },
+      { method: "POST", path: "/api/todos/toggle", note: "Mark done or not done." },
+      { method: "POST", path: "/api/todos/edit", note: "Change a task's text." },
+      { method: "POST", path: "/api/todos/priority", note: "Set low, medium, or high." },
+      { method: "POST", path: "/api/todos/delete", note: "Remove a task." },
+      { method: "POST", path: "/api/todos/ship", note: "Hand a task to the assistant. Needs a project — the agent edits files." },
+    ],
+  },
+  {
+    name: "Watch",
+    scoped: true,
+    endpoints: [
+      { method: "GET", path: "/api/watch/sessions", note: "Every session the daemon owns." },
+      { method: "POST", path: "/api/watch/sessions", note: "Start a command under a new session." },
+      { method: "GET", path: "/api/watch/sessions/{id}", note: "A snapshot: recent lines, bookmarks, triggers." },
+      { method: "GET", path: "/api/watch/sessions/{id}/stream", note: "SSE. A frame per batch of lines, and on exit." },
+      { method: "GET", path: "/api/watch/sessions/{id}/search", note: "Search the full buffer: q, mode=any|all, regex." },
+      { method: "GET", path: "/api/watch/sessions/{id}/export", note: "The whole session as a text transcript, as a download. ?timestamps=true." },
+      { method: "POST", path: "/api/watch/sessions/{id}/stop", note: "Stop the process, keep the output." },
+      { method: "DELETE", path: "/api/watch/sessions/{id}", note: "Discard the session and its output." },
+      { method: "POST", path: "/api/watch/sessions/{id}/bookmarks", note: "Pin a line. /bookmarks/delete removes one." },
+      { method: "POST", path: "/api/watch/sessions/{id}/triggers", note: "Watch for a pattern. /triggers/delete removes one." },
+    ],
+  },
+  {
+    name: "Workspace",
+    scoped: true,
+    endpoints: [
+      { method: "GET", path: "/api/workspace", note: "The catalogue: members, their workflows, the toolchain." },
+      { method: "GET", path: "/api/workspace/graph", note: "One workflow compiled across packages. Takes workflow=." },
+      { method: "GET", path: "/api/workspace/env-drift", note: "Which .env variables changed since ciabatta last ran here. A peek: it never acknowledges the drift." },
+    ],
+  },
+  {
+    name: "Run",
+    scoped: true,
+    endpoints: [
+      { method: "GET", path: "/api/run/recipes", note: "Recipe names declared in this project." },
+      { method: "POST", path: "/api/run/preflight", note: "What a start would need, without starting it." },
+      { method: "GET", path: "/api/run/runs", note: "Runs the daemon owns." },
+      { method: "POST", path: "/api/run/runs", note: "Start recipes, or workflows (workflows: [], plus filter: []). 422 lists missing_env." },
+      { method: "GET", path: "/api/run/runs/{id}", note: "Current state of every step." },
+      { method: "GET", path: "/api/run/runs/{id}/stream", note: "SSE. Step transitions and log lines as they happen." },
+      { method: "POST", path: "/api/run/runs/{id}/choose", note: "Answer a step that is waiting on a decision." },
+    ],
+  },
+  {
+    name: "Analyze",
+    scoped: true,
+    endpoints: [
+      { method: "GET", path: "/api/analyze/graph", note: "The last scan's dependency graph." },
+      { method: "POST", path: "/api/analyze/scans", note: "Start a fresh scan." },
+      { method: "GET", path: "/api/analyze/status", note: "Whether a scan is in flight for this project." },
+    ],
+  },
+  {
+    name: "AI",
+    scoped: true,
+    endpoints: [
+      { method: "GET", path: "/api/ai/graph", note: "The mind map: architectures, files, pending proposals." },
+      { method: "GET", path: "/api/ai/jobs", note: "Background assistant jobs and their output." },
+      { method: "POST", path: "/api/ai/ask", note: "Ask a question. Serialized per project." },
+      { method: "POST", path: "/api/ai/ship", note: "Queue a task as a background job." },
+      { method: "POST", path: "/api/ai/confirm", note: "Accept or reject one tag proposal." },
+      { method: "POST", path: "/api/ai/confirm-all", note: "Accept or reject every pending proposal." },
+      { method: "POST", path: "/api/ai/prune", note: "Forget a file or an architecture." },
+      { method: "POST", path: "/api/ai/feedback", note: "Tell the assistant it got something wrong." },
+    ],
+  },
+];
+
+const METHOD_COLOR = {
+  GET: "default",
+  POST: "primary",
+  DELETE: "error",
+} as const;
+
+function EndpointTable() {
+  return (
+    <Box sx={{ overflowX: "auto" }}>
+      <Table size="small" sx={{ minWidth: 620 }}>
+        <TableHead>
+          <TableRow>
+            <TableCell sx={{ width: 90 }}>Method</TableCell>
+            <TableCell>Path</TableCell>
+            <TableCell>What it does</TableCell>
+          </TableRow>
+        </TableHead>
+        <TableBody>
+          {ENDPOINTS.map((group) => (
+            <Fragment key={group.name}>
+              <TableRow>
+                <TableCell colSpan={3} sx={{ borderBottom: 0, pt: 2.5 }}>
+                  <Stack direction="row" spacing={1} alignItems="center">
+                    <Typography variant="h3">{group.name}</Typography>
+                    {group.scoped && (
+                      <Chip size="small" variant="outlined" label="project-scoped" />
+                    )}
+                  </Stack>
+                </TableCell>
+              </TableRow>
+              {group.endpoints.map((endpoint) => (
+                <TableRow key={`${endpoint.method} ${endpoint.path}`} hover>
+                  <TableCell>
+                    <Chip
+                      size="small"
+                      variant="outlined"
+                      color={METHOD_COLOR[endpoint.method]}
+                      label={endpoint.method}
+                    />
+                  </TableCell>
+                  <TableCell sx={{ fontFamily: monoFontStack, fontSize: 13 }}>
+                    {endpoint.path}
+                  </TableCell>
+                  <TableCell>
+                    <Typography variant="body2" color="text.secondary">
+                      {endpoint.note}
+                    </Typography>
+                  </TableCell>
+                </TableRow>
+              ))}
+            </Fragment>
+          ))}
+        </TableBody>
+      </Table>
+    </Box>
+  );
+}
+
+// ─── The command reference ──────────────────────────────────────────────────
+
+interface Command {
+  /** How you'd type it, with its most useful arguments. */
+  usage: string;
+  /** What it does, in one line. */
+  note: string;
+  /** The flags worth knowing about, as (flag, meaning). */
+  flags?: [string, string][];
+}
+
+interface CommandGroup {
+  name: string;
+  blurb: string;
+  commands: Command[];
+}
+
+/**
+ * What ciabatta can run, from the app.
+ *
+ * You are usually reading this page *because* you are in the browser and the
+ * thing you want to do next happens in a terminal — so the reference has to be
+ * here, not only in `--help`. Kept to what a command is for and the flags that
+ * change what it does; `ciabatta <command> --help` is still the exhaustive list.
+ */
+const COMMANDS: CommandGroup[] = [
+  {
+    name: "Running things",
+    blurb:
+      "One command runs everything. A target is a workflow (declared in a package) or a recipe (declared in a config) — they compile to the same graph and run through the same engine, so which one you have is a matter of where it was written down.",
+    commands: [
+      {
+        usage: "ciabatta run [TARGET…]",
+        note: "Run workflows and/or recipes as one graph, in dependency order. With no target, runs every run-capable recipe in the project.",
+        flags: [
+          ["--filter TERM", "Run only the steps this selects. Repeatable. See below."],
+          ["--graph", "Explore the resolved graph interactively and run nothing."],
+          ["--dry-run", "Walk every step without executing it."],
+          ["--only MEMBER", "Start from these sub-workspaces; dependencies still come along."],
+          ["--isolated", "Don't follow dependencies into other sub-workspaces."],
+          ["--gui", "Watch it live in this app instead of the terminal."],
+          ["-e KEY=VALUE", "Set a variable for every step. Beats .env and CI."],
+          ["--tui", "Watch it in the terminal TUI. Runs print plain text by default."],
+        ],
+      },
+      {
+        usage: "ciabatta build",
+        note: "Any name ciabatta doesn't recognise as a command is a workflow, so this is the same as ciabatta run build. Use the longer ciabatta workflow <name> when a workflow's name collides with a real command.",
+      },
+      {
+        usage: "ciabatta run build test",
+        note: "Several targets compile into a single graph rather than running one after the other — a dependency both of them need runs once.",
+      },
+      {
+        usage: "ciabatta run --build",
+        note: "Open the visual flowchart builder. Designs a TOML file; runs nothing.",
+      },
+    ],
+  },
+  {
+    name: "Seeing what exists",
+    blurb:
+      "The questions a monorepo usually can't answer: what is there to run, who owns it, and what will actually happen if I run it.",
+    commands: [
+      {
+        usage: "ciabatta list",
+        note: "Every sub-workspace, its workflows, their owners and what they need — plus this project's recipes.",
+        flags: [
+          ["-s TERM", "Search names, descriptions, owners, tags, and the commands steps run."],
+          ["-v", "Also list every step inside each workflow."],
+        ],
+      },
+      {
+        usage: "ciabatta run <target> --graph",
+        note: "The resolved graph: every step in wave order, and per step what it does, who owns it, what it waits for, what waits on it. Honours --filter. Add --tui to explore it interactively instead of printing it.",
+      },
+      {
+        usage: "ciabatta config reference",
+        note: "The full config file schema.",
+      },
+    ],
+  },
+  {
+    name: "Starting a project",
+    blurb: "Opting a repo, or one package in it, into ciabatta.",
+    commands: [
+      {
+        usage: "ciabatta init --example",
+        note: "Generate a complete worked monorepo to learn from: four sub-workspaces that genuinely depend on each other, workflows spanning them, scripts, tags, timeouts, a recovery node, and a README explaining every part. Every step runs, so it works on a bare machine.",
+        flags: [
+          ["--into DIR", "Where to write it. Defaults to ./ciabatta-example."],
+          ["--nexus", "Add a registry and a release workflow that publishes as a graph step."],
+          ["--docker", "Add a Dockerfile and a deploy workflow."],
+          ["--all", "Include everything optional."],
+        ],
+      },
+      {
+        usage: "ciabatta init --lib",
+        note: "Opt the current directory in as a sub-workspace: a [workspace] identity plus a starter workflow. Prompts for a description and an owner, on purpose.",
+        flags: [
+          ["--depends-on MEMBER", 'Declare a dependency: "other" or "other:workflow".'],
+          ["--workflow NAME", "Name of the starter workflow. Defaults to build."],
+        ],
+      },
+      {
+        usage: "ciabatta init",
+        note: "A publishing-only config in the current directory — registries and recipes, no workspace identity.",
+      },
+      { usage: "ciabatta configure", note: "Set up registries interactively." },
+    ],
+  },
+  {
+    name: "Publishing",
+    blurb:
+      "Push and pull are also available as graph steps (`kind = \"push\"`), which is the better way — a publish step can't run before the artifact exists.",
+    commands: [
+      {
+        usage: "ciabatta push [RECIPE…]",
+        note: "Publish recipes in parallel; all of them if none are named.",
+        flags: [
+          ["--cookbook MENU", "Push the recipes grouped under a menu."],
+          ["--dry-run", "Show what would happen."],
+          ["--local", "Resolve CIABATTA_* from local git rather than CI."],
+        ],
+      },
+      { usage: "ciabatta pull [RECIPE…]", note: "Download the artifacts instead." },
+      {
+        usage: "ciabatta source",
+        note: 'Print the resolved CIABATTA_* variables as shell exports: eval "$(ciabatta source)".',
+      },
+    ],
+  },
+  {
+    name: "Watching and inspecting",
+    blurb: "Long-running commands, and what the codebase is made of.",
+    commands: [
+      {
+        usage: "ciabatta watch <command>",
+        note: "Run a command and stream its logs into this app. The daemon owns it, so Ctrl-C detaches rather than kills.",
+        flags: [
+          ["-t PHRASE", "Notify when an output line contains this. Repeatable."],
+          ["--list", "List the sessions the daemon is running."],
+          ["--attach ID", "Follow an existing session — how you tail a persistent step."],
+          ["--stop ID", "Actually stop one."],
+        ],
+      },
+      {
+        usage: "ciabatta analyze",
+        note: "Scan the codebase's dependency graph and serve it here.",
+        flags: [["--check-vulns", "Also query the OSV database for known vulnerabilities."]],
+      },
+      { usage: "ciabatta tui", note: "The terminal registry browser." },
+      { usage: "ciabatta todo [TASK]", note: "Your task list. With text, adds it and exits." },
+    ],
+  },
+  {
+    name: "The assistant and the daemon",
+    blurb: "",
+    commands: [
+      {
+        usage: "ciabatta ai",
+        note: "Chat with an assistant that learns this codebase, with the live architecture map here.",
+        flags: [
+          ["ask <question>", "One-shot question, plain output."],
+          ["ship <task>", "Hand a task to the agent to complete in the background."],
+          ["burn-in", "Traverse the codebase and build the whole mind map in one pass."],
+          ["report [DAYS]", "Summarize what changed recently. --pdf to save it."],
+        ],
+      },
+      {
+        usage: "ciabatta daemon <status|stop|restart|logs>",
+        note: "Inspect or restart the background daemon serving this app. You rarely need it — any command with a web view starts it.",
+      },
+    ],
+  },
+];
+
+function CommandReference() {
+  return (
+    <Box sx={{ my: 2 }}>
+      {COMMANDS.map((group) => (
+        <Box key={group.name} sx={{ mb: 3 }}>
+          <SubHeading>{group.name}</SubHeading>
+          {group.blurb && <P>{group.blurb}</P>}
+          <Stack spacing={1.5} sx={{ maxWidth: "78ch" }}>
+            {group.commands.map((command) => (
+              <Box
+                key={command.usage}
+                sx={{
+                  border: 1,
+                  borderColor: "divider",
+                  borderRadius: 1,
+                  p: 1.5,
+                  bgcolor: "background.paper",
+                }}
+              >
+                <Typography
+                  sx={{ fontFamily: monoFontStack, fontSize: 13.5, fontWeight: 600, mb: 0.5 }}
+                >
+                  {command.usage}
+                </Typography>
+                <Typography variant="body2" sx={{ lineHeight: 1.7 }}>
+                  {command.note}
+                </Typography>
+                {command.flags && (
+                  <Box sx={{ mt: 1, display: "grid", gridTemplateColumns: "auto 1fr", gap: 0.75 }}>
+                    {command.flags.map(([flag, meaning]) => (
+                      <Fragment key={flag}>
+                        <Typography
+                          sx={{
+                            fontFamily: monoFontStack,
+                            fontSize: 12.5,
+                            color: "text.secondary",
+                            whiteSpace: "nowrap",
+                          }}
+                        >
+                          {flag}
+                        </Typography>
+                        <Typography variant="caption" color="text.secondary" sx={{ lineHeight: 1.6 }}>
+                          {meaning}
+                        </Typography>
+                      </Fragment>
+                    ))}
+                  </Box>
+                )}
+              </Box>
+            ))}
+          </Stack>
+        </Box>
+      ))}
+    </Box>
+  );
+}
+
+// ─── The sections ───────────────────────────────────────────────────────────
+
+interface DocSection {
+  id: string;
+  title: string;
+  body: ReactNode;
+}
+
+const SECTIONS: DocSection[] = [
+  {
+    id: "overview",
+    title: "What this is",
+    body: (
+      <>
+        <P>
+          One daemon, one web app. Ciabatta&apos;s tools used to be separate servers on separate
+          ports, each with its own layout and its own idea of what a project was; they are now
+          pages in this app, backed by a single local HTTP API.
+        </P>
+        <P>
+          The important consequence is <strong>ownership</strong>: the daemon owns the work, not
+          the terminal that asked for it. A watch session, a run, and a serial capture all outlive
+          the command that started them and the tab that is watching them. Close the browser, come
+          back tomorrow, and a persistent dev server started by a workflow step is still there with
+          its logs intact.
+        </P>
+        <P>
+          The daemon starts on demand — any ciabatta command probes for one and launches it if
+          nothing answers — and you can drive it directly:
+        </P>
+        <Pre>{`ciabatta daemon serve            # run it in the foreground
+ciabatta daemon serve --port 9000
+ciabatta daemon stop             # ask it to exit`}</Pre>
+        <P>
+          It binds loopback by default. See <a href="#security">Tokens and access</a> before
+          changing that — this API can start processes.
+        </P>
+      </>
+    ),
+  },
+  {
+    id: "navigating",
+    title: "Finding your way around",
+    body: (
+      <>
+        <Bullets
+          items={[
+            <>
+              <strong>Project switcher</strong> (top bar) — nearly everything except Todo is
+              per-checkout, and the switcher decides which one. Projects register themselves the
+              first time you run a ciabatta command inside them. Your choice is remembered, and
+              falls back to whichever project the daemon lists first.
+            </>,
+            <>
+              <strong>Health chip</strong> — polls <C>/api/health</C> every ten seconds. If it goes
+              red the daemon is gone; if the version differs from what you just installed, an old
+              daemon is still holding the port.
+            </>,
+            <>
+              <strong>Navigation rail</strong> — collapsible, and the collapsed state is remembered
+              on wide screens. Below ~900px it becomes an overlay that closes when you pick a
+              destination, because the log and graph views want the width.
+            </>,
+            <>
+              <strong>Colour mode</strong> — the toggle sits next to the health chip and persists.
+            </>,
+            <>
+              <strong>Every view is a URL.</strong> <C>/watch/3</C> and <C>/run/12</C> are real
+              links you can bookmark or paste to a colleague on the same machine; the daemon serves
+              the app for any non-asset path, so reloading them works.
+            </>,
+          ]}
+        />
+      </>
+    ),
+  },
+  {
+    id: "commands",
+    title: "Commands",
+    body: (
+      <>
+        <P>
+          What ciabatta can run. You are usually reading this because the next thing you want to do
+          happens in a terminal, so the reference lives here as well as in <C>--help</C> — which
+          remains the exhaustive list for any one command.
+        </P>
+        <Alert severity="success" sx={{ mb: 2, maxWidth: "78ch" }}>
+          <strong>There is no difference between a workflow and a run.</strong> A workflow is
+          declared in a package&apos;s <C>.ciabatta/workflows/</C>, a recipe in a{" "}
+          <C>ciabatta.toml</C>; both are targets for <C>ciabatta run</C>, and both take the same
+          flags. Name several and they compile into one graph rather than running in sequence.
+        </Alert>
+        <CommandReference />
+
+        <SubHeading>Filtering a graph</SubHeading>
+        <P>
+          <C>--filter</C> narrows a run to the steps you care about, which is how you iterate on
+          one package without sitting through the whole monorepo:
+        </P>
+        <Pre>{`ciabatta run test --filter tag:fast              # only steps tagged fast
+ciabatta run test --filter '!tag:flaky'         # everything except the flaky ones
+ciabatta run build --filter workspace:api       # one package's steps
+ciabatta run release --filter kind:push         # just the publish, artifact in hand
+ciabatta run test --filter tag:fast --filter tag:smoke   # either one`}</Pre>
+        <P>
+          Selectors are <C>tag:</C>, <C>workspace:</C> (alias <C>member:</C>), <C>kind:</C>,{" "}
+          <C>owner:</C>, <C>step:</C>, or a bare word that searches all of them plus descriptions.
+          A leading <C>!</C> excludes, and exclusions beat matches. Positive terms are OR&apos;d —
+          a filter list reads as &quot;the things I want&quot;. Tags cascade from the sub-workspace
+          to the workflow to the step, so a step inherits every label above it.
+        </P>
+        <Alert severity="warning" sx={{ my: 2, maxWidth: "78ch" }}>
+          A filter <strong>prunes</strong> the graph rather than expanding a selection: the
+          surviving steps run without the dependencies you filtered away, on the assumption those
+          already happened. It is the fast debug loop, not how you build a fresh checkout.
+          Ciabatta reports every dependency edge it cut, so this is never silent.
+        </Alert>
+
+        <SubHeading>Environment variables</SubHeading>
+        <P>
+          Precedence, weakest first: <C>.env</C> files → CI-derived → the ambient environment →{" "}
+          <C>-e KEY=VALUE</C>. A workflow can insist on variables with <C>REQUIRED_ENV</C>, checked
+          before anything runs rather than halfway through.
+        </P>
+        <P>
+          Ciabatta snapshots the variables its <C>.env</C> files define — names and value{" "}
+          <em>hashes</em>, never the values — under <C>.ciabatta/cache/</C>. When they change,
+          because someone pulled a branch that adds a required variable, the next run says which
+          ones moved before it starts. The same drift is served at{" "}
+          <C>/api/workspace/env-drift</C>.
+        </P>
+      </>
+    ),
+  },
+  {
+    id: "todo",
+    title: "Todo",
+    body: (
+      <>
+        <P>
+          A personal task list stored in <C>~/.ciabatta/todos.json</C>. Deliberately global rather
+          than per-project: it is your list, and it follows you between checkouts.
+        </P>
+        <P>
+          Tasks carry a priority (low, medium, high) and a done flag. The one project-scoped action
+          is <strong>ship</strong>, which hands the task to the assistant as a background job and
+          returns its job number — the agent edits files, so it needs to know whose. Follow it on
+          the <Link to="/ai">AI page</Link>.
+        </P>
+      </>
+    ),
+  },
+  {
+    id: "watch",
+    title: "Watch",
+    body: (
+      <>
+        <P>
+          Run a command and stream its output into a live, searchable view. The daemon spawns the
+          process, so the session survives closing this tab or the terminal — including the
+          sessions that a workflow&apos;s <C>persistent</C> steps leave behind, which show up here
+          labelled with the graph node that started them.
+        </P>
+        <SubHeading>In a session</SubHeading>
+        <Bullets
+          items={[
+            <>
+              <strong>Search</strong> covers the whole buffer on the daemon side, not just the lines
+              currently rendered. Choose <em>any</em> or <em>all</em> for multi-term queries, or
+              switch to regex.
+            </>,
+            <>
+              <strong>Bookmarks</strong> pin a line with a label and a snippet, so &quot;the point
+              where it broke&quot; is still findable after another 50,000 lines.
+            </>,
+            <>
+              <strong>Triggers</strong> are patterns (literal or regex) the daemon matches as output
+              arrives; each hit is recorded with its line, so you can start a long build and come
+              back to the list of matches for <C>error</C>.
+            </>,
+            <>
+              <strong>Stop</strong> ends the process but keeps the output. <strong>Discard</strong>{" "}
+              throws the session away entirely.
+            </>,
+            <>
+              <strong>Export</strong> (the share icon) saves the log to a file or copies it to the
+              clipboard, ready to send to someone else.
+            </>,
+          ]}
+        />
+        <SubHeading>Sending a log to someone</SubHeading>
+        <P>
+          The export button builds the transcript on the daemon, not from what this tab happens to
+          have streamed — so it is the <em>whole</em> buffer, with the command, the exit status,
+          and your bookmarks in the header, and <C>stderr</C> lines marked as such. If the ring
+          buffer dropped older output, the file says so rather than starting mid-story.
+        </P>
+        <Bullets
+          items={[
+            <>
+              <strong>Download as a file</strong> — a <C>.log</C> named after the step (or the
+              command), for attaching to a ticket.
+            </>,
+            <>
+              <strong>Download with timestamps</strong> — every line prefixed with when it arrived.
+              Reach for this when the question is <em>where did it stall</em>; skip it when you are
+              sending someone a stack trace.
+            </>,
+            <>
+              <strong>Copy to clipboard</strong> — straight into chat. Needs a secure context, so
+              it may be refused over plain HTTP on a non-loopback host; the download always works.
+            </>,
+          ]}
+        />
+        <P>
+          The same thing from a terminal is <C>ciabatta watch --attach ID {">"} out.log</C>.
+        </P>
+        <Alert severity="info" sx={{ my: 2, maxWidth: "78ch" }}>
+          There is no box here for typing a command to run. The daemon executes with your full
+          privileges, so a free-text shell field in a web page is a remote-execution surface for
+          anything that can reach the port. Start sessions from the CLI, where the person starting
+          one is the person at the keyboard.
+        </Alert>
+        <P>
+          Output arrives over SSE and is flushed on animation frames, and both the daemon and the
+          browser cap what they retain — a command emitting thousands of lines a second will drop
+          the oldest lines rather than lock the tab up.
+        </P>
+      </>
+    ),
+  },
+  {
+    id: "workspace",
+    title: "Workspace",
+    body: (
+      <>
+        <P>
+          The answer to &quot;what can I run in this monorepo, and what happens if I do&quot;. It
+          reads the <C>.ciabatta</C> declarations off disk — no scan — so the whole catalogue of
+          sub-workspaces, their workflows, owners, tags, and steps arrives in one request and
+          searching happens locally.
+        </P>
+        <P>
+          Search is deliberately generous: it matches names, descriptions, owners, tags,{" "}
+          <em>and the commands steps actually run</em>. &quot;Which package runs protoc?&quot; is
+          the question a monorepo otherwise can&apos;t answer.
+        </P>
+        <SubHeading>Graphing a workflow</SubHeading>
+        <P>
+          Pick a workflow name and the daemon compiles the graph that would run, following
+          cross-package dependencies. Nodes say which sub-workspace they came from, and are laid
+          out by dependency wave. Missing toolchain entries are called out separately — a build
+          that would fail for want of <C>protoc</C> says so before it starts.
+        </P>
+        <P>Step badges mean:</P>
+        <Bullets
+          items={[
+            <>
+              <Chip size="small" color="primary" label="push" /> — the special publishing phase,
+              identifiable so it can be skipped or required as a unit.
+            </>,
+            <>
+              <Chip size="small" variant="outlined" color="info" label="persistent" /> — started and
+              left running; the graph does not wait for it. Tail it under Watch.
+            </>,
+            <>
+              <Chip size="small" variant="outlined" label="timeout" /> — killed past its limit, and
+              the rest of the graph carries on.
+            </>,
+            <>
+              <Chip size="small" variant="outlined" label="non-blocking" /> — its failure skips
+              dependents but does not stop the run.
+            </>,
+          ]}
+        />
+        <P>
+          From here you can start the graph directly, with or without <strong>dry run</strong>. It
+          becomes an ordinary run on the <Link to="/run">Run page</Link>; the daemon compiles the
+          graph the same way <C>ciabatta build</C> does, so the UI and the CLI can&apos;t disagree
+          about what executes.
+        </P>
+      </>
+    ),
+  },
+  {
+    id: "run",
+    title: "Run",
+    body: (
+      <>
+        <P>
+          Executes a step DAG live. Pick recipes (or arrive from Workspace with a compiled
+          workflow), optionally tick <strong>dry run</strong>, and start. The daemon owns the run,
+          so it keeps going with the tab closed.
+        </P>
+        <SubHeading>Missing environment</SubHeading>
+        <P>
+          If a recipe declares variables the daemon&apos;s environment lacks, the start is rejected
+          with the list rather than begun and aborted halfway. The launcher prompts for those values
+          and retries — nothing half-executes because a variable was unset.
+        </P>
+        <SubHeading>Watching a run</SubHeading>
+        <Bullets
+          items={[
+            <>
+              Steps are drawn as a graph with their status. Solid edges are <C>needs</C>{" "}
+              dependencies; the others are failure branches and retries.
+            </>,
+            <>
+              <strong>Recovery steps</strong> are the fix-it branches a failure diverts into, rather
+              than a dead end.
+            </>,
+            <>
+              A step can <strong>ask a question</strong> mid-run; the prompt appears with its
+              options and the run waits for your answer.
+            </>,
+            <>Selecting any step shows its logs, streamed as they are produced.</>,
+          ]}
+        />
+        <SubHeading>Flowchart builder</SubHeading>
+        <P>
+          <Link to="/run/builder">The builder</Link> is an authoring tool, not an executor. Lay out
+          steps, their <C>needs</C>, and their error branches, then copy the generated TOML into
+          your <C>ciabatta.toml</C>. Nothing you build there runs until it is committed to the file.
+        </P>
+      </>
+    ),
+  },
+  {
+    id: "analyze",
+    title: "Analyze",
+    body: (
+      <>
+        <P>
+          The project&apos;s dependency graph: internal packages, external dependencies, and where
+          artifacts get published. Filter nodes by name to cut a large graph down to the part you
+          care about.
+        </P>
+        <P>
+          Scans run on the daemon and are one-at-a-time per project — the page shows a scan in
+          flight rather than starting a second. Optionally the scan checks dependencies against the{" "}
+          <strong>OSV</strong> vulnerability database, which makes it slower and needs network
+          access.
+        </P>
+      </>
+    ),
+  },
+  {
+    id: "ai",
+    title: "AI",
+    body: (
+      <>
+        <SubHeading>Mind map</SubHeading>
+        <P>
+          The architecture map the assistant builds as it learns the codebase: architectures at the
+          centre, the files belonging to each around them, with a confidence score. Run{" "}
+          <C>ciabatta ai burn-in</C> to have it traverse the codebase up front, or just start asking
+          questions — it learns as it goes.
+        </P>
+        <P>
+          The assistant proposes tags rather than applying them. Pending proposals are listed under
+          the map to accept or reject, individually or in bulk, and selecting a node lets you{" "}
+          <strong>forget</strong> a file or an entire architecture when the map has learned
+          something wrong.
+        </P>
+        <SubHeading>Jobs</SubHeading>
+        <P>
+          Background tasks and their output. Ship one with <C>ciabatta ai ship &quot;…&quot;</C> or
+          from the <Link to="/todo">Todo page</Link>. Questions asked from here are serialized per
+          project, so two callers can&apos;t interleave one conversation.
+        </P>
+      </>
+    ),
+  },
+  {
+    id: "api",
+    title: "The HTTP API",
+    body: (
+      <>
+        <P>
+          Everything this app does, it does through the routes below — there is no private channel.
+          Anything here is equally available to <C>curl</C>, a script, or an editor plugin.
+        </P>
+        <P>
+          Project-scoped routes take the project id as <C>?project=&lt;id&gt;</C> (or a{" "}
+          <C>project</C> field in the body). Errors come back as <C>{'{ "error": "…" }'}</C> with a
+          meaningful status; some carry structured fields as well, like the <C>missing_env</C> list
+          on a rejected run.
+        </P>
+        <Pre>{`TOKEN=$(jq -r .token ~/.ciabatta/daemon.json)
+PORT=$(jq -r .port  ~/.ciabatta/daemon.json)
+
+curl -s "http://127.0.0.1:$PORT/api/health"
+
+curl -s -H "Authorization: Bearer $TOKEN" \\
+  "http://127.0.0.1:$PORT/api/projects"
+
+curl -N -H "Authorization: Bearer $TOKEN" \\
+  "http://127.0.0.1:$PORT/api/watch/sessions/1/stream"`}</Pre>
+        <EndpointTable />
+      </>
+    ),
+  },
+  {
+    id: "security",
+    title: "Tokens and access",
+    body: (
+      <>
+        <P>
+          The daemon generates a token at startup and records it in{" "}
+          <C>~/.ciabatta/daemon.json</C> alongside its port and pid. Every route except{" "}
+          <C>/api/health</C> requires it as <C>Authorization: Bearer &lt;token&gt;</C>.
+        </P>
+        <P>
+          There is no login flow because there is nothing to log into: the daemon injects the token
+          into the page it serves as a <C>&lt;meta name=&quot;ciabatta-token&quot;&gt;</C> tag.
+          Anyone who can load the page can already read the token file, so this costs a local user
+          nothing — and it keeps mutating routes closed when the daemon is bound somewhere other
+          than loopback. <C>EventSource</C> can&apos;t set headers, so streams accept{" "}
+          <C>?token=</C> instead.
+        </P>
+        <Alert severity="warning" sx={{ my: 2, maxWidth: "78ch" }}>
+          This API starts processes. Bound to anything but loopback, anyone who can reach the port
+          and read the token can run commands as you. The daemon logs a warning when you do it;
+          treat that as the whole security model.
+        </Alert>
+      </>
+    ),
+  },
+  {
+    id: "development",
+    title: "Working on this app",
+    body: (
+      <>
+        <P>
+          The app is a Vite + React bundle in the <C>tool_frontend</C> workspace, compiled into the
+          Rust binary. A released ciabatta is still a single file with no asset directory beside it.
+        </P>
+        <SubHeading>Dev server</SubHeading>
+        <P>
+          Vite serves on 5173 and proxies <C>/api</C> to a real daemon on 8099 (override with{" "}
+          <C>CIABATTA_DAEMON_PORT</C>), so HMR runs against live data and everything stays
+          same-origin. Vite serves its own <C>index.html</C>, so there is no injected token — pass
+          it once as <C>?token=…</C> and it is remembered.
+        </P>
+        <Pre>{`ciabatta daemon serve --port 8099   # in one terminal
+yarn workspace ciabatta-tool-frontend dev
+
+# then open http://localhost:5173/?token=$(jq -r .token ~/.ciabatta/daemon.json)`}</Pre>
+        <SubHeading>Building</SubHeading>
+        <Pre>{`yarn install
+yarn turbo run build --filter=ciabatta-tool-frontend
+cargo build --release`}</Pre>
+        <P>
+          The Rust build embeds <C>tool_frontend/dist</C>. On a fresh clone that directory
+          doesn&apos;t exist, so <C>build.rs</C> substitutes a placeholder page rather than failing
+          the build — that way <C>cargo build</C> works without node installed. If you are reading a
+          page that says the web app isn&apos;t built, that is what happened: run the yarn build and
+          recompile. CI and the release workflow always build the bundle first.
+        </P>
+        <SubHeading>Adding a page</SubHeading>
+        <Bullets
+          items={[
+            <>
+              Routing is code-based in <C>src/router.tsx</C> — no codegen, because the bundle is
+              compiled into a binary and generated-file drift is not worth the convenience.
+            </>,
+            <>
+              Add the nav entry in <C>src/components/AppShell.tsx</C>, and use{" "}
+              <C>PageHeader</C> / <C>RequireProject</C> from <C>src/components/Page.tsx</C> so the
+              page looks like the others.
+            </>,
+            <>
+              Register more specific routes before parameterised ones — <C>/run/builder</C> has to
+              come before <C>/run/$runId</C>.
+            </>,
+            <>And add a section here, so the docs ship with the feature.</>,
+          ]}
+        />
+      </>
+    ),
+  },
+];
+
+// ─── The page ───────────────────────────────────────────────────────────────
+
+export function DocsPage() {
+  const { data: health } = useHealth();
+
+  return (
+    <Box>
+      <PageHeader
+        title="Docs"
+        description="How this app works, what each tool is for, and the API underneath it — shipped in the same binary, so it always matches what you're running."
+      />
+
+      <Grid container spacing={4}>
+        <Grid size={{ xs: 12, lg: 9 }}>
+          {SECTIONS.map((section, index) => (
+            <Box
+              key={section.id}
+              id={section.id}
+              component="section"
+              sx={{ scrollMarginTop: `${ANCHOR_OFFSET}px` }}
+            >
+              {index > 0 && <Divider sx={{ my: 4 }} />}
+              <Typography variant="h2" sx={{ mb: 1.5 }}>
+                {section.title}
+              </Typography>
+              {section.body}
+            </Box>
+          ))}
+
+          <Divider sx={{ my: 4 }} />
+          <Typography variant="caption" color="text.secondary">
+            {health
+              ? `These docs ship with ciabatta ${health.version} — the daemon answering this page.`
+              : "These docs ship with the binary serving this page."}
+          </Typography>
+        </Grid>
+
+        {/* On narrower screens the nav rail already competes for width, and the
+            sections are short enough to scroll. */}
+        <Grid size={{ lg: 3 }} sx={{ display: { xs: "none", lg: "block" } }}>
+          <Box sx={{ position: "sticky", top: ANCHOR_OFFSET }}>
+            <Typography variant="overline" color="text.secondary">
+              On this page
+            </Typography>
+            <List dense disablePadding>
+              {SECTIONS.map((section) => (
+                <ListItemButton
+                  key={section.id}
+                  component="a"
+                  href={`#${section.id}`}
+                  sx={{ borderRadius: 1, py: 0.25 }}
+                >
+                  <ListItemText
+                    primary={section.title}
+                    primaryTypographyProps={{ variant: "body2" }}
+                  />
+                </ListItemButton>
+              ))}
+            </List>
+          </Box>
+        </Grid>
+      </Grid>
+    </Box>
+  );
+}

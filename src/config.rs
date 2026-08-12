@@ -14,7 +14,7 @@ pub const BIND_HOST_ENV: &str = "CIABATTA_BIND_HOST";
 /// the operator opts in via [`BIND_HOST_ENV`].
 pub const DEFAULT_BIND_HOST: &str = "127.0.0.1";
 
-/// The interface ciabatta's web servers (deploy `--gui`/`--build`, analyze,
+/// The interface ciabatta's web servers (run `--gui`/`--build`, analyze,
 /// todo, and the ai daemon) bind to.
 ///
 /// Reads [`BIND_HOST_ENV`], falling back to [`DEFAULT_BIND_HOST`] when it's unset
@@ -30,6 +30,19 @@ pub fn bind_host() -> String {
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
 pub struct CiabattaConfig {
     pub system: Option<SystemConfig>,
+    /// The `[workspace]` table: this directory's identity as a sub-workspace of
+    /// a monorepo — its name, owner, and what it depends on. Written by
+    /// `ciabatta init --lib`; absent for a standalone project.
+    pub workspace: Option<crate::workspace::WorkspaceMeta>,
+    /// Workflows written inline as `[workflows.<name>]`, for a sub-workspace
+    /// small enough not to want a file each. The usual home is
+    /// `.ciabatta/workflows/<name>.toml`.
+    #[serde(default)]
+    pub workflows: HashMap<String, crate::workspace::Workflow>,
+    /// How to install the build tools workflows declare in `requires`. Usually
+    /// written once at the monorepo root and inherited by every sub-workspace.
+    #[serde(default)]
+    pub toolchain: HashMap<String, crate::workspace::ToolSpec>,
     #[serde(default)]
     pub registries: HashMap<String, RegistryConfig>,
     #[serde(rename = "recipies", default)]
@@ -231,9 +244,9 @@ pub struct RecipeEntry {
     pub push: Option<SimpleRecipe>,
     /// Pull-direction overrides (any field set here wins over `base`).
     pub pull: Option<SimpleRecipe>,
-    /// Deploy-direction definition: a DAG of dependent script steps (usually in
+    /// Run-direction definition: a DAG of dependent script steps (usually in
     /// a separate flowchart file). Unlike push/pull this is not a `SimpleRecipe`.
-    pub deploy: Option<crate::deploy::DeployRecipe>,
+    pub run: Option<crate::run::RunRecipe>,
 }
 
 /// Where a recipe publishes to. Either a single remote path (the classic form,
@@ -356,10 +369,10 @@ impl RecipeEntry {
         }
     }
 
-    /// The deploy definition for this recipe, if it declares a `[deploy]`
-    /// sub-table. Deploys are opt-in per recipe (no implicit default).
-    pub fn deploy_recipe(&self) -> Option<&crate::deploy::DeployRecipe> {
-        self.deploy.as_ref()
+    /// The run definition for this recipe, if it declares a `[run]`
+    /// sub-table. Runs are opt-in per recipe (no implicit default).
+    pub fn run_recipe(&self) -> Option<&crate::run::RunRecipe> {
+        self.run.as_ref()
     }
 
     /// Whether the push/pull direction has something to transfer or run. A recipe
@@ -376,11 +389,11 @@ impl RecipeEntry {
             || push.bash_script.is_some()
     }
 
-    /// A recipe that declares a `[deploy]` section but has no push/pull transfer
-    /// action is deploy-only: it exists solely as a deployment task, so `ciabatta
+    /// A recipe that declares a `[run]` section but has no push/pull transfer
+    /// action is run-only: it exists solely as a runnable task, so `ciabatta
     /// push`/`pull` skips it rather than failing on "no push/pull action".
-    pub fn is_deploy_only(&self) -> bool {
-        self.deploy.is_some() && !self.has_transfer_action()
+    pub fn is_run_only(&self) -> bool {
+        self.run.is_some() && !self.has_transfer_action()
     }
 }
 
@@ -614,9 +627,31 @@ pub fn validate_publish_path(path: &str, vars: &HashMap<String, String>) -> Resu
     Ok(())
 }
 
+/// The shape of a `{VAR}` placeholder, shared by substitution and the
+/// "which placeholders can't be filled yet" check below.
+const VAR_PLACEHOLDER: &str = r"\{([A-Z_][A-Z0-9_]*)\}";
+
+/// The `{VAR}` placeholders in `template` that `vars` has no value for, in the
+/// order they appear (de-duplicated).
+///
+/// [`substitute_vars`] reports only the first one, as an error string. Callers
+/// that want to *fix* the problem rather than report it — the run launcher
+/// prompting for what a run is missing — need the names instead.
+pub fn unresolved_vars(template: &str, vars: &HashMap<String, String>) -> Vec<String> {
+    let re = regex::Regex::new(VAR_PLACEHOLDER).unwrap();
+    let mut missing: Vec<String> = Vec::new();
+    for caps in re.captures_iter(template) {
+        let name = caps[1].to_string();
+        if !vars.contains_key(&name) && !missing.contains(&name) {
+            missing.push(name);
+        }
+    }
+    missing
+}
+
 /// Substitute `{VAR}` placeholders in a string with values from `vars`.
 pub fn substitute_vars(template: &str, vars: &HashMap<String, String>) -> Result<String> {
-    let re = regex::Regex::new(r"\{([A-Z_][A-Z0-9_]*)\}").unwrap();
+    let re = regex::Regex::new(VAR_PLACEHOLDER).unwrap();
     let mut error: Option<String> = None;
     let result = re.replace_all(template, |caps: &regex::Captures| {
         let name = &caps[1];
@@ -1014,14 +1049,14 @@ broken = ["a", "missing"]
     }
 
     #[test]
-    fn parses_deploy_sub_table() {
+    fn parses_run_sub_table() {
         let cfg = parse(
             r#"
 [recipies.web]
 registry = "nexus"
 
-[recipies.web.deploy]
-flowchart = ".ciabatta/deploys.toml"
+[recipies.web.run]
+flowchart = ".ciabatta/runs.toml"
 pre  = "scripts/notify.sh"
 
 [recipies.web.push]
@@ -1029,10 +1064,10 @@ bash_script = "scripts/push.sh"
 "#,
         );
         let entry = &cfg.recipes["web"];
-        let deploy = entry.deploy_recipe().expect("deploy present");
-        assert_eq!(deploy.flowchart.as_deref(), Some(".ciabatta/deploys.toml"));
-        assert_eq!(deploy.pre.as_deref(), Some("scripts/notify.sh"));
-        // Deploy coexists with a push action on the same recipe.
+        let run = entry.run_recipe().expect("run present");
+        assert_eq!(run.flowchart.as_deref(), Some(".ciabatta/runs.toml"));
+        assert_eq!(run.pre.as_deref(), Some("scripts/notify.sh"));
+        // Run coexists with a push action on the same recipe.
         assert_eq!(
             entry.push_recipe().bash_script.as_deref(),
             Some("scripts/push.sh")
@@ -1040,67 +1075,67 @@ bash_script = "scripts/push.sh"
     }
 
     #[test]
-    fn is_deploy_only_distinguishes_pure_deploy_recipes() {
+    fn is_run_only_distinguishes_pure_run_recipes() {
         let cfg = parse(
             r#"
-# Deploy-only: a [deploy] section and nothing to push/pull.
-[recipies.migrate.deploy]
-flowchart = ".ciabatta/deploys.toml"
+# Run-only: a [run] section and nothing to push/pull.
+[recipies.migrate.run]
+flowchart = ".ciabatta/runs.toml"
 
-# Deploy alongside a real push action → still pushable.
+# Run alongside a real push action → still pushable.
 [recipies.web]
 registry = "nexus"
 publish_path = "web/{CIABATTA_COMMIT}/dist"
-[recipies.web.deploy]
-flowchart = ".ciabatta/deploys.toml"
+[recipies.web.run]
+flowchart = ".ciabatta/runs.toml"
 
-# A plain transfer recipe with no deploy → never deploy-only.
+# A plain transfer recipe with no run → never run-only.
 [recipies.assets]
 registry = "nexus"
 
-# A command recipe (no registry/path) is a push action, not deploy-only.
-[recipies.script.deploy]
-flowchart = ".ciabatta/deploys.toml"
+# A command recipe (no registry/path) is a push action, not run-only.
+[recipies.script.run]
+flowchart = ".ciabatta/runs.toml"
 [recipies.script.push]
 main = "make ship"
 "#,
         );
 
-        assert!(cfg.recipes["migrate"].is_deploy_only());
-        assert!(!cfg.recipes["web"].is_deploy_only());
-        assert!(!cfg.recipes["assets"].is_deploy_only());
-        assert!(!cfg.recipes["script"].is_deploy_only());
+        assert!(cfg.recipes["migrate"].is_run_only());
+        assert!(!cfg.recipes["web"].is_run_only());
+        assert!(!cfg.recipes["assets"].is_run_only());
+        assert!(!cfg.recipes["script"].is_run_only());
     }
 
     #[test]
-    fn parses_inline_deploy_steps() {
+    fn parses_inline_run_steps() {
         let cfg = parse(
             r#"
-[recipies.svc.deploy]
-[[recipies.svc.deploy.steps]]
+[recipies.svc.run]
+[[recipies.svc.run.steps]]
 name = "build"
 script = "b.sh"
-[[recipies.svc.deploy.steps]]
+[[recipies.svc.run.steps]]
 name = "ship"
 run = "make ship"
 needs = ["build"]
 on_error = "fix"
-[[recipies.svc.deploy.steps]]
+[[recipies.svc.run.steps]]
 name = "fix"
 recover = true
 options = [ { label = "retry", run = "true", default = true } ]
 "#,
         );
-        let deploy = cfg.recipes["svc"].deploy_recipe().unwrap();
-        assert_eq!(deploy.steps.len(), 3);
-        assert_eq!(deploy.steps[1].on_error.as_deref(), Some("fix"));
-        assert!(deploy.steps[2].recover);
-        assert_eq!(deploy.steps[2].options[0].label, "retry");
-        assert!(deploy.steps[2].options[0].default);
+        let run = cfg.recipes["svc"].run_recipe().unwrap();
+        assert_eq!(run.steps.len(), 3);
+        assert_eq!(run.steps[1].on_error.as_deref(), Some("fix"));
+        assert!(run.steps[2].recover);
+        assert_eq!(run.steps[2].options[0].label, "retry");
+        assert!(run.steps[2].options[0].default);
     }
 
     #[test]
-    fn recipe_without_deploy_has_none() {
+    fn recipe_without_run_has_none() {
         let cfg = parse(
             r#"
 [recipies.a]
@@ -1108,7 +1143,7 @@ registry = "nexus"
 publish_path = "x/y"
 "#,
         );
-        assert!(cfg.recipes["a"].deploy_recipe().is_none());
+        assert!(cfg.recipes["a"].run_recipe().is_none());
     }
 
     #[test]

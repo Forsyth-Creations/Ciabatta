@@ -5,7 +5,8 @@
     "packageManager": "yarn@4.17.0",
     "workspaces": [
         "frontend",
-        "src"
+        "src",
+        "tool_frontend"
     ],
     "scripts": {
         "build": "turbo run build",

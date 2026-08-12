@@ -1,6 +1,6 @@
 [package]
 name = "ciabatta"
-version = "0.1.22"
+version = "0.1.23"
 edition = "2024"
 description = "A command line tool for publishing artifacts to various registries"
 license = "MIT"
@@ -9,6 +9,17 @@ repository = "https://github.com/forsyth-creations/ciabatta"
 homepage = "https://forsyth-creations.github.io/Ciabatta/"
 keywords = ["artifact", "publishing", "cli", "registry", "ci"]
 categories = ["command-line-utilities", "development-tools"]
+
+# The daemon's web app is compiled into the binary from tool_frontend/dist, so
+# a published crate has to carry it — it's gitignored build output, not source.
+include = [
+    "src/**/*",
+    "build.rs",
+    "tool_frontend/dist/**/*",
+    "Cargo.toml",
+    "README.md",
+    "LICENSE",
+]
 
 [[bin]]
 name = "ciabatta"
@@ -32,7 +43,19 @@ chrono = { version = "0.4", features = ["serde"] }
 serde_json = "1"
 rustfmt = "0.10.0"
 owo-colors = "4.3.0"
-# Disable the default `libudev` feature so Linux builds don't need the system
-# libudev-dev library (breaks CI and static musl release builds). serialport
-# falls back to pure-Rust sysfs port enumeration on Linux.
-serialport = { version = "4", default-features = false }
+# The daemon's HTTP stack. hyper/http/tower are already in the tree via reqwest,
+# so axum adds little beyond its own routing layer.
+axum = { version = "0.8", features = ["macros"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["trace"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+# The built tool_frontend bundle is embedded in the binary at compile time.
+include_dir = "0.7"
+async-stream = "0.3"
+rand = "0.8"
+
+# Killing a timed-out or abandoned step means killing its whole process group:
+# `sh -c "…"` forks rather than execs, so signalling the shell alone orphans
+# whatever it started. Already in the tree via tokio; named here for `killpg`.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

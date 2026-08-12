@@ -1,5 +1,6 @@
 pub mod app;
 pub mod browser;
+pub mod graph;
 pub mod ui;
 
 use std::collections::HashMap;

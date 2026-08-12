@@ -20,7 +20,7 @@ pub mod edit;
 pub mod jobs;
 pub mod pdf;
 pub mod provider;
-pub mod server;
+
 pub mod session;
 pub mod tools;
 pub mod tui;
@@ -567,12 +567,19 @@ pub async fn run_tui(
     };
     assistant.set_mode(mode);
 
+    // The chat TUI stays a terminal app, but the mind map it links to is now
+    // served by the daemon rather than a server this process stands up.
     let graph_url = if no_graph {
         None
     } else {
-        let jobs = jobs::Jobs::open(root, config)?;
-        let handle = server::spawn(assistant.clone(), jobs, port).await?;
-        Some(handle)
+        match crate::daemon::connect(Some(port)).await {
+            Ok(session) => Some(session.page_url("/ai")),
+            Err(e) => {
+                // A missing daemon shouldn't stop you chatting.
+                tracing::warn!("could not reach the ciabatta daemon for the mind map: {e:#}");
+                None
+            }
+        }
     };
 
     tui::run(assistant, graph_url).await
@@ -786,19 +793,28 @@ pub fn run_clear(root: &Path, yes: bool) -> Result<()> {
 /// `ciabatta ai serve`: run just the daemon (mind map + JSON API) in the
 /// foreground until interrupted.
 pub async fn run_serve(root: &Path, config: &CiabattaConfig, port: u16, mode: Mode) -> Result<()> {
+    // The assistant no longer needs its own server — the ciabatta daemon
+    // serves the mind map and the JSON API for every project at once. Building
+    // it here still validates the config and warms the cache.
     let assistant = Assistant::new(root, config)?;
     assistant.set_mode(mode);
-    let jobs = jobs::Jobs::open(root, config)?;
-    let url = server::spawn(assistant, jobs, port).await?;
-    println!("\nAI assistant daemon ready at {url}");
-    println!("  {url}           live architecture mind map");
-    println!("  POST {url}api/ask       {{\"prompt\": \"...\"}}");
-    println!("  POST {url}api/ship      {{\"prompt\": \"...\"}}   (background task)");
-    println!("  GET  {url}api/jobs      background task status");
-    println!("  POST {url}api/feedback  {{\"positive\": true}}");
-    println!("Press Ctrl-C to stop.");
-    // The server runs on spawned tasks; park this one until interrupted.
-    tokio::signal::ctrl_c().await?;
+
+    let session = crate::daemon::connect(Some(port)).await?;
+    let base = &session.daemon.base_url;
+    let project = &session.project.id;
+
+    println!("\nThe ciabatta daemon serves the assistant at {base}");
+    println!("  {}", session.page_url("/ai"));
+    println!("      live architecture mind map");
+    println!("  POST {base}/api/ai/ask       {{\"project\": \"{project}\", \"prompt\": \"...\"}}");
+    println!("  POST {base}/api/ai/ship      {{\"project\": \"{project}\", \"prompt\": \"...\"}}");
+    println!("  GET  {base}/api/ai/jobs?project={project}");
+    println!("  POST {base}/api/ai/feedback  {{\"project\": \"{project}\", \"positive\": true}}");
+    println!(
+        "\nRequests need the token from ~/.ciabatta/daemon.json as a bearer header.\n\
+         The daemon keeps running after this command exits; stop it with \
+         `ciabatta daemon stop`."
+    );
     Ok(())
 }
 
@@ -1165,6 +1181,23 @@ fn splice_ai_section(existing: &str, ai_block: &str) -> String {
     out
 }
 
+fn prompt_default(label: &str, default: &str) -> Result<String> {
+    if default.is_empty() {
+        print!("{label}: ");
+    } else {
+        print!("{label} [{default}]: ");
+    }
+    std::io::stdout().flush()?;
+    let mut line = String::new();
+    std::io::stdin().read_line(&mut line)?;
+    let line = line.trim();
+    Ok(if line.is_empty() {
+        default.to_string()
+    } else {
+        line.to_string()
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::splice_ai_section;
@@ -1197,21 +1230,4 @@ mod tests {
     fn splice_into_empty_file_is_just_the_block() {
         assert_eq!(splice_ai_section("", AI_BLOCK), AI_BLOCK);
     }
-}
-
-fn prompt_default(label: &str, default: &str) -> Result<String> {
-    if default.is_empty() {
-        print!("{label}: ");
-    } else {
-        print!("{label} [{default}]: ");
-    }
-    std::io::stdout().flush()?;
-    let mut line = String::new();
-    std::io::stdin().read_line(&mut line)?;
-    let line = line.trim();
-    Ok(if line.is_empty() {
-        default.to_string()
-    } else {
-        line.to_string()
-    })
 }

@@ -4,14 +4,21 @@
   </a>
 </div>
 
-**Artifact publishing made easy.**
+**Monorepo orchestration and artifact publishing.**
 
-Ciabatta is a fast, cross-platform CLI for publishing and pulling build
-artifacts to and from common registries — Nexus (raw, **npm**, and **PyPI**), S3,
-Artifactory, Docker, and ECR — driven by a single declarative TOML file. It picks
-up branch / commit / tag / build-number metadata from whatever CI system you run
-on, runs multiple publish jobs in parallel, and shows progress in a friendly
-terminal UI.
+Ciabatta is a fast, cross-platform CLI that does two jobs, from one declarative
+TOML file.
+
+It **orchestrates a monorepo**: every package opts in with `ciabatta init --lib`
+and declares who owns it, what its workflows do, and which other packages they
+need. `ciabatta build` then resolves *one* graph across the whole repo and shows
+you exactly what will run, in what order, and where each node came from.
+
+And it **publishes artifacts** to common registries — Nexus (raw, **npm**, and
+**PyPI**), S3, Artifactory, Docker, and ECR. It picks up branch / commit / tag /
+build-number metadata from whatever CI system you run on, runs multiple publish
+jobs in parallel, and shows progress in a friendly terminal UI. Publishing is
+also just a step on the graph, so a build that ends in a push is one command.
 
 ```
    _____ _       _           _   _
@@ -24,6 +31,18 @@ terminal UI.
 
 ## Why Ciabatta
 
+- **Every script is discoverable, described, and owned.** `ciabatta list` shows
+  every workflow in the monorepo, what it does, and who to ask — so nobody has
+  to open six packages to find out what `build.sh` is for.
+- **Cross-package dependencies are declared, not remembered.** A package that
+  needs another's generated protobufs says so once; ciabatta runs them in the
+  right order, every time, and *draws you the graph* before it starts.
+- **Missing toolchains are named up front.** Declare what a step needs, and a
+  missing `protoc` is reported before the build starts, with the install command
+  your repo wrote down — not as "command not found" ten minutes in.
+- **Nothing hangs the graph.** Long-running steps get a `timeout`; genuinely
+  persistent ones (dev servers, watchers) are handed to the daemon and stepped
+  over, so they keep running after the build that started them is done.
 - **One config, many registries.** Describe your registries and publish
   "recipes" once in `.ciabatta/ciabatta.toml`; run any combination of them with
   a single command.
@@ -73,6 +92,31 @@ Builds are published for Linux (x86_64 / aarch64, static), macOS
 
 ## Quick start
 
+**A monorepo:**
+
+```bash
+# 1. In each package, opt in
+cd packages/proto && ciabatta init --lib --owner "Grace" \
+    --description "Shared protobuf definitions" --workflow generate
+cd ../api      && ciabatta init --lib --owner "Ada" \
+    --description "Public REST API" --depends-on proto:generate
+
+# 2. See everything the repo can do, and who owns it
+ciabatta list -v
+ciabatta list -s proto        # ...or search
+
+# 3. See the graph before you run it
+ciabatta build --graph
+
+# 4. Walk every step without side effects
+ciabatta build --dry-run
+
+# 5. Run it, from anywhere in the repo
+ciabatta build
+```
+
+**A single project publishing artifacts:**
+
 ```bash
 # 1. Scaffold a .ciabatta/ directory with a starter config
 ciabatta init --ci github
@@ -92,22 +136,30 @@ ciabatta pull release_frontend
 
 Ciabatta discovers your project by walking up to find the `.ciabatta/`
 directory; the directory **above** it is treated as the project root that
-artifacts are published from.
+artifacts are published from. For workflows it goes one level further out: the
+**monorepo root** is your git root, and every directory beneath it with a
+`.ciabatta/ciabatta.toml` is a sub-workspace.
 
 ## Commands
 
 | Command | What it does |
 | --- | --- |
+| `ciabatta <WORKFLOW>` | Run that workflow across every sub-workspace that defines one, in dependency order. `ciabatta build`, `ciabatta test`, … |
+| `ciabatta workflow <NAME>` | The same thing, spelled out — for a workflow whose name collides with a command below. |
 | `ciabatta push [RECIPE...]` | Push one or more recipes in parallel (all if none named). |
 | `ciabatta pull [RECIPE...]` | Download artifacts for one or more recipes. |
-| `ciabatta deploy [RECIPE...]` | Run a deploy: a DAG of dependent script steps with error-recovery branches. `--gui` for a live browser view, `--build` for a visual flowchart editor. |
-| `ciabatta list` | List all recipes defined in the config. |
-| `ciabatta init [--ci SYSTEM]` | Create a `.ciabatta/` directory with a starter `ciabatta.toml`. |
+| `ciabatta run [RECIPE...]` | Execute a single project's run: a DAG of dependent script steps with error-recovery branches. `--gui` for a live browser view, `--build` for a visual flowchart editor. |
+| `ciabatta list` | Every workflow in the monorepo — with descriptions, owners and dependencies — then this project's recipes. `-s TERM` to search, `-v` for steps. |
+| `ciabatta init --lib` | Opt this package in as a sub-workspace: a `[workspace]` identity plus a starter workflow. |
+| `ciabatta init [--ci SYSTEM]` | Create a `.ciabatta/` directory with a starter publishing `ciabatta.toml`. |
 | `ciabatta configure` | Interactively add a registry (and optionally a recipe) — no hand-editing TOML. |
 | `ciabatta configure auto` | Analyze the project and pick recipes from an interactive checklist (Docker → ECR/Nexus, Rust binaries → crates.io / S3 / Nexus). |
 | `ciabatta tui` (alias `browse`) | Interactive browser — inspect registries, check paths, push on demand. |
-| `ciabatta analyze` | Build the project's dependency graph and serve an interactive view. |
-| `ciabatta watch <command>` | Run a command and stream its logs into a live, searchable web view with bookmarks and notification triggers. |
+| `ciabatta analyze` | Build the project's dependency graph and open an interactive view. |
+| `ciabatta watch <command>` | Run a command and stream its logs into a live, searchable web view with bookmarks and notification triggers. `--list` to see running sessions, `--attach <ID>` to tail one, `--stop <ID>` to end it. |
+| `ciabatta todo [TASK]` | Personal task list. With a TASK, adds it and exits; without, opens the todo page. |
+| `ciabatta ai` | AI assistant — chat TUI plus a live architecture mind map. |
+| `ciabatta daemon <status\|stop\|restart\|logs>` | Inspect or control the background daemon. |
 | `ciabatta config show` | Print the resolved configuration. |
 | `ciabatta config reference` | Show documentation on the config format and options. |
 
@@ -118,6 +170,17 @@ Useful flags on `push` / `pull`:
 - `--dry-run` — show what would happen without publishing or fetching.
 - `--no-tui` — disable the TUI and stream plain progress to stdout (ideal for CI).
 - `-c, --config PATH` — use a specific config file instead of discovery.
+
+Useful flags on a workflow (`ciabatta build`, …):
+
+- `--graph` — print the graph and stop. Nothing runs.
+- `--dry-run` — walk every step, executing none of them.
+- `--only MEMBER` — start from one sub-workspace. Its dependencies still come
+  along, so the result stays correct. Repeatable.
+- `--isolated` — don't follow dependencies out of what you selected, for when
+  everything upstream is already built.
+- `-e, --env KEY=VALUE` — set a variable for every step. Repeatable.
+- `--gui` — watch the graph run live in a browser instead of the terminal.
 
 Global flags (any command):
 
@@ -132,6 +195,192 @@ file in it individually, recreating the folder structure under the recipe's
 In the `ciabatta tui` browser, press `e` on a registry to **explore** its remote
 contents — navigate folders and see which artifacts already exist, which is handy
 when deciding on a `publish_path`.
+
+## Monorepos
+
+A monorepo accumulates scripts nobody owns, publishing to places nobody
+remembers, quietly depending on each other in ways nobody wrote down. Ciabatta's
+answer is that each package declares three things — **who owns it**, **what its
+workflows do**, and **which other packages they need** — and everything else
+follows from that.
+
+### Opting a package in
+
+```bash
+cd packages/api
+ciabatta init --lib --owner "Ada" --description "Public REST API" \
+              --depends-on proto:generate
+```
+
+That writes a `[workspace]` identity into `packages/api/.ciabatta/ciabatta.toml`:
+
+```toml
+[workspace]
+name        = "api"
+description = "Public REST API"
+owner       = "Ada"
+depends_on  = ["proto:generate"]   # what this package needs first
+tags        = ["backend"]
+requires    = ["cargo"]            # tools every workflow here needs on PATH
+```
+
+`description` and `owner` aren't decoration — they're what `ciabatta list` shows
+everyone else, so `init --lib` defaults the owner to your git user and nags you
+if either is blank.
+
+### Workflows
+
+One file per workflow, in `.ciabatta/workflows/`. The **filename is the
+workflow name**, and every package that defines a workflow of that name joins
+the same graph.
+
+```toml
+# packages/api/.ciabatta/workflows/build.toml
+description  = "Compile the API service"
+owner        = "Ada"
+needs        = ["proto:generate"]     # cross-package deps for this workflow
+REQUIRED_ENV = ["API_TOKEN"]          # refuse to start unless set
+env_file     = ".env"                 # relative to this package
+
+[[steps]]
+name        = "compile"
+description = "Build the release binary"
+run         = "cargo build --release"
+requires    = ["cargo", "protoc"]     # tools this step needs
+timeout     = "10m"
+retries     = 1
+
+[[steps]]
+name        = "publish"
+description = "Publish the binary to Nexus"
+kind        = "push"                  # a special, identifiable phase
+recipe      = "binary"                # a [recipies] entry in this package
+needs       = ["compile"]
+```
+
+Steps run **from their own package's directory**, with that package's
+`[workspace.env]` variables in scope, so scripts work exactly as they do when
+you run them by hand.
+
+### One graph, drawn before it runs
+
+```console
+$ ciabatta build --graph
+Workflow 'build' — 4 step(s) across 3 sub-workspace(s), in 4 wave(s)
+Root: /home/ada/monorepo
+
+  wave 1 — runs in parallel
+  └─ proto:codegen
+        Emit Rust + TS stubs into gen/
+        from proto (packages/proto), owner Grace
+
+  wave 2 — runs in parallel
+  └─ api:compile  [1 retries]
+        Build the release binary
+        from api (packages/api), owner Ada
+        after proto:codegen
+        needs tools cargo, protoc
+  ...
+```
+
+Every node says which package it came from and who owns it. `--dry-run` walks
+the same graph and prints each command without executing it; `--gui` streams it
+into a live browser view.
+
+Dependencies are declared in two places, and both accept the same spelling:
+
+| Spelling | Means |
+| --- | --- |
+| `depends_on` in `[workspace]` | Applies to **every** workflow in the package. |
+| `needs` in a workflow file | Applies to that workflow only. |
+| `"common"` | That package's workflow *of the same name*. Skipped if it has none. |
+| `"proto:generate"` | Exactly that workflow. An error if it doesn't exist. |
+| `"self:codegen"` | Another workflow in the same package. |
+
+A cycle is refused with the loop spelled out, rather than deadlocking.
+
+### Missing toolchains, answered
+
+Declare install instructions once at the monorepo root:
+
+```toml
+# .ciabatta/ciabatta.toml at the repo root
+[workspace]
+umbrella = true            # the root is shared settings, not a package
+
+[toolchain.protoc]
+hint        = "brew install protobuf"
+check       = "protoc --version"    # optional: smarter than a PATH lookup
+description = "Protocol buffer compiler"
+```
+
+Every tool a graph requires is checked **before the first step runs**, and all
+the missing ones are reported together:
+
+```console
+$ ciabatta build
+Missing 1 build tool(s):
+  • protoc — needed by web:bundle
+    install it with: brew install protobuf
+```
+
+### Steps that would otherwise hang
+
+| Setting | What it does |
+| --- | --- |
+| `timeout = "10m"` | Kills the step — and everything it spawned — past the limit, marks it failed, and **lets the rest of the graph carry on**. |
+| `persistent = true` | A dev server or watcher that never exits: it's started, its dependents are released immediately, and the daemon takes ownership of it as a **watch session that outlives the run** — see below. |
+| `retries = 2` | Extra attempts for a flaky step. A timeout isn't retried — it's stuck, not flaky. |
+| `continue_on_error = true` | Its failure skips its dependents but doesn't stop the run. |
+
+A run that tolerated failures still **fails**, and reports every one of them at
+the end — tolerating a failure is not hiding it.
+
+### Persistent steps outlive the run
+
+A dev server that dies with the build that started it isn't persistent at all,
+so ciabatta hands `persistent` steps to its daemon as watch sessions. The step
+runs in its own package's directory with the run's environment, its output is
+collected in full, and the run prints the id to reach it by:
+
+```console
+$ ciabatta dev
+[dev]   [api:server] $ npm run dev   (persistent — the graph continues)
+[dev]   [api:server] handed to the ciabatta daemon as watch session #4 — it outlives this run
+[dev]   [api:server] follow it:  ciabatta watch --attach 4
+[dev]   [api:server] stop it:    ciabatta watch --stop 4
+[dev] ✓ completed
+
+$ ciabatta watch --list
+Watch sessions (1):
+  #4    running         812 lines   api:server  (npm run dev)
+```
+
+`--attach` tails it in the terminal (Ctrl-C detaches; the session keeps going),
+and it shows up on the **Watch** page named after the step that left it behind.
+Sessions are owned by the daemon, so they end when you stop them or when the
+daemon does — `ciabatta daemon stop` takes them with it.
+
+If no daemon can be reached, the step falls back to running inside the run: it
+still doesn't block the graph, but it stops when the run does, and the log says
+so rather than leaving you to find out.
+
+### Finding things
+
+```console
+$ ciabatta list -s proto
+▪ proto  (packages/proto)
+  Shared protobuf definitions
+  owner: Grace
+
+    generate         Generate language bindings from the .proto files
+    owner: Grace     run with: ciabatta generate --only proto
+```
+
+`-s/--search` matches names, descriptions, owners, tags, and the commands steps
+actually run. `-v` drills into the steps. The same data is on the daemon's HTTP
+API (`GET /api/workspace`, `GET /api/workspace/graph?workflow=build`) for the
+web app.
 
 ## Configuration
 
@@ -285,7 +534,7 @@ through each stage live:
 ```
 Push:    login → pre-push   → push   → post-push
 Pull:    login → pre-pull   → pull   → post-pull
-Deploy:  login → pre-deploy → deploy → post-deploy
+Run:     login → pre-run    → run    → post-run
 ```
 
 Override any stage with an arbitrary command — bash, python, a compiled binary,
@@ -317,12 +566,12 @@ publish_path = "front/{CIABATTA_COMMIT}/dist"
 | push / pull | `main` | built-in registry action (or legacy `bash_script`) |
 | post-push / post-pull | `post` | nothing |
 
-## Deploys
+## Runs
 
-A **deploy** is a third recipe direction, run with `ciabatta deploy`. Instead of
-a single registry transfer, its `deploy` phase runs a **DAG of dependent script
-steps** — build → migrate → release, and so on. Deploys are "just another
-recipe": they live in `[recipies.<name>.deploy]`, show up in `ciabatta list`,
+A **run** is a third recipe direction, executed with `ciabatta run`. Instead of
+a single registry transfer, its `run` phase executes a **DAG of dependent script
+steps** — build → migrate → release, and so on. Runs are "just another
+recipe": they live in `[recipies.<name>.run]`, show up in `ciabatta list`,
 and work with menus (`--cookbook`).
 
 The **step graph lives in its own flowchart file**, referenced from your config,
@@ -330,15 +579,15 @@ so a complex pipeline doesn't clutter `ciabatta.toml`:
 
 ```toml
 # .ciabatta/ciabatta.toml
-[recipies.web.deploy]
-flowchart = ".ciabatta/deploys.toml"   # the step DAG (a separate file)
+[recipies.web.run]
+flowchart = ".ciabatta/runs.toml"      # the step DAG (a separate file)
 pre  = "scripts/notify_start.sh"        # optional login/pre/post phase hooks
 ```
 
 ```toml
-# .ciabatta/deploys.toml — each top-level entry is a series of dependent steps.
+# .ciabatta/runs.toml — each top-level entry is a series of dependent steps.
 [web]
-  REQUIRED_ENV = ["DEPLOY_TOKEN", "AWS_REGION"]  # gate the whole flowchart
+  REQUIRED_ENV = ["RUN_TOKEN", "AWS_REGION"]     # gate the whole flowchart
 
   [[web.steps]]
   name = "build"
@@ -371,19 +620,25 @@ validated up front (missing edges, non-recovery `on_error` targets, and cycles
 are rejected before anything runs).
 
 **`REQUIRED_ENV`** lists variables the flowchart needs. Before any phase runs,
-each is checked; if one is empty or unset the deploy is aborted — the missing
+each is checked; if one is empty or unset the run is aborted — the missing
 names are printed to the console and shown in the `--gui` view, and no step runs.
-(You can also set `REQUIRED_ENV` on the `[recipies.<name>.deploy]` table; the two
+(You can also set `REQUIRED_ENV` on the `[recipies.<name>.run]` table; the two
 lists are merged.)
+
+Started from the **web app**, a missing variable isn't a failure — the launcher
+refuses to start the run and asks you for the values instead, then starts it with
+what you typed. Ciabatta checks the daemon's own environment and any `env_file`
+the recipe sources first, so it only prompts for what genuinely has nowhere else
+to come from.
 
 ### Build variables are auto-sourced
 
-Every `ciabatta deploy` **auto-sources the `CIABATTA_*` build variables from your
+Every `ciabatta run` **auto-sources the `CIABATTA_*` build variables from your
 local git** (`CIABATTA_BRANCH` / `_COMMIT` / `_TAG` / `_BUILD_NUMBER`, plus the
 derived `CIABATTA_PATH`) and makes them available to every step, `run` command,
 and phase hook — the same set `ciabatta source` prints, so you don't need to
 `eval "$(ciabatta source)"` first. This happens regardless of `--local` /
-`CIABATTA_ENV`, so a deploy script can reference `$CIABATTA_COMMIT` on a plain
+`CIABATTA_ENV`, so a run's script can reference `$CIABATTA_COMMIT` on a plain
 dev-machine run:
 
 ```toml
@@ -394,7 +649,7 @@ run  = "./scripts/release.sh --tag $CIABATTA_COMMIT"
 
 Only *unset* variables are filled in: anything you provide explicitly — from a CI
 system, the ambient environment, or `-e CIABATTA_BRANCH=…` — takes precedence. A
-non-git directory is fine; the deploy just runs without the git-derived values.
+non-git directory is fine; the run just proceeds without the git-derived values.
 
 ### Error recovery ("if error")
 
@@ -403,30 +658,32 @@ presents a list of fix `options`:
 
 - With **`--gui`**, the browser shows fix-it buttons — click one to run that fix.
 - Without a UI (plain / CI), the option marked **`default = true`** runs
-  automatically (unattended self-heal); if none is marked, the deploy fails and
+  automatically (unattended self-heal); if none is marked, the run fails and
   prints the available remedies.
 - After a fix succeeds, **`retry`** re-runs the named step. Retry loops are
   bounded so a persistently failing step can't spin forever.
 
-### Watching and building deploys in the browser
+### Watching and building runs in the browser
 
 ```bash
-ciabatta deploy web --gui     # live view: flowchart + streaming logs + fix buttons
-ciabatta deploy --build       # visual flowchart editor → copy the generated TOML
+ciabatta run web --gui        # live view: flowchart + streaming logs + fix buttons
+ciabatta run --build          # visual flowchart editor → copy the generated TOML
 ```
 
-`--gui` serves a local page (default `--port 8088`) that shows each step lighting
-up as it runs, per-step logs, and interactive recovery. `--build` opens a visual
+`--gui` hands the run to the daemon and opens a page at
+`http://127.0.0.1:8099/run/<id>` showing each step lighting up as it runs,
+per-step logs, and interactive recovery. The daemon owns the run, so it keeps
+going if you close the terminal. `--build` opens a visual
 builder that needs no project: lay out steps, edges, and recovery options, then
 copy the emitted TOML into your flowchart file. Already have a pipeline? Paste
 its TOML into the builder's import box to keep editing it visually.
 
 | Phase | Override key | Default |
 | --- | --- | --- |
-| login | `login` | nothing (deploys usually authenticate inside a step) |
-| pre-deploy | `pre` | nothing |
-| deploy | the `steps` DAG | runs the flowchart |
-| post-deploy | `post` | nothing |
+| login | `login` | nothing (runs usually authenticate inside a step) |
+| pre-run | `pre` | nothing |
+| run | the `steps` DAG | executes the flowchart |
+| post-run | `post` | nothing |
 
 ## Credentials
 
@@ -464,8 +721,9 @@ It scans `Cargo.toml`, `package.json`, `requirements.txt` / `pyproject.toml`,
 `Dockerfile`s, and `.gitlab-ci.yml` (its `image:` / `services:` container
 images) for external dependencies, identifies the internal packages in the repo,
 and derives publish points from your ciabatta recipes (and a publishable crate →
-crates.io). The result is written as JSON and served at `http://127.0.0.1:8080`,
-where you can click any node for details.
+crates.io). The result is written as JSON and shown at
+`http://127.0.0.1:8099/analyze`, where you can sort, filter and click through the
+graph. You can also rescan from that page.
 
 **Accurate Rust versions.** A `Cargo.toml` dependency is only a *requirement*
 (`serde = "1"`), so `analyze` reads the workspace `Cargo.lock` and shows the
@@ -491,8 +749,7 @@ publish`, `twine upload`, `helm push`, and `curl` uploads (`-T` / `--upload-file
 ciabatta recipe — is **not** flagged as ciabatta-managed.
 
 ```bash
-ciabatta analyze                 # write JSON + open the live view on :8080
-ciabatta analyze --port 9000     # use a different port
+ciabatta analyze                 # write JSON + open the view at :8099/analyze
 ciabatta analyze --no-serve      # just write ciabatta-analyze.json
 ciabatta analyze --check-vulns   # also query OSV for known vulnerabilities
 ciabatta analyze --requirements reqs.txt --trace trace.csv   # requirements column
@@ -550,12 +807,19 @@ scan in a browser than in a scrollback buffer.
 ```bash
 ciabatta watch "npm run dev"                 # stream a dev server's logs
 ciabatta watch -t error -t "panic" "cargo test"   # notify on matching lines
-ciabatta watch --port 9000 "make deploy | tee build.log"
+ciabatta watch --list            # every session the daemon is running
+ciabatta watch --attach 3        # tail session 3 (Ctrl-C only detaches)
+ciabatta watch --stop 3          # stop session 3
 ```
+
+Sessions also arrive here from workflows: a step marked `persistent = true` is
+handed to the daemon as one, so it keeps running after its build finishes. Those
+sessions are named after the graph node that left them behind — see
+[Persistent steps outlive the run](#persistent-steps-outlive-the-run).
 
 The command runs through your shell, so pipes, `&&`, and redirects work — quote
 the whole command when you use them. The view opens in your browser at
-`http://127.0.0.1:8090` (override with `--port`, suppress with `--no-open`), and
+`http://127.0.0.1:8099/watch/<id>` (suppress with `--no-open`), and
 keeps serving after the command exits so the logs stay browsable. The status pill
 shows whether it's running or how it exited.
 
@@ -583,7 +847,9 @@ lines themselves are never written to disk. The in-memory buffer is bounded
 Useful flags:
 
 - `-t, --trigger PHRASE` — notify on lines containing this phrase (repeatable).
-- `-p, --port PORT` — port for the web view (default `8090`).
+- `-p, --port PORT` — the ciabatta daemon's port (default `8099`).
+- `--stop ID` — stop a running session. Ctrl-C on `ciabatta watch` only
+  detaches from it; the command keeps running in the daemon.
 - `--max-lines N` — cap the in-memory log buffer (default `200000`).
 - `--no-open` — don't open the browser automatically.
 
@@ -619,11 +885,91 @@ history and pulls the most recent commit that does (over HTTP registries like
 Nexus). This just needs the branch history to be available — a normal CI checkout
 has it; it tries the branch ref, then `origin/<branch>`, then `HEAD`.
 
+## The daemon and the web app
+
+Every browser-facing feature — todo, watch, run, analyze and the AI mind map
+— is served by **one background daemon** on **one port**, at
+`http://127.0.0.1:8099`. Each is a page in a single web app rather than a
+separate server on its own port.
+
+You almost never start it by hand. Any command with a web view checks for a
+running daemon and launches one in the background if there isn't one:
+
+```bash
+ciabatta todo        # starts the daemon if needed, opens http://127.0.0.1:8099/todo
+ciabatta watch make    # reuses the same daemon, opens /watch/<id>
+```
+
+| Page | What it does |
+| --- | --- |
+| `/` | Dashboard — daemon status and every tool in one place. |
+| `/todo` | Your personal task list (global, not per-project). |
+| `/watch` | Watch sessions; `/watch/<id>` is one session's live log. |
+| `/run` | Runs; `/run/<id>` is a live flowchart, `/run/builder` the editor. |
+| `/analyze` | The dependency graph. |
+| `/ai` | The architecture mind map and background assistant jobs. |
+
+### Managing it
+
+```bash
+ciabatta daemon status     # is it running, and where
+ciabatta daemon stop       # stop it (background work stops with it)
+ciabatta daemon restart
+ciabatta daemon logs -f    # follow ~/.ciabatta/daemon.log
+ciabatta daemon serve      # run it in the foreground, e.g. to debug startup
+```
+
+The port is `8099` by default; override it with `CIABATTA_DAEMON_PORT` or `-p`
+on any command. `CIABATTA_BIND_HOST=0.0.0.0` exposes it beyond loopback — see
+the security note below before you do that.
+
+### Projects
+
+One daemon serves every checkout you use. Each command registers its working
+directory, and the project switcher in the top bar picks which one the
+per-project pages are showing. The todo list is deliberately *not* scoped: it
+lives in `~/.ciabatta/todos.json` and follows you between repos.
+
+### The daemon owns your work
+
+`ciabatta watch` and `ciabatta run --gui` hand the work to the daemon rather
+than running it in your terminal. That means:
+
+- **Ctrl-C on `ciabatta watch` detaches, it doesn't kill.** The command keeps
+  running and stays live in the browser. Stop it for real with
+  `ciabatta watch --stop <ID>` or the Stop button.
+- `ciabatta run --gui` returns as soon as the run starts. Closing the
+  terminal — or the laptop — doesn't abandon a run mid-flight.
+- Stopping the daemon stops everything it owns.
+
+### Security
+
+The daemon is long-lived and its API can start processes, so every
+state-changing route requires a bearer token. It's generated at startup and
+stored in `~/.ciabatta/daemon.json` (mode `0600`); the web app receives it in
+the served page, and the CLI reads it from that file. `GET /api/health` is the
+only unauthenticated route.
+
+This matters most with `CIABATTA_BIND_HOST=0.0.0.0`: without the token, anyone
+who could reach the port could run commands as you. Keep it on loopback unless
+you have a reason not to.
+
 ## Web frontend
 
-Ciabatta ships a small Vite-built site (hosted on GitHub Pages) with download
-links and usage instructions. See the
-[project site](https://forsyth-creations.github.io/Ciabatta/).
+Two separate front ends live in this repo:
+
+- **`tool_frontend/`** — the daemon's web app described above (React, MUI,
+  TanStack, React Flow). It's compiled into the binary, so a release is still a
+  single file. Build it with
+  `yarn turbo run build --filter=ciabatta-tool-frontend`; `yarn dev` inside
+  `tool_frontend/` gives HMR against a running daemon.
+- **`frontend/`** — the public docs site on GitHub Pages, with download links
+  and usage instructions. See the
+  [project site](https://forsyth-creations.github.io/Ciabatta/).
+
+Building the Rust binary without a built `tool_frontend/dist` still works: the
+daemon serves a placeholder page telling you to run the yarn build. CI and the
+release workflow always build it first.
 
 ## License
 

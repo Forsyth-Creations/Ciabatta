@@ -15,7 +15,7 @@ use tokio::sync::mpsc::UnboundedSender;
 ///
 /// Lines are always accumulated into `lines` (for error context and final
 /// display). When `live` is set, each line is *also* forwarded immediately as
-/// it is produced, so a watching UI (the deploy GUI / TUI) can show output while
+/// it is produced, so a watching UI (the run GUI / TUI) can show output while
 /// a long-running process is still executing instead of only after it exits.
 pub struct LogSink<'a> {
     lines: &'a mut Vec<String>,
@@ -359,25 +359,103 @@ pub async fn run_shell_command(
     env_vars: &HashMap<String, String>,
     sink: &mut LogSink<'_>,
 ) -> Result<()> {
+    run_shell_command_opts(cmd, cwd, env_vars, false, sink).await
+}
+
+/// [`run_shell_command`], plus control over what happens to the command when
+/// the returned future is dropped.
+///
+/// `kill_on_drop` matters for the two ways a run can walk away from a command
+/// that is still going: a step whose `timeout` expired, and a `persistent` step
+/// whose background task is aborted when the graph finishes. In both cases the
+/// process tree has to go with it, so the command is spawned into its own
+/// process group and the whole group is signalled — see [`ProcessGroup`].
+pub async fn run_shell_command_opts(
+    cmd: &str,
+    cwd: &Path,
+    env_vars: &HashMap<String, String>,
+    kill_on_drop: bool,
+    sink: &mut LogSink<'_>,
+) -> Result<()> {
     use std::process::Stdio;
     use tokio::process::Command;
 
-    let child = Command::new("sh")
+    let mut command = Command::new("sh");
+    command
         .arg("-c")
         .arg(cmd)
         .current_dir(cwd)
         .envs(env_vars)
+        .kill_on_drop(kill_on_drop)
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    // Lead a new process group, so abandoning the command can take everything
+    // it spawned with it rather than just the shell.
+    #[cfg(unix)]
+    if kill_on_drop {
+        command.process_group(0);
+    }
+
+    let child = command
         .spawn()
         .with_context(|| format!("Failed to spawn shell for command: {cmd}"))?;
 
+    let group = ProcessGroup::new(child.id(), kill_on_drop);
     let status = stream_child_output(child, sink).await?;
+    // Reaped normally: the pid is free to be reused, so stop tracking it.
+    group.disarm();
 
     if !status.success() {
         anyhow::bail!("Command failed (exit {:?}): {}", status.code(), cmd);
     }
     Ok(())
+}
+
+/// Kills a command's entire process group if it is dropped while still armed.
+///
+/// Tokio's `kill_on_drop` signals only the process it spawned. That process is
+/// `sh`, which forks rather than execs for anything non-trivial, so a step's
+/// real work — the compiler, the dev server — would survive being "killed" and
+/// keep running long after ciabatta exited. Spawning into a fresh process group
+/// and signalling the group is what actually stops it.
+///
+/// On platforms without process groups this is inert, and `kill_on_drop` alone
+/// applies.
+struct ProcessGroup {
+    /// `None` once disarmed, or when there was nothing to track.
+    pid: Option<u32>,
+}
+
+impl ProcessGroup {
+    fn new(pid: Option<u32>, armed: bool) -> Self {
+        Self {
+            pid: if armed { pid } else { None },
+        }
+    }
+
+    /// Stop tracking: the command finished and was reaped, so its pid may
+    /// already belong to something else.
+    fn disarm(mut self) {
+        self.pid = None;
+    }
+}
+
+impl Drop for ProcessGroup {
+    fn drop(&mut self) {
+        let Some(pid) = self.pid.take() else {
+            return;
+        };
+        #[cfg(unix)]
+        // SAFETY: `killpg` on a pid we spawned as a group leader and have not
+        // yet reaped. A failure (the group is already gone) is nothing to act
+        // on, which is why the result is discarded.
+        unsafe {
+            libc::killpg(pid as libc::pid_t, libc::SIGKILL);
+        }
+        #[cfg(not(unix))]
+        let _ = pid;
+    }
 }
 
 /// Append captured command output to `log`, collapsing carriage-return
@@ -440,7 +518,7 @@ mod tests {
     async fn run_shell_command_streams_lines_before_exit() {
         // A command that prints, pauses, then prints again. The first line must
         // reach the live channel well before the whole command finishes —
-        // otherwise the deploy GUI would sit at "(no output yet)" until exit.
+        // otherwise the run GUI would sit at "(no output yet)" until exit.
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
         let env = HashMap::new();
         let cwd = Path::new(".");

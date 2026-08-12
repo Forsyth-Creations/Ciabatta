@@ -43,13 +43,13 @@ impl StageKind {
             (StageKind::Login, _) => "login",
             (StageKind::Pre, RunMode::Push) => "pre-push",
             (StageKind::Pre, RunMode::Pull) => "pre-pull",
-            (StageKind::Pre, RunMode::Deploy) => "pre-deploy",
+            (StageKind::Pre, RunMode::Run) => "pre-run",
             (StageKind::Main, RunMode::Push) => "push",
             (StageKind::Main, RunMode::Pull) => "pull",
-            (StageKind::Main, RunMode::Deploy) => "deploy",
+            (StageKind::Main, RunMode::Run) => "run",
             (StageKind::Post, RunMode::Push) => "post-push",
             (StageKind::Post, RunMode::Pull) => "post-pull",
-            (StageKind::Post, RunMode::Deploy) => "post-deploy",
+            (StageKind::Post, RunMode::Run) => "post-run",
         }
     }
 
@@ -60,7 +60,7 @@ impl StageKind {
             (StageKind::Pre, _) => "pre",
             (StageKind::Main, RunMode::Push) => "push",
             (StageKind::Main, RunMode::Pull) => "pull",
-            (StageKind::Main, RunMode::Deploy) => "deploy",
+            (StageKind::Main, RunMode::Run) => "run",
             (StageKind::Post, _) => "post",
         }
     }
@@ -89,19 +89,19 @@ pub enum ProgressUpdate {
         total: usize,
     },
     Log(String, String),
-    /// A deploy step (DAG node) started running its action.
+    /// A run step (DAG node) started running its action.
     StepStarted {
         recipe: String,
         step: String,
     },
-    /// A deploy step finished. `ok` is false when the action failed (it may then
+    /// A run step finished. `ok` is false when the action failed (it may then
     /// be routed to a recovery node).
     StepFinished {
         recipe: String,
         step: String,
         ok: bool,
     },
-    /// A deploy step was skipped because its `when`/`skip_if` condition said so.
+    /// A run step was skipped because its `when`/`skip_if` condition said so.
     /// It counts as satisfied, so its dependents still run. `reason` is a short
     /// explanation (e.g. ``skip_if `env.IN_CI == true` ``).
     StepSkipped {
@@ -109,14 +109,14 @@ pub enum ProgressUpdate {
         step: String,
         reason: String,
     },
-    /// A log line produced by a specific deploy step's action.
+    /// A log line produced by a specific run step's action.
     StepLog {
         recipe: String,
         step: String,
         line: String,
     },
     /// A recovery node is waiting for the operator to pick a fix option. The UI
-    /// replies with a [`StepChoice`] over the deploy control channel. `options`
+    /// replies with a [`StepChoice`] over the run control channel. `options`
     /// carries the option labels in order.
     StepNeedsChoice {
         recipe: String,
@@ -128,7 +128,7 @@ pub enum ProgressUpdate {
     Failed(String, String),
 }
 
-/// A recovery decision sent from the UI (TUI / `--gui`) back to the deploy
+/// A recovery decision sent from the UI (TUI / `--gui`) back to the run
 /// engine: run option `option` of recovery node `step` for recipe `recipe`.
 #[derive(Debug, Clone)]
 pub struct StepChoice {
@@ -137,22 +137,39 @@ pub struct StepChoice {
     pub option: usize,
 }
 
-/// How a deploy run resolves recovery choices. Push/pull ignore this entirely.
-#[derive(Clone, Default)]
-pub struct DeployCtl {
+/// How a run resolves recovery choices, and what happens to work that outlives
+/// it. Push/pull ignore this entirely.
+#[derive(Clone)]
+pub struct RunCtl {
     /// When true, recovery nodes wait for a UI choice on `choices`; when false
     /// (plain / CI) the engine auto-picks the first `default` option or fails.
     pub interactive: bool,
     /// Broadcast bus the UI publishes [`StepChoice`]s on. Each recipe engine
     /// subscribes and filters for its own recipe + step.
     pub choices: Option<tokio::sync::broadcast::Sender<StepChoice>>,
+    /// Hand `persistent` steps to the daemon as watch sessions, so they outlive
+    /// the run — starting the daemon if it isn't up. On by default, because a
+    /// dev server that dies with the build that started it isn't persistent at
+    /// all. Turned off where spawning a daemon would be a surprise: unit tests,
+    /// and anywhere a caller asks for a self-contained run.
+    pub persist_via_daemon: bool,
+}
+
+impl Default for RunCtl {
+    fn default() -> Self {
+        Self {
+            interactive: false,
+            choices: None,
+            persist_via_daemon: true,
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum RunMode {
     Push,
     Pull,
-    Deploy,
+    Run,
 }
 
 /// Pre-flight validation: all publish-path vars must be set.
@@ -169,14 +186,13 @@ pub fn validate_recipes(
             .get(name)
             .ok_or_else(|| anyhow::anyhow!("Recipe '{}' not found in config", name))?;
 
-        // Deploys resolve and validate their step DAG (from the flowchart file)
+        // Runs resolve and validate their step DAG (from the flowchart file)
         // instead of a publish path.
-        if let RunMode::Deploy = mode {
-            let deploy = entry
-                .deploy_recipe()
-                .ok_or_else(|| anyhow::anyhow!("Recipe '{}' has no [deploy] definition", name))?;
-            crate::deploy::resolve_deploy(deploy, name, root)
-                .map_err(|e| anyhow::anyhow!("{e}"))?;
+        if let RunMode::Run = mode {
+            let run = entry
+                .run_recipe()
+                .ok_or_else(|| anyhow::anyhow!("Recipe '{}' has no [run] definition", name))?;
+            crate::run::resolve_run(run, name, root).map_err(|e| anyhow::anyhow!("{e}"))?;
             continue;
         }
 
@@ -185,7 +201,7 @@ pub fn validate_recipes(
             RunMode::Pull => entry
                 .pull_recipe()
                 .ok_or_else(|| anyhow::anyhow!("Recipe '{}' has no pull action defined", name))?,
-            RunMode::Deploy => unreachable!(),
+            RunMode::Run => unreachable!(),
         };
 
         // Only the built-in main action consumes publish_path; if the user
@@ -234,14 +250,14 @@ pub async fn run_all(
         env_vars,
         dry_run,
         mode,
-        DeployCtl::default(),
+        RunCtl::default(),
         tx,
     )
     .await
 }
 
-/// Like [`run_all`], but with a [`DeployCtl`] for interactive recovery choices.
-/// Push/pull callers use [`run_all`] (which passes a default, unused `DeployCtl`).
+/// Like [`run_all`], but with a [`RunCtl`] for interactive recovery choices.
+/// Push/pull callers use [`run_all`] (which passes a default, unused `RunCtl`).
 #[allow(clippy::too_many_arguments)]
 pub async fn run_all_ctl(
     config: &CiabattaConfig,
@@ -250,7 +266,7 @@ pub async fn run_all_ctl(
     env_vars: &HashMap<String, String>,
     dry_run: bool,
     mode: RunMode,
-    ctl: DeployCtl,
+    ctl: RunCtl,
     tx: mpsc::Sender<ProgressUpdate>,
 ) -> Result<()> {
     let mut handles = Vec::new();
@@ -283,7 +299,7 @@ async fn run_one(
     env_vars: &HashMap<String, String>,
     dry_run: bool,
     mode: RunMode,
-    ctl: &DeployCtl,
+    ctl: &RunCtl,
     tx: mpsc::Sender<ProgressUpdate>,
 ) -> Result<()> {
     let _ = tx.send(ProgressUpdate::Started(name.clone())).await;
@@ -292,14 +308,14 @@ async fn run_one(
         mode = match mode {
             RunMode::Push => "push",
             RunMode::Pull => "pull",
-            RunMode::Deploy => "deploy",
+            RunMode::Run => "run",
         },
         dry_run,
         "starting recipe"
     );
 
-    let result = if mode == RunMode::Deploy {
-        crate::deploy::run_deploy(&name, config, root, env_vars, dry_run, ctl, &tx).await
+    let result = if mode == RunMode::Run {
+        crate::run::execute(&name, config, root, env_vars, dry_run, ctl, &tx).await
     } else {
         execute_recipe(&name, config, root, env_vars, dry_run, mode, &tx).await
     };
@@ -336,8 +352,8 @@ async fn execute_recipe(
         RunMode::Pull => entry
             .pull_recipe()
             .ok_or_else(|| anyhow::anyhow!("Recipe '{}' has no pull action", name))?,
-        // Deploy is dispatched to the DAG engine in `run_one` before reaching here.
-        RunMode::Deploy => unreachable!("deploy mode is handled by the deploy engine"),
+        // Run mode is dispatched to the DAG engine in `run_one` before reaching here.
+        RunMode::Run => unreachable!("run mode is handled by the run engine"),
     };
 
     // Resolve the registry (if any) and the artifact paths once up front, so the
@@ -590,8 +606,8 @@ async fn run_transfer(
     let res = match mode {
         RunMode::Push => registry::push(o, &mut sublog).await,
         RunMode::Pull => registry::pull(o, &mut sublog).await,
-        // Deploys never resolve registry transfers.
-        RunMode::Deploy => unreachable!("deploy mode does not run registry transfers"),
+        // Runs never resolve registry transfers.
+        RunMode::Run => unreachable!("run mode does not run registry transfers"),
     };
     (i, res, sublog)
 }
@@ -977,15 +993,15 @@ mod tests {
         assert_eq!(StageKind::Main.label(RunMode::Push), "push");
         assert_eq!(StageKind::Main.label(RunMode::Pull), "pull");
         assert_eq!(StageKind::Post.label(RunMode::Pull), "post-pull");
-        // Deploy labels its phases pre-deploy → deploy → post-deploy.
-        assert_eq!(StageKind::Pre.label(RunMode::Deploy), "pre-deploy");
-        assert_eq!(StageKind::Main.label(RunMode::Deploy), "deploy");
-        assert_eq!(StageKind::Post.label(RunMode::Deploy), "post-deploy");
+        // Run mode labels its phases pre-run → run → post-run.
+        assert_eq!(StageKind::Pre.label(RunMode::Run), "pre-run");
+        assert_eq!(StageKind::Main.label(RunMode::Run), "run");
+        assert_eq!(StageKind::Post.label(RunMode::Run), "post-run");
         // Compact forms drop the direction suffix on pre/post.
         assert_eq!(StageKind::Pre.short(RunMode::Push), "pre");
         assert_eq!(StageKind::Post.short(RunMode::Pull), "post");
         assert_eq!(StageKind::Main.short(RunMode::Push), "push");
-        assert_eq!(StageKind::Main.short(RunMode::Deploy), "deploy");
+        assert_eq!(StageKind::Main.short(RunMode::Run), "run");
     }
 
     #[test]

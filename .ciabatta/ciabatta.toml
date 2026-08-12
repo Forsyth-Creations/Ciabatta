@@ -1,6 +1,27 @@
 # Ciabatta configuration
 # Run `ciabatta config reference` for full documentation.
 
+# ─── Identity ──────────────────────────────────────────────────────────────────
+# Ciabatta is its own first sub-workspace: `ciabatta build`, `ciabatta test` and
+# `ciabatta lint` here run through the very schema this tool implements.
+[workspace]
+name        = "ciabatta"
+description = "Monorepo orchestration and artifact publishing CLI"
+owner       = "Henry Forsyth"
+tags        = ["rust", "cli", "tooling"]
+requires    = ["cargo"]
+
+# ─── Toolchain ─────────────────────────────────────────────────────────────────
+# How to install what workflows declare in `requires`. Reported before anything
+# runs when a tool is missing.
+[toolchain.cargo]
+hint        = "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh"
+description = "The Rust toolchain (cargo, rustc, clippy, rustfmt)"
+
+[toolchain.yarn]
+hint        = "corepack enable && corepack prepare yarn@4 --activate"
+description = "Yarn 4, which drives the tool_frontend build"
+
 [system]
 # ci = "github"  # Uncomment and set: gitlab | github | jenkins | circleci | azure | bitbucket
 containers = "docker"

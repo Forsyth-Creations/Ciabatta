@@ -1,15 +1,13 @@
 //! `ciabatta todo` — a tiny personal task list.
 //!
-//! Three ways to use it:
+//! Two ways to use it:
 //!   ciabatta todo "take out the trash"   add a task from the command line
-//!   ciabatta todo                         launch a small web app to manage tasks
-//!   ciabatta todo -d                      launch that web app in the background
+//!   ciabatta todo                         open the todo page in the web app
 //!
 //! Tasks live in a single JSON file under the user's home directory
 //! (`~/.ciabatta/todos.json`), so the list is personal and independent of which
-//! project directory you happen to be in.
-
-pub mod server;
+//! project directory you happen to be in. That's why the daemon serves it
+//! unscoped, unlike every other page — see `crate::daemon::routes::todo`.
 
 use std::path::PathBuf;
 use std::sync::Mutex;

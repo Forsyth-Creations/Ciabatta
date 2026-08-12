@@ -2,16 +2,17 @@
 //! searchable web view.
 //!
 //! The command runs through the shell (so pipes / `&&` / redirects work). Its
-//! stdout and stderr are captured line-by-line into a bounded ring buffer, and a
-//! tiny web server (see [`server`]) serves a single-page UI that polls for new
-//! lines, searches the whole buffer, lets you bookmark ("point at") lines, and
-//! fires notifications when a line matches a trigger phrase.
+//! stdout and stderr are captured line-by-line into a bounded ring buffer, and
+//! the web app streams them live, searches the whole buffer, lets you bookmark
+//! ("point at") lines, and notifies when a line matches a trigger phrase.
+//!
+//! The **daemon** owns these processes (see
+//! [`crate::daemon::routes::watch`]), not the CLI invocation that started
+//! them, so a watch survives closing the terminal.
 //!
 //! Bookmarks and triggers **persist to disk** under `~/.ciabatta/watch/`, keyed
 //! by the command string, so they survive restarts. Log lines themselves are
 //! never persisted — they're transient and potentially huge.
-
-pub mod server;
 
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
@@ -113,12 +114,55 @@ struct Inner {
     next_bookmark_id: u64,
     next_trigger_id: u64,
     status: RunStatus,
+    /// The watched process, while it's running. Cleared when it's reaped.
+    pid: Option<u32>,
+}
+
+/// The session identity a transcript is labelled with.
+///
+/// Lives on the daemon's session record rather than in the log store, so it's
+/// passed in rather than read out.
+pub struct TranscriptMeta<'a> {
+    pub id: u64,
+    pub command: &'a str,
+    pub label: Option<&'a str>,
+    pub created_at: &'a str,
+}
+
+impl TranscriptMeta<'_> {
+    /// A filename for a downloaded transcript, safe on every platform.
+    ///
+    /// Named after the step when there is one and the command otherwise, so a
+    /// folder of these is still readable after you've saved a few.
+    pub fn filename(&self) -> String {
+        let mut slug = String::new();
+        let mut last_dash = false;
+        for c in self.label.unwrap_or(self.command).chars() {
+            if c.is_ascii_alphanumeric() {
+                slug.push(c.to_ascii_lowercase());
+                last_dash = false;
+            } else if !last_dash {
+                slug.push('-');
+                last_dash = true;
+            }
+        }
+        let slug: String = slug.trim_matches('-').chars().take(60).collect();
+        let slug = slug.trim_matches('-');
+        if slug.is_empty() {
+            format!("ciabatta-watch-{}.log", self.id)
+        } else {
+            format!("ciabatta-watch-{}-{}.log", self.id, slug)
+        }
+    }
 }
 
 /// The watch store: a command's captured output plus its bookmarks and triggers.
 pub struct WatchState {
     inner: Mutex<Inner>,
     persist_path: PathBuf,
+    /// Notified whenever a line arrives or the process exits, so SSE
+    /// subscribers can wake without polling.
+    changed: tokio::sync::Notify,
 }
 
 impl WatchState {
@@ -163,28 +207,65 @@ impl WatchState {
             next_bookmark_id,
             next_trigger_id,
             status: RunStatus::Running,
+            pid: None,
         };
 
         Ok(Self {
             inner: Mutex::new(inner),
             persist_path,
+            changed: tokio::sync::Notify::new(),
         })
     }
 
     /// Spawn the command through the shell, streaming stdout/stderr into the
     /// store on background tasks. Returns once the child has started; the tasks
     /// keep running until the child exits.
-    pub fn spawn(self: &std::sync::Arc<Self>, command: &str) -> Result<()> {
+    ///
+    /// `cwd` is the directory the command runs in. The daemon owns these
+    /// processes now, so it can't inherit a useful working directory the way
+    /// the old per-invocation server did — the caller must say where.
+    ///
+    /// `env` is layered over the daemon's own environment. A session started by
+    /// hand needs nothing there, but a `persistent` workflow step does: it has
+    /// to see the same `CIABATTA_*` variables and per-package settings the rest
+    /// of its graph ran with, and the daemon's environment has neither.
+    pub fn spawn(
+        self: &std::sync::Arc<Self>,
+        command: &str,
+        cwd: &std::path::Path,
+        env: &std::collections::HashMap<String, String>,
+    ) -> Result<()> {
         use tokio::io::{AsyncBufReadExt, BufReader};
 
         let mut cmd = shell_command(command);
+        cmd.current_dir(cwd);
+        // Ask the command for colour. Its output is a pipe, not a terminal, so
+        // every well-behaved tool disables colour on its own — and the web app
+        // renders the escapes it does emit, so the default costs the reader the
+        // one thing that distinguishes an error line from a note. These are the
+        // three conventions the ecosystem actually reads; they go on before the
+        // caller's `env` so an explicit `FORCE_COLOR=0` still wins.
+        cmd.env("FORCE_COLOR", "1");
+        cmd.env("CLICOLOR_FORCE", "1");
+        cmd.env("CLICOLOR", "1");
+        cmd.envs(env);
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
         cmd.stdin(Stdio::null());
+        // Kill the child if the handle is ever dropped, so a session that goes
+        // away can't leave an orphan running.
+        cmd.kill_on_drop(true);
+        // Lead a new process group, so [`stop`](Self::stop) can signal
+        // everything the command started rather than just the shell.
+        #[cfg(unix)]
+        cmd.process_group(0);
 
         let mut child = cmd
             .spawn()
             .with_context(|| format!("Failed to start command: {command}"))?;
+
+        // Keep the pid so the session can be stopped on request.
+        self.inner.lock().unwrap().pid = child.id();
 
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
@@ -218,12 +299,164 @@ impl WatchState {
                 },
                 Err(e) => RunStatus::Failed(e.to_string()),
             };
-            state.inner.lock().unwrap().status = status;
+            {
+                let mut inner = state.inner.lock().unwrap();
+                inner.status = status;
+                inner.pid = None;
+            }
+            // Wake any SSE subscriber so it reports the exit and closes.
+            state.changed.notify_waiters();
         });
 
         Ok(())
     }
 
+    /// Whether the watched process is still running.
+    pub fn is_running(&self) -> bool {
+        matches!(self.inner.lock().unwrap().status, RunStatus::Running)
+    }
+
+    /// Sequence number of the newest captured line. Cheap change detector for
+    /// the SSE loop.
+    pub fn seq(&self) -> u64 {
+        self.inner.lock().unwrap().next_seq
+    }
+
+    /// Wait until something changes (a new line, or the process exiting).
+    ///
+    /// The SSE stream parks here instead of polling on a timer, so an idle
+    /// session costs nothing.
+    pub async fn changed(&self) {
+        self.changed.notified().await;
+    }
+
+    /// Ask the watched process to stop.
+    ///
+    /// Sends SIGTERM to the session's whole process **group** on Unix, so the
+    /// child gets a chance to clean up; Windows has no equivalent, so it's a
+    /// hard tree kill there.
+    ///
+    /// The group matters: the session runs through `sh -c`, which forks rather
+    /// than execs for anything non-trivial, so signalling the shell alone would
+    /// leave the actual work — `npm run dev`, and the node process under it —
+    /// running with nothing left to stop it.
+    pub fn stop(&self) -> Result<()> {
+        let pid = self.inner.lock().unwrap().pid;
+        let Some(pid) = pid else {
+            anyhow::bail!("This watch session isn't running.");
+        };
+
+        #[cfg(unix)]
+        {
+            // SAFETY: `killpg` on a pid we spawned as a group leader (see
+            // `spawn`). A failure is reported, not fatal. The pid can only be
+            // reused after we reap the child, which clears it above.
+            let rc = unsafe { libc::killpg(pid as libc::pid_t, libc::SIGTERM) };
+            anyhow::ensure!(rc == 0, "Failed to signal pid {pid}");
+        }
+        #[cfg(windows)]
+        {
+            std::process::Command::new("taskkill")
+                .args(["/PID", &pid.to_string(), "/T", "/F"])
+                .output()
+                .with_context(|| format!("Failed to stop pid {pid}"))?;
+        }
+
+        Ok(())
+    }
+
+    /// A full snapshot for the API: lines after `after`, plus everything the
+    /// UI needs to render the session header.
+    pub fn state_json(&self, after: u64, limit: usize) -> serde_json::Value {
+        self.snapshot(after, limit)
+    }
+
+    /// Render the whole buffer as a plain-text transcript, for saving or
+    /// sending to someone else.
+    ///
+    /// The header matters as much as the lines: a log pasted into a chat window
+    /// with no command, no status, and no timestamps is most of a bug report
+    /// short of the useful parts. `stderr` lines are marked, because "which of
+    /// these came from stderr" is invariably the next question and the
+    /// interleaved stream alone can't answer it.
+    ///
+    /// `timestamps` prefixes every line with when it arrived — right for
+    /// diagnosing a hang, noise for a stack trace, so the caller chooses.
+    pub fn transcript(&self, meta: &TranscriptMeta<'_>, timestamps: bool) -> String {
+        let inner = self.inner.lock().unwrap();
+
+        let mut out = String::new();
+        out.push_str(&format!("# ciabatta watch session {}\n", meta.id));
+        out.push_str(&format!("# command:  {}\n", meta.command));
+        if let Some(label) = meta.label {
+            out.push_str(&format!("# step:     {label}\n"));
+        }
+        out.push_str(&format!("# started:  {}\n", meta.created_at));
+        out.push_str(&format!(
+            "# status:   {}\n",
+            match &inner.status {
+                RunStatus::Running => "still running".to_string(),
+                RunStatus::Exited(code) => format!("exited with code {code}"),
+                RunStatus::Signaled => "killed by a signal".to_string(),
+                RunStatus::Failed(code) => format!("failed to start: {code}"),
+            }
+        ));
+        out.push_str(&format!("# exported: {}\n", now_rfc3339()));
+        // A truncated buffer must say so: a transcript that silently starts in
+        // the middle sends the reader hunting for a cause that was dropped.
+        // `next_seq` is the id the *next* line will get and starts at 1, so the
+        // number captured so far is one less than it.
+        if inner.next_seq.saturating_sub(1) as usize > inner.lines.len() {
+            out.push_str(&format!(
+                "# NOTE: only the last {} lines were kept; earlier output was dropped.\n",
+                inner.max_lines
+            ));
+        }
+        out.push_str(&format!("# {} line(s) follow.\n\n", inner.lines.len()));
+
+        for line in &inner.lines {
+            if timestamps {
+                out.push_str(&line.ts);
+                out.push(' ');
+            }
+            if line.stream == Stream::Stderr {
+                out.push_str("[stderr] ");
+            }
+            out.push_str(&strip_ansi(&line.text));
+            out.push('\n');
+        }
+
+        // Bookmarks are the reader's own annotations of what mattered; they're
+        // often the most useful thing in the file, and would otherwise be lost
+        // the moment the log leaves the browser.
+        if !inner.bookmarks.is_empty() {
+            out.push_str("\n# ─── Bookmarks ───\n");
+            for mark in &inner.bookmarks {
+                out.push_str(&format!("# line {}: {}\n", mark.seq, mark.label));
+                if let Some(note) = &mark.note {
+                    out.push_str(&format!("#   note: {note}\n"));
+                }
+            }
+        }
+
+        out
+    }
+
+    /// Search the buffer. Thin public wrapper so the daemon routes can reach
+    /// the existing implementation.
+    pub fn search_lines(
+        &self,
+        terms: &[String],
+        all: bool,
+        regex: bool,
+        stream: Option<Stream>,
+        limit: usize,
+    ) -> (Vec<LogLine>, usize) {
+        self.search(terms, all, regex, stream, limit)
+    }
+}
+
+impl WatchState {
     /// Append one captured line, evaluate triggers, and (on a match) print the
     /// line with a terminal bell so the console user is also notified.
     fn push_line(&self, stream: Stream, text: String) {
@@ -233,11 +466,14 @@ impl WatchState {
         inner.next_seq += 1;
         let ts = now_rfc3339();
 
-        // Check triggers before moving `text` into the buffer.
+        // Check triggers before moving `text` into the buffer, against the line
+        // without its colour escapes — a pattern shouldn't have to know that the
+        // word it's looking for happens to be printed in red.
+        let plain = strip_ansi(&text);
         let mut matched: Vec<(u64, String)> = Vec::new();
         for t in &inner.triggers {
             if let Some(re) = inner.compiled.get(&t.id)
-                && re.is_match(&text)
+                && re.is_match(&plain)
             {
                 matched.push((t.id, t.pattern.clone()));
             }
@@ -255,9 +491,7 @@ impl WatchState {
             while inner.hits.len() > MAX_HITS {
                 inner.hits.pop_front();
             }
-            // Terminal notification channel: bell + the matching line.
-            print!("\x07");
-            println!("⚑ trigger [{pattern}] → {text}");
+            tracing::debug!("watch trigger [{pattern}] matched: {text}");
         }
 
         inner.lines.push_back(LogLine {
@@ -270,6 +504,11 @@ impl WatchState {
         while inner.lines.len() > max {
             inner.lines.pop_front();
         }
+
+        // Release the lock before waking subscribers so they don't immediately
+        // block on it.
+        drop(inner);
+        self.changed.notify_waiters();
     }
 
     /// Add a trigger (deduping by pattern+kind) and persist. Returns its id.
@@ -313,12 +552,15 @@ impl WatchState {
     /// persist. Returns its id.
     pub fn add_bookmark(&self, seq: u64, label: &str, note: Option<String>) -> u64 {
         let mut inner = self.inner.lock().unwrap();
+        // The snippet and the label outlive the buffer — they're persisted and
+        // read back as plain text, so they keep the words and not the colours.
         let snippet = inner
             .lines
             .iter()
             .find(|l| l.seq == seq)
-            .map(|l| l.text.clone())
+            .map(|l| strip_ansi(&l.text).into_owned())
             .unwrap_or_default();
+        let label = strip_ansi(label);
         let label = if label.trim().is_empty() {
             format!("line {seq}")
         } else {
@@ -394,7 +636,9 @@ impl WatchState {
             {
                 continue;
             }
-            let hit = |m: &Option<Regex>| m.as_ref().is_some_and(|re| re.is_match(&line.text));
+            // Match the words, not the colour escapes around them.
+            let plain = strip_ansi(&line.text);
+            let hit = |m: &Option<Regex>| m.as_ref().is_some_and(|re| re.is_match(&plain));
             let is_match = if all {
                 matchers.iter().all(hit)
             } else {
@@ -437,6 +681,55 @@ fn shell_command(command: &str) -> tokio::process::Command {
         cmd.arg("-c").arg(command);
         cmd
     }
+}
+
+/// Remove ANSI escape sequences from `text`.
+///
+/// Captured lines keep their escapes so the web app can colour them, but
+/// everything that reads a line *as text* — trigger and search matching, the
+/// exported transcript, a bookmark's label — wants the words without them. A
+/// search for "error" must not miss a line that colours the word red, and a
+/// transcript pasted into a ticket must not arrive full of `[31m`.
+fn strip_ansi(text: &str) -> std::borrow::Cow<'_, str> {
+    if !text.contains('\u{1b}') {
+        return std::borrow::Cow::Borrowed(text);
+    }
+
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\u{1b}' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            // CSI — parameter and intermediate bytes, then a final byte in
+            // `@`..`~`. Covers colour (`m`) and the cursor moves a progress bar
+            // emits, which are equally unwanted in text.
+            Some('[') => {
+                for c in chars.by_ref() {
+                    if ('\u{40}'..='\u{7e}').contains(&c) {
+                        break;
+                    }
+                }
+            }
+            // OSC — a string (a window title, a hyperlink) ended by BEL or ST.
+            Some(']') => {
+                while let Some(c) = chars.next() {
+                    if c == '\u{7}' {
+                        break;
+                    }
+                    if c == '\u{1b}' {
+                        chars.next();
+                        break;
+                    }
+                }
+            }
+            // Any other escape is two characters; both are already consumed.
+            _ => {}
+        }
+    }
+    std::borrow::Cow::Owned(out)
 }
 
 /// Compile a trigger/search matcher. Substring patterns are escaped and made
@@ -502,9 +795,126 @@ mod tests {
     use std::sync::Arc;
 
     fn store() -> Arc<WatchState> {
-        // Use a unique command so the persisted sidecar doesn't collide.
-        let cmd = format!("test-cmd-{}", std::process::id());
+        // Unique per *call*, not just per process: every test in this binary
+        // shares one pid, so a pid-only name pointed the whole (parallel) suite
+        // at a single sidecar and let one test's lines show up in another's.
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let cmd = format!("test-cmd-{}-{n}", std::process::id());
         Arc::new(WatchState::new(&cmd, 100).unwrap())
+    }
+
+    fn meta() -> TranscriptMeta<'static> {
+        TranscriptMeta {
+            id: 7,
+            command: "npm run build",
+            label: None,
+            created_at: "2026-08-11T09:00:00+01:00",
+        }
+    }
+
+    #[test]
+    fn a_transcript_carries_the_context_a_bare_log_dump_loses() {
+        let s = store();
+        s.push_line(Stream::Stdout, "compiling".into());
+        s.push_line(Stream::Stderr, "warning: unused import".into());
+        s.add_bookmark(2, "the warning", Some("this is the one".into()));
+
+        let text = s.transcript(&meta(), false);
+
+        // Who, what, and when — the parts a pasted log is always missing.
+        assert!(text.contains("ciabatta watch session 7"), "{text}");
+        assert!(text.contains("# command:  npm run build"), "{text}");
+        assert!(
+            text.contains("# started:  2026-08-11T09:00:00+01:00"),
+            "{text}"
+        );
+        assert!(text.contains("# status:   still running"), "{text}");
+        assert!(text.contains("# 2 line(s) follow."), "{text}");
+
+        // stderr is distinguishable, which the interleaved stream alone isn't.
+        assert!(text.contains("compiling"), "{text}");
+        assert!(text.contains("[stderr] warning: unused import"), "{text}");
+        // …and the reader's own annotations survive leaving the browser.
+        assert!(text.contains("# line 2: the warning"), "{text}");
+        assert!(text.contains("#   note: this is the one"), "{text}");
+    }
+
+    #[test]
+    fn timestamps_are_opt_in() {
+        let s = store();
+        s.push_line(Stream::Stdout, "a line".into());
+
+        assert!(!s.transcript(&meta(), false).contains("[stderr]"));
+        let plain = s.transcript(&meta(), false);
+        let stamped = s.transcript(&meta(), true);
+        // The stamped one is longer by a timestamp per line, and the plain one
+        // starts its body with the text itself.
+        assert!(stamped.len() > plain.len());
+        assert!(plain.contains("\na line\n"), "{plain}");
+        assert!(!stamped.contains("\na line\n"), "{stamped}");
+    }
+
+    #[test]
+    fn a_truncated_buffer_says_so_rather_than_starting_mid_story() {
+        // A buffer of two, with three lines pushed through it.
+        let cmd = format!("test-trunc-{}", std::process::id());
+        let s = WatchState::new(&cmd, 2).unwrap();
+        for line in ["first", "second", "third"] {
+            s.push_line(Stream::Stdout, line.into());
+        }
+
+        let text = s.transcript(&meta(), false);
+        assert!(text.contains("earlier output was dropped"), "{text}");
+        assert!(!text.contains("first"), "{text}");
+        assert!(text.contains("third"), "{text}");
+    }
+
+    #[test]
+    fn an_intact_buffer_does_not_claim_to_be_truncated() {
+        let s = store();
+        for line in ["one", "two", "three"] {
+            s.push_line(Stream::Stdout, line.into());
+        }
+        let text = s.transcript(&meta(), false);
+        assert!(!text.contains("dropped"), "{text}");
+    }
+
+    #[test]
+    fn a_transcript_filename_is_readable_and_safe() {
+        assert_eq!(
+            TranscriptMeta {
+                id: 3,
+                command: "npm run dev -- --port 3000",
+                label: None,
+                created_at: "",
+            }
+            .filename(),
+            "ciabatta-watch-3-npm-run-dev-port-3000.log"
+        );
+        // A labelled session is named after its step, which identifies it far
+        // better than the command line does.
+        assert_eq!(
+            TranscriptMeta {
+                id: 4,
+                command: "sleep 3600",
+                label: Some("web:serve"),
+                created_at: "",
+            }
+            .filename(),
+            "ciabatta-watch-4-web-serve.log"
+        );
+        // Nothing usable left after slugging still yields a valid filename.
+        assert_eq!(
+            TranscriptMeta {
+                id: 5,
+                command: "!!!",
+                label: None,
+                created_at: "",
+            }
+            .filename(),
+            "ciabatta-watch-5.log"
+        );
     }
 
     #[test]
@@ -523,6 +933,44 @@ mod tests {
         let (all, all_total) = s.search(&terms, true, false, None, 100);
         assert_eq!(all_total, 1);
         assert_eq!(all[0].text, "hello world");
+    }
+
+    #[test]
+    fn colour_escapes_do_not_hide_a_line_from_search_or_a_trigger() {
+        let s = store();
+        s.add_trigger("error", false).unwrap();
+        // A coloured line, as any build tool emits once it thinks it has a tty.
+        s.push_line(Stream::Stderr, "\u{1b}[1;31merror\u{1b}[0m: boom".into());
+
+        let (found, total) = s.search(&["error: boom".to_string()], false, false, None, 100);
+        assert_eq!(total, 1);
+        // The line keeps its escapes — the web app colours them; only the
+        // matching looked at the text underneath.
+        assert!(found[0].text.contains('\u{1b}'));
+
+        let snap = s.snapshot(0, 100);
+        assert_eq!(snap["hits"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn the_transcript_is_plain_text() {
+        let s = store();
+        s.push_line(Stream::Stdout, "\u{1b}[32mpassed\u{1b}[0m".into());
+        // Cursor moves from a progress bar go too: they are not text either.
+        s.push_line(Stream::Stdout, "\u{1b}[2K\u{1b}[1G50%".into());
+
+        let out = s.transcript(
+            &TranscriptMeta {
+                id: 1,
+                command: "make",
+                label: None,
+                created_at: "",
+            },
+            false,
+        );
+        assert!(!out.contains('\u{1b}'));
+        assert!(out.contains("passed"));
+        assert!(out.contains("50%"));
     }
 
     #[test]

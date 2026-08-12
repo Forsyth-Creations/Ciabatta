@@ -688,6 +688,22 @@ fn context_window_tokens(model: &str, kind: ProviderKind) -> usize {
     32_000
 }
 
+/// A trimmed, single-line preview of a response body for error messages — enough
+/// to recognise an HTML error page or a proxy notice without dumping kilobytes.
+fn snippet(body: &str) -> String {
+    let trimmed = body.trim();
+    if trimmed.is_empty() {
+        return "(empty response body)".to_string();
+    }
+    let flat: String = trimmed.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flat.chars().count() > 300 {
+        let head: String = flat.chars().take(300).collect();
+        format!("body: {head}…")
+    } else {
+        format!("body: {flat}")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -768,21 +784,5 @@ mod tests {
             cache_read_tokens: 1000,
         };
         assert_eq!(u.label(), "1.2k in · 340 out · 1.0k cached");
-    }
-}
-
-/// A trimmed, single-line preview of a response body for error messages — enough
-/// to recognise an HTML error page or a proxy notice without dumping kilobytes.
-fn snippet(body: &str) -> String {
-    let trimmed = body.trim();
-    if trimmed.is_empty() {
-        return "(empty response body)".to_string();
-    }
-    let flat: String = trimmed.split_whitespace().collect::<Vec<_>>().join(" ");
-    if flat.chars().count() > 300 {
-        let head: String = flat.chars().take(300).collect();
-        format!("body: {head}…")
-    } else {
-        format!("body: {flat}")
     }
 }

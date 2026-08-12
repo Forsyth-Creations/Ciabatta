@@ -735,6 +735,20 @@ pub enum ConfigureCommand {
     },
 }
 
+/// Parse `-e KEY=VALUE` flags into a HashMap.
+pub fn parse_env_flags(
+    flags: &[String],
+) -> anyhow::Result<std::collections::HashMap<String, String>> {
+    let mut map = std::collections::HashMap::new();
+    for flag in flags {
+        let (k, v) = flag
+            .split_once('=')
+            .ok_or_else(|| anyhow::anyhow!("Invalid env flag '{}': expected KEY=VALUE", flag))?;
+        map.insert(k.to_string(), v.to_string());
+    }
+    Ok(map)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -772,18 +786,4 @@ mod tests {
         assert!(!run_args(&["ciabatta", "run", "build", "--no-tui"]).use_tui());
         assert!(!run_args(&["ciabatta", "run", "build", "--no-tui", "--tui"]).use_tui());
     }
-}
-
-/// Parse `-e KEY=VALUE` flags into a HashMap.
-pub fn parse_env_flags(
-    flags: &[String],
-) -> anyhow::Result<std::collections::HashMap<String, String>> {
-    let mut map = std::collections::HashMap::new();
-    for flag in flags {
-        let (k, v) = flag
-            .split_once('=')
-            .ok_or_else(|| anyhow::anyhow!("Invalid env flag '{}': expected KEY=VALUE", flag))?;
-        map.insert(k.to_string(), v.to_string());
-    }
-    Ok(map)
 }

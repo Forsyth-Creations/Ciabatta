@@ -386,9 +386,16 @@ pub async fn run_shell_command_opts(
         .arg(cmd)
         .current_dir(cwd)
         .envs(env_vars)
-        .kill_on_drop(kill_on_drop)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+
+    // Tokio's `kill_on_drop` signals only the pid it spawned, which is never
+    // enough on its own — see [`ProcessGroup`]. On Windows it's actively
+    // harmful: `taskkill /T` finds the tree by walking parent pids, so
+    // terminating the shell first orphans everything under it and leaves
+    // nothing to walk. There, `ProcessGroup` does the killing by itself.
+    #[cfg(not(windows))]
+    command.kill_on_drop(kill_on_drop);
 
     // Lead a new process group, so abandoning the command can take everything
     // it spawned with it rather than just the shell.
@@ -420,8 +427,13 @@ pub async fn run_shell_command_opts(
 /// keep running long after ciabatta exited. Spawning into a fresh process group
 /// and signalling the group is what actually stops it.
 ///
-/// On platforms without process groups this is inert, and `kill_on_drop` alone
-/// applies.
+/// Windows has no process groups, and the gap is worse there rather than
+/// better: `sh` is Git Bash, which runs the script in a `bash` child of its
+/// own. Terminating the pid we hold leaves that `bash` — and the dev server or
+/// compiler under it — running. Because the survivors inherited the stdout and
+/// stderr pipe handles, the read end never reaches EOF either, so anything
+/// still reading the abandoned command's output waits forever. `taskkill /T`
+/// takes the whole tree and closes the pipes with it.
 struct ProcessGroup {
     /// `None` once disarmed, or when there was nothing to track.
     pid: Option<u32>,
@@ -453,7 +465,21 @@ impl Drop for ProcessGroup {
         unsafe {
             libc::killpg(pid as libc::pid_t, libc::SIGKILL);
         }
-        #[cfg(not(unix))]
+        #[cfg(windows)]
+        {
+            // `/T` is the whole point: it walks the tree from this pid and
+            // takes the Git Bash shell, the `bash` under it, and whatever that
+            // started. Waited on rather than fired and forgotten, so that by
+            // the time this returns the pipes really are closed — a reader
+            // parked on them is exactly what we're here to release. A failure
+            // means the tree is already gone, which is the outcome we wanted.
+            let _ = std::process::Command::new("taskkill")
+                .args(["/PID", &pid.to_string(), "/T", "/F"])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
+        }
+        #[cfg(not(any(unix, windows)))]
         let _ = pid;
     }
 }

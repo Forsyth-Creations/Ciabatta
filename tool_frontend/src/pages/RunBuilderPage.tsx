@@ -29,7 +29,7 @@ import type { Theme } from "@mui/material/styles";
 import type { Edge, Node } from "@xyflow/react";
 
 import { GraphCanvas } from "../components/GraphCanvas";
-import { layeredLayout } from "../components/layout";
+import { ORTHOGONAL_EDGE, layeredLayout } from "../components/layout";
 import { PageHeader } from "../components/Page";
 import { monoFontStack } from "../theme";
 
@@ -263,6 +263,7 @@ function buildPreview(steps: DraftStep[], theme: Theme) {
 
   const edges: Edge[] = [
     ...orderEdges.map((e, i) => ({
+      ...ORTHOGONAL_EDGE,
       id: `needs-${i}`,
       source: e.source,
       target: e.target,
@@ -271,6 +272,7 @@ function buildPreview(steps: DraftStep[], theme: Theme) {
     ...steps
       .filter((s) => s.onError)
       .map((s, i) => ({
+        ...ORTHOGONAL_EDGE,
         id: `error-${i}`,
         source: s.name,
         target: s.onError,

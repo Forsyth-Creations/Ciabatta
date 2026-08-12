@@ -9,6 +9,7 @@
 import { useQuery } from "@tanstack/react-query";
 
 import { api } from "./client";
+import type { EnvReport } from "./types";
 
 export interface WorkflowStep {
   name: string;
@@ -27,6 +28,10 @@ export interface WorkflowStep {
   continue_on_error: boolean;
   recover: boolean;
   on_error: string | null;
+  /** Variables this step sets for itself, on top of the run's environment. */
+  env: Record<string, string>;
+  /** Variables this step reads — in its command, cwd, or conditions. */
+  env_refs: string[];
 }
 
 export interface WorkflowSummary {
@@ -98,6 +103,11 @@ export interface WorkflowGraph {
   /** Node ids per dependency layer — the order the graph is drawn in. */
   waves: string[][];
   missing_tools: MissingTool[];
+  /**
+   * Every environment variable this graph depends on, resolved against the
+   * daemon's own environment — what a run started from here would see.
+   */
+  env: EnvReport;
 }
 
 export const workspaceKeys = {

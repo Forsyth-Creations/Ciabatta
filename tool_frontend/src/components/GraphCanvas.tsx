@@ -36,6 +36,16 @@ interface GraphCanvasProps {
    * of the graph than it helps you navigate.
    */
   minimap?: boolean;
+  /**
+   * Change this when the graph's *shape* changes — nodes added or removed
+   * rather than restyled — to re-fit the view around it.
+   *
+   * react-flow only fits on mount, so without it a node placed outside the
+   * current viewport (a new column of environment inputs, say) is drawn where
+   * nobody can see it. Panning and zooming reset with it, which is the right
+   * trade when what you're looking at has changed.
+   */
+  fitKey?: string | number;
 }
 
 export function GraphCanvas({
@@ -45,6 +55,7 @@ export function GraphCanvas({
   onNodeClick,
   nodeColor,
   minimap,
+  fitKey,
 }: GraphCanvasProps) {
   const theme = useTheme();
 
@@ -82,6 +93,7 @@ export function GraphCanvas({
       }}
     >
       <ReactFlow
+        key={fitKey}
         nodes={nodes}
         edges={edges}
         onNodeClick={onNodeClick}

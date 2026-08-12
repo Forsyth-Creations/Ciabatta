@@ -9,6 +9,7 @@
 //! [`crate::daemon::routes::run`].
 
 pub mod engine;
+pub mod envdeps;
 pub mod filter;
 pub mod view;
 

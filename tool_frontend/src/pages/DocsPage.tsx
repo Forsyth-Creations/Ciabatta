@@ -320,7 +320,7 @@ const COMMANDS: CommandGroup[] = [
           ["--isolated", "Don't follow dependencies into other sub-workspaces."],
           ["--gui", "Watch it live in this app instead of the terminal."],
           ["-e KEY=VALUE", "Set a variable for every step. Beats .env and CI."],
-          ["--no-tui", "Plain stdout, for CI logs."],
+          ["--tui", "Watch it in the terminal TUI. Runs print plain text by default."],
         ],
       },
       {
@@ -352,7 +352,7 @@ const COMMANDS: CommandGroup[] = [
       },
       {
         usage: "ciabatta run <target> --graph",
-        note: "An interactive view of the resolved graph: every step in wave order, and per step what it does, who owns it, what it waits for, what waits on it. Honours --filter. Add --no-tui to print it instead.",
+        note: "The resolved graph: every step in wave order, and per step what it does, who owns it, what it waits for, what waits on it. Honours --filter. Add --tui to explore it interactively instead of printing it.",
       },
       {
         usage: "ciabatta config reference",

@@ -50,8 +50,9 @@ also just a step on the graph, so a build that ends in a push is one command.
   `CIABATTA_TAG`, and `CIABATTA_BUILD_NUMBER` from GitLab, GitHub Actions,
   Jenkins, CircleCI, Azure DevOps, or Bitbucket — and lets you template them
   into publish paths.
-- **Parallel with live progress.** Run several recipes at once and watch each
-  one in a `ratatui`-powered TUI (or `--no-tui` for plain CI logs).
+- **Parallel with live progress.** Run several recipes at once. Runs print plain
+  text (add `--tui` for the `ratatui` live view); `push`/`pull` open the TUI
+  unless you pass `--no-tui`.
 - **Push *and* pull.** Because Ciabatta knows where things live, it can fetch
   artifacts back down, not just upload them.
 - **Bring your own auth.** Login is handled by your own scripts — Ciabatta just
@@ -171,7 +172,7 @@ Useful flags on `push` / `pull`:
 - `--no-tui` — disable the TUI and stream plain progress to stdout (ideal for CI).
 - `-c, --config PATH` — use a specific config file instead of discovery.
 
-Useful flags on a workflow (`ciabatta build`, …):
+Useful flags on a run or a workflow (`ciabatta run …`, `ciabatta build`, …):
 
 - `--graph` — print the graph and stop. Nothing runs.
 - `--dry-run` — walk every step, executing none of them.
@@ -180,6 +181,9 @@ Useful flags on a workflow (`ciabatta build`, …):
 - `--isolated` — don't follow dependencies out of what you selected, for when
   everything upstream is already built.
 - `-e, --env KEY=VALUE` — set a variable for every step. Repeatable.
+- `--tui` — run inside the live terminal UI. **Runs print plain text by
+  default**, which is what CI wants and what you can pipe; the TUI is opt-in.
+  (`--no-tui` is still accepted and does nothing.)
 - `--gui` — watch the graph run live in a browser instead of the terminal.
 
 Global flags (any command):
@@ -630,6 +634,38 @@ refuses to start the run and asks you for the values instead, then starts it wit
 what you typed. Ciabatta checks the daemon's own environment and any `env_file`
 the recipe sources first, so it only prompts for what genuinely has nowhere else
 to come from.
+
+### The environment is printed before anything runs
+
+A run's steps are shell scripts, and the difference between "works here" and
+"fails there" is far more often a variable than the graph. So every
+`ciabatta run` (and every workflow) prints the variables it depends on first —
+the same way it prints the graph before executing it:
+
+```
+Environment for 'web' — 5 variable(s) this run depends on
+  sourcing .env
+  API_TOKEN     ••••••••                  [environment · REQUIRED_ENV · used by deploy]
+  AWS_REGION    eu-west-1                 [env file · .env · REQUIRED_ENV · used by deploy]
+  STAGE         prod                      [environment · REQUIRED_ENV · used by build, deploy]
+  DATABASE_URL  postgres://localhost/app  [env file · .env]
+  JOBS          4                         [config · used by build]
+```
+
+The list is everything the run is actually wired to: `REQUIRED_ENV`, every key
+in the `.env` files it sources, the `[env]` tables that cascade from
+sub-workspace to workflow to step, and every `$VAR` the step commands, working
+directories and `when` / `skip_if` conditions read. Each line says where the
+value came from (`environment` — your shell, CI, or `-e` — beats `env file`,
+which beats `config`) and which steps depend on it. Anything unset is shown as
+such, and required variables that are missing are called out before the run
+aborts on them.
+
+**Values whose names look like secrets** (`*_TOKEN`, `*_SECRET*`, `*PASSWORD*`,
+`*_KEY`, `*_PASS`, `*AUTH*`, …) are masked. This output goes into CI logs.
+
+The same list is served to the web app, where each variable is drawn as a node
+feeding into the steps that read it — click one to light up its dependents.
 
 ### Build variables are auto-sourced
 

@@ -880,10 +880,10 @@ recognise as a command is treated as a workflow.
 ciabatta run build --graph
 ```
 
-Opens an interactive view of exactly what would run: every step in wave order,
-and for each one what it does, who owns it, what it's waiting for, what's
-waiting on *it*, and which tools it needs. Arrow keys move, `q` quits, nothing
-executes. Add `--no-tui` to print it instead, which is what you want in CI.
+Prints exactly what would run: every step in wave order, and for each one what
+it does, who owns it, what it's waiting for, and which tools it needs. Nothing
+executes. Add `--tui` for an interactive view of the same thing, one node at a
+time — arrow keys move, `q` quits.
 
 ### Running part of a graph
 

@@ -13,7 +13,7 @@ use serde::Serialize;
 use crate::config::CiabattaConfig;
 use crate::runner::{ProgressUpdate, RunMode, StageKind};
 
-use super::resolve_run;
+use super::{envdeps, resolve_run};
 
 // ─── Serializable live state ────────────────────────────────────────────────
 
@@ -36,6 +36,11 @@ pub struct RecipeView {
     edges: Vec<EdgeView>,
     logs: Vec<String>,
     pending: Option<PendingChoice>,
+    /// Every environment variable this run depends on, with the value its steps
+    /// will see and where that value came from. Resolved once, when the run is
+    /// created — it is what the run started with, not a live view of the
+    /// daemon's environment.
+    env: crate::run::envdeps::EnvReport,
 }
 
 #[derive(Serialize, Clone)]
@@ -75,6 +80,16 @@ pub struct StepView {
     timeout: Option<String>,
     /// Tools it needs on `PATH`.
     requires: Vec<String>,
+
+    // ─── Environment ────────────────────────────────────────────────────────
+    /// The variables this step's own `[env]` table sets, layered over the
+    /// run's. A compiled workflow graph folds its sub-workspace's and
+    /// workflow's tables in here too.
+    env: std::collections::BTreeMap<String, String>,
+    /// The variables this step reads — from its command, working directory and
+    /// conditions. Together with `env` these are the edges the graph view
+    /// draws between a variable and the steps that depend on it.
+    env_refs: Vec<String>,
 }
 
 #[derive(Serialize, Clone)]
@@ -228,11 +243,16 @@ impl GuiState {
 }
 
 /// Build the initial live state (all steps pending) from the resolved runs.
+///
+/// `env` is what the run will start with — the daemon's own environment plus
+/// whatever the caller supplied — so the view can say which variables each step
+/// depends on and what they resolve to, the same list the terminal prints.
 pub fn initial_state(
     config: &CiabattaConfig,
     root: &std::path::Path,
     names: &[String],
     dry_run: bool,
+    env: &std::collections::HashMap<String, String>,
 ) -> Result<GuiState> {
     let mut recipes = Vec::new();
     for name in names {
@@ -285,6 +305,12 @@ pub fn initial_state(
                 persistent: step.persistent,
                 timeout: step.timeout.clone(),
                 requires: step.requires.clone(),
+                env: step
+                    .env
+                    .iter()
+                    .map(|(key, value)| (key.clone(), envdeps::shown(key, value)))
+                    .collect(),
+                env_refs: envdeps::step_refs(step),
             });
         }
 
@@ -305,6 +331,7 @@ pub fn initial_state(
             edges,
             logs: Vec::new(),
             pending: None,
+            env: envdeps::collect(&resolved, root, env),
         });
     }
     Ok(GuiState {

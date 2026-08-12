@@ -6,7 +6,21 @@
  * engine would be a large dependency baked into the Rust binary for very little.
  */
 
-import type { Edge, Node } from "@xyflow/react";
+import { Position, type Edge, type Node } from "@xyflow/react";
+
+/**
+ * Edge styling for the layered graphs: orthogonal segments with rounded
+ * corners, rather than react-flow's default bezier.
+ *
+ * With nodes in columns, a curve between two of them wanders through the space
+ * where other edges are; a right-angled route reads as wiring and stays legible
+ * when a dozen of them share a lane. Spread this into an edge and override
+ * `style` as needed.
+ */
+export const ORTHOGONAL_EDGE = {
+  type: "smoothstep" as const,
+  pathOptions: { borderRadius: 14 },
+};
 
 /**
  * Two-ring radial layout: a small set of "hub" nodes on an inner circle, with
@@ -112,6 +126,12 @@ export function layeredLayout(
           y: (index - (column.length - 1) / 2) * rowHeight,
         },
         type: "default",
+        // The graph runs left to right, so edges must leave the right side and
+        // arrive at the left. With react-flow's default top/bottom handles
+        // every edge doubles back on itself into an S — the "comes after"
+        // direction is exactly the thing that stops being readable.
+        sourcePosition: Position.Right,
+        targetPosition: Position.Left,
       });
     });
   }

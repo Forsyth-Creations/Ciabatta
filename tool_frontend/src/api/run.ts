@@ -3,6 +3,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { ApiError, api } from "./client";
+import type { EnvReport } from "./types";
 import { useWorkspace } from "./workspace";
 
 export type StepStatus = "pending" | "running" | "success" | "failed" | "skipped";
@@ -28,6 +29,11 @@ export interface StepView {
   persistent: boolean;
   timeout: string | null;
   requires: string[];
+
+  /** Variables this step sets for itself, on top of the run's environment. */
+  env: Record<string, string>;
+  /** Variables this step reads — in its command, cwd, or conditions. */
+  env_refs: string[];
 }
 
 export interface EdgeView {
@@ -57,6 +63,11 @@ export interface RecipeView {
   edges: EdgeView[];
   logs: string[];
   pending: PendingChoice | null;
+  /**
+   * The environment this run started with, resolved once when it was created:
+   * every variable its steps depend on, with the value they see.
+   */
+  env: EnvReport;
 }
 
 export interface RunSummary {

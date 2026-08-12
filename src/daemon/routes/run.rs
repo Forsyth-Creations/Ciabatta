@@ -231,16 +231,19 @@ async fn create(
         (workspace.root, vec![name])
     };
 
-    // Fail fast on a bad flowchart, before anything is spawned.
-    let gui_state = Arc::new(Mutex::new(
-        initial_state(&config, &root, &names, payload.dry_run).map_err(RouteError::bad_request)?,
-    ));
-
     // Seed from the daemon's own environment, so a run started from the browser
     // sees what one started from a terminal would (`build_env_vars` does the
     // same), then layer whatever the caller supplied on top.
     let mut env: HashMap<String, String> = std::env::vars().collect();
     env.extend(payload.env.clone());
+
+    // Fail fast on a bad flowchart, before anything is spawned. The resolved
+    // environment goes in with it, so the view can show each step's variables
+    // alongside the step itself.
+    let gui_state = Arc::new(Mutex::new(
+        initial_state(&config, &root, &names, payload.dry_run, &env)
+            .map_err(RouteError::bad_request)?,
+    ));
 
     // Pre-flight the environment rather than spawning a run that would only
     // abort at the engine's `REQUIRED_ENV` gate. 422 carries the variable names

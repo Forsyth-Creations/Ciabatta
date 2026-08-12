@@ -429,10 +429,10 @@ pub struct RunArgs {
     #[arg(long)]
     pub isolated: bool,
 
-    /// Explore the resolved graph without running it: an interactive viewer of
-    /// every step, in wave order, with what it does and where it came from.
-    /// Reflects --filter, so it answers "what would this actually run?".
-    /// With --no-tui it prints the graph instead, for CI logs.
+    /// Show the resolved graph without running it: every step, in wave order,
+    /// with what it does and where it came from. Reflects --filter, so it
+    /// answers "what would this actually run?". With --tui it opens the
+    /// interactive explorer instead, one node at a time.
     #[arg(long)]
     pub graph: bool,
 
@@ -444,8 +444,17 @@ pub struct RunArgs {
     #[arg(long)]
     pub dry_run: bool,
 
-    /// Disable the TUI and print progress to stdout.
+    /// Run inside the live TUI instead of printing plain progress.
+    ///
+    /// A run prints ordinary text by default: it's what CI wants, it's what
+    /// survives in a scrollback, and it's what you can pipe. The TUI is the
+    /// richer view when you're watching a run happen.
     #[arg(long)]
+    pub tui: bool,
+
+    /// Accepted and ignored — plain output is the default. Kept so existing
+    /// scripts and CI jobs that pass it keep working.
+    #[arg(long, hide = true)]
     pub no_tui: bool,
 
     /// Derive CIABATTA_BRANCH/_COMMIT/_TAG/_BUILD_NUMBER from local git history
@@ -471,6 +480,16 @@ pub struct RunArgs {
     /// CIABATTA_DAEMON_PORT).
     #[arg(short = 'p', long)]
     pub port: Option<u16>,
+}
+
+impl RunArgs {
+    /// Whether this invocation takes over the terminal with the TUI.
+    ///
+    /// Opt-in, and `--no-tui` still wins if both are given — a script that
+    /// already asks for plain output must keep getting it.
+    pub fn use_tui(&self) -> bool {
+        self.tui && !self.no_tui
+    }
 }
 
 /// Parses a bare `ciabatta <workflow> [flags]` invocation.
@@ -532,8 +551,14 @@ pub struct WorkflowArgs {
     #[arg(long)]
     pub dry_run: bool,
 
-    /// Disable the TUI and print progress to stdout.
+    /// Run inside the live TUI instead of printing plain progress. A workflow
+    /// is an ordinary run, so it prints plain text unless you ask for the TUI.
     #[arg(long)]
+    pub tui: bool,
+
+    /// Accepted and ignored — plain output is the default. Kept so existing
+    /// scripts and CI jobs that pass it keep working.
+    #[arg(long, hide = true)]
     pub no_tui: bool,
 
     /// Watch the run live in a browser instead of the terminal.
@@ -547,6 +572,14 @@ pub struct WorkflowArgs {
     /// Port the ciabatta daemon listens on (with --gui).
     #[arg(short = 'p', long)]
     pub port: Option<u16>,
+}
+
+impl WorkflowArgs {
+    /// Whether this invocation takes over the terminal with the TUI. See
+    /// [`RunArgs::use_tui`] — the two spellings must agree.
+    pub fn use_tui(&self) -> bool {
+        self.tui && !self.no_tui
+    }
 }
 
 #[derive(Subcommand, Debug)]
@@ -700,6 +733,45 @@ pub enum ConfigureCommand {
         #[arg(long)]
         yes: bool,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn run_args(argv: &[&str]) -> RunArgs {
+        match Cli::try_parse_from(argv).expect("parses").command {
+            Commands::Run(args) => args,
+            other => panic!("expected a run, got {other:?}"),
+        }
+    }
+
+    fn workflow_args(argv: &[&str]) -> WorkflowArgs {
+        match Cli::try_parse_from(argv).expect("parses").command {
+            Commands::Workflow(args) => args,
+            other => panic!("expected a workflow, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_run_prints_plain_text_unless_the_tui_is_asked_for() {
+        assert!(!run_args(&["ciabatta", "run", "build"]).use_tui());
+        assert!(run_args(&["ciabatta", "run", "build", "--tui"]).use_tui());
+
+        // A workflow is an ordinary run, so the two spellings must agree —
+        // `ciabatta build` and `ciabatta run build` can't differ in whether
+        // they take over the terminal.
+        assert!(!workflow_args(&["ciabatta", "workflow", "build"]).use_tui());
+        assert!(workflow_args(&["ciabatta", "workflow", "build", "--tui"]).use_tui());
+    }
+
+    #[test]
+    fn no_tui_is_still_accepted_and_still_means_plain() {
+        // Scripts and CI jobs that already pass it must keep working, and must
+        // keep getting plain output even alongside --tui.
+        assert!(!run_args(&["ciabatta", "run", "build", "--no-tui"]).use_tui());
+        assert!(!run_args(&["ciabatta", "run", "build", "--no-tui", "--tui"]).use_tui());
+    }
 }
 
 /// Parse `-e KEY=VALUE` flags into a HashMap.

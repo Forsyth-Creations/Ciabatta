@@ -221,6 +221,20 @@ async fn graph(
 
     let missing = workspace::missing_tools(&workspace, &compiled.steps);
 
+    // What the graph depends on besides its steps: the variables it declares,
+    // sources, and reads, resolved against the daemon's own environment — the
+    // same environment a run started from here would get.
+    let env = crate::run::envdeps::collect(
+        &crate::run::ResolvedRun {
+            required_env: compiled.required_env.clone(),
+            env_files: compiled.env_files.clone(),
+            steps: compiled.steps.clone(),
+            ..Default::default()
+        },
+        &workspace.root,
+        &std::env::vars().collect(),
+    );
+
     Ok(Json(json!({
         "workflow": compiled.label(),
         "root": workspace.root.to_string_lossy(),
@@ -249,11 +263,21 @@ async fn graph(
                 "needed_by": tool.needed_by,
             }))
             .collect::<Vec<_>>(),
+        "env": env,
     })))
 }
 
 /// One step, described the way the catalogue and the graph both want it.
+///
+/// `env` is what the step sets for itself and `env_refs` what it reads: a step
+/// depends on its variables every bit as much as on the steps before it, and
+/// the graph draws both.
 fn step_json(step: &crate::run::RunStep) -> Value {
+    let env: serde_json::Map<String, Value> = step
+        .env
+        .iter()
+        .map(|(key, value)| (key.clone(), json!(crate::run::envdeps::shown(key, value))))
+        .collect();
     json!({
         "name": step.name,
         "description": step.description,
@@ -270,5 +294,7 @@ fn step_json(step: &crate::run::RunStep) -> Value {
         "continue_on_error": step.continue_on_error,
         "recover": step.recover,
         "on_error": step.on_error,
+        "env": env,
+        "env_refs": crate::run::envdeps::step_refs(step),
     })
 }

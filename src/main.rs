@@ -51,7 +51,7 @@ async fn main() -> Result<()> {
             // the screen with the TUI (the output would corrupt/close it).
             let vars = build_env_vars(&cfg, &env, local, &root, no_tui)?;
             let names = select_transfer_names(&cfg, &cookbooks, &recipes)?;
-            execute_recipes(&cfg, &root, &names, &vars, dry_run, no_tui, RunMode::Push).await?;
+            execute_recipes(&cfg, &root, &names, &vars, dry_run, !no_tui, RunMode::Push).await?;
         }
 
         Commands::Pull {
@@ -66,7 +66,7 @@ async fn main() -> Result<()> {
             let (root, cfg) = load_project(config.as_deref())?;
             let vars = build_env_vars(&cfg, &env, local, &root, no_tui)?;
             let names = select_transfer_names(&cfg, &cookbooks, &recipes)?;
-            execute_recipes(&cfg, &root, &names, &vars, dry_run, no_tui, RunMode::Pull).await?;
+            execute_recipes(&cfg, &root, &names, &vars, dry_run, !no_tui, RunMode::Pull).await?;
         }
 
         Commands::Run(args) => {
@@ -280,7 +280,7 @@ async fn cmd_workflow(args: cli::WorkflowArgs, bare_name: bool) -> Result<()> {
 
     // The graph goes to stderr when a TUI is about to take the screen, so it
     // survives in the scrollback either way.
-    let takes_over_screen = !args.no_tui && !args.gui;
+    let takes_over_screen = args.use_tui() && !args.gui;
     if !(args.graph && takes_over_screen) {
         let drawing = workspace::render::graph(&ws, &graph);
         if takes_over_screen {
@@ -310,9 +310,9 @@ async fn cmd_workflow(args: cli::WorkflowArgs, bare_name: bool) -> Result<()> {
     }
 
     if args.graph {
-        // In a terminal, the graph is worth exploring rather than scrolling:
-        // the viewer shows one node at a time in full. Piped output and
-        // --no-tui get the plain drawing printed above instead.
+        // With --tui the graph is worth exploring rather than scrolling: the
+        // viewer shows one node at a time in full. Otherwise the plain drawing
+        // printed above is the answer.
         if takes_over_screen {
             tui::graph::explore(&ws, &graph, &pruned).await?;
         } else {
@@ -328,20 +328,19 @@ async fn cmd_workflow(args: cli::WorkflowArgs, bare_name: bool) -> Result<()> {
     // config as a single run-capable recipe, and the existing machinery — TUI,
     // live view, recovery prompts — does the rest.
     let mut cfg = load_config(&ws.root)?;
-    let mut vars = build_env_vars(
-        &cfg,
-        &args.env,
-        args.local,
-        &ws.root,
-        args.no_tui && !args.gui,
-    )?;
-    source_ciabatta_vars(&mut vars, &ws.root, args.no_tui && !args.gui);
-    report_env_drift(&ws.root, &graph.env_files, args.no_tui && !args.gui);
+    // Resolved variables are echoed only when this terminal is going to keep
+    // showing text: the TUI would be corrupted by it, and a --gui run reports
+    // in the browser instead.
+    let announce = !args.use_tui() && !args.gui;
+    let mut vars = build_env_vars(&cfg, &args.env, args.local, &ws.root, announce)?;
+    source_ciabatta_vars(&mut vars, &ws.root, announce);
+    report_env_drift(&ws.root, &graph.env_files, announce);
     let name = workspace::graph::install_as_recipe(&mut cfg, graph);
 
     if args.gui {
         // The daemon owns the run, so it compiles the graph itself from the
         // same declarations rather than being handed our copy.
+        report_env_dependencies(&cfg, &ws.root, &[name], &vars, false);
         return cmd_workflow_gui(&args, &workflows, &ws.root, vars).await;
     }
 
@@ -351,7 +350,7 @@ async fn cmd_workflow(args: cli::WorkflowArgs, bare_name: bool) -> Result<()> {
         &[name],
         &vars,
         args.dry_run,
-        args.no_tui,
+        args.use_tui(),
         RunMode::Run,
     )
     .await
@@ -415,6 +414,7 @@ async fn cmd_run(args: cli::RunArgs) -> Result<()> {
                 graph: args.graph,
                 env: args.env,
                 dry_run: args.dry_run,
+                tui: args.tui,
                 no_tui: args.no_tui,
                 gui: args.gui,
                 local: args.local,
@@ -436,12 +436,12 @@ async fn cmd_run_recipes(
     workflow_names: &[String],
 ) -> Result<()> {
     let (root, mut cfg) = load_project(args.config.as_deref())?;
-    let mut vars = build_env_vars(&cfg, &args.env, args.local, &root, args.no_tui || args.gui)?;
+    let mut vars = build_env_vars(&cfg, &args.env, args.local, &root, !args.use_tui())?;
     // Auto-source the CIABATTA_* build variables from local git so every run
     // script sees CIABATTA_BRANCH/_COMMIT/_TAG/_BUILD_NUMBER/_PATH, even when
     // the run isn't in explicit `--local` or CI mode. Anything already resolved
     // wins.
-    source_ciabatta_vars(&mut vars, &root, args.no_tui && !args.gui);
+    source_ciabatta_vars(&mut vars, &root, !args.use_tui() && !args.gui);
 
     let names = select_run_names(&cfg, &args.cookbooks, recipes)?;
     if names.is_empty() {
@@ -470,17 +470,18 @@ async fn cmd_run_recipes(
     }
 
     if args.graph {
-        return show_recipe_graph(&cfg, &root, &names, args.no_tui).await;
+        return show_recipe_graph(&cfg, &root, &names, args.use_tui()).await;
     }
 
     report_env_drift(
         &root,
         &recipe_env_files(&cfg, &names),
-        args.no_tui && !args.gui,
+        !args.use_tui() && !args.gui,
     );
 
     if args.gui {
         runner::validate_recipes(&cfg, &root, &names, &vars, &RunMode::Run)?;
+        report_env_dependencies(&cfg, &root, &names, &vars, false);
         return cmd_run_gui(args.port, names, vars, args.dry_run).await;
     }
     execute_recipes(
@@ -489,10 +490,49 @@ async fn cmd_run_recipes(
         &names,
         &vars,
         args.dry_run,
-        args.no_tui,
+        args.use_tui(),
         RunMode::Run,
     )
     .await
+}
+
+/// Print every environment variable the named runs depend on, before any of
+/// them starts.
+///
+/// A run's steps are shell scripts, and the difference between "works here" and
+/// "fails there" is far more often a variable than the graph. Ciabatta already
+/// resolves the whole environment before the first step — `REQUIRED_ENV`, the
+/// `.env` files it sources, the `[env]` tables that cascade down to each step,
+/// and the `$VAR`s the commands read — so it may as well say so, in the same
+/// spirit as printing the graph before running it.
+///
+/// Secret-looking names are listed with their values masked: this output goes
+/// into CI logs.
+fn report_env_dependencies(
+    cfg: &CiabattaConfig,
+    root: &Path,
+    names: &[String],
+    vars: &HashMap<String, String>,
+    to_stderr: bool,
+) {
+    for name in names {
+        let Some(recipe) = cfg.recipes.get(name).and_then(|e| e.run_recipe()) else {
+            continue;
+        };
+        // A recipe that won't resolve is about to fail with a far better
+        // message than anything a report could add.
+        let Ok(resolved) = run::resolve_run(recipe, name, root) else {
+            continue;
+        };
+        let Some(text) = run::envdeps::collect(&resolved, root, vars).render(name) else {
+            continue;
+        };
+        if to_stderr {
+            eprintln!("{text}");
+        } else {
+            println!("{text}");
+        }
+    }
 }
 
 /// Tell the operator when the `.env` files a run depends on have moved since
@@ -584,7 +624,7 @@ async fn show_recipe_graph(
     cfg: &CiabattaConfig,
     root: &Path,
     names: &[String],
-    no_tui: bool,
+    use_tui: bool,
 ) -> Result<()> {
     let mut steps: Vec<run::RunStep> = Vec::new();
     for name in names {
@@ -612,7 +652,7 @@ async fn show_recipe_graph(
         env: Default::default(),
     };
 
-    if no_tui {
+    if !use_tui {
         print!("{}", workspace::render::graph(&ws, &graph));
         println!("\nNothing was run (--graph).");
         return Ok(());
@@ -1534,7 +1574,7 @@ async fn execute_recipes(
     names: &[String],
     vars: &HashMap<String, String>,
     dry_run: bool,
-    no_tui: bool,
+    use_tui: bool,
     mode: RunMode,
 ) -> Result<()> {
     if names.is_empty() {
@@ -1546,6 +1586,13 @@ async fn execute_recipes(
     // Validate publish-path variables (push/pull) or the step DAG (run)
     // before launching.
     runner::validate_recipes(cfg, root, names, vars, &mode)?;
+
+    // What the run depends on, environment-wise, before a step touches it. It
+    // goes to stderr when the TUI is about to take the screen, so it survives
+    // in the scrollback the same way the graph drawing does.
+    if mode == RunMode::Run {
+        report_env_dependencies(cfg, root, names, vars, use_tui);
+    }
 
     // Resolve the container runtime once up front so every recipe shares it and
     // an ambiguous/missing runtime fails fast (before any work starts). Runs
@@ -1563,7 +1610,7 @@ async fn execute_recipes(
     }
     let cfg = &cfg;
 
-    if no_tui {
+    if !use_tui {
         run_plain(cfg, root, names, vars, dry_run, mode).await
     } else {
         let success = tui::run(cfg, root, names, vars, dry_run, mode).await?;

@@ -41,17 +41,20 @@ import SearchIcon from "@mui/icons-material/Search";
 import { useNavigate } from "@tanstack/react-router";
 
 import { useStartRun } from "../api/run";
+import type { EnvVar } from "../api/types";
 import {
   useWorkflowGraph,
   useWorkspace,
   workflowMatches,
   type GraphNode,
   type MemberSummary,
+  type WorkflowGraph,
   type WorkflowStep,
   type WorkflowSummary,
 } from "../api/workspace";
 import { ErrorNote, Loading, PageHeader, RequireProject } from "../components/Page";
 import { EnvDriftBanner } from "../components/EnvDriftBanner";
+import { EnvPanel, EnvVarChip, StepEnvChips } from "../components/EnvVars";
 import { monoFontStack } from "../theme";
 
 export function WorkspacePage() {
@@ -330,6 +333,7 @@ function StepBadges({ step }: { step: WorkflowStep }) {
       {step.requires.map((tool) => (
         <Chip key={tool} size="small" variant="outlined" label={tool} sx={{ opacity: 0.7 }} />
       ))}
+      <StepEnvChips env={step.env} />
     </>
   );
 }
@@ -405,6 +409,10 @@ function GraphPanel({ project, workflow }: { project: string; workflow: string }
         )}
 
         <Stack spacing={2} sx={{ mt: 2 }}>
+          {/* The graph's inputs, before its first wave: everything the steps
+              read that isn't produced by another step. */}
+          <EnvPanel report={data.env} title="environment — read before wave 1" />
+
           {data.waves.map((wave, index) => (
             <Box key={index}>
               <Typography variant="overline" color="text.secondary">
@@ -413,7 +421,9 @@ function GraphPanel({ project, workflow }: { project: string; workflow: string }
               <Stack spacing={1} sx={{ mt: 0.5 }}>
                 {wave.map((id) => {
                   const node = byId.get(id);
-                  return node ? <GraphNodeCard key={id} node={node} /> : null;
+                  return node ? (
+                    <GraphNodeCard key={id} node={node} env={envFor(data, id)} />
+                  ) : null;
                 })}
               </Stack>
             </Box>
@@ -426,7 +436,7 @@ function GraphPanel({ project, workflow }: { project: string; workflow: string }
               </Typography>
               <Stack spacing={1} sx={{ mt: 0.5 }}>
                 {recoveries.map((node) => (
-                  <GraphNodeCard key={node.id} node={node} />
+                  <GraphNodeCard key={node.id} node={node} env={envFor(data, node.id)} />
                 ))}
               </Stack>
             </Box>
@@ -437,12 +447,22 @@ function GraphPanel({ project, workflow }: { project: string; workflow: string }
   );
 }
 
+/** The variables one node depends on, with the values this machine resolves. */
+function envFor(graph: WorkflowGraph, id: string): EnvVar[] {
+  return graph.env.vars.filter((variable) => variable.steps.includes(id));
+}
+
 /**
  * One node. The sub-workspace it came from is the most prominent thing after
  * its name: in a graph drawn from six packages, "which package is this?" is the
  * first question anyone asks.
  */
-function GraphNodeCard({ node }: { node: GraphNode }) {
+function GraphNodeCard({ node, env }: { node: GraphNode; env: EnvVar[] }) {
+  // What the node declares for itself is already a badge; this is what it
+  // reads from the environment around it, resolved.
+  const own = new Set(Object.keys(node.env));
+  const reads = env.filter((variable) => !own.has(variable.key));
+
   return (
     <Box
       sx={{
@@ -491,6 +511,23 @@ function GraphNodeCard({ node }: { node: GraphNode }) {
         >
           {node.cwd}
         </Typography>
+      )}
+      {reads.length > 0 && (
+        <Stack
+          direction="row"
+          spacing={0.75}
+          sx={{ mt: 0.5 }}
+          flexWrap="wrap"
+          useFlexGap
+          alignItems="center"
+        >
+          <Typography variant="caption" color="text.secondary">
+            reads
+          </Typography>
+          {reads.map((variable) => (
+            <EnvVarChip key={variable.key} variable={variable} />
+          ))}
+        </Stack>
       )}
     </Box>
   );

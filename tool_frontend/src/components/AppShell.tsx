@@ -37,6 +37,7 @@ import AccountTreeIcon from "@mui/icons-material/AccountTree";
 import ChecklistIcon from "@mui/icons-material/Checklist";
 import DarkModeIcon from "@mui/icons-material/DarkMode";
 import HubIcon from "@mui/icons-material/Hub";
+import InventoryIcon from "@mui/icons-material/Inventory2";
 import LightModeIcon from "@mui/icons-material/LightMode";
 import MenuBookIcon from "@mui/icons-material/MenuBook";
 import MenuIcon from "@mui/icons-material/Menu";
@@ -62,6 +63,7 @@ const NAV_ITEMS = [
   { to: "/watch", label: "Watch", icon: <MonitorHeartIcon /> },
   { to: "/workspace", label: "Workspace", icon: <AccountTreeIcon /> },
   { to: "/run", label: "Run", icon: <RocketLaunchIcon /> },
+  { to: "/cache", label: "Cache", icon: <InventoryIcon /> },
   { to: "/analyze", label: "Analyze", icon: <HubIcon /> },
   { to: "/ai", label: "AI", icon: <PsychologyIcon /> },
 ] as const;

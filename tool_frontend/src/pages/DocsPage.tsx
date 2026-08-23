@@ -66,7 +66,7 @@ function C({ children }: { children: ReactNode }) {
   );
 }
 
-/** A block of shell or TOML to copy. */
+/** A block of shell or YAML to copy. */
 function Pre({ children }: { children: string }) {
   return (
     <Box
@@ -333,7 +333,7 @@ const COMMANDS: CommandGroup[] = [
       },
       {
         usage: "ciabatta run --build",
-        note: "Open the visual flowchart builder. Designs a TOML file; runs nothing.",
+        note: "Open the visual flowchart builder. Designs a flowchart file; runs nothing.",
       },
     ],
   },
@@ -376,7 +376,7 @@ const COMMANDS: CommandGroup[] = [
       },
       {
         usage: "ciabatta init --lib",
-        note: "Opt the current directory in as a sub-workspace: a [workspace] identity plus a starter workflow. Prompts for a description and an owner, on purpose.",
+        note: "Opt the current directory in as a sub-workspace: a `workspace:` identity plus a starter workflow. Prompts for a description and an owner, on purpose.",
         flags: [
           ["--depends-on MEMBER", 'Declare a dependency: "other" or "other:workflow".'],
           ["--workflow NAME", "Name of the starter workflow. Defaults to build."],
@@ -601,7 +601,7 @@ ciabatta daemon stop             # ask it to exit`}</Pre>
         <Alert severity="success" sx={{ mb: 2, maxWidth: "78ch" }}>
           <strong>There is no difference between a workflow and a run.</strong> A workflow is
           declared in a package&apos;s <C>.ciabatta/workflows/</C>, a recipe in a{" "}
-          <C>ciabatta.toml</C>; both are targets for <C>ciabatta run</C>, and both take the same
+          <C>ciabatta.yaml</C>; both are targets for <C>ciabatta run</C>, and both take the same
           flags. Name several and they compile into one graph rather than running in sequence.
         </Alert>
         <CommandReference />
@@ -652,14 +652,42 @@ ciabatta run test --filter tag:fast --filter tag:smoke   # either one`}</Pre>
     body: (
       <>
         <P>
-          A personal task list stored in <C>~/.ciabatta/todos.json</C>. Deliberately global rather
-          than per-project: it is your list, and it follows you between checkouts.
+          A task list stored in <C>~/.ciabatta/todos.json</C>, scoped to the project you are looking
+          at. The switcher at the top of the page selects whose list you see, so notes written in
+          one repo do not clutter another.
+        </P>
+        <SubHeading>The global list</SubHeading>
+        <P>
+          Not everything you write down is about a repo. The globe button on a task makes it{" "}
+          <strong>global</strong>: it leaves the project&apos;s list and appears on the{" "}
+          <Link to="/">dashboard</Link>, where it stays whichever project you switch to. A global
+          task can be filed back under the selected project the same way. From a terminal,{" "}
+          <C>ciabatta todo --global &quot;…&quot;</C> adds one directly.
         </P>
         <P>
-          Tasks carry a priority (low, medium, high) and a done flag. The one project-scoped action
-          is <strong>ship</strong>, which hands the task to the assistant as a background job and
-          returns its job number — the agent edits files, so it needs to know whose. Follow it on
-          the <Link to="/ai">AI page</Link>.
+          The two lists are deliberately disjoint — a global task appears on the dashboard and
+          nowhere else. Showing it under every project as well would turn the thing you set aside
+          into the thing you see most often. Tasks written before todos were scoped carry no
+          project, so they land on the global list, which is where something nobody attached to a
+          repo belongs anyway.
+        </P>
+        <P>
+          Removing a project from the switcher promotes its tasks to the global list rather than
+          leaving them attached to an id nothing resolves — which would be deletion without saying
+          so.
+        </P>
+        <P>
+          Click a task&apos;s text to edit it in place. The editor is multi-line, because a task is
+          often a paragraph and a box that scrolls sideways makes anything longer than a sentence
+          unreadable while you are writing it — so Enter inserts a newline, and{" "}
+          <C>⌘/Ctrl+Enter</C> saves. Clicking away saves too, because after typing that means
+          &ldquo;keep it&rdquo; far more often than it means the opposite; Escape abandons. An empty
+          edit is treated as a mis-key rather than a delete — the bin does that.
+        </P>
+        <P>
+          Tasks carry a priority (low, medium, high) and a done flag. <strong>Ship</strong> hands
+          the task to the assistant as a background job and returns its job number — the agent edits
+          files, so it needs to know whose. Follow it on the <Link to="/ai">AI page</Link>.
         </P>
       </>
     ),
@@ -833,8 +861,209 @@ ciabatta run test --filter tag:fast --filter tag:smoke   # either one`}</Pre>
         <SubHeading>Flowchart builder</SubHeading>
         <P>
           <Link to="/run/builder">The builder</Link> is an authoring tool, not an executor. Lay out
-          steps, their <C>needs</C>, and their error branches, then copy the generated TOML into
-          your <C>ciabatta.toml</C>. Nothing you build there runs until it is committed to the file.
+          steps, their <C>needs</C>, and their error branches, then copy the generated config into
+          your <C>ciabatta.yaml</C>. Nothing you build there runs until it is committed to the file.
+        </P>
+      </>
+    ),
+  },
+  {
+    id: "cache",
+    title: "Cache",
+    body: (
+      <>
+        <P>
+          Caching is off until a workspace opts in, because a cache that turns itself on is a cache
+          that will one day serve somebody a stale artifact they never asked it to keep. Opting in
+          is one line — and it is the same line where you say what your inputs are, which is the
+          part that actually has to be right.
+        </P>
+        <Pre>{`ciabatta cache init            # propose inputs and outputs from the directory
+ciabatta dry-run build         # what would be reused, and why not
+ciabatta dry-run build --diff  # ...with the lines that changed`}</Pre>
+
+        <SubHeading>Three dependencies</SubHeading>
+        <P>
+          A stage depends on exactly three things, and any of them changing is a rebuild: its{" "}
+          <strong>input files</strong>, the <strong>environment variables</strong> it declared in{" "}
+          <C>cache.env</C>, and the <strong>outputs of the stages it needs</strong>. The third is
+          what makes a graph cacheable rather than just a directory — change a <C>.proto</C> file
+          and <C>proto:generate</C> misses, its outputs change, and everything downstream of it
+          misses too, each for a reason it can name.
+        </P>
+        <P>
+          The <Link to="/cache">Cache page</Link> shows all three. For every stage it prints the
+          decision, the input files it is judged on, the output files it produces, and — when the
+          answer is &ldquo;rebuild&rdquo; — a diff in the shape of a pull request: the changed
+          files with their lines, the variables that moved, and the upstream stages that produced
+          something different. The same view is attached to each node of the{" "}
+          <Link to="/workspace">workflow graph</Link>, with the graph&apos;s inputs above its first
+          wave and its outputs below the last.
+        </P>
+
+        <SubHeading>Two things worth knowing</SubHeading>
+        <P>
+          <strong>An undeclared input is a wrong answer, not a slow one.</strong> A build that reads
+          a file not listed in <C>inputs</C> will be handed a stale result when that file changes.
+          That is why <C>cache init</C> scaffolds the inputs from what is actually in the directory
+          rather than leaving them empty, and why the dry run exists at all.
+        </P>
+        <P>
+          <strong>Outputs are verified, not assumed.</strong> A key match says the inputs did not
+          change; it says nothing about whether somebody deleted <C>dist/</C> or hand-edited a
+          generated file. So the outputs are hashed too, and a mismatch is a restore or a rebuild —
+          the difference between &ldquo;we think this is current&rdquo; and &ldquo;this is
+          current&rdquo;.
+        </P>
+      </>
+    ),
+  },
+  {
+    id: "remote-cache",
+    title: "Remote cache",
+    body: (
+      <>
+        <P>
+          A small server anyone can stand up, so a team&apos;s builds stop repeating each
+          other&apos;s work. It keeps artifacts on its own filesystem in the same layout the local
+          cache uses — no object store to provision, no database to migrate.
+        </P>
+        <Pre>{`# On the server
+ciabatta remote-cache init
+ciabatta remote-cache start
+
+# On each developer's machine
+ciabatta remote-cache login http://cache.example.com:8380
+ciabatta cache init --remote http://cache.example.com:8380`}</Pre>
+        <P>
+          A project is known to the server by its name <em>and an id the server assigns</em>, and
+          that id is written back into the workspace config to be committed. It is what makes every
+          checkout and every CI runner resolve to the same project: names get reused and renamed,
+          and two teams both calling their repo <C>api</C> must never end up silently sharing a
+          cache.
+        </P>
+        <P>
+          Authentication is <C>open</C>, <C>token</C>, or LDAPS against the directory you already
+          run, with group membership deciding who gets in and who may write. Read access is a
+          convenience; <strong>write access is trust</strong> — whoever can write to a cache decides
+          what everyone else&apos;s build produces — which is why read-only access exists for both
+          a token user and an LDAP group.
+        </P>
+        <P>
+          The <Link to="/cache">Remote tab</Link> shows the hit rate, what is stored, the retention
+          policy, and which ciabatta builds the server hands out. A rate near zero usually means the
+          keys are not stable — an undeclared input, or something like a timestamp baked into a
+          build — rather than that nothing is reusable.
+        </P>
+
+        <SubHeading>The server&apos;s own page</SubHeading>
+        <P>
+          The cache server serves a small admin page at its root — open{" "}
+          <C>http://your-cache:8380/</C> in a browser. It shows the hit rate, what is stored, and
+          the ciabatta builds it hands out, and it does the one thing the CLI does badly:{" "}
+          <strong>minting credentials</strong>. <C>remote-cache add-user</C> prints a hash for you
+          to paste into the config and restart around; the page writes the user to the
+          server&apos;s own list and hands back the token there and then. That token is shown
+          exactly once — only its SHA-256 is kept — so a lost one is reissued, never recovered.
+        </P>
+        <P>
+          On a <C>token</C> or <C>ldap</C> server only an <strong>admin</strong> may do that. On an{" "}
+          <C>open</C> server anyone who can reach it may, because open mode already means &ldquo;I
+          trust whoever is on this network&rdquo; and refusing would leave no way to mint the first
+          credential when locking the cache down — but a user created on an open server is{" "}
+          <strong>never</strong> an admin, or somebody could grant themselves lasting control while
+          the door was open and keep it after it was shut.
+        </P>
+        <P>
+          So the migration from open to authenticated is: create the users you want on the page,
+          add one <C>admin: true</C> user to <C>auth.users</C> in the config, set{" "}
+          <C>auth.mode: token</C>, and restart. Config-declared users stay yours — the page will
+          neither shadow nor delete them.
+        </P>
+
+        <SubHeading>TLS</SubHeading>
+        <P>
+          The server speaks HTTP; put it behind a reverse proxy with TLS for anything beyond a
+          trusted network. If that proxy uses a self-signed certificate, or an internal CA a machine
+          does not have installed, that machine can opt out with <C>cache.remote.tls_verify: false</C>{" "}
+          — or <C>remote-cache login --no-tls-verify</C>, which remembers the choice for later
+          commands.
+        </P>
+        <Alert severity="warning" sx={{ mb: 2, maxWidth: "78ch" }}>
+          With verification off, HTTPS is an encrypted channel to <em>whoever answered</em> — so the
+          build artifacts it hands back are only as trustworthy as the network between you.
+          Installing the CA certificate is the better fix wherever it is available.
+        </Alert>
+
+        <SubHeading>Running one locally</SubHeading>
+        <P>
+          Everything above works on one machine, which is the sanest way to try the remote cache
+          before pointing a team at it. Two things to know first. The cache server and the ciabatta
+          daemon are <strong>different processes</strong> — the daemon serves this web app on 8099,
+          the cache is its own server on 8380 — so running both is just picking two free ports. And{" "}
+          <C>remote-cache start</C> runs in the foreground: it is a server, and it holds the
+          terminal until you stop it.
+        </P>
+        <Pre>{`# ── Terminal 1: the cache server ──────────────────────────────
+mkdir -p ~/scratch/ciabatta-cache && cd ~/scratch/ciabatta-cache
+ciabatta remote-cache init --port 8380
+
+# Loopback only: this one is for you, not the network. (\`init\` writes
+# 0.0.0.0, which is right for a shared cache and wrong for a local test.)
+sed -i 's/bind: 0.0.0.0/bind: 127.0.0.1/' remote-cache.yaml
+
+ciabatta remote-cache start          # holds this terminal`}</Pre>
+        <Pre>{`# ── Terminal 2: the daemon and your project ───────────────────
+# Move this web app off 8099 if something else is using it.
+ciabatta daemon restart --port 9099
+
+cd ~/code/my-project
+ciabatta remote-cache login http://127.0.0.1:8380
+ciabatta cache init --enable --remote http://127.0.0.1:8380
+
+ciabatta run build                   # first build: uploads
+
+rm -rf .ciabatta/cache dist          # pretend to be a colleague's machine
+ciabatta run build                   # "restored from the remote cache"
+
+ciabatta remote-cache status         # hit rate, storage, retention`}</Pre>
+        <P>
+          Open <C>http://127.0.0.1:8380/</C> while it is running: that is the server&apos;s own
+          admin page, and on an <C>open</C> cache you can mint a credential there and use it
+          straight away with <C>ciabatta remote-cache login</C>.
+        </P>
+        <P>
+          Wiping <C>.ciabatta/cache</C> along with the build output is the whole trick: it leaves
+          the workspace looking like a fresh checkout, so the only place the artifacts can come back
+          from is the server.
+        </P>
+        <Alert severity="info" sx={{ mb: 2, maxWidth: "78ch" }}>
+          <strong>On the daemon&apos;s port.</strong> <C>--port</C> picks the port a daemon{" "}
+          <em>starts</em> on; it does not move one that is already running. A plain{" "}
+          <C>ciabatta watch -p 9099</C> with a healthy daemon on 8099 quietly keeps using 8099 — so
+          change it with <C>ciabatta daemon restart --port 9099</C>, or export{" "}
+          <C>CIABATTA_DAEMON_PORT=9099</C> before the first command that starts one. There is one
+          daemon record (<C>~/.ciabatta/daemon.json</C>), so there is one daemon at a time: the port
+          moves rather than a second daemon appearing beside the first.
+        </Alert>
+        <P>
+          When you are done, Ctrl-C the server and remove the directory you made — everything it
+          stored is under there, and the workspace&apos;s <C>cache.remote</C> section is the only
+          trace left in your project.
+        </P>
+
+        <SubHeading>Handing out ciabatta itself</SubHeading>
+        <P>
+          Point the server at the binaries you want your team on. It hashes them, mentions the
+          version in every reply, and tells a client running something older. Then{" "}
+          <C>ciabatta self update</C> fetches the new build from the server it already trusts,
+          checks it against the advertised SHA-256, and only then replaces the binary. The hash
+          decides, not the version string, so rebuilding without bumping the version still updates
+          everybody.
+        </P>
+        <P>
+          Nothing updates automatically. A build tool that swaps its own binary out from under a
+          running CI job is a bad build tool; this notices, tells you, and waits to be asked.
         </P>
       </>
     ),

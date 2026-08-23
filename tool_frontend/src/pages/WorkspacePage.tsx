@@ -55,6 +55,13 @@ import {
 import { ErrorNote, Loading, PageHeader, RequireProject } from "../components/Page";
 import { EnvDriftBanner } from "../components/EnvDriftBanner";
 import { EnvPanel, EnvVarChip, StepEnvChips } from "../components/EnvVars";
+import {
+  GraphInputsPanel,
+  GraphOutputsPanel,
+  StageCacheBadge,
+} from "../components/CacheFiles";
+import { useCachePlan } from "../api/cache";
+import type { PlannedStep } from "../api/types";
 import { monoFontStack } from "../theme";
 
 export function WorkspacePage() {
@@ -343,6 +350,9 @@ function StepBadges({ step }: { step: WorkflowStep }) {
 function GraphPanel({ project, workflow }: { project: string; workflow: string }) {
   const navigate = useNavigate();
   const { data, isLoading, error } = useWorkflowGraph(project, workflow);
+  // What each stage would reuse. A cache that isn't configured simply yields
+  // nothing here, so the graph looks exactly as it did before caching existed.
+  const { data: plan } = useCachePlan(project, workflow);
   const start = useStartRun();
   const [dryRun, setDryRun] = useState(false);
 
@@ -359,6 +369,8 @@ function GraphPanel({ project, workflow }: { project: string; workflow: string }
 
   const byId = new Map(data.nodes.map((node) => [node.id, node]));
   const recoveries = data.nodes.filter((node) => node.recover);
+  const planned = new Map((plan?.steps ?? []).map((step) => [step.name, step]));
+  const caching = plan?.caching ?? false;
 
   return (
     <Card variant="outlined">
@@ -412,6 +424,7 @@ function GraphPanel({ project, workflow }: { project: string; workflow: string }
           {/* The graph's inputs, before its first wave: everything the steps
               read that isn't produced by another step. */}
           <EnvPanel report={data.env} title="environment — read before wave 1" />
+          {caching && plan && <GraphInputsPanel plan={plan} />}
 
           {data.waves.map((wave, index) => (
             <Box key={index}>
@@ -422,12 +435,19 @@ function GraphPanel({ project, workflow }: { project: string; workflow: string }
                 {wave.map((id) => {
                   const node = byId.get(id);
                   return node ? (
-                    <GraphNodeCard key={id} node={node} env={envFor(data, id)} />
+                    <GraphNodeCard
+                      key={id}
+                      node={node}
+                      env={envFor(data, id)}
+                      planned={planned.get(id)}
+                    />
                   ) : null;
                 })}
               </Stack>
             </Box>
           ))}
+
+          {caching && plan && <GraphOutputsPanel plan={plan} />}
 
           {recoveries.length > 0 && (
             <Box>
@@ -457,7 +477,15 @@ function envFor(graph: WorkflowGraph, id: string): EnvVar[] {
  * its name: in a graph drawn from six packages, "which package is this?" is the
  * first question anyone asks.
  */
-function GraphNodeCard({ node, env }: { node: GraphNode; env: EnvVar[] }) {
+function GraphNodeCard({
+  node,
+  env,
+  planned,
+}: {
+  node: GraphNode;
+  env: EnvVar[];
+  planned?: PlannedStep;
+}) {
   // What the node declares for itself is already a badge; this is what it
   // reads from the environment around it, resolved.
   const own = new Set(Object.keys(node.env));
@@ -529,6 +557,11 @@ function GraphNodeCard({ node, env }: { node: GraphNode; env: EnvVar[] }) {
           ))}
         </Stack>
       )}
+
+      {/* What the cache would do with this stage, and — on a miss — the diff
+          that explains it. Absent entirely when caching is off, so a graph
+          without a cache looks exactly as it always did. */}
+      {planned && <StageCacheBadge step={planned} />}
     </Box>
   );
 }

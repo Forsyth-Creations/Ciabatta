@@ -170,45 +170,45 @@ fn plan(options: &Options) -> Vec<File> {
         file("README.md", readme(options)),
         file(".gitignore", GITIGNORE),
         file(".env.example", ENV_EXAMPLE),
-        file(".ciabatta/ciabatta.toml", root_config(options)),
+        file(".ciabatta/ciabatta.yaml", root_config(options)),
         // ─── proto ──────────────────────────────────────────────────────────
-        file("packages/proto/.ciabatta/ciabatta.toml", PROTO_CONFIG),
+        file("packages/proto/.ciabatta/ciabatta.yaml", PROTO_CONFIG),
         file(
-            "packages/proto/.ciabatta/workflows/generate.toml",
+            "packages/proto/.ciabatta/workflows/generate.yaml",
             PROTO_GENERATE,
         ),
         script("packages/proto/scripts/generate.sh", PROTO_SCRIPT),
         file("packages/proto/api.proto", PROTO_FILE),
         // ─── common ─────────────────────────────────────────────────────────
-        file("packages/common/.ciabatta/ciabatta.toml", COMMON_CONFIG),
+        file("packages/common/.ciabatta/ciabatta.yaml", COMMON_CONFIG),
         file(
-            "packages/common/.ciabatta/workflows/build.toml",
+            "packages/common/.ciabatta/workflows/build.yaml",
             COMMON_BUILD,
         ),
-        file("packages/common/.ciabatta/workflows/test.toml", COMMON_TEST),
+        file("packages/common/.ciabatta/workflows/test.yaml", COMMON_TEST),
         // ─── api ────────────────────────────────────────────────────────────
-        file("packages/api/.ciabatta/ciabatta.toml", api_config(options)),
-        file("packages/api/.ciabatta/workflows/build.toml", API_BUILD),
-        file("packages/api/.ciabatta/workflows/test.toml", API_TEST),
+        file("packages/api/.ciabatta/ciabatta.yaml", api_config(options)),
+        file("packages/api/.ciabatta/workflows/build.yaml", API_BUILD),
+        file("packages/api/.ciabatta/workflows/test.yaml", API_TEST),
         script("packages/api/scripts/build.sh", API_BUILD_SCRIPT),
         file("packages/api/.env", API_ENV),
         // ─── web ────────────────────────────────────────────────────────────
-        file("packages/web/.ciabatta/ciabatta.toml", WEB_CONFIG),
-        file("packages/web/.ciabatta/workflows/build.toml", WEB_BUILD),
-        file("packages/web/.ciabatta/workflows/test.toml", WEB_TEST),
-        file("packages/web/.ciabatta/workflows/dev.toml", WEB_DEV),
+        file("packages/web/.ciabatta/ciabatta.yaml", WEB_CONFIG),
+        file("packages/web/.ciabatta/workflows/build.yaml", WEB_BUILD),
+        file("packages/web/.ciabatta/workflows/test.yaml", WEB_TEST),
+        file("packages/web/.ciabatta/workflows/dev.yaml", WEB_DEV),
     ];
 
     if options.nexus {
         files.push(file(
-            "packages/api/.ciabatta/workflows/release.toml",
+            "packages/api/.ciabatta/workflows/release.yaml",
             API_RELEASE,
         ));
     }
     if options.docker {
         files.push(file("packages/api/Dockerfile", DOCKERFILE));
         files.push(file(
-            "packages/api/.ciabatta/workflows/deploy.toml",
+            "packages/api/.ciabatta/workflows/deploy.yaml",
             API_DEPLOY,
         ));
     }
@@ -249,43 +249,43 @@ fn root_config(options: &Options) -> String {
     let mut out = String::from(
         r#"# The monorepo root.
 #
-# `umbrella = true` says this directory is not itself a package — it holds the
-# shared [toolchain] hints and standard variables every sub-workspace inherits,
+# `umbrella: true` says this directory is not itself a package — it holds the
+# shared `toolchain:` hints and standard variables every sub-workspace inherits,
 # and stays out of `ciabatta list` as a package of its own.
 
-[workspace]
-umbrella    = true
-description = "Example monorepo showing how ciabatta orchestrates sub-workspaces"
+workspace:
+  umbrella: true
+  description: Example monorepo showing how ciabatta orchestrates sub-workspaces
 
-# Standard variables every step in every package can count on. A sub-workspace
-# or a single step can add to these; the more specific one wins a collision.
-[workspace.env]
-LOG_LEVEL = "info"
+  # Standard variables every step in every package can count on. A sub-workspace
+  # or a single step can add to these; the more specific one wins a collision.
+  env:
+    LOG_LEVEL: info
 
 # ─── Toolchain ─────────────────────────────────────────────────────────────────
-# What a step means when it says `requires = ["protoc"]`, and — crucially — how
-# to get it. Written down once, here, so the person who hits "protoc: not found"
+# What a step means when it says `requires: [protoc]`, and — crucially — how to
+# get it. Written down once, here, so the person who hits "protoc: not found"
 # gets the install command instead of a search engine.
 #
 # `check` is for tools a bare PATH lookup can't find (a plugin, a version).
+toolchain:
+  sh:
+    description: POSIX shell — every step in this example runs through it
+    hint: already on your machine
 
-[toolchain.sh]
-description = "POSIX shell — every step in this example runs through it"
-hint        = "already on your machine"
-
-[toolchain.protoc]
-description = "Protocol buffer compiler"
-hint        = "brew install protobuf   (apt: apt-get install -y protobuf-compiler)"
-check       = "protoc --version"
+  protoc:
+    description: Protocol buffer compiler
+    hint: "brew install protobuf   (apt: apt-get install -y protobuf-compiler)"
+    check: protoc --version
 "#,
     );
 
     if options.docker {
         out.push_str(
             r#"
-[toolchain.docker]
-description = "Container runtime for the deploy workflow"
-hint        = "https://docs.docker.com/get-docker/  (podman works too)"
+  docker:
+    description: Container runtime for the deploy workflow
+    hint: "https://docs.docker.com/get-docker/  (podman works too)"
 "#,
         );
     }
@@ -299,36 +299,32 @@ hint        = "https://docs.docker.com/get-docker/  (podman works too)"
 #
 #   ciabatta run smoke
 #
-[recipies.smoke.run]
-[[recipies.smoke.run.steps]]
-name        = "ping"
-description = "Cheapest possible check that the repo is wired up"
-run         = "echo 'ciabatta example: everything is where it should be'"
-tags        = ["fast"]
+recipies:
+  smoke:
+    run:
+      steps:
+        - name: ping
+          description: Cheapest possible check that the repo is wired up
+          run: "echo 'ciabatta example: everything is where it should be'"
+          tags: [fast]
 "#,
     );
 
+    // Both publishing recipes are entries under the one `recipies:` key opened
+    // above — YAML has no equivalent of repeating a `[recipies.x]` header, so a
+    // second top-level key here would make the file unparseable.
     if options.nexus {
         out.push_str(
             r#"
-# ─── Registries ────────────────────────────────────────────────────────────────
-# Where built artifacts go. A workflow publishes by adding a step with
-# `kind = "push"` naming one of the recipes below — publishing is a node on the
-# graph, not a separate command you have to remember to run afterwards.
-#
-# Credentials come from CIABATTA_NEXUS_USER / CIABATTA_NEXUS_PASS, or from a
-# login_script. They are never written in this file.
-
-[registries.nexus]
-url        = "https://nexus.example.com/repository/releases/"
-needs_auth = true
-tls_verify = true
-
-[recipies.api-binary]
-registry            = "nexus"
-local_artifact_path = "packages/api/dist/api"
-# The CIABATTA_* variables are resolved from git (or from CI) before the push.
-publish_path        = "example/api/{CIABATTA_BRANCH}/{CIABATTA_COMMIT}/api"
+  # ─── Publishing ──────────────────────────────────────────────────────────────
+  # A workflow publishes by adding a step with `kind: push` naming one of these
+  # recipes — publishing is a node on the graph, not a separate command you have
+  # to remember to run afterwards.
+  api-binary:
+    registry: nexus
+    local_artifact_path: packages/api/dist/api
+    # The CIABATTA_* variables are resolved from git (or from CI) before the push.
+    publish_path: "example/api/{CIABATTA_BRANCH}/{CIABATTA_COMMIT}/api"
 "#,
         );
     }
@@ -336,12 +332,42 @@ publish_path        = "example/api/{CIABATTA_BRANCH}/{CIABATTA_COMMIT}/api"
     if options.docker {
         out.push_str(
             r#"
-[registries.ghcr]
-url        = "ghcr.io/example"
-needs_auth = true
+  api-image:
+    push:
+      bash_script: packages/api/scripts/docker_push.sh
+"#,
+        );
+    }
 
-[recipies.api-image.push]
-bash_script = "packages/api/scripts/docker_push.sh"
+    // Same again for `registries:`: whichever option comes first opens the key.
+    if options.nexus || options.docker {
+        out.push_str(
+            r#"
+# ─── Registries ────────────────────────────────────────────────────────────────
+# Where built artifacts go.
+#
+# Credentials come from CIABATTA_<REGISTRY>_USER / CIABATTA_<REGISTRY>_PASS, or
+# from a login_script. They are never written in this file.
+registries:
+"#,
+        );
+    }
+
+    if options.nexus {
+        out.push_str(
+            r#"  nexus:
+    url: https://nexus.example.com/repository/releases/
+    needs_auth: true
+    tls_verify: true
+"#,
+        );
+    }
+
+    if options.docker {
+        out.push_str(
+            r#"  ghcr:
+    url: ghcr.io/example
+    needs_auth: true
 "#,
         );
     }
@@ -356,37 +382,37 @@ const PROTO_CONFIG: &str = r#"# The package that owns the API schema.
 # Nothing here depends on anything: proto is the root of this monorepo's
 # dependency graph, which is exactly why everything else has to wait for it.
 
-[workspace]
-name        = "proto"
-description = "Protobuf definitions and the stubs generated from them"
-owner       = "Platform Team"
-tags        = ["codegen", "schema"]
-depends_on  = []
-requires    = ["sh"]
+workspace:
+  name: proto
+  description: Protobuf definitions and the stubs generated from them
+  owner: Platform Team
+  tags: [codegen, schema]
+  depends_on: []
+  requires: [sh]
 "#;
 
 const PROTO_GENERATE: &str = r#"# `ciabatta run generate` — or, more usefully, whatever pulls this in.
 #
 # Note the name: this workflow is NOT called "build". Other packages depend on
-# it explicitly with `depends_on = ["proto:generate"]`, which is how a package
-# says "I need the stubs" rather than "I need whatever proto calls a build".
+# it explicitly with `depends_on: [proto:generate]`, which is how a package says
+# "I need the stubs" rather than "I need whatever proto calls a build".
 
-description = "Generate the client/server stubs from api.proto"
-owner       = "Platform Team"
-tags        = ["codegen"]
+description: Generate the client/server stubs from api.proto
+owner: Platform Team
+tags: [codegen]
 
-# A real project would put `requires = ["protoc"]` here and the graph would
-# refuse to start without it, printing the [toolchain.protoc] hint from the
-# root config. This example uses sh so it runs anywhere.
-requires    = ["sh"]
+# A real project would put `requires: [protoc]` here and the graph would refuse
+# to start without it, printing the `toolchain.protoc` hint from the root
+# config. This example uses sh so it runs anywhere.
+requires: [sh]
 
-[[steps]]
-name        = "generate"
-description = "Write generated/api.stub.txt from api.proto"
-script      = "scripts/generate.sh"
-tags        = ["codegen"]
-# A hung codegen must not hold up the whole monorepo.
-timeout     = "2m"
+steps:
+  - name: generate
+    description: Write generated/api.stub.txt from api.proto
+    script: scripts/generate.sh
+    tags: [codegen]
+    # A hung codegen must not hold up the whole monorepo.
+    timeout: 2m
 "#;
 
 const PROTO_SCRIPT: &str = r#"#!/bin/sh
@@ -431,41 +457,41 @@ const COMMON_CONFIG: &str = r#"# A shared library, built on the generated stubs.
 # workflow here — "we always need the stubs first" is one line, not one line per
 # workflow.
 
-[workspace]
-name        = "common"
-description = "Shared helpers used by both the api and the web app"
-owner       = "Platform Team"
-tags        = ["library"]
-depends_on  = ["proto:generate"]
-requires    = ["sh"]
+workspace:
+  name: common
+  description: Shared helpers used by both the api and the web app
+  owner: Platform Team
+  tags: [library]
+  depends_on: [proto:generate]
+  requires: [sh]
 
-[workspace.env]
-# Every step in this package sees this, on top of the root's [workspace.env].
-COMMON_STRICT = "1"
+  env:
+    # Every step in this package sees this, on top of the root's workspace env.
+    COMMON_STRICT: "1"
 "#;
 
-const COMMON_BUILD: &str = r#"description = "Compile the shared library"
-owner       = "Platform Team"
+const COMMON_BUILD: &str = r#"description: Compile the shared library
+owner: Platform Team
 
-[[steps]]
-name        = "compile"
-description = "Build common against the generated stubs"
-run         = "mkdir -p dist && echo 'common built' > dist/common.txt && echo 'common: built'"
-tags        = ["library"]
+steps:
+  - name: compile
+    description: Build common against the generated stubs
+    run: "mkdir -p dist && echo 'common built' > dist/common.txt && echo 'common: built'"
+    tags: [library]
 "#;
 
-const COMMON_TEST: &str = r#"description = "Test the shared library"
-owner       = "Platform Team"
+const COMMON_TEST: &str = r#"description: Test the shared library
+owner: Platform Team
 
 # This workflow needs common's own build, not just proto's stubs. `self:` names
 # another workflow in this same package.
-needs       = ["self:build"]
+needs: [self:build]
 
-[[steps]]
-name        = "unit"
-description = "Fast unit tests — no network, no fixtures"
-run         = "echo 'common: 42 tests passed'"
-tags        = ["fast"]
+steps:
+  - name: unit
+    description: Fast unit tests — no network, no fixtures
+    run: "echo 'common: 42 tests passed'"
+    tags: [fast]
 "#;
 
 // ─── api ────────────────────────────────────────────────────────────────────
@@ -478,18 +504,19 @@ fn api_config(options: &Options) -> String {
 # so `ciabatta run build` from anywhere in the repo runs proto, then common,
 # then this, in that order, without anyone having to remember it.
 
-[workspace]
-name        = "api"
-description = "The public REST/gRPC service"
-owner       = "API Team"
-tags        = ["backend", "service"]
-depends_on  = ["proto:generate", "common"]
-requires    = ["sh"]
+workspace:
+  name: api
+  description: The public REST/gRPC service
+  owner: API Team
+  tags: [backend, service]
+  depends_on: [proto:generate, common]
+  requires: [sh]
 
-# Sourced before any workflow here runs. ciabatta snapshots the variables these
-# files define and tells you on the next run when they've changed — so a pull
-# that adds a required variable announces itself.
-env_file    = ".env"
+  # Ciabatta sources `.env` from the package by default, so this line only makes
+  # that explicit. Point it somewhere else to override it, and name the
+  # checked-in template it's generated from with `env_default`.
+  env_file: .env
+  env_default: .env.example
 "#,
     );
 
@@ -505,77 +532,72 @@ env_file    = ".env"
     out
 }
 
-const API_BUILD: &str = r#"description = "Build the api binary"
-owner       = "API Team"
-requires    = ["sh"]
+const API_BUILD: &str = r#"description: Build the api binary
+owner: API Team
+requires: [sh]
 
 # Refuse to start unless these are set, rather than failing halfway through with
 # something unhelpful. Sourced from .env, the environment, CI, or -e flags.
-REQUIRED_ENV = ["API_URL"]
+REQUIRED_ENV: [API_URL]
 
-[[steps]]
-name        = "compile"
-description = "Compile the service binary into dist/api"
-script      = "scripts/build.sh"
-tags        = ["slow"]
-timeout     = "10m"
-# Transient failures (a flaky mirror, a busy disk) get one more go before the
-# graph gives up on this branch.
-retries     = 1
-# …and if it still fails, route to the recovery node below instead of taking
-# the whole run down with it.
-on_error    = "fix-build"
+steps:
+  - name: compile
+    description: Compile the service binary into dist/api
+    script: scripts/build.sh
+    tags: [slow]
+    timeout: 10m
+    # Transient failures (a flaky mirror, a busy disk) get one more go before the
+    # graph gives up on this branch.
+    retries: 1
+    # …and if it still fails, route to the recovery node below instead of taking
+    # the whole run down with it.
+    on_error: fix-build
 
-[[steps]]
-name        = "package"
-description = "Tar the binary up for publishing"
-run         = "tar czf dist/api.tgz -C dist api && echo 'api: packaged dist/api.tgz'"
-needs       = ["compile"]
-tags        = ["slow"]
+  - name: package
+    description: Tar the binary up for publishing
+    run: "tar czf dist/api.tgz -C dist api && echo 'api: packaged dist/api.tgz'"
+    needs: [compile]
+    tags: [slow]
 
-# A recovery node: not part of the success graph, entered only when `compile`
-# fails. In a terminal you're offered the choice; in the web view it's a button.
-# `retry` re-runs the failed step once a fix succeeds.
-[[steps]]
-name        = "fix-build"
-description = "The build failed — try to clear it up and go again"
-recover     = true
-retry       = "compile"
-message     = "api failed to build. What should I try?"
+  # A recovery node: not part of the success graph, entered only when `compile`
+  # fails. In a terminal you're offered the choice; in the web view it's a
+  # button. `retry` re-runs the failed step once a fix succeeds.
+  - name: fix-build
+    description: The build failed — try to clear it up and go again
+    recover: true
+    retry: compile
+    message: "api failed to build. What should I try?"
+    options:
+      - label: Clean the output directory and rebuild
+        run: "rm -rf dist && echo 'api: cleaned dist/'"
+        default: true
 
-[[steps.options]]
-label   = "Clean the output directory and rebuild"
-run     = "rm -rf dist && echo 'api: cleaned dist/'"
-default = true
-
-[[steps.options]]
-label = "Regenerate the stubs, in case they're stale"
-run   = "cd ../proto && sh scripts/generate.sh"
+      - label: Regenerate the stubs, in case they're stale
+        run: cd ../proto && sh scripts/generate.sh
 "#;
 
-const API_TEST: &str = r#"description = "Test the api"
-owner       = "API Team"
-needs       = ["self:build"]
+const API_TEST: &str = r#"description: Test the api
+owner: API Team
+needs: [self:build]
 
 # Tagged steps are what `--filter` selects on:
 #   ciabatta run test --filter tag:fast      the quick loop
 #   ciabatta run test --filter '!tag:flaky'  everything but the unreliable ones
-[[steps]]
-name        = "unit"
-description = "Unit tests — no I/O, milliseconds"
-run         = "echo 'api: 128 unit tests passed'"
-tags        = ["fast"]
+steps:
+  - name: unit
+    description: Unit tests — no I/O, milliseconds
+    run: "echo 'api: 128 unit tests passed'"
+    tags: [fast]
 
-[[steps]]
-name        = "integration"
-description = "Talks to a database; slower, and occasionally flaky"
-run         = "echo 'api: 14 integration tests passed against $API_URL'"
-needs       = ["unit"]
-tags        = ["slow", "flaky"]
-retries     = 2
-# One flaky suite shouldn't fail the whole monorepo's test run: this branch
-# reports its failure at the end and everything else carries on.
-continue_on_error = true
+  - name: integration
+    description: Talks to a database; slower, and occasionally flaky
+    run: "echo 'api: 14 integration tests passed against $API_URL'"
+    needs: [unit]
+    tags: [slow, flaky]
+    retries: 2
+    # One flaky suite shouldn't fail the whole monorepo's test run: this branch
+    # reports its failure at the end and everything else carries on.
+    continue_on_error: true
 "#;
 
 const API_BUILD_SCRIPT: &str = r##"#!/bin/sh
@@ -616,33 +638,32 @@ API_TIMEOUT=30s
 
 const API_RELEASE: &str = r#"# Publishing is a node on the graph, not a separate command.
 #
-# `kind = "push"` with a `recipe` runs that recipe from the root config — the
-# same thing `ciabatta push api-binary` would do — but as a step, with `needs`,
-# so it cannot possibly run before the artifact it publishes exists.
+# `kind: push` with a `recipe` runs that recipe from the root config — the same
+# thing `ciabatta push api-binary` would do — but as a step, with `needs`, so it
+# cannot possibly run before the artifact it publishes exists.
 #
 #   ciabatta run release
 #   ciabatta run release --filter kind:push    (just the publish, artifact in hand)
 
-description = "Build, package, and publish the api"
-owner       = "API Team"
-needs       = ["self:build"]
-tags        = ["release"]
+description: Build, package, and publish the api
+owner: API Team
+needs: [self:build]
+tags: [release]
 
-REQUIRED_ENV = ["CIABATTA_NEXUS_USER", "CIABATTA_NEXUS_PASS"]
+REQUIRED_ENV: [CIABATTA_NEXUS_USER, CIABATTA_NEXUS_PASS]
 
-[[steps]]
-name        = "verify"
-description = "Refuse to publish something that isn't there"
-run         = "test -f dist/api.tgz && echo 'api: artifact present'"
-tags        = ["release"]
+steps:
+  - name: verify
+    description: Refuse to publish something that isn't there
+    run: "test -f dist/api.tgz && echo 'api: artifact present'"
+    tags: [release]
 
-[[steps]]
-name        = "publish"
-description = "Upload the packaged binary to Nexus"
-kind        = "push"
-recipe      = "api-binary"
-needs       = ["verify"]
-tags        = ["release"]
+  - name: publish
+    description: Upload the packaged binary to Nexus
+    kind: push
+    recipe: api-binary
+    needs: [verify]
+    tags: [release]
 "#;
 
 const DOCKERFILE: &str = r#"# Built by the `deploy` workflow. Deliberately tiny — this example is about
@@ -660,46 +681,44 @@ const API_DEPLOY: &str = r#"# Build an image and ship it.
 #
 #   ciabatta run deploy -e DEPLOY_ENV=prod
 
-description = "Build the container image and deploy it"
-owner       = "API Team"
-needs       = ["self:build"]
-tags        = ["deploy"]
-requires    = ["sh"]
+description: Build the container image and deploy it
+owner: API Team
+needs: [self:build]
+tags: [deploy]
+requires: [sh]
 
-REQUIRED_ENV = ["DEPLOY_ENV"]
+REQUIRED_ENV: [DEPLOY_ENV]
 
-[[steps]]
-name        = "image"
-description = "Build the container image from packages/api/Dockerfile"
-# A real project drops the echo: docker build -t ghcr.io/example/api:$CIABATTA_COMMIT .
-run         = "echo \"api: would run docker build -t ghcr.io/example/api:${CIABATTA_COMMIT:-dev} .\""
-tags        = ["deploy"]
-timeout     = "15m"
+steps:
+  - name: image
+    description: Build the container image from packages/api/Dockerfile
+    # A real project drops the echo:
+    #   docker build -t ghcr.io/example/api:$CIABATTA_COMMIT .
+    run: 'echo "api: would run docker build -t ghcr.io/example/api:${CIABATTA_COMMIT:-dev} ."'
+    tags: [deploy]
+    timeout: 15m
 
-[[steps]]
-name        = "push-image"
-description = "Push the image to the registry"
-kind        = "push"
-recipe      = "api-image"
-needs       = ["image"]
-tags        = ["deploy"]
+  - name: push-image
+    description: Push the image to the registry
+    kind: push
+    recipe: api-image
+    needs: [image]
+    tags: [deploy]
 
-[[steps]]
-name        = "smoke"
-description = "Hit the deployed service once to prove it came up"
-run         = "echo 'api: smoke test passed'"
-needs       = ["push-image"]
-tags        = ["deploy"]
+  - name: smoke
+    description: Hit the deployed service once to prove it came up
+    run: "echo 'api: smoke test passed'"
+    needs: [push-image]
+    tags: [deploy]
 
-[[steps]]
-name        = "announce"
-description = "Tell the team — production only"
-run         = "echo 'api: announcing the production deploy'"
-needs       = ["smoke"]
-# Only runs when the condition holds; otherwise it's skipped and anything
-# depending on it still goes ahead.
-when        = "env.DEPLOY_ENV == prod"
-tags        = ["deploy"]
+  - name: announce
+    description: Tell the team — production only
+    run: "echo 'api: announcing the production deploy'"
+    needs: [smoke]
+    # Only runs when the condition holds; otherwise it's skipped and anything
+    # depending on it still goes ahead.
+    when: env.DEPLOY_ENV == prod
+    tags: [deploy]
 "#;
 
 // ─── web ────────────────────────────────────────────────────────────────────
@@ -710,39 +729,39 @@ const WEB_CONFIG: &str = r#"# The frontend. Depends on the api — a bare packag
 # So `ciabatta run build` waits for api's build, and `ciabatta run test` waits
 # for api's test, from this one declaration.
 
-[workspace]
-name        = "web"
-description = "The browser app"
-owner       = "Web Team"
-tags        = ["frontend"]
-depends_on  = ["api"]
-requires    = ["sh"]
+workspace:
+  name: web
+  description: The browser app
+  owner: Web Team
+  tags: [frontend]
+  depends_on: [api]
+  requires: [sh]
 "#;
 
-const WEB_BUILD: &str = r#"description = "Bundle the frontend"
-owner       = "Web Team"
+const WEB_BUILD: &str = r#"description: Bundle the frontend
+owner: Web Team
 
-[[steps]]
-name        = "bundle"
-description = "Produce dist/bundle.js"
-run         = "mkdir -p dist && echo '// bundled' > dist/bundle.js && echo 'web: bundled'"
-tags        = ["frontend", "slow"]
+steps:
+  - name: bundle
+    description: Produce dist/bundle.js
+    run: "mkdir -p dist && echo '// bundled' > dist/bundle.js && echo 'web: bundled'"
+    tags: [frontend, slow]
 "#;
 
-const WEB_TEST: &str = r#"description = "Test the frontend"
-owner       = "Web Team"
-needs       = ["self:build"]
+const WEB_TEST: &str = r#"description: Test the frontend
+owner: Web Team
+needs: [self:build]
 
-[[steps]]
-name        = "unit"
-description = "Component tests"
-run         = "echo 'web: 61 component tests passed'"
-tags        = ["fast", "frontend"]
+steps:
+  - name: unit
+    description: Component tests
+    run: "echo 'web: 61 component tests passed'"
+    tags: [fast, frontend]
 "#;
 
 const WEB_DEV: &str = r#"# A workflow with a step that never exits.
 #
-# `persistent = true` starts the dev server, releases everything downstream
+# `persistent: true` starts the dev server, releases everything downstream
 # immediately, and hands the process to the ciabatta daemon — so it keeps
 # running after the graph finishes instead of hanging it forever. The run prints
 # a session id:
@@ -751,23 +770,22 @@ const WEB_DEV: &str = r#"# A workflow with a step that never exits.
 #   ciabatta watch --list           find it again later
 #   ciabatta watch --stop <ID>      stop it
 
-description = "Run the app locally against a live api"
-owner       = "Web Team"
-tags        = ["dev"]
+description: Run the app locally against a live api
+owner: Web Team
+tags: [dev]
 
-[[steps]]
-name        = "serve"
-description = "The dev server — keeps running after this workflow finishes"
-run         = "echo 'web: dev server listening on http://localhost:3000' && sleep 3600"
-persistent  = true
-tags        = ["dev"]
+steps:
+  - name: serve
+    description: The dev server — keeps running after this workflow finishes
+    run: "echo 'web: dev server listening on http://localhost:3000' && sleep 3600"
+    persistent: true
+    tags: [dev]
 
-[[steps]]
-name        = "open"
-description = "Print where to go, once the server is up"
-run         = "echo 'web: open http://localhost:3000'"
-needs       = ["serve"]
-tags        = ["dev"]
+  - name: open
+    description: Print where to go, once the server is up
+    run: "echo 'web: open http://localhost:3000'"
+    needs: [serve]
+    tags: [dev]
 "#;
 
 // ─── README ─────────────────────────────────────────────────────────────────
@@ -802,7 +820,7 @@ them**, and the resulting graph is **shown to you before it runs**.
 ## What's in here
 
 ```
-.ciabatta/ciabatta.toml       the monorepo root: shared toolchain + variables
+.ciabatta/ciabatta.yaml       the monorepo root: shared toolchain + variables
 packages/
   proto/                      the API schema, and the stubs generated from it
   common/                     shared library — needs proto's stubs
@@ -825,30 +843,30 @@ Nobody wrote that graph down. Each package declared what *it* needs, and
 
 | What | Where to look |
 | --- | --- |
-| Cross-package dependency | `packages/api/.ciabatta/ciabatta.toml` → `depends_on` |
+| Cross-package dependency | `packages/api/.ciabatta/ciabatta.yaml` → `depends_on` |
 | Depending on one specific workflow | `depends_on = ["proto:generate"]` in the same file |
-| Depending on another workflow in the same package | `needs = ["self:build"]` in `packages/api/.ciabatta/workflows/test.toml` |
-| Ownership and descriptions | every `ciabatta.toml` and every step |
-| Toolchain hints | `.ciabatta/ciabatta.toml` → `[toolchain]` |
-| Tags, for `--filter` | steps in `packages/api/.ciabatta/workflows/test.toml` |
-| Timeouts and retries | `packages/api/.ciabatta/workflows/build.toml` |
-| A recovery node (`on_error`) | `packages/api/.ciabatta/workflows/build.toml` → `fix-build` |
-| A step that never exits | `packages/web/.ciabatta/workflows/dev.toml` → `persistent` |
-| Required variables | `packages/api/.ciabatta/workflows/build.toml` → `REQUIRED_ENV` |
+| Depending on another workflow in the same package | `needs: [self:build]` in `packages/api/.ciabatta/workflows/test.yaml` |
+| Ownership and descriptions | every `ciabatta.yaml` and every step |
+| Toolchain hints | `.ciabatta/ciabatta.yaml` → `toolchain:` |
+| Tags, for `--filter` | steps in `packages/api/.ciabatta/workflows/test.yaml` |
+| Timeouts and retries | `packages/api/.ciabatta/workflows/build.yaml` |
+| A recovery node (`on_error`) | `packages/api/.ciabatta/workflows/build.yaml` → `fix-build` |
+| A step that never exits | `packages/web/.ciabatta/workflows/dev.yaml` → `persistent` |
+| Required variables | `packages/api/.ciabatta/workflows/build.yaml` → `REQUIRED_ENV` |
 | `.env` files | `packages/api/.env`, and `.env.example` at the root |
-| A run defined in a config rather than a workflow file | `.ciabatta/ciabatta.toml` → `[recipies.smoke.run]` |
+| A run defined in a config rather than a workflow file | `.ciabatta/ciabatta.yaml` → `recipies.smoke.run` |
 "#,
     );
 
     if options.nexus {
         out.push_str(
-            "| Publishing as a graph node | `packages/api/.ciabatta/workflows/release.toml` |\n\
-             | Registry and credentials | `.ciabatta/ciabatta.toml` → `[registries.nexus]` |\n",
+            "| Publishing as a graph node | `packages/api/.ciabatta/workflows/release.yaml` |\n\
+             | Registry and credentials | `.ciabatta/ciabatta.yaml` → `registries.nexus` |\n",
         );
     }
     if options.docker {
         out.push_str(
-            "| Container build and deploy | `packages/api/.ciabatta/workflows/deploy.toml` |\n\
+            "| Container build and deploy | `packages/api/.ciabatta/workflows/deploy.yaml` |\n\
              | Conditional steps (`when`) | the `announce` step in that file |\n",
         );
     }
@@ -928,7 +946,7 @@ rather than failing later with an error about something else. Try it: edit
    command run all of them.
 4. **Tag steps by cost and kind.** `fast`, `slow`, `flaky`, `integration` —
    they're what makes `--filter` useful six months from now.
-5. **Put install instructions in `[toolchain]`.** The person who hits
+5. **Put install instructions in `toolchain:`.** The person who hits
    "protoc: not found" should get the fix, not a search engine.
 6. **Give long steps a `timeout`,** flaky ones `retries`, and non-critical ones
    `continue_on_error`. One bad step shouldn't hold up the repo.
@@ -972,7 +990,7 @@ mod tests {
         dir
     }
 
-    /// Every generated TOML file must actually parse as the schema it claims to
+    /// Every generated config must actually parse as the schema it claims to
     /// be — an example that doesn't load is worse than no example.
     #[test]
     fn every_generated_config_parses() {
@@ -981,15 +999,57 @@ mod tests {
             docker: true,
             ..Default::default()
         };
+        // The optional slices add entries under `registries:` and `recipies:`,
+        // which in YAML means extending one key rather than repeating a header.
+        // Check each combination lands everything it should.
+        for (nexus, docker, registries, recipes) in [
+            (false, false, vec![], vec!["smoke"]),
+            (true, false, vec!["nexus"], vec!["smoke", "api-binary"]),
+            (false, true, vec!["ghcr"], vec!["smoke", "api-image"]),
+            (
+                true,
+                true,
+                vec!["nexus", "ghcr"],
+                vec!["smoke", "api-binary", "api-image"],
+            ),
+        ] {
+            let opts = Options {
+                nexus,
+                docker,
+                ..Default::default()
+            };
+            let rendered = root_config(&opts);
+            let cfg: crate::config::CiabattaConfig = crate::format::from_str(
+                &rendered,
+                crate::format::Format::Yaml,
+            )
+            .unwrap_or_else(|e| {
+                panic!("root config (nexus={nexus}, docker={docker}) broke: {e}\n{rendered}")
+            });
+
+            let mut got: Vec<&str> = cfg.registries.keys().map(|s| s.as_str()).collect();
+            got.sort_unstable();
+            let mut want = registries.clone();
+            want.sort_unstable();
+            assert_eq!(got, want, "registries with nexus={nexus}, docker={docker}");
+
+            let mut got: Vec<&str> = cfg.recipes.keys().map(|s| s.as_str()).collect();
+            got.sort_unstable();
+            let mut want = recipes.clone();
+            want.sort_unstable();
+            assert_eq!(got, want, "recipes with nexus={nexus}, docker={docker}");
+        }
+
         for entry in plan(&options) {
-            if !entry.path.ends_with(".toml") {
+            if !crate::format::is_config_file(std::path::Path::new(entry.path)) {
                 continue;
             }
-            if entry.path.ends_with("ciabatta.toml") {
-                toml::from_str::<crate::config::CiabattaConfig>(&entry.contents)
+            let format = crate::format::Format::of_path(std::path::Path::new(entry.path));
+            if entry.path.ends_with("ciabatta.yaml") {
+                crate::format::from_str::<crate::config::CiabattaConfig>(&entry.contents, format)
                     .unwrap_or_else(|e| panic!("{} does not parse as a config: {e}", entry.path));
             } else {
-                toml::from_str::<crate::workspace::Workflow>(&entry.contents)
+                crate::format::from_str::<crate::workspace::Workflow>(&entry.contents, format)
                     .unwrap_or_else(|e| panic!("{} does not parse as a workflow: {e}", entry.path));
             }
         }
@@ -998,7 +1058,7 @@ mod tests {
     #[test]
     fn the_optional_slices_are_opt_in() {
         let bare: Vec<&str> = plan(&Options::default()).iter().map(|f| f.path).collect();
-        assert!(!bare.iter().any(|p| p.contains("release.toml")));
+        assert!(!bare.iter().any(|p| p.contains("release.yaml")));
         assert!(!bare.iter().any(|p| p.contains("Dockerfile")));
 
         let full = Options {
@@ -1007,9 +1067,9 @@ mod tests {
             ..Default::default()
         };
         let paths: Vec<&str> = plan(&full).iter().map(|f| f.path).collect();
-        assert!(paths.iter().any(|p| p.contains("release.toml")));
+        assert!(paths.iter().any(|p| p.contains("release.yaml")));
         assert!(paths.iter().any(|p| p.contains("Dockerfile")));
-        assert!(paths.iter().any(|p| p.contains("deploy.toml")));
+        assert!(paths.iter().any(|p| p.contains("deploy.yaml")));
     }
 
     /// The generated repo has to load as a workspace with the dependency graph

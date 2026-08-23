@@ -307,7 +307,7 @@ fn contains(haystack: &str, needle: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{CIABATTA_DIR, CONFIG_FILE};
+    use crate::config::CIABATTA_DIR;
     use crate::workspace::graph::Selection;
     use std::path::{Path, PathBuf};
 
@@ -321,7 +321,7 @@ mod tests {
     fn member(root: &Path, rel: &str, config: &str) -> PathBuf {
         let dir = root.join(rel);
         std::fs::create_dir_all(dir.join(CIABATTA_DIR)).unwrap();
-        std::fs::write(dir.join(CIABATTA_DIR).join(CONFIG_FILE), config).unwrap();
+        std::fs::write(dir.join(CIABATTA_DIR).join("ciabatta.toml"), config).unwrap();
         dir
     }
 

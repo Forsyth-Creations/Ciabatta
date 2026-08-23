@@ -1,0 +1,20 @@
+# Converted from build.toml by `ciabatta config migrate`.
+# Comments in the original weren't carried over — build.toml is still there
+# if you want them back. Ciabatta now reads this file instead.
+description: Build the daemon web app and the ciabatta binary
+owner: Henry Forsyth
+requires:
+- cargo
+steps:
+- name: frontend
+  run: yarn turbo run build --filter=ciabatta-tool-frontend
+  description: Build tool_frontend/dist, which build.rs embeds into the binary
+  requires:
+  - yarn
+  timeout: 10m
+- name: binary
+  run: cargo build
+  description: Compile the ciabatta CLI
+  timeout: 20m
+  needs:
+  - frontend

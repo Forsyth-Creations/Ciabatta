@@ -12,6 +12,7 @@ import { createRootRoute, createRoute, createRouter, Outlet } from "@tanstack/re
 
 import { AppShell } from "./components/AppShell";
 import { AnalyzePage } from "./pages/AnalyzePage";
+import { CachePage } from "./pages/CachePage";
 import { AiPage } from "./pages/AiPage";
 import { DashboardPage } from "./pages/DashboardPage";
 import { DocsPage } from "./pages/DocsPage";
@@ -85,6 +86,12 @@ const runDetailRoute = createRoute({
   component: RunDetailPage,
 });
 
+const cacheRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/cache",
+  component: CachePage,
+});
+
 const analyzeRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/analyze",
@@ -113,6 +120,7 @@ const routeTree = rootRoute.addChildren([
   runRoute,
   runBuilderRoute,
   runDetailRoute,
+  cacheRoute,
   analyzeRoute,
   aiRoute,
   docsRoute,

@@ -7,7 +7,7 @@
 **Monorepo orchestration and artifact publishing.**
 
 Ciabatta is a fast, cross-platform CLI that does two jobs, from one declarative
-TOML file.
+YAML file.
 
 It **orchestrates a monorepo**: every package opts in with `ciabatta init --lib`
 and declares who owns it, what its workflows do, and which other packages they
@@ -44,7 +44,7 @@ also just a step on the graph, so a build that ends in a push is one command.
   persistent ones (dev servers, watchers) are handed to the daemon and stepped
   over, so they keep running after the build that started them is done.
 - **One config, many registries.** Describe your registries and publish
-  "recipes" once in `.ciabatta/ciabatta.toml`; run any combination of them with
+  "recipes" once in `.ciabatta/ciabatta.yaml`; run any combination of them with
   a single command.
 - **CI-aware.** Automatically resolves `CIABATTA_BRANCH`, `CIABATTA_COMMIT`,
   `CIABATTA_TAG`, and `CIABATTA_BUILD_NUMBER` from GitLab, GitHub Actions,
@@ -139,7 +139,7 @@ Ciabatta discovers your project by walking up to find the `.ciabatta/`
 directory; the directory **above** it is treated as the project root that
 artifacts are published from. For workflows it goes one level further out: the
 **monorepo root** is your git root, and every directory beneath it with a
-`.ciabatta/ciabatta.toml` is a sub-workspace.
+`.ciabatta/ciabatta.yaml` is a sub-workspace.
 
 ## Commands
 
@@ -150,15 +150,21 @@ artifacts are published from. For workflows it goes one level further out: the
 | `ciabatta push [RECIPE...]` | Push one or more recipes in parallel (all if none named). |
 | `ciabatta pull [RECIPE...]` | Download artifacts for one or more recipes. |
 | `ciabatta run [RECIPE...]` | Execute a single project's run: a DAG of dependent script steps with error-recovery branches. `--gui` for a live browser view, `--build` for a visual flowchart editor. |
+| `ciabatta dry-run [TARGET...]` | What a run would reuse from the cache and what it would rebuild — and for a rebuild, exactly what changed. Runs nothing. `--diff` for the lines. |
+| `ciabatta cache <init\|status\|prune\|clean>` | Set up and inspect this workspace's build cache. `init` proposes inputs and outputs from what's actually in the directory. |
+| `ciabatta remote-cache <init\|start\|login\|logout\|status\|add-user>` | Run or connect to a shared cache the whole team reads from. |
+| `ciabatta self update` | Update this binary from the remote cache that serves it, verified against the SHA-256 it advertises. |
+| `ciabatta convert --script PATH` | Turn an existing script into a recipe: its tools, its variables, its outputs, and the description in its header. |
+| `ciabatta config migrate` | Convert this checkout's TOML config files to YAML. |
 | `ciabatta list` | Every workflow in the monorepo — with descriptions, owners and dependencies — then this project's recipes. `-s TERM` to search, `-v` for steps. |
-| `ciabatta init --lib` | Opt this package in as a sub-workspace: a `[workspace]` identity plus a starter workflow. |
-| `ciabatta init [--ci SYSTEM]` | Create a `.ciabatta/` directory with a starter publishing `ciabatta.toml`. |
-| `ciabatta configure` | Interactively add a registry (and optionally a recipe) — no hand-editing TOML. |
+| `ciabatta init --lib` | Opt this package in as a sub-workspace: a `workspace:` identity plus a starter workflow. |
+| `ciabatta init [--ci SYSTEM]` | Create a `.ciabatta/` directory with a starter publishing `ciabatta.yaml`. |
+| `ciabatta configure` | Interactively add a registry (and optionally a recipe) — no hand-editing YAML. |
 | `ciabatta configure auto` | Analyze the project and pick recipes from an interactive checklist (Docker → ECR/Nexus, Rust binaries → crates.io / S3 / Nexus). |
 | `ciabatta tui` (alias `browse`) | Interactive browser — inspect registries, check paths, push on demand. |
 | `ciabatta analyze` | Build the project's dependency graph and open an interactive view. |
 | `ciabatta watch <command>` | Run a command and stream its logs into a live, searchable web view with bookmarks and notification triggers. `--list` to see running sessions, `--attach <ID>` to tail one, `--stop <ID>` to end it. |
-| `ciabatta todo [TASK]` | Personal task list. With a TASK, adds it and exits; without, opens the todo page. |
+| `ciabatta todo [TASK] [--global]` | Task list, scoped to the project you're in — or to the global list with `--global`. With a TASK, adds it and exits; without, opens the todo page. |
 | `ciabatta ai` | AI assistant — chat TUI plus a live architecture mind map. |
 | `ciabatta daemon <status\|stop\|restart\|logs>` | Inspect or control the background daemon. |
 | `ciabatta config show` | Print the resolved configuration. |
@@ -216,16 +222,16 @@ ciabatta init --lib --owner "Ada" --description "Public REST API" \
               --depends-on proto:generate
 ```
 
-That writes a `[workspace]` identity into `packages/api/.ciabatta/ciabatta.toml`:
+That writes a `workspace:` identity into `packages/api/.ciabatta/ciabatta.yaml`:
 
-```toml
-[workspace]
-name        = "api"
-description = "Public REST API"
-owner       = "Ada"
-depends_on  = ["proto:generate"]   # what this package needs first
-tags        = ["backend"]
-requires    = ["cargo"]            # tools every workflow here needs on PATH
+```yaml
+workspace:
+  name: api
+  description: Public REST API
+  owner: Ada
+  depends_on: [proto:generate]   # what this package needs first
+  tags: [backend]
+  requires: [cargo]              # tools every workflow here needs on PATH
 ```
 
 `description` and `owner` aren't decoration — they're what `ciabatta list` shows
@@ -238,28 +244,28 @@ One file per workflow, in `.ciabatta/workflows/`. The **filename is the
 workflow name**, and every package that defines a workflow of that name joins
 the same graph.
 
-```toml
-# packages/api/.ciabatta/workflows/build.toml
-description  = "Compile the API service"
-owner        = "Ada"
-needs        = ["proto:generate"]     # cross-package deps for this workflow
-REQUIRED_ENV = ["API_TOKEN"]          # refuse to start unless set
-env_file     = ".env"                 # relative to this package
+```yaml
+# packages/api/.ciabatta/workflows/build.yaml
+description: Compile the API service
+owner: Ada
+needs: [proto:generate]        # cross-package deps for this workflow
+REQUIRED_ENV: [API_TOKEN]      # refuse to start unless set
+env_file: .env                 # relative to this package (and the default)
+env_default: .env.default      # the checked-in template .env comes from
 
-[[steps]]
-name        = "compile"
-description = "Build the release binary"
-run         = "cargo build --release"
-requires    = ["cargo", "protoc"]     # tools this step needs
-timeout     = "10m"
-retries     = 1
+steps:
+  - name: compile
+    description: Build the release binary
+    run: cargo build --release
+    requires: [cargo, protoc]  # tools this step needs
+    timeout: 10m
+    retries: 1
 
-[[steps]]
-name        = "publish"
-description = "Publish the binary to Nexus"
-kind        = "push"                  # a special, identifiable phase
-recipe      = "binary"                # a [recipies] entry in this package
-needs       = ["compile"]
+  - name: publish
+    description: Publish the binary to Nexus
+    kind: push                 # a special, identifiable phase
+    recipe: binary             # a `recipies` entry in this package
+    needs: [compile]
 ```
 
 Steps run **from their own package's directory**, with that package's
@@ -307,15 +313,16 @@ A cycle is refused with the loop spelled out, rather than deadlocking.
 
 Declare install instructions once at the monorepo root:
 
-```toml
-# .ciabatta/ciabatta.toml at the repo root
-[workspace]
-umbrella = true            # the root is shared settings, not a package
+```yaml
+# .ciabatta/ciabatta.yaml at the repo root
+workspace:
+  umbrella: true           # the root is shared settings, not a package
 
-[toolchain.protoc]
-hint        = "brew install protobuf"
-check       = "protoc --version"    # optional: smarter than a PATH lookup
-description = "Protocol buffer compiler"
+toolchain:
+  protoc:
+    hint: brew install protobuf
+    check: protoc --version         # optional: smarter than a PATH lookup
+    description: Protocol buffer compiler
 ```
 
 Every tool a graph requires is checked **before the first step runs**, and all
@@ -388,46 +395,49 @@ web app.
 
 ## Configuration
 
-Ciabatta reads `.ciabatta/ciabatta.toml`. Registries describe *where* things go;
+Ciabatta reads `.ciabatta/ciabatta.yaml`. Registries describe *where* things go;
 recipes describe *what* to publish and *how*.
 
 The fastest way to start is `ciabatta configure` (add a registry interactively)
 or `ciabatta configure auto` (let Ciabatta inspect the repo and suggest recipes).
 You can also edit the file by hand:
 
-```toml
-[system]
-ci = "github"          # gitlab | github | jenkins | circleci | azure | bitbucket
-containers = "docker"  # docker | podman — when omitted, Ciabatta auto-detects what
-                       # is installed (prefers podman, then docker; asks you to
-                       # choose if both are present).
+```yaml
+system:
+  ci: github           # gitlab | github | jenkins | circleci | azure | bitbucket
+  containers: docker   # docker | podman — when omitted, Ciabatta auto-detects
+                       # what is installed (prefers podman, then docker; asks
+                       # you to choose if both are present).
 
-[registries.nexus]
-# url and login_script expand environment variables with bash-style defaults,
-# so one config can target different environments.
-type       = "nexus"
-url        = "https://${NEXUS_HOST:-nexus.example.com}"  # bare Nexus host
-repository = "raw-hosted"   # which repo artifacts publish into
-format     = "raw"          # raw | npm | pypi
-tls_verify = true
-needs_auth = true
+registries:
+  nexus:
+    # url and login_script expand environment variables with bash-style
+    # defaults, so one config can target different environments.
+    type: nexus
+    url: "https://${NEXUS_HOST:-nexus.example.com}"   # bare Nexus host
+    repository: raw-hosted   # which repo artifacts publish into
+    format: raw              # raw | npm | pypi
+    tls_verify: true
+    needs_auth: true
 
-[registries.s3]
-type = "s3"
-url  = "s3://my-artifacts-bucket"   # the bucket, with the s3:// scheme
+  s3:
+    type: s3
+    url: s3://my-artifacts-bucket    # the bucket, with the s3:// scheme
 
-# A simple recipe: copy a local artifact to a templated publish path.
-[recipies.release_frontend]
-registry = "nexus"
-local_artifact_path = "frontend/dist"
-publish_path = "frontend/{CIABATTA_BRANCH}/{CIABATTA_COMMIT}/frontend"
+recipies:
+  # A simple recipe: copy a local artifact to a templated publish path.
+  release_frontend:
+    registry: nexus
+    local_artifact_path: frontend/dist
+    publish_path: "frontend/{CIABATTA_BRANCH}/{CIABATTA_COMMIT}/frontend"
 
-# A scripted recipe: run your own push/pull scripts with the variables injected.
-[recipies.release_backend.push]
-bash_script = "scripts/release_backend.sh"
-
-[recipies.release_backend.pull]
-bash_script = "scripts/pull_backend.sh"
+  # A scripted recipe: run your own push/pull scripts with the variables
+  # injected.
+  release_backend:
+    push:
+      bash_script: scripts/release_backend.sh
+    pull:
+      bash_script: scripts/pull_backend.sh
 ```
 
 A few rules worth knowing:
@@ -464,17 +474,19 @@ version determine where it lands). Both read credentials from
 bearer token. `ciabatta pull` supports only `raw` repositories — pull npm/PyPI
 packages with their native clients.
 
-```toml
+```yaml
 # Publish an npm package straight to a Nexus npm repository.
-[registries.sdk]
-type       = "nexus"
-url        = "https://nexus.example.com"
-repository = "npm-hosted"
-format     = "npm"
+registries:
+  sdk:
+    type: nexus
+    url: https://nexus.example.com
+    repository: npm-hosted
+    format: npm
 
-[recipies.sdk]
-registry            = "sdk"
-local_artifact_path = "packages/sdk"   # tarball or package directory
+recipies:
+  sdk:
+    registry: sdk
+    local_artifact_path: packages/sdk   # tarball or package directory
 ```
 
 ### S3
@@ -482,16 +494,18 @@ local_artifact_path = "packages/sdk"   # tarball or package directory
 An S3 registry drives the AWS CLI, so it's just a bucket URL: set `url` to
 `s3://<bucket>` and each recipe's `publish_path` becomes the object key.
 
-```toml
-[registries.s3]
-type = "s3"                        # inferred when the name contains "s3"
-url  = "s3://my-artifacts-bucket"
+```yaml
+registries:
+  s3:
+    type: s3                       # inferred when the name contains "s3"
+    url: s3://my-artifacts-bucket
 
-[recipies.release]
-registry            = "s3"
-local_artifact_path = "target/release/app"
-publish_path        = "app/{CIABATTA_BRANCH}/{CIABATTA_COMMIT}/app"
-# uploads to s3://my-artifacts-bucket/app/<branch>/<commit>/app
+recipies:
+  release:
+    registry: s3
+    local_artifact_path: target/release/app
+    publish_path: "app/{CIABATTA_BRANCH}/{CIABATTA_COMMIT}/app"
+    # uploads to s3://my-artifacts-bucket/app/<branch>/<commit>/app
 ```
 
 - **Auth** uses the standard AWS credential chain — `AWS_ACCESS_KEY_ID` /
@@ -508,19 +522,21 @@ image** with `local_image`. Ciabatta retags it to the registry's target
 reference and pushes it — so you don't have to bake the registry URL into your
 `docker build`:
 
-```toml
-[registries.myecr]
-type = "ecr"                       # inferred when the name contains "ecr"
-url  = "123456789.dkr.ecr.us-east-1.amazonaws.com"
+```yaml
+registries:
+  myecr:
+    type: ecr                      # inferred when the name contains "ecr"
+    url: 123456789.dkr.ecr.us-east-1.amazonaws.com
 
-[recipies.app]
-registry     = "myecr"
-local_image  = "app:latest"        # a local image (name or name:tag)
-publish_path = "app:{CIABATTA_COMMIT}"   # remote image ref (repo[:tag])
+recipies:
+  app:
+    registry: myecr
+    local_image: app:latest              # a local image (name or name:tag)
+    publish_path: "app:{CIABATTA_COMMIT}"   # remote image ref (repo[:tag])
 
-  # Build the image locally; ciabatta handles the tag + push.
-  [recipies.app.push]
-  pre = "docker build -t app:latest ."
+    # Build the image locally; ciabatta handles the tag + push.
+    push:
+      pre: docker build -t app:latest .
 ```
 
 On push this runs `docker tag app:latest <url>/app:<commit>` then
@@ -547,20 +563,21 @@ anything runnable. Unset stages fall back to their defaults (login authenticates
 runs via `sh -c` from the project root with all `CIABATTA_*` vars in its
 environment.
 
-```toml
-[recipies.frontend]
-registry = "nexus"
-local_artifact_path = "frontend/dist"
-publish_path = "front/{CIABATTA_COMMIT}/dist"
+```yaml
+recipies:
+  frontend:
+    registry: nexus
+    local_artifact_path: frontend/dist
+    publish_path: "front/{CIABATTA_COMMIT}/dist"
 
-  # Overrides for the push direction only:
-  [recipies.frontend.push]
-  pre  = "python scripts/bundle.py"     # pre-push
-  post = "./scripts/notify.sh deployed" # post-push
-  # login + push (main) use their defaults
+    # Overrides for the push direction only:
+    push:
+      pre: python scripts/bundle.py         # pre-push
+      post: ./scripts/notify.sh deployed    # post-push
+      # login + push (main) use their defaults
 
-  [recipies.frontend.pull]
-  post = "echo pulled $CIABATTA_COMMIT"
+    pull:
+      post: echo pulled $CIABATTA_COMMIT
 ```
 
 | Stage | Override key | Default |
@@ -579,44 +596,45 @@ recipe": they live in `[recipies.<name>.run]`, show up in `ciabatta list`,
 and work with menus (`--cookbook`).
 
 The **step graph lives in its own flowchart file**, referenced from your config,
-so a complex pipeline doesn't clutter `ciabatta.toml`:
+so a complex pipeline doesn't clutter `ciabatta.yaml`:
 
-```toml
-# .ciabatta/ciabatta.toml
-[recipies.web.run]
-flowchart = ".ciabatta/runs.toml"      # the step DAG (a separate file)
-pre  = "scripts/notify_start.sh"        # optional login/pre/post phase hooks
+```yaml
+# .ciabatta/ciabatta.yaml
+recipies:
+  web:
+    run:
+      flowchart: .ciabatta/runs.yaml    # the step DAG (a separate file)
+      pre: scripts/notify_start.sh      # optional login/pre/post phase hooks
 ```
 
-```toml
-# .ciabatta/runs.toml — each top-level entry is a series of dependent steps.
-[web]
-  REQUIRED_ENV = ["RUN_TOKEN", "AWS_REGION"]     # gate the whole flowchart
+```yaml
+# .ciabatta/runs.yaml — each top-level entry is a series of dependent steps.
+web:
+  REQUIRED_ENV: [RUN_TOKEN, AWS_REGION]     # gate the whole flowchart
 
-  [[web.steps]]
-  name = "build"
-  script = "scripts/build.sh"           # a bash file… (or use run = "…" inline)
+  steps:
+    - name: build
+      script: scripts/build.sh        # a bash file… (or use `run:` inline)
 
-  [[web.steps]]
-  name = "migrate"
-  script  = "scripts/migrate.sh"
-  needs   = ["build"]                    # runs once "build" succeeds (a DAG edge)
-  on_error = "fix_migrate"               # on failure, jump to a recovery node
+    - name: migrate
+      script: scripts/migrate.sh
+      needs: [build]                  # runs once "build" succeeds (a DAG edge)
+      on_error: fix_migrate           # on failure, jump to a recovery node
 
-  [[web.steps]]                          # a recovery node: a choice of fixes
-  name = "fix_migrate"
-  recover = true
-  message = "Migration failed — choose how to recover:"
-  retry   = "migrate"                    # re-run this step after a fix succeeds
-  options = [
-    { label = "Roll back",    script = "scripts/rollback.sh" },
-    { label = "Force unlock", run = "make unlock", default = true },
-  ]
+    - name: fix_migrate               # a recovery node: a choice of fixes
+      recover: true
+      message: "Migration failed — choose how to recover:"
+      retry: migrate                  # re-run this step after a fix succeeds
+      options:
+        - label: Roll back
+          script: scripts/rollback.sh
+        - label: Force unlock
+          run: make unlock
+          default: true
 
-  [[web.steps]]
-  name = "release"
-  script = "scripts/release.sh"
-  needs  = ["migrate"]
+    - name: release
+      script: scripts/release.sh
+      needs: [migrate]
 ```
 
 Steps whose `needs` are all satisfied become eligible to run; the graph is
@@ -677,10 +695,10 @@ and phase hook — the same set `ciabatta source` prints, so you don't need to
 `CIABATTA_ENV`, so a run's script can reference `$CIABATTA_COMMIT` on a plain
 dev-machine run:
 
-```toml
-[[web.steps]]
-name = "release"
-run  = "./scripts/release.sh --tag $CIABATTA_COMMIT"
+```yaml
+steps:
+  - name: release
+    run: ./scripts/release.sh --tag $CIABATTA_COMMIT
 ```
 
 Only *unset* variables are filled in: anything you provide explicitly — from a CI
@@ -703,7 +721,7 @@ presents a list of fix `options`:
 
 ```bash
 ciabatta run web --gui        # live view: flowchart + streaming logs + fix buttons
-ciabatta run --build          # visual flowchart editor → copy the generated TOML
+ciabatta run --build          # visual flowchart editor → copy the generated config
 ```
 
 `--gui` hands the run to the daemon and opens a page at
@@ -711,8 +729,8 @@ ciabatta run --build          # visual flowchart editor → copy the generated T
 per-step logs, and interactive recovery. The daemon owns the run, so it keeps
 going if you close the terminal. `--build` opens a visual
 builder that needs no project: lay out steps, edges, and recovery options, then
-copy the emitted TOML into your flowchart file. Already have a pipeline? Paste
-its TOML into the builder's import box to keep editing it visually.
+copy the emitted config into your flowchart file. Already have a pipeline?
+Paste it into the builder's import box to keep editing it visually.
 
 | Phase | Override key | Default |
 | --- | --- | --- |
@@ -720,6 +738,312 @@ its TOML into the builder's import box to keep editing it visually.
 | pre-run | `pre` | nothing |
 | run | the `steps` DAG | executes the flowchart |
 | post-run | `post` | nothing |
+
+## Caching
+
+Off until a workspace opts in. A cache that turns itself on is a cache that will
+one day serve somebody a stale artifact they never asked it to keep.
+
+```bash
+ciabatta cache init            # propose inputs and outputs from the directory
+ciabatta dry-run build         # what would be reused, and why not
+ciabatta dry-run build --diff  # ...with the lines that changed
+ciabatta cache status          # what the local store is holding
+```
+
+```yaml
+cache:
+  enabled: true
+  inputs:  ["src/**/*", "Cargo.toml"]   # what the build READS
+  outputs: ["target/release/app"]       # what the build WRITES
+  exclude: [target]                     # never counted as an input, so a build
+                                        # can't invalidate itself with its own
+                                        # output
+  env: [PROFILE]                        # variables the RESULT depends on
+```
+
+A stage has exactly **three** dependencies, and any of them changing is a
+rebuild:
+
+1. its **input files**,
+2. the **environment variables** it declared in `cache.env`,
+3. the **outputs of the stages it needs**.
+
+The third is what makes a *graph* cacheable rather than just a directory. Change
+a `.proto` file and `proto:generate` misses; its outputs change; every stage
+downstream of it misses too — each for a reason it can name.
+
+Two things worth being explicit about:
+
+**An undeclared input is a wrong answer, not a slow one.** If a build reads a
+file that isn't in `inputs`, changing that file won't change the key and the
+cache will confidently hand back the wrong artifact. That's why `cache init`
+scaffolds `inputs` from the directory's real contents instead of leaving it
+empty, and why `dry-run` exists.
+
+**Outputs are verified, not assumed.** A key match says the inputs didn't
+change; it says nothing about whether somebody deleted `dist/` or hand-edited a
+generated file. So the outputs are hashed too, and a mismatch is a restore or a
+rebuild — the difference between "we think this is current" and "this is
+current".
+
+`ciabatta dry-run` is the command that makes the cache trustworthy. For every
+stage it prints the decision, and when the answer is "rebuild" it shows the diff
+that explains it — the changed files with their lines, the environment variables
+that moved, and the upstream stages that produced something different. The same
+view is on the **Cache** page of the web app, and on each node of the workflow
+graph.
+
+## The remote cache
+
+A small server anyone can stand up, so a team's builds stop repeating each
+other's work. It keeps artifacts on its own filesystem in the same layout the
+local cache uses — no object store to provision, no database to migrate.
+
+```bash
+# On the server
+ciabatta remote-cache init
+ciabatta remote-cache start
+
+# On each developer's machine
+ciabatta remote-cache login http://cache.example.com:8380
+ciabatta cache init --remote http://cache.example.com:8380
+```
+
+A project is known to the server by its **name and an id the server assigns**.
+The id is written back into the workspace config and committed:
+
+```yaml
+cache:
+  remote:
+    url: http://cache.example.com:8380
+    project: 7f3a-…        # assigned on first contact — commit this
+```
+
+That id is what makes every checkout and every CI runner resolve to the same
+project. Names get reused and renamed; two teams both calling their repo `api`
+must never end up silently sharing a cache, and the id is what prevents it.
+
+### The server's own page
+
+The cache server serves a small admin page at its root — open
+`http://cache.example.com:8380/` in a browser. It shows the hit rate, what's
+stored, and the ciabatta builds it hands out, and it does the one thing the CLI
+does badly: **minting credentials**.
+
+`ciabatta remote-cache add-user` prints a hash for you to paste into the config
+and restart around, which is fine once and tiresome forever. The page writes the
+user to the server's own list and hands back the token there and then. The token
+is displayed exactly once — only its SHA-256 is kept — so if it's lost the
+credential has to be reissued rather than recovered.
+
+Two rules govern who may do that:
+
+- On a **`token`** or **`ldap`** server, only an **admin** — a user with
+  `admin: true`. Admin is granted in the operator's own config file, or by an
+  existing admin.
+- On an **`open`** server, anyone who can reach it. Open mode already means "I
+  trust whoever is on this network", and refusing would leave no way to mint the
+  first credential when locking the cache down. **But a user created on an open
+  server is never an admin** — otherwise somebody could grant themselves lasting
+  control while the door was open and keep it after it was shut.
+
+So the migration from open to authenticated is: create the users you want on the
+page, add one `admin: true` user to `auth.users` in the config, set
+`auth.mode: token`, and restart. Server-managed users live in
+`<storage>/users.json`; config-declared ones stay yours, and the page will
+neither shadow nor delete them.
+
+### TLS
+
+The server speaks HTTP. Put it behind a reverse proxy with TLS for anything
+beyond a trusted network. If that proxy uses a self-signed certificate, or an
+internal CA a machine doesn't have installed, that machine can opt out of
+verification:
+
+```yaml
+cache:
+  remote:
+    url: https://cache.example.com
+    tls_verify: false     # defaults to true
+```
+
+`ciabatta remote-cache login --no-tls-verify` does the same for the login itself
+and remembers it for later commands against that server.
+
+Know what you're buying. With verification off, HTTPS is an encrypted channel to
+whoever answered — so the build artifacts it hands back are only as trustworthy
+as the network between you. Installing the CA certificate is the better fix
+wherever it's available.
+
+### Authentication
+
+Authentication is `open`, `token`, or **LDAPS** against the directory you
+already run:
+
+```yaml
+auth:
+  mode: ldap
+  ldap:
+    url: ldaps://ldap.example.com:636
+    bind_dn: "uid={username},ou=people,dc=example,dc=com"
+    required_group: "cn=engineering,ou=groups,dc=example,dc=com"
+    write_groups: ["cn=ci,ou=groups,dc=example,dc=com"]   # others are read-only
+    tls_verify: true
+```
+
+Read access is a convenience; **write access is trust** — whoever can write to a
+cache decides what everyone else's build produces. That's why `read_only` exists
+on both a token user and an LDAP group: a fork's CI should benefit from the
+cache without being able to poison it.
+
+Cached artifacts are pruned on a retention policy, aged from **last use** rather
+than from creation — the artifact everyone still depends on shouldn't be evicted
+for being old:
+
+```yaml
+retention:
+  max_age: 30d
+  max_size: 10GB
+```
+
+### Running one locally
+
+Everything above works on one machine, which is the sanest way to try the remote
+cache before pointing a team at it. Two things to know first:
+
+**The cache server and the ciabatta daemon are different processes.** The daemon
+serves the web app on **8099**; the remote cache is its own server on **8380**.
+They don't know about each other and don't share a port, so running both is just
+picking two free ones.
+
+**`remote-cache start` runs in the foreground.** It's a server — it holds the
+terminal until you stop it. Use a second terminal, or background it.
+
+```bash
+# ── Terminal 1: the cache server ──────────────────────────────────────────
+mkdir -p ~/scratch/ciabatta-cache && cd ~/scratch/ciabatta-cache
+ciabatta remote-cache init --port 8380
+
+# Loopback only: this one is for you, not the network. (`init` writes
+# 0.0.0.0, which is right for a shared cache and wrong for a local test.)
+sed -i 's/bind: 0.0.0.0/bind: 127.0.0.1/' remote-cache.yaml
+
+ciabatta remote-cache start          # holds this terminal
+```
+
+```bash
+# ── Terminal 2: the daemon and your project ───────────────────────────────
+# Move the web app off 8099 if something else is using it.
+ciabatta daemon restart --port 9099
+
+cd ~/code/my-project
+ciabatta remote-cache login http://127.0.0.1:8380
+ciabatta cache init --enable --remote http://127.0.0.1:8380
+
+ciabatta run build                   # first build: uploads
+
+rm -rf .ciabatta/cache dist          # pretend to be a colleague's machine
+ciabatta run build                   # "restored from the remote cache"
+
+ciabatta remote-cache status         # hit rate, storage, retention
+```
+
+Open `http://127.0.0.1:8380/` while it's running: that's the server's own admin
+page, and on an `open` cache you can mint a credential there and immediately use
+it with `ciabatta remote-cache login`.
+
+Wiping `.ciabatta/cache` along with the build output is the whole trick: it
+leaves the workspace looking like a fresh checkout, so the only place the
+artifacts can come back from is the server.
+
+**On the daemon's port.** `--port` picks the port a daemon *starts* on; it does
+not move one that's already running. A plain `ciabatta watch -p 9099` with a
+healthy daemon on 8099 quietly keeps using 8099 — so change it with
+`ciabatta daemon restart --port 9099`, or export `CIABATTA_DAEMON_PORT=9099`
+before the first command that starts one. There's one daemon record
+(`~/.ciabatta/daemon.json`), so there's one daemon at a time; the port moves,
+rather than a second one appearing beside the first.
+
+When you're done, Ctrl-C the server and `rm -rf ~/scratch/ciabatta-cache` —
+everything it stored is under that directory, and the workspace's `cache.remote`
+section is the only trace left in your project.
+
+### Handing out ciabatta itself
+
+A team on a shared cache already trusts one server and already talks to it on
+every build, which makes it the obvious place to answer "is everyone on the same
+ciabatta?".
+
+```yaml
+releases:
+  version: "0.2.0"
+  binaries:
+    linux:   /srv/ciabatta/ciabatta-linux-x86_64
+    windows: /srv/ciabatta/ciabatta-windows-x86_64.exe
+```
+
+The server hashes those, mentions the version in every reply, and tells a client
+on something older. Then:
+
+```bash
+ciabatta self update --check    # is there one?
+ciabatta self update            # install it
+```
+
+The download is checked against the advertised SHA-256 before anything on disk
+is touched. The **hash** decides, not the version string — rebuild and copy a
+new binary over the same path and your team still gets updated, because what's
+advertised is the content, which is also what the client verifies.
+
+Nothing updates automatically. A build tool that swaps its own binary out from
+under a running CI job is a bad build tool; this notices, tells you, and waits
+to be asked.
+
+## Environment files
+
+Three rules, in the order they apply:
+
+1. **`.env` is the default.** A workspace that says nothing gets `.env` from its
+   own directory. Nobody should have to configure the conventional thing.
+2. **`env_file` overrides it** — and *replaces* it rather than adding to it,
+   which is what "use this file instead" has to mean to be useful for keeping
+   dev and prod settings apart.
+3. **`env_default` is where a missing `.env` comes from.** `.env` is gitignored,
+   so a fresh checkout doesn't have one; the checked-in template does. Naming it
+   means ciabatta generates the `.env` rather than failing on a variable the
+   developer has never heard of.
+
+```yaml
+workspace:
+  env_file: .env               # the default; set it to override
+  env_default: .env.default    # the checked-in template
+```
+
+And one requirement that follows from the third: **a workspace whose workflows
+declare `REQUIRED_ENV` must declare `env_default`.** Not bureaucracy — it's what
+makes rule 3 possible. A repo where the required variables are written down
+somewhere reviewable is a repo a new person can build; one where they aren't is
+a repo where the answer lives in somebody's shell history.
+
+`ciabatta watch` sources the same files a run would and prints exactly what it
+resolved before the command starts, so a watched dev server and a `dev` workflow
+step can't quietly see different environments.
+
+## Converting a script
+
+A recipe *is* a script. The only thing ciabatta adds is the declarations around
+it — and that's the part nobody wants to write by hand.
+
+```bash
+ciabatta convert --script scripts/build.sh
+```
+
+It reads the script and does the tedious part: the tools it calls, the
+environment variables it reads (and which have no fallback, so they belong in
+`REQUIRED_ENV`), the files it writes, and the description sitting in its own
+header comment. Everything it finds is printed for review before it's written,
+and what it can't infer it leaves marked rather than guessing.
 
 ## Credentials
 
@@ -820,10 +1144,10 @@ connections — wires each requirement to the internal package that owns the
 traced file(s), threading requirements through to the rest of the graph. Both
 can be set on the command line or in config:
 
-```toml
-[analyze]
-requirements = "docs/requirements.txt"
-trace = "docs/trace.csv"
+```yaml
+analyze:
+  requirements: docs/requirements.txt
+  trace: docs/trace.csv
 ```
 
 The web view is fully self-contained (no external assets or network needed,

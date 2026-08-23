@@ -26,7 +26,7 @@ pub mod tools;
 pub mod tui;
 
 use std::io::Write as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -1091,21 +1091,22 @@ pub fn run_setup(root: &Path) -> Result<()> {
         max_tool_rounds: None,
     };
 
-    write_ai_config(root, &ai)?;
-    let path = root.join(CIABATTA_DIR).join(CONFIG_FILE);
-    println!("\nWrote the [ai] section to {}", path.display());
+    let path = write_ai_config(root, &ai)?;
+    println!("\nWrote the ai section to {}", path.display());
     println!("Try it: ciabatta ai ask \"what does this project do?\"");
     Ok(())
 }
 
-/// Write the `[ai]` table into the project's ciabatta.toml by splicing the
-/// section textually — replacing an existing `[ai]` block or appending a new
-/// one — so the user's comments and formatting elsewhere survive. Creates the
-/// file if the project has none.
-fn write_ai_config(root: &Path, ai: &AiConfig) -> Result<()> {
+/// Write the `ai:` section into the project's config by splicing it in —
+/// replacing an existing block or appending a new one — so the user's comments
+/// and formatting elsewhere survive. Creates the file if the project has none.
+fn write_ai_config(root: &Path, ai: &AiConfig) -> Result<PathBuf> {
     let dir = root.join(CIABATTA_DIR);
     std::fs::create_dir_all(&dir).with_context(|| format!("Failed to create {}", dir.display()))?;
-    let path = dir.join(CONFIG_FILE);
+    // Write back into whichever config the project already has, so a repo
+    // that hasn't migrated yet doesn't silently gain a second config file.
+    let path = crate::config::config_path(root).unwrap_or_else(|| dir.join(CONFIG_FILE));
+    let format = crate::format::Format::of_path(&path);
 
     let existing = match std::fs::read_to_string(&path) {
         Ok(s) => s,
@@ -1114,27 +1115,47 @@ fn write_ai_config(root: &Path, ai: &AiConfig) -> Result<()> {
     };
     if !existing.trim().is_empty() {
         // Validate before we touch anything.
-        existing
-            .parse::<toml::Table>()
+        crate::format::from_str::<CiabattaConfig>(&existing, format)
             .with_context(|| format!("Failed to parse {}", path.display()))?;
     }
 
-    // Render just the [ai] section.
-    let mut wrapper = toml::Table::new();
-    wrapper.insert(
-        "ai".to_string(),
-        toml::Value::try_from(ai).context("Failed to serialize the [ai] section")?,
-    );
-    let ai_block = toml::to_string_pretty(&wrapper).context("Failed to render the [ai] section")?;
+    let rendered = match format {
+        crate::format::Format::Yaml => {
+            let block = format!("ai:\n{}", crate::format::yaml_block(ai)?);
+            crate::format::set_top_level(&existing, "ai", &block)
+        }
+        // A project still on TOML gets its `[ai]` table written back as TOML;
+        // `ciabatta config migrate` is how it moves, not `ai setup`.
+        crate::format::Format::Toml => {
+            let mut wrapper = toml::Table::new();
+            wrapper.insert(
+                "ai".to_string(),
+                toml::Value::try_from(ai).context("Failed to serialize the ai section")?,
+            );
+            let block =
+                toml::to_string_pretty(&wrapper).context("Failed to render the ai section")?;
+            splice_toml_ai_section(&existing, &block)
+        }
+    };
 
-    let rendered = splice_ai_section(&existing, &ai_block);
-    std::fs::write(&path, rendered).with_context(|| format!("Failed to write {}", path.display()))
+    // The splice edits a file the user owns; hand it back only if it still loads.
+    crate::format::from_str::<CiabattaConfig>(&rendered, format).with_context(|| {
+        format!(
+            "Writing the ai section would have broken {}, so it was left alone",
+            path.display()
+        )
+    })?;
+
+    std::fs::write(&path, rendered)
+        .with_context(|| format!("Failed to write {}", path.display()))?;
+    Ok(path)
 }
 
-/// Replace the `[ai]` block in `existing` with `ai_block` (or append it when
-/// absent). A block runs from the `[ai]` header line to the next `[section]`
-/// header. The `[ai]` config has no nested tables, so this simple scan holds.
-fn splice_ai_section(existing: &str, ai_block: &str) -> String {
+/// Replace the `[ai]` block in a legacy TOML config with `ai_block` (or append
+/// it when absent). A block runs from the `[ai]` header line to the next
+/// `[section]` header. The ai config has no nested tables, so this simple scan
+/// holds.
+fn splice_toml_ai_section(existing: &str, ai_block: &str) -> String {
     let lines: Vec<&str> = existing.lines().collect();
     let start = lines.iter().position(|l| l.trim() == "[ai]");
 
@@ -1200,34 +1221,121 @@ fn prompt_default(label: &str, default: &str) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::splice_ai_section;
+    use super::*;
 
-    const AI_BLOCK: &str = "[ai]\nprovider = \"claude\"\n";
+    const TOML_BLOCK: &str = "[ai]\nprovider = \"claude\"\n";
+
+    fn yaml_block(provider: &str) -> String {
+        format!("ai:\n  provider: {provider}\n")
+    }
+
+    fn parse_yaml(s: &str) -> CiabattaConfig {
+        crate::format::from_str(s, crate::format::Format::Yaml).expect("config parses")
+    }
+
+    // ─── YAML, the format ciabatta writes ───────────────────────────────────
 
     #[test]
-    fn splice_appends_when_absent_and_keeps_comments() {
+    fn the_ai_section_appends_without_disturbing_the_rest() {
+        let existing = "# my precious comment\nsystem:\n  ci: github\n";
+        let out = crate::format::set_top_level(existing, "ai", &yaml_block("claude"));
+
+        assert!(out.contains("# my precious comment"));
+        let parsed = parse_yaml(&out);
+        assert_eq!(
+            parsed.system.as_ref().and_then(|s| s.ci.as_deref()),
+            Some("github")
+        );
+        assert_eq!(
+            parsed.ai.as_ref().and_then(|a| a.provider.as_deref()),
+            Some("claude")
+        );
+    }
+
+    #[test]
+    fn re_running_setup_replaces_the_ai_section_rather_than_repeating_it() {
+        let existing =
+            "ai:\n  provider: openai\n  model: old\n\n# keep me\nsystem:\n  ci: github\n";
+        let out = crate::format::set_top_level(existing, "ai", &yaml_block("claude"));
+
+        assert!(!out.contains("old"), "the previous settings must be gone");
+        assert!(out.contains("# keep me"), "other comments must survive");
+        assert_eq!(
+            out.lines().filter(|l| *l == "ai:").count(),
+            1,
+            "a second ai: key would make the config unparseable"
+        );
+
+        let parsed = parse_yaml(&out);
+        assert_eq!(
+            parsed.ai.as_ref().and_then(|a| a.provider.as_deref()),
+            Some("claude")
+        );
+        assert!(
+            parsed
+                .ai
+                .as_ref()
+                .and_then(|a| a.model.as_deref())
+                .is_none()
+        );
+        assert_eq!(
+            parsed.system.as_ref().and_then(|s| s.ci.as_deref()),
+            Some("github")
+        );
+    }
+
+    #[test]
+    fn the_whole_ai_config_round_trips_through_the_splice() {
+        let ai = AiConfig {
+            provider: Some("openai".into()),
+            endpoint: Some("http://localhost:8000/v1".into()),
+            model: Some("gpt-4o".into()),
+            api_key_env: Some("MY_KEY".into()),
+            tls_verify: false,
+            images: vec!["docker.io/library/python:3.12".into()],
+            verify: Some("cargo test".into()),
+            max_tokens: Some(16384),
+            max_tool_rounds: Some(80),
+            ..Default::default()
+        };
+        let block = format!("ai:\n{}", crate::format::yaml_block(&ai).unwrap());
+        let out = crate::format::set_top_level("system:\n  ci: github\n", "ai", &block);
+
+        let parsed = parse_yaml(&out).ai.expect("ai section written");
+        assert_eq!(parsed.endpoint.as_deref(), Some("http://localhost:8000/v1"));
+        assert_eq!(parsed.model.as_deref(), Some("gpt-4o"));
+        assert_eq!(parsed.api_key_env.as_deref(), Some("MY_KEY"));
+        assert!(!parsed.tls_verify);
+        assert_eq!(parsed.images, vec!["docker.io/library/python:3.12"]);
+        assert_eq!(parsed.verify.as_deref(), Some("cargo test"));
+        assert_eq!(parsed.max_tokens, Some(16384));
+        assert_eq!(parsed.max_tool_rounds, Some(80));
+    }
+
+    #[test]
+    fn splicing_into_an_empty_file_is_just_the_block() {
+        let out = crate::format::set_top_level("", "ai", &yaml_block("claude"));
+        assert_eq!(out.trim(), yaml_block("claude").trim());
+    }
+
+    // ─── TOML, for a project that hasn't migrated ───────────────────────────
+
+    #[test]
+    fn a_legacy_toml_config_is_still_edited_as_toml() {
         let existing = "# my precious comment\n[system]\nci = \"github\"\n";
-        let out = splice_ai_section(existing, AI_BLOCK);
+        let out = splice_toml_ai_section(existing, TOML_BLOCK);
         assert!(out.contains("# my precious comment"));
         assert!(out.contains("[system]"));
         assert!(out.trim_end().ends_with("provider = \"claude\""));
-    }
 
-    #[test]
-    fn splice_replaces_existing_ai_block_only() {
         let existing = "[ai]\nprovider = \"openai\"\nmodel = \"old\"\n\n# keep me\n[system]\nci = \"github\"\n";
-        let out = splice_ai_section(existing, AI_BLOCK);
+        let out = splice_toml_ai_section(existing, TOML_BLOCK);
         assert!(out.contains("provider = \"claude\""));
         assert!(!out.contains("old"));
         assert!(out.contains("# keep me"));
-        assert!(out.contains("[system]"));
-        // still valid TOML with both sections
         let doc: toml::Table = out.parse().unwrap();
         assert!(doc.contains_key("ai") && doc.contains_key("system"));
-    }
 
-    #[test]
-    fn splice_into_empty_file_is_just_the_block() {
-        assert_eq!(splice_ai_section("", AI_BLOCK), AI_BLOCK);
+        assert_eq!(splice_toml_ai_section("", TOML_BLOCK), TOML_BLOCK);
     }
 }

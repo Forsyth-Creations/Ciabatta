@@ -5,8 +5,9 @@
 //! So every feature route except todo is scoped by a `project` id, and this
 //! module maps that id back to a directory on disk.
 //!
-//! Todo is deliberately *not* scoped — it lives in `~/.ciabatta/todos.json` and
-//! is personal to the user, independent of which checkout they're in.
+//! Todo is scoped too, from 0.2.0: the list lives in `~/.ciabatta/todos.json`
+//! but each task carries the project it belongs to, so the switcher selects
+//! which list you see.
 //!
 //! The registry persists to `~/.ciabatta/projects.json` so the project switcher
 //! still lists your repos after a daemon restart.
@@ -111,7 +112,13 @@ impl Registry {
 /// FNV-1a over the path string, hex encoded. This only needs to be stable and
 /// collision-resistant enough for a handful of local checkouts, not
 /// cryptographic.
-fn project_id(root: &Path) -> String {
+///
+/// Public because it's a *pure function of the path*, and that matters: a CLI
+/// command can work out which project it's in without opening the registry.
+/// Opening it would mean writing a file the running daemon already holds in
+/// memory, leaving the daemon's copy stale — so the two would disagree about
+/// which projects exist.
+pub fn project_id(root: &Path) -> String {
     const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
     const PRIME: u64 = 0x0000_0100_0000_01b3;
 

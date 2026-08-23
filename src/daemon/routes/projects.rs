@@ -43,6 +43,12 @@ async fn register(
     Ok(Json(project))
 }
 
+/// Forget a project.
+///
+/// Its tasks are promoted to the global list rather than left behind. A task
+/// attached to an id nothing resolves any more would be in the file but in no
+/// list — deleted in effect but not in fact — and losing somebody's notes
+/// because they tidied up their project switcher is not a trade worth making.
 async fn forget(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -51,7 +57,9 @@ async fn forget(
     if !removed {
         return Err(RouteError::not_found(format!("No project {id}")));
     }
-    Ok(Json(json!({ "ok": true })))
+
+    let promoted = state.todos.globalize(&id)?;
+    Ok(Json(json!({ "ok": true, "todos_made_global": promoted })))
 }
 
 #[cfg(test)]

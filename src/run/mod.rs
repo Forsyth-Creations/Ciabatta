@@ -8,6 +8,7 @@
 //! web view and the visual builder are served by the daemon, in
 //! [`crate::daemon::routes::run`].
 
+pub mod cached;
 pub mod engine;
 pub mod envdeps;
 pub mod filter;
@@ -15,7 +16,7 @@ pub mod view;
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 
 pub use engine::execute;
@@ -28,18 +29,23 @@ pub use engine::execute;
 /// `steps` are also accepted, so a small pipeline needs no second file.
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
 pub struct RunRecipe {
-    /// Path (relative to the project root) to a flowchart TOML file holding the
-    /// step DAG. When set, its `entry` table supplies the steps.
+    /// Path (relative to the project root) to a flowchart file holding the
+    /// step DAG. When set, its `entry` mapping supplies the steps.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub flowchart: Option<String>,
     /// Which top-level entry of the flowchart file to use. Defaults to the
     /// recipe's own name.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub entry: Option<String>,
 
     /// Override the `login` phase (default: no-op for runs).
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub login: Option<String>,
     /// Override the `pre-run` phase (default: no-op).
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub pre: Option<String>,
     /// Override the `post-run` phase (default: no-op).
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub post: Option<String>,
 
     /// Path(s) (relative to the project root) to `.env` file(s) sourced before
@@ -56,6 +62,7 @@ pub struct RunRecipe {
     /// `env_file = ".env.{RUN_ENV}"` sources `.env.dev` or `.env.prod`
     /// depending on `RUN_ENV`.
     #[serde(default, deserialize_with = "string_or_vec")]
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub env_file: Vec<String>,
 
     /// Environment variables that must be set (and non-empty) for the run to
@@ -63,10 +70,12 @@ pub struct RunRecipe {
     /// is aborted with an error. Merged with the flowchart file's own
     /// `REQUIRED_ENV` when a `flowchart` file is used.
     #[serde(default, rename = "REQUIRED_ENV")]
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub required_env: Vec<String>,
 
     /// Steps written inline, when not using a separate `flowchart` file.
     #[serde(default)]
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub steps: Vec<RunStep>,
 }
 
@@ -99,8 +108,10 @@ pub struct RunStep {
     pub name: String,
 
     /// A bash script to run (path relative to the step's working directory).
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub script: Option<String>,
     /// An inline shell command (`sh -c`), as an alternative to `script`.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub run: Option<String>,
 
     // ─── Documentation & ownership ──────────────────────────────────────────
@@ -108,8 +119,10 @@ pub struct RunStep {
     // it; `ciabatta list` prints both, so nobody has to open the file to find
     // out. `ciabatta init --lib` scaffolds them and nags when they're missing.
     /// One line on what this step does, and what it expects to be true first.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     /// Who owns this step — a name, handle, or team.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub owner: Option<String>,
     /// Free-form labels — `fast`, `slow`, `integration`, `frontend`. A compiled
     /// workflow graph folds its sub-workspace's and workflow's tags in here, so
@@ -118,6 +131,7 @@ pub struct RunStep {
     /// These are what `--filter tag:fast` selects on, which is how you run one
     /// slice of a graph without running all of it.
     #[serde(default)]
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<String>,
 
     // ─── Requirements ───────────────────────────────────────────────────────
@@ -127,6 +141,7 @@ pub struct RunStep {
     /// `[toolchain.<tool>]` entry — instead of surfacing as "command not found"
     /// halfway through a build.
     #[serde(default)]
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub requires: Vec<String>,
 
     // ─── Long-running & flaky steps ─────────────────────────────────────────
@@ -134,21 +149,25 @@ pub struct RunStep {
     /// or a bare number of seconds. When it expires the step is killed and
     /// marked timed-out, and — since a hung step must not hold up everything
     /// else — the rest of the graph carries on (see `continue_on_error`).
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub timeout: Option<String>,
     /// Extra attempts to make when the step fails, for transient errors
     /// (default 0: one attempt, no retry).
     #[serde(default)]
+    #[serde(skip_serializing_if = "crate::format::is_zero")]
     pub retries: u32,
     /// A step that never exits on its own — a dev server, a log tailer, a
     /// watcher. It is started, its dependents are released immediately, and it
     /// keeps running for the rest of the graph rather than hanging it. Follow
     /// its output with `ciabatta watch`.
     #[serde(default)]
+    #[serde(skip_serializing_if = "crate::format::is_false")]
     pub persistent: bool,
     /// Don't fail the whole run when this step fails: its dependents are
     /// skipped, every other branch carries on, and the run reports the failure
     /// at the end. Always applied when a `timeout` expires.
     #[serde(default)]
+    #[serde(skip_serializing_if = "crate::format::is_false")]
     pub continue_on_error: bool,
 
     // ─── Phase & placement ──────────────────────────────────────────────────
@@ -156,28 +175,35 @@ pub struct RunStep {
     /// `build`, `test`, `deploy`, … Free-form and cosmetic (the graph labels
     /// the node with it) except for `push`, which gets a built-in action —
     /// see `recipe`.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
     /// For `kind = "push"` steps: the `[recipies]` recipe to publish. With no
     /// `script`/`run` of its own such a step runs `ciabatta push <recipe>` in
     /// its own sub-workspace, so publishing is just another node on the graph.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub recipe: Option<String>,
     /// Working directory for this step's action, relative to the project root.
     /// Workflow graphs set it to the owning sub-workspace's directory, so its
     /// scripts run where they were written to run. Defaults to the root.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
     /// Which sub-workspace this step came from. Filled in when a workspace
     /// workflow graph is compiled; it's what labels each node on the graph.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub workspace: Option<String>,
     /// Environment variables for this step alone, layered over the run's own.
     /// A compiled workflow graph folds each sub-workspace's standard variables
     /// in here, so two members' settings can't collide in one shared map.
     #[serde(default)]
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub env: std::collections::BTreeMap<String, String>,
 
     /// Names of steps that must succeed before this one runs (the success DAG).
     #[serde(default)]
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub needs: Vec<String>,
     /// On failure, jump to this recovery node instead of aborting the run.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub on_error: Option<String>,
 
     /// Condition(s) that must ALL hold for this step to run; if any is false the
@@ -186,24 +212,36 @@ pub struct RunStep {
     /// environment, e.g. `when = "env.RUN_ENV == prod"` or
     /// `when = ["env.RUN_ENV == prod", "REGION == us-east-1"]`.
     #[serde(default, deserialize_with = "string_or_vec")]
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub when: Vec<String>,
     /// Condition(s) that skip this step when ANY holds — the inverse of `when`,
     /// matching "skip if …". Accepts one condition or a list, e.g.
     /// `skip_if = "env.IN_CI == true"`.
     #[serde(default, deserialize_with = "string_or_vec")]
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub skip_if: Vec<String>,
 
     /// Marks this node as a recovery node: it presents `options` rather than
     /// running an action of its own.
     #[serde(default)]
+    #[serde(skip_serializing_if = "crate::format::is_false")]
     pub recover: bool,
     /// Prompt shown when a recovery node is reached.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
     /// After a chosen fix succeeds, re-run this node (typically the failed step).
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub retry: Option<String>,
     /// The fix choices offered by a recovery node.
     #[serde(default)]
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub options: Vec<FixOption>,
+
+    /// Cache settings for this step alone, overriding the recipe's and the
+    /// workspace's. For the step that reads something none of its neighbours
+    /// do — most steps inherit and never write this.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache: Option<crate::cache::CacheConfig>,
 }
 
 /// One fix choice on a recovery node.
@@ -212,12 +250,15 @@ pub struct FixOption {
     /// Human-readable label shown in the UI / GUI.
     pub label: String,
     /// A bash script to run as the fix (path relative to the project root).
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub script: Option<String>,
     /// An inline shell command, as an alternative to `script`.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub run: Option<String>,
     /// Run this option automatically in non-interactive mode (plain / CI), where
     /// no operator is present to choose. The first `default` option wins.
     #[serde(default)]
+    #[serde(skip_serializing_if = "crate::format::is_false")]
     pub default: bool,
 }
 
@@ -344,31 +385,34 @@ pub fn parse_duration(raw: &str) -> Result<std::time::Duration> {
 
 /// A flowchart file: a map of entry name → its step list.
 ///
-/// ```toml
-/// [web]
-///   [[web.steps]]
-///   name = "build"
-///   script = "scripts/build.sh"
+/// ```yaml
+/// web:
+///   steps:
+///     - name: build
+///       script: scripts/build.sh
 /// ```
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Deserialize, Serialize, Default)]
 pub struct FlowchartFile {
     #[serde(flatten)]
     pub entries: HashMap<String, Flowchart>,
 }
 
 /// One named flowchart within a [`FlowchartFile`].
-#[derive(Debug, Deserialize, Clone, Default)]
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
 pub struct Flowchart {
     /// Environment variables that must be set (and non-empty) for this
     /// flowchart's steps to run. Empty/unset variables abort the run before
     /// any phase executes.
     #[serde(default, rename = "REQUIRED_ENV")]
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub required_env: Vec<String>,
     /// `.env` file path(s) sourced before this flowchart's run starts. Merged
-    /// with any declared on the recipe's `[run]` table.
+    /// with any declared on the recipe's `run:` mapping.
     #[serde(default, deserialize_with = "string_or_vec")]
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub env_file: Vec<String>,
     #[serde(default)]
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub steps: Vec<RunStep>,
 }
 
@@ -401,7 +445,7 @@ impl ResolvedRun {
 /// single or double quotes (the quotes are removed). Values are otherwise taken
 /// verbatim (leading/trailing whitespace trimmed for unquoted values). Lines
 /// without an `=` are skipped.
-pub(crate) fn parse_env_content(content: &str) -> Vec<(String, String)> {
+pub fn parse_env_content(content: &str) -> Vec<(String, String)> {
     let mut pairs = Vec::new();
     for raw in content.lines() {
         let line = raw.trim();
@@ -657,15 +701,13 @@ pub fn resolve_run(run: &RunRecipe, recipe_name: &str, root: &Path) -> Result<Re
     let steps = match run.flowchart.as_deref() {
         Some(rel) => {
             let path = root.join(rel);
-            let content = std::fs::read_to_string(&path).with_context(|| {
+            let file: FlowchartFile = crate::format::load(&path).with_context(|| {
                 format!(
-                    "Failed to read flowchart file '{}' for recipe '{}'",
+                    "Failed to load flowchart file '{}' for recipe '{}'",
                     path.display(),
                     recipe_name
                 )
             })?;
-            let file: FlowchartFile = toml::from_str(&content)
-                .with_context(|| format!("Failed to parse flowchart file '{}'", path.display()))?;
             let entry = run.entry.as_deref().unwrap_or(recipe_name);
             let chart = file.entries.get(entry).ok_or_else(|| {
                 let mut names: Vec<&String> = file.entries.keys().collect();

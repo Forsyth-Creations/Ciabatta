@@ -97,6 +97,53 @@ pub async fn execute(
     // whole flowchart on `REQUIRED_ENV`. The daemon's launcher runs the very
     // same check before it spawns us, so it can prompt for what's missing
     // instead of starting a run that would only abort here.
+    // The `.env` rules, before anything is sourced:
+    //   * a build that declares REQUIRED_ENV must say where those variables are
+    //     documented, or a fresh checkout fails on a variable nobody mentioned;
+    //   * a missing `.env` is generated from that template rather than being an
+    //     error, which is the whole point of declaring it.
+    let meta = config.workspace.clone().unwrap_or_default();
+
+    // A compiled workflow graph was already checked per sub-workspace, where
+    // the member that declared each requirement was known — so only a plain
+    // project recipe is checked here. Applying the root's config to a
+    // monorepo's requirements would demand `env_default` from a repository
+    // root that never declared the variables in the first place.
+    let from_workspace = resolved.steps.iter().any(|step| step.workspace.is_some());
+    if !from_workspace {
+        crate::environment::files::require_template(&meta, root, &resolved.required_env, name)?;
+    }
+
+    let target = meta
+        .env_file
+        .first()
+        .cloned()
+        .unwrap_or_else(|| crate::environment::files::DEFAULT_ENV_FILE.to_string());
+    if let Some(written) = crate::environment::files::generate_from_template(&meta, root, &target)?
+    {
+        let _ = tx
+            .send(ProgressUpdate::Log(
+                name.to_string(),
+                format!(
+                    "Generated {} from {}",
+                    written.display(),
+                    meta.env_default.as_deref().unwrap_or("the template")
+                ),
+            ))
+            .await;
+    }
+
+    // With the file in place, fold the workspace's env files into the run's own
+    // — `.env` by default, or whatever `env_file` names instead.
+    let mut resolved = resolved;
+    let workspace_files = crate::environment::files::resolve(&meta, root);
+    for file in workspace_files.files {
+        if !resolved.env_files.contains(&file) {
+            resolved.env_files.insert(0, file);
+        }
+    }
+    let resolved = resolved;
+
     let prepared = prepare_env(&resolved, root, env_vars)?;
     for file in &prepared.sourced {
         let _ = tx
@@ -160,7 +207,37 @@ pub async fn execute(
                 run_phase_hook(resolved.pre.as_deref(), name, root, env_vars, dry_run, tx).await?
             }
             StageKind::Main => {
-                run_dag(&resolved, name, root, env_vars, dry_run, ctl, tx).await?;
+                // Caching is opt-in per workspace, so this is usually a no-op —
+                // but it has to be set up before the graph starts, since each
+                // step's key depends on what the steps before it produced.
+                let mut cache = if dry_run {
+                    None
+                } else {
+                    let mut session =
+                        super::cached::Session::open(root, config, entry.cache.clone());
+                    if let Some(session) = session.as_mut() {
+                        session.connect_remote().await;
+                    }
+                    session
+                };
+
+                run_dag(
+                    &resolved,
+                    name,
+                    root,
+                    env_vars,
+                    dry_run,
+                    ctl,
+                    tx,
+                    cache.as_mut(),
+                )
+                .await?;
+
+                if let Some(summary) = cache.as_ref().and_then(|c| c.stats.summary()) {
+                    let _ = tx
+                        .send(ProgressUpdate::Log(name.to_string(), summary))
+                        .await;
+                }
                 true
             }
             StageKind::Post => {
@@ -212,6 +289,7 @@ async fn run_phase_hook(
 
 /// Execute the step DAG. Runs steps whose `needs` are satisfied, one wave at a
 /// time; on a step failure, routes to its `on_error` recovery node.
+#[allow(clippy::too_many_arguments)]
 async fn run_dag(
     resolved: &ResolvedRun,
     recipe: &str,
@@ -220,6 +298,7 @@ async fn run_dag(
     dry_run: bool,
     ctl: &RunCtl,
     tx: &mpsc::Sender<ProgressUpdate>,
+    mut cache: Option<&mut super::cached::Session>,
 ) -> Result<()> {
     // Every tool the graph's steps declare has to be on PATH before anything
     // runs. Discovering a missing toolchain three steps in — as a bare "command
@@ -285,10 +364,47 @@ async fn run_dag(
                 continue;
             }
 
+            // Ask the cache before doing the work. A hit restores this step's
+            // declared outputs and marks it satisfied, so everything downstream
+            // proceeds exactly as if it had run.
+            let mut pending = None;
+            if let Some(session) = cache.as_deref_mut() {
+                match session.before(step, env_vars).await {
+                    Ok(super::cached::Action::Skip { note }) => {
+                        state.insert(step.name.as_str(), StepState::Skipped);
+                        let _ = tx
+                            .send(ProgressUpdate::StepSkipped {
+                                recipe: recipe.to_string(),
+                                step: step.name.clone(),
+                                reason: note,
+                            })
+                            .await;
+                        continue;
+                    }
+                    Ok(super::cached::Action::Run(token)) => pending = Some(token),
+                    // A cache that can't decide costs a rebuild, never a build.
+                    Err(e) => {
+                        let _ = tx
+                            .send(ProgressUpdate::Log(
+                                recipe.to_string(),
+                                format!("note: skipping the cache for {} ({e:#})", step.name),
+                            ))
+                            .await;
+                    }
+                }
+            }
+
+            let started = std::time::Instant::now();
             let outcome = run_step_action(step, recipe, root, env_vars, dry_run, tx).await;
             match outcome {
                 Ok(()) => {
                     state.insert(step.name.as_str(), StepState::Succeeded);
+                    // Only a step that actually succeeded is worth keeping.
+                    if let (Some(session), Some(token)) = (cache.as_deref_mut(), pending) {
+                        session
+                            .after(step, token, started.elapsed().as_millis() as u64)
+                            .await;
+                    }
                 }
                 Err(err) => {
                     state.insert(step.name.as_str(), StepState::Failed);
@@ -1066,7 +1182,7 @@ mod tests {
             updates
         });
 
-        let result = run_dag(&resolved, "test", root, &env, false, &ctl, &tx).await;
+        let result = run_dag(&resolved, "test", root, &env, false, &ctl, &tx, None).await;
         drop(tx);
         (result, collector.await.unwrap())
     }

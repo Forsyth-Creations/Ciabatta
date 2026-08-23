@@ -251,16 +251,24 @@ pub enum Commands {
         config: Option<std::path::PathBuf>,
     },
 
-    /// Manage a personal todo list.
+    /// Manage a todo list — this project's, or the global one.
     ///
     /// With no arguments, opens the todo page in ciabatta's web app (starting
     /// the background daemon if it isn't already running). Pass a string to add
     /// a task from the command line without opening anything.
+    ///
+    /// A task added inside a project belongs to that project. `--global` files
+    /// it on the global list instead, which is for the things that aren't about
+    /// any one repo — that list has its own place on the dashboard.
     Todo {
         /// Task text to add. When given, the task is added and ciabatta exits
         /// (the web app is not opened).
         #[arg(name = "TASK")]
         task: Option<String>,
+
+        /// Add the task to the global list rather than to this project.
+        #[arg(short, long)]
+        global: bool,
 
         /// Deprecated and ignored: the daemon already runs in the background,
         /// so the todo app outlives this command either way.
@@ -384,12 +392,272 @@ pub enum Commands {
         subcommand: Option<ConfigureCommand>,
     },
 
+    /// Show what a run would reuse from the cache and what it would rebuild.
+    ///
+    /// Runs nothing. For every step it prints the decision — up to date, a
+    /// cache hit, or a rebuild — and for a rebuild, exactly what changed:
+    /// which input files (with the lines), which environment variables, and
+    /// which upstream stages produced something different.
+    ///
+    ///   ciabatta dry-run build           what would this build actually do?
+    ///   ciabatta dry-run build --diff    …and show me the lines
+    #[command(name = "dry-run", visible_alias = "dryrun")]
+    DryRun {
+        /// Recipes and/or workflows to plan. With none, plans every
+        /// run-capable recipe in this project.
+        #[arg(name = "TARGET")]
+        targets: Vec<String>,
+
+        /// Show the line-by-line diff for every changed input file, not just
+        /// which files moved.
+        #[arg(long, short)]
+        diff: bool,
+
+        /// Print the plan as JSON, for scripting.
+        #[arg(long)]
+        json: bool,
+
+        /// Set an environment variable (KEY=VALUE). Cached builds key on the
+        /// variables their config declares, so this can change the answer.
+        #[arg(short = 'e', long = "env", value_name = "KEY=VALUE")]
+        env: Vec<String>,
+
+        /// Derive CIABATTA_* variables from local git.
+        #[arg(long)]
+        local: bool,
+
+        /// Path to the ciabatta config (overrides discovery).
+        #[arg(short = 'c', long)]
+        config: Option<std::path::PathBuf>,
+    },
+
+    /// Set up and inspect this workspace's build cache.
+    ///
+    /// Caching is off until a workspace opts in, because a cache that turns
+    /// itself on is a cache that will one day serve a stale artifact nobody
+    /// asked it to keep. `ciabatta cache init` is the way in: it looks at what
+    /// is actually in the directory and proposes the inputs and outputs.
+    Cache {
+        #[command(subcommand)]
+        subcommand: CacheCommand,
+    },
+
+    /// Run or connect to a shared remote cache.
+    ///
+    ///   ciabatta remote-cache init                 write a server config
+    ///   ciabatta remote-cache start                run the server
+    ///   ciabatta remote-cache login <URL>          connect this machine to one
+    #[command(name = "remote-cache", visible_alias = "rc")]
+    RemoteCache {
+        #[command(subcommand)]
+        subcommand: RemoteCacheCommand,
+    },
+
+    /// Manage this ciabatta installation.
+    #[command(name = "self")]
+    Zelf {
+        #[command(subcommand)]
+        subcommand: SelfCommand,
+    },
+
+    /// Turn an existing script into a ciabatta recipe.
+    ///
+    /// A recipe *is* a script — this reads one, works out what it needs and
+    /// what it produces, and writes the recipe into this workspace's
+    /// `.ciabatta/` so it can join the graph like everything else.
+    ///
+    ///   ciabatta convert --script scripts/build.sh
+    Convert {
+        /// The script to convert.
+        #[arg(long, short, value_name = "PATH")]
+        script: std::path::PathBuf,
+
+        /// Name for the generated recipe. Defaults to the script's filename.
+        #[arg(long, short, value_name = "NAME")]
+        name: Option<String>,
+
+        /// Also write it as a workflow under `.ciabatta/workflows/`, so
+        /// `ciabatta <name>` runs it across the monorepo.
+        #[arg(long)]
+        workflow: bool,
+
+        /// Print the generated recipe instead of writing it.
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Overwrite an existing recipe of the same name.
+        #[arg(long)]
+        force: bool,
+    },
+
     /// Any other name is a workflow: `ciabatta build`, `ciabatta test`, …
     ///
     /// Captured raw and re-parsed as [`WorkflowArgs`], which is why the flags
     /// after the name behave exactly as they do under `ciabatta workflow`.
     #[command(external_subcommand)]
     External(Vec<String>),
+}
+
+#[derive(Subcommand, Debug)]
+pub enum CacheCommand {
+    /// Work out what this workspace reads and writes, and write a `cache:`
+    /// section proposing it.
+    ///
+    /// The proposal comes from the directory's real contents rather than from a
+    /// template, because the one thing that has to be right is `inputs` — a
+    /// build that reads a file nobody declared will be served a stale artifact.
+    Init {
+        /// Turn caching on straight away. Without this the section is written
+        /// with `enabled: false` for you to review first.
+        #[arg(long)]
+        enable: bool,
+
+        /// Also point this workspace at a remote cache.
+        #[arg(long, value_name = "URL")]
+        remote: Option<String>,
+
+        /// Overwrite an existing `cache:` section.
+        #[arg(long)]
+        force: bool,
+    },
+
+    /// What the local cache is holding, and what it has saved.
+    Status,
+
+    /// Delete every cached entry for this project.
+    Clean {
+        /// Skip the confirmation prompt.
+        #[arg(long, short)]
+        yes: bool,
+    },
+
+    /// Apply a retention policy to the local cache.
+    Prune {
+        /// Evict entries unused for longer than this (`30d`, `12h`).
+        #[arg(long, value_name = "DURATION")]
+        max_age: Option<String>,
+
+        /// Cap the store at this size (`10GB`, `500MB`).
+        #[arg(long, value_name = "SIZE")]
+        max_size: Option<String>,
+
+        /// Cap the number of entries.
+        #[arg(long, value_name = "N")]
+        max_entries: Option<usize>,
+
+        /// Show what would be evicted without removing anything.
+        #[arg(long)]
+        dry_run: bool,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum RemoteCacheCommand {
+    /// Write a config for a new remote cache server.
+    Init {
+        /// Where to write it. Defaults to the current directory.
+        #[arg(long, value_name = "DIR")]
+        into: Option<std::path::PathBuf>,
+
+        /// Port the server should listen on.
+        #[arg(short, long)]
+        port: Option<u16>,
+
+        /// Directory for the artifact store, relative to the config.
+        #[arg(long, value_name = "DIR", default_value = "storage")]
+        storage: String,
+
+        /// Overwrite an existing config.
+        #[arg(long)]
+        force: bool,
+    },
+
+    /// Run the remote cache server in the foreground.
+    Start {
+        /// Path to the server config. Defaults to `remote-cache.yaml` in the
+        /// current directory.
+        #[arg(short, long, value_name = "FILE")]
+        config: Option<std::path::PathBuf>,
+
+        /// Override the configured port.
+        #[arg(short, long)]
+        port: Option<u16>,
+    },
+
+    /// Log this machine in to a remote cache.
+    Login {
+        /// The server's base URL, e.g. http://cache.example.com:8380.
+        #[arg(name = "URL")]
+        url: String,
+
+        /// Don't verify the server's TLS certificate.
+        ///
+        /// For a cache behind a self-signed certificate, or an internal CA this
+        /// machine doesn't have. Remembered for later commands against the same
+        /// server. With it off, HTTPS is an encrypted channel to whoever
+        /// answered — so the artifacts you're handed are only as trustworthy as
+        /// the network.
+        #[arg(long)]
+        no_tls_verify: bool,
+
+        /// Username. Prompted for when the server needs one and it's omitted.
+        #[arg(short, long)]
+        username: Option<String>,
+
+        /// Read the password (or token) from this environment variable instead
+        /// of prompting — how CI logs in without a terminal.
+        #[arg(long, value_name = "VAR")]
+        password_env: Option<String>,
+    },
+
+    /// Forget the saved session for a remote cache.
+    Logout {
+        /// The server to log out of. With none, logs out of all of them.
+        #[arg(name = "URL")]
+        url: Option<String>,
+    },
+
+    /// Show a remote cache's stats: hits, misses, storage, and retention.
+    Status {
+        /// The server to ask. Defaults to the one this workspace is configured
+        /// to use.
+        #[arg(name = "URL")]
+        url: Option<String>,
+    },
+
+    /// Mint a token for a user and print the config line to add.
+    #[command(name = "add-user")]
+    AddUser {
+        /// The username.
+        #[arg(name = "NAME")]
+        name: String,
+
+        /// Give them read access but not write access.
+        #[arg(long)]
+        read_only: bool,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum SelfCommand {
+    /// Update this ciabatta binary from the remote cache that serves it.
+    ///
+    /// The cache your workspace is already configured against advertises a
+    /// build and its SHA-256; this downloads it, checks the hash, and swaps the
+    /// binary over only if it matches.
+    Update {
+        /// The cache to update from. Defaults to the one this workspace uses.
+        #[arg(long, value_name = "URL")]
+        from: Option<String>,
+
+        /// Check whether an update is available and exit.
+        #[arg(long)]
+        check: bool,
+
+        /// Install even when the advertised build is what's already running.
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 /// Arguments for `ciabatta run`.
@@ -723,6 +991,23 @@ pub enum ConfigCommand {
     /// Show documentation on the config file format and available options.
     #[command(name = "reference", alias = "ref")]
     Reference,
+
+    /// Convert this checkout's TOML config files to YAML.
+    ///
+    /// Ciabatta reads both, so this is optional — but YAML is what it writes
+    /// and documents from 0.2.0. Every `.ciabatta/` at or below the workspace
+    /// root is converted: the project config, its workflows, and any flowchart
+    /// files. The originals are left in place for you to delete once you're
+    /// happy with the result.
+    Migrate {
+        /// Show what would be converted without writing anything.
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Migrate this directory instead of the discovered workspace root.
+        #[arg(long, value_name = "DIR")]
+        path: Option<std::path::PathBuf>,
+    },
 }
 
 #[derive(Subcommand, Debug)]

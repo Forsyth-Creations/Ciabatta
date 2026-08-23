@@ -1,0 +1,23 @@
+# Converted from test.toml by `ciabatta config migrate`.
+# Comments in the original weren't carried over — test.toml is still there
+# if you want them back. Ciabatta now reads this file instead.
+description: Format, lint and test — everything CI gates on
+owner: Henry Forsyth
+requires:
+- cargo
+steps:
+- name: format
+  run: cargo fmt --check
+  description: Verify the tree is rustfmt-clean
+- name: lint
+  run: cargo clippy -- -D warnings
+  description: Clippy with warnings denied, as CI runs it
+  timeout: 20m
+  needs:
+  - format
+- name: unit
+  run: cargo test
+  description: The full test suite
+  timeout: 20m
+  needs:
+  - lint

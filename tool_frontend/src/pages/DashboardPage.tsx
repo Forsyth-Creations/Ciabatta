@@ -11,11 +11,14 @@ import {
   Card,
   CardActionArea,
   CardContent,
+  Divider,
   Grid2 as Grid,
+  Paper,
   Stack,
   Typography,
 } from "@mui/material";
 import ChecklistIcon from "@mui/icons-material/Checklist";
+import PublicIcon from "@mui/icons-material/Public";
 import HubIcon from "@mui/icons-material/Hub";
 import MenuBookIcon from "@mui/icons-material/MenuBook";
 import MonitorHeartIcon from "@mui/icons-material/MonitorHeart";
@@ -25,6 +28,7 @@ import { Link } from "@tanstack/react-router";
 import type { ReactNode } from "react";
 
 import { PageHeader } from "../components/Page";
+import { TodoList } from "../components/TodoList";
 import { useHealth } from "../api/queries";
 import { useProjectContext } from "../state/project";
 
@@ -39,7 +43,7 @@ const TOOLS: Tool[] = [
   {
     to: "/todo",
     title: "Todo",
-    blurb: "Your personal task list, shared across every project.",
+    blurb: "This project's task list — and the global one, below.",
     icon: <ChecklistIcon />,
   },
   {
@@ -103,6 +107,8 @@ export function DashboardPage() {
         ))}
       </Grid>
 
+      <GlobalTodos />
+
       <Stack direction="row" spacing={1} alignItems="center" sx={{ mt: 3 }}>
         <Typography variant="body2" color="text.secondary">
           New here?
@@ -119,5 +125,44 @@ export function DashboardPage() {
         </Typography>
       )}
     </Box>
+  );
+}
+
+/**
+ * The global todo list: the things that aren't about any one repo.
+ *
+ * It lives on the dashboard rather than behind the project switcher because
+ * that's the whole point of it — a task you deliberately detached from a
+ * project shouldn't need you to pick a project to find it again.
+ */
+function GlobalTodos() {
+  const { project } = useProjectContext();
+
+  return (
+    <Paper variant="outlined" sx={{ p: 2, mt: 4 }}>
+      <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 0.5 }}>
+        <PublicIcon fontSize="small" color="primary" />
+        <Typography variant="h3">Global todo</Typography>
+      </Stack>
+      <Typography variant="body2" color="text.secondary" sx={{ mb: 2, maxWidth: "70ch" }}>
+        Tasks that belong to no project, so they stay put whichever one you switch to. Move
+        something here from a project&apos;s list with its globe button, or add it straight
+        from a terminal with <code>ciabatta todo --global</code>.
+      </Typography>
+
+      <Divider sx={{ mb: 2 }} />
+
+      <TodoList
+        projectId={null}
+        placeholder="Something that isn't about any one repo…"
+        emptyNote="Nothing global yet."
+        // A global task can be filed under whichever project is selected; with
+        // none selected there is nowhere to move it to, so the button isn't shown.
+        moveTarget={project ? { id: project.id, name: project.name } : null}
+        // Shipping needs a checkout for the agent to edit, and a global task by
+        // definition names none.
+        allowShip={false}
+      />
+    </Paper>
   );
 }

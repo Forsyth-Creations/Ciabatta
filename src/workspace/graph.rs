@@ -655,6 +655,19 @@ fn compile(
                 graph.env_files.push(path);
             }
         }
+        // A workflow that can't run without certain variables must say where
+        // they're documented — and the workspace that has to say so is the one
+        // that declared the requirement, not the monorepo root. Checked here
+        // because this is the only place both facts are in scope.
+        if !workflow.required_env.is_empty() {
+            crate::environment::files::require_template(
+                &member.meta,
+                &member.dir,
+                &workflow.required_env,
+                &member.name,
+            )?;
+        }
+
         for var in &workflow.required_env {
             if !graph.required_env.contains(var) {
                 graph.required_env.push(var.clone());
@@ -691,7 +704,7 @@ fn join_rel(member_rel: &str, path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{CIABATTA_DIR, CONFIG_FILE};
+    use crate::config::CIABATTA_DIR;
     use std::path::{Path, PathBuf};
 
     fn scratch(name: &str) -> PathBuf {
@@ -704,7 +717,7 @@ mod tests {
     fn member(root: &Path, rel: &str, config: &str) -> PathBuf {
         let dir = root.join(rel);
         std::fs::create_dir_all(dir.join(CIABATTA_DIR)).unwrap();
-        std::fs::write(dir.join(CIABATTA_DIR).join(CONFIG_FILE), config).unwrap();
+        std::fs::write(dir.join(CIABATTA_DIR).join("ciabatta.toml"), config).unwrap();
         dir
     }
 
@@ -988,7 +1001,8 @@ mod tests {
         let api = member(
             &root,
             "packages/api",
-            "[workspace]\nname = \"api\"\nenv_file = \".env\"\n",
+            "[workspace]\nname = \"api\"\nenv_file = \".env\"\n\
+             env_default = \".env.default\"\n",
         );
         workflow(
             &api,
@@ -1003,6 +1017,40 @@ mod tests {
             vec!["packages/api/.env", "packages/api/.env.build"]
         );
         assert_eq!(graph.required_env, vec!["API_TOKEN".to_string()]);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A workflow that can't run without certain variables has to say where
+    /// they're documented — and it's the *sub-workspace* that declared them
+    /// that has to say so, not the monorepo root, which never mentioned them.
+    #[test]
+    fn a_member_needing_variables_must_name_its_template() {
+        let root = scratch("envdefault");
+        let api = member(&root, "packages/api", "[workspace]\nname = \"api\"\n");
+        workflow(
+            &api,
+            "build",
+            "REQUIRED_ENV = [\"API_TOKEN\"]\n\
+             [[steps]]\nname = \"b\"\nrun = \"true\"\n",
+        );
+
+        let ws = Workspace::load(&root).unwrap();
+        let err = build(&ws, "build", &Selection::default())
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("'api' declares"),
+            "the error must name the member: {err}"
+        );
+        assert!(err.contains("API_TOKEN"), "and the variables: {err}");
+        assert!(err.contains("env_default"), "and the fix: {err}");
+
+        // A member with no REQUIRED_ENV is asked for nothing.
+        let web = member(&root, "packages/web", "[workspace]\nname = \"web\"\n");
+        workflow(&web, "bundle", "[[steps]]\nname = \"b\"\nrun = \"true\"\n");
+        let ws = Workspace::load(&root).unwrap();
+        assert!(build(&ws, "bundle", &Selection::default()).is_ok());
+
         std::fs::remove_dir_all(&root).ok();
     }
 

@@ -95,30 +95,39 @@ pub fn run_interactive(root: &Path, cfg: &CiabattaConfig) -> Result<()> {
     let login_script = prompt("Login script path (blank for none): ")?;
 
     let mut snippet = String::new();
-    snippet.push_str(&format!("\n[registries.{name}]\n"));
-    snippet.push_str(&format!("url = {}\n", toml_basic(&url)));
+    snippet.push_str(&format!("  {name}:\n"));
+    snippet.push_str(&format!("    url: {}\n", yaml_value(&url)));
     // Only emit `type` when it isn't already implied by the registry name, to
     // keep the generated config tidy.
     if kind != inferred {
-        snippet.push_str(&format!("type = {}\n", toml_basic(&kind)));
+        snippet.push_str(&format!("    type: {}\n", yaml_value(&kind)));
     }
     if !nexus_repository.is_empty() {
-        snippet.push_str(&format!("repository = {}\n", toml_basic(&nexus_repository)));
+        snippet.push_str(&format!(
+            "    repository: {}\n",
+            yaml_value(&nexus_repository)
+        ));
     }
     // `raw` is the default; only emit `format` when it differs.
     if !nexus_format.is_empty() && nexus_format != "raw" {
-        snippet.push_str(&format!("format = {}\n", toml_basic(&nexus_format)));
+        snippet.push_str(&format!("    format: {}\n", yaml_value(&nexus_format)));
     }
     if !nexus_base_path.is_empty() {
-        snippet.push_str(&format!("base_path = {}\n", toml_basic(&nexus_base_path)));
+        snippet.push_str(&format!(
+            "    base_path: {}\n",
+            yaml_value(&nexus_base_path)
+        ));
     }
-    snippet.push_str("tls_verify = true\n");
-    snippet.push_str(&format!("needs_auth = {needs_auth}\n"));
+    snippet.push_str("    tls_verify: true\n");
+    snippet.push_str(&format!("    needs_auth: {needs_auth}\n"));
     if !login_script.is_empty() {
-        snippet.push_str(&format!("login_script = {}\n", toml_basic(&login_script)));
+        snippet.push_str(&format!(
+            "    login_script: {}\n",
+            yaml_value(&login_script)
+        ));
     }
 
-    let mut blocks = vec![snippet];
+    let mut blocks = vec![Block::registry(snippet)];
 
     // Offer to wire up a recipe that publishes to this registry.
     if prompt_yes_no("\nAdd a recipe that publishes to this registry now?", false)? {
@@ -134,18 +143,21 @@ pub fn run_interactive(root: &Path, cfg: &CiabattaConfig) -> Result<()> {
         let publish = prompt("  Publish path (supports {CIABATTA_BRANCH}/{CIABATTA_COMMIT}/…): ")?;
 
         let mut r = String::new();
-        r.push_str(&format!("\n[recipies.{recipe}]\n"));
-        r.push_str(&format!("registry = {}\n", toml_basic(&name)));
+        r.push_str(&format!("  {recipe}:\n"));
+        r.push_str(&format!("    registry: {}\n", yaml_value(&name)));
         if !local.is_empty() {
-            r.push_str(&format!("local_artifact_path = {}\n", toml_basic(&local)));
+            r.push_str(&format!(
+                "    local_artifact_path: {}\n",
+                yaml_value(&local)
+            ));
         }
         if !publish.is_empty() {
-            r.push_str(&format!("publish_path = {}\n", toml_basic(&publish)));
+            r.push_str(&format!("    publish_path: {}\n", yaml_value(&publish)));
         }
-        blocks.push(r);
+        blocks.push(Block::recipe(r));
     }
 
-    let path = append_blocks(root, &blocks)?;
+    let path = apply_blocks(root, &blocks)?;
     println!("\nUpdated {}", path.display());
     println!("Run `ciabatta config show` to review, or `ciabatta list` to see recipes.");
     Ok(())
@@ -194,11 +206,15 @@ pub fn run_auto(root: &Path, cfg: &CiabattaConfig, assume_yes: bool) -> Result<(
         return Ok(());
     }
 
-    let blocks: Vec<String> = chosen
+    // Reversed so the entries land under `recipies:` in the order they were
+    // chosen — each insert goes in directly after the key, so the last one
+    // spliced ends up first.
+    let blocks: Vec<Block> = chosen
         .iter()
-        .map(|&i| suggestions[i].snippet.clone())
+        .rev()
+        .map(|&i| Block::recipe(suggestions[i].snippet.clone()))
         .collect();
-    let path = append_blocks(root, &blocks)?;
+    let path = apply_blocks(root, &blocks)?;
     println!("\nAdded {} recipe(s) to {}", chosen.len(), path.display());
     for &i in &chosen {
         println!("  • {}", suggestions[i].recipe);
@@ -252,15 +268,18 @@ fn build_suggestions(
         for reg in &ecr {
             let recipe = uniquify(&format!("{image}_to_{reg}"), &mut used);
             let snippet = format!(
-                "\n# Build the Docker image from {df} and push it to the \"{reg}\" ECR registry.\n\
-                 # ciabatta retags {image}:$CIABATTA_COMMIT to the registry URL and pushes it.\n\
-                 [recipies.{recipe}]\n\
-                 registry     = {reg_q}\n\
-                 local_image  = {tag}\n\
-                 publish_path = {tag}\n\
-                 pre          = '{container} build -t {image}:$CIABATTA_COMMIT -f {df} {ctx}'\n",
-                reg_q = toml_basic(reg),
-                tag = toml_basic(&format!("{image}:{{CIABATTA_COMMIT}}")),
+                "  # Build the Docker image from {df} and push it to the \"{reg}\" ECR registry.\n\
+                 \x20 # ciabatta retags {image}:$CIABATTA_COMMIT to the registry URL and pushes it.\n\
+                 \x20 {recipe}:\n\
+                 \x20   registry: {reg_q}\n\
+                 \x20   local_image: {tag}\n\
+                 \x20   publish_path: {tag}\n\
+                 \x20   pre: {pre}\n",
+                reg_q = yaml_value(reg),
+                tag = yaml_value(&format!("{image}:{{CIABATTA_COMMIT}}")),
+                pre = yaml_value(&format!(
+                    "{container} build -t {image}:$CIABATTA_COMMIT -f {df} {ctx}"
+                )),
             );
             suggestions.push(Suggestion {
                 summary: format!("Push image from {df} to ECR registry \"{reg}\""),
@@ -274,15 +293,19 @@ fn build_suggestions(
             // CIABATTA_<REG>_USER/PASS auth for us).
             let recipe = uniquify(&format!("{image}_to_{reg}"), &mut used);
             let snippet = format!(
-                "\n# Build the Docker image from {df}, save it as a tarball, and upload it to nexus (\"{reg}\").\n\
-                 [recipies.{recipe}]\n\
-                 registry            = {reg_q}\n\
-                 local_artifact_path = {local}\n\
-                 publish_path        = {publish}\n\
-                 pre                 = '{container} build -t {image}:$CIABATTA_COMMIT -f {df} {ctx} && {container} save -o {image}.tar {image}:$CIABATTA_COMMIT'\n",
-                reg_q = toml_basic(reg),
-                local = toml_basic(&format!("{image}.tar")),
-                publish = toml_basic(&format!("docker/{image}/{{CIABATTA_COMMIT}}/{image}.tar")),
+                "  # Build the Docker image from {df}, save it as a tarball, and upload it to nexus (\"{reg}\").\n\
+                 \x20 {recipe}:\n\
+                 \x20   registry: {reg_q}\n\
+                 \x20   local_artifact_path: {local}\n\
+                 \x20   publish_path: {publish}\n\
+                 \x20   pre: {pre}\n",
+                reg_q = yaml_value(reg),
+                local = yaml_value(&format!("{image}.tar")),
+                publish = yaml_value(&format!("docker/{image}/{{CIABATTA_COMMIT}}/{image}.tar")),
+                pre = yaml_value(&format!(
+                    "{container} build -t {image}:$CIABATTA_COMMIT -f {df} {ctx} && \
+                     {container} save -o {image}.tar {image}:$CIABATTA_COMMIT"
+                )),
             );
             suggestions.push(Suggestion {
                 summary: format!("Upload image tarball from {df} to nexus registry \"{reg}\""),
@@ -298,10 +321,11 @@ fn build_suggestions(
         if pkg.publishable {
             let recipe = uniquify(&format!("{}_crate", pkg.name), &mut used);
             let snippet = format!(
-                "\n# Publish the \"{name}\" crate to crates.io (needs `cargo login` / CARGO_REGISTRY_TOKEN).\n\
-                 [recipies.{recipe}]\n\
-                 main = 'cargo publish{mflag}'\n",
+                "  # Publish the \"{name}\" crate to crates.io (needs `cargo login` / CARGO_REGISTRY_TOKEN).\n\
+                 \x20 {recipe}:\n\
+                 \x20   main: {main}\n",
                 name = pkg.name,
+                main = yaml_value(&format!("cargo publish{mflag}")),
             );
             suggestions.push(Suggestion {
                 summary: format!("Publish crate \"{}\" to crates.io", pkg.name),
@@ -315,18 +339,19 @@ fn build_suggestions(
                     format!("{:?}", infer_registry_kind(reg, &cfg.registries[reg])).to_lowercase();
                 let recipe = uniquify(&format!("{bin}_binary_to_{reg}"), &mut used);
                 let snippet = format!(
-                    "\n# Build the \"{bin}\" release binary and upload it to the \"{reg}\" {kind} registry.\n\
-                     [recipies.{recipe}]\n\
-                     registry            = {reg_q}\n\
-                     local_artifact_path = {local}\n\
-                     publish_path        = {publish}\n\
-                     pre                 = 'cargo build --release{mflag}'\n",
-                    reg_q = toml_basic(reg),
-                    local = toml_basic(&format!("target/release/{bin}")),
-                    publish = toml_basic(&format!(
+                    "  # Build the \"{bin}\" release binary and upload it to the \"{reg}\" {kind} registry.\n\
+                     \x20 {recipe}:\n\
+                     \x20   registry: {reg_q}\n\
+                     \x20   local_artifact_path: {local}\n\
+                     \x20   publish_path: {publish}\n\
+                     \x20   pre: {pre}\n",
+                    reg_q = yaml_value(reg),
+                    local = yaml_value(&format!("target/release/{bin}")),
+                    publish = yaml_value(&format!(
                         "{name}/{{CIABATTA_BRANCH}}/{{CIABATTA_COMMIT}}/{bin}",
                         name = pkg.name
                     )),
+                    pre = yaml_value(&format!("cargo build --release{mflag}")),
                 );
                 suggestions.push(Suggestion {
                     summary: format!("Upload binary \"{bin}\" to {kind} registry \"{reg}\""),
@@ -694,9 +719,16 @@ fn uniquify(base: &str, used: &mut BTreeSet<String>) -> String {
 }
 
 /// Format a value as a TOML basic string with the necessary escaping.
-fn toml_basic(s: &str) -> String {
-    let escaped = s.replace('\\', "\\\\").replace('"', "\\\"");
-    format!("\"{escaped}\"")
+/// Render a value as a YAML scalar, quoting it whenever leaving it bare would
+/// change what it means.
+///
+/// Publish paths carry `{CIABATTA_COMMIT}` placeholders and `pre` commands are
+/// whole shell lines, so almost everything ciabatta scaffolds here needs the
+/// quotes — `{` opens a flow mapping and `:` splits a key from its value.
+fn yaml_value(s: &str) -> String {
+    serde_yaml_ng::to_string(s)
+        .map(|rendered| rendered.trim_end().trim_start_matches("--- ").to_string())
+        .unwrap_or_else(|_| format!("{s:?}"))
 }
 
 /// Parse a selection like `1,3`, `all`, or blank into 0-based indices.
@@ -735,8 +767,8 @@ fn ensure_config_exists(root: &Path) -> Result<PathBuf> {
             .with_context(|| format!("Failed to create {}", dir.display()))?;
         let header = "# Ciabatta configuration\n\
                       # Run `ciabatta config reference` for full documentation.\n\n\
-                      [system]\n\
-                      # containers = \"docker\"  # docker | podman (auto-detected when unset)\n";
+                      system:\n\
+                      \x20 # containers: docker   # docker | podman (auto-detected when unset)\n";
         std::fs::write(&path, header)
             .with_context(|| format!("Failed to write {}", path.display()))?;
         println!("Created {}", path.display());
@@ -744,23 +776,63 @@ fn ensure_config_exists(root: &Path) -> Result<PathBuf> {
     Ok(path)
 }
 
-/// Append config blocks to the project's config file.
-fn append_blocks(root: &Path, blocks: &[String]) -> Result<PathBuf> {
+/// Splice config blocks into the project's config file.
+///
+/// YAML has no equivalent of TOML's `[registries.nexus]` header, so a new entry
+/// can't simply be appended at the end of the file — a second top-level
+/// `registries:` key would be a duplicate. Each block is inserted under the key
+/// it belongs to instead, and the result is parsed before it's written: this
+/// edits a file the user owns, and handing it back broken is not an option.
+fn apply_blocks(root: &Path, blocks: &[Block]) -> Result<PathBuf> {
     if blocks.is_empty() {
         bail!("nothing to write");
     }
     let path = ensure_config_exists(root)?;
-    let mut content = std::fs::read_to_string(&path)
+    let original = std::fs::read_to_string(&path)
         .with_context(|| format!("Failed to read {}", path.display()))?;
-    if !content.ends_with('\n') {
-        content.push('\n');
-    }
+
+    let mut content = original.clone();
     for block in blocks {
-        content.push_str(block);
+        content = crate::format::insert_under(&content, block.key, &block.entry)?;
     }
+
+    // A block that doesn't parse means a bug here, not a bad answer from the
+    // user — so say so plainly instead of leaving them a corrupt config.
+    if let Err(e) = crate::format::from_str::<CiabattaConfig>(&content, crate::format::Format::Yaml)
+    {
+        bail!(
+            "The generated config wouldn't parse, so {} was left untouched: {e}",
+            path.display()
+        );
+    }
+
     std::fs::write(&path, &content)
         .with_context(|| format!("Failed to write {}", path.display()))?;
     Ok(path)
+}
+
+/// One addition to the config: an indented YAML entry and the top-level key it
+/// belongs under.
+#[derive(Debug, Clone)]
+struct Block {
+    key: &'static str,
+    entry: String,
+}
+
+impl Block {
+    fn registry(entry: String) -> Self {
+        Block {
+            key: "registries",
+            entry,
+        }
+    }
+
+    fn recipe(entry: String) -> Self {
+        Block {
+            key: "recipies",
+            entry,
+        }
+    }
 }
 
 // ─── Prompting ───────────────────────────────────────────────────────────────
@@ -808,6 +880,115 @@ mod tests {
         assert_eq!(uniquify("app_to_ecr", &mut used), "app_to_ecr_2");
         assert_eq!(uniquify("app_to_ecr", &mut used), "app_to_ecr_3");
         assert_eq!(uniquify("Fresh-Name", &mut used), "fresh_name");
+    }
+
+    /// Every suggestion is spliced straight into a file the user owns, so an
+    /// entry that doesn't parse would corrupt their config. Generate the whole
+    /// catalogue against a project that triggers all of them and load the
+    /// result back through the real config type.
+    #[test]
+    fn every_suggested_recipe_splices_into_a_config_that_parses() {
+        let root = std::env::temp_dir().join(format!("ciab_configure_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("Dockerfile"), "FROM scratch\n").unwrap();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[[bin]]\nname = \"app\"\n",
+        )
+        .unwrap();
+
+        let cfg: CiabattaConfig = crate::format::from_str(
+            "registries:\n  ecr:\n    url: 1.dkr.ecr.us-east-1.amazonaws.com\n\
+             \x20 nexus:\n    url: https://nexus.example.com\n",
+            crate::format::Format::Yaml,
+        )
+        .unwrap();
+
+        let found = discover(&root);
+        let (suggestions, _, _) = build_suggestions(&root, &cfg, &found);
+        assert!(
+            suggestions.len() >= 3,
+            "expected the docker/ecr, docker/nexus and binary suggestions, got {}",
+            suggestions.len()
+        );
+
+        // Splice every one of them in, exactly as `run_auto` would.
+        let mut document = "# Ciabatta configuration\n\nsystem:\n  ci: github\n".to_string();
+        for suggestion in &suggestions {
+            document =
+                crate::format::insert_under(&document, "recipies", &suggestion.snippet).unwrap();
+        }
+
+        let parsed: CiabattaConfig =
+            crate::format::from_str(&document, crate::format::Format::Yaml)
+                .unwrap_or_else(|e| panic!("generated config did not parse: {e}\n\n{document}"));
+
+        assert_eq!(parsed.recipes.len(), suggestions.len());
+        for suggestion in &suggestions {
+            assert!(
+                parsed.recipes.contains_key(&suggestion.recipe),
+                "recipe '{}' is missing from the parsed config",
+                suggestion.recipe
+            );
+        }
+        // The comments ciabatta scaffolded above `system:` survive the splice.
+        assert!(document.starts_with("# Ciabatta configuration"));
+        assert_eq!(
+            parsed.system.as_ref().and_then(|s| s.ci.as_deref()),
+            Some("github"),
+            "the existing config must survive being added to"
+        );
+
+        // Placeholders and shell commands must come back out intact rather than
+        // having been eaten by YAML's flow syntax.
+        let docker = parsed
+            .recipes
+            .values()
+            .find(|r| r.base.local_image.is_some())
+            .expect("a docker recipe was suggested");
+        // The image is named after the directory holding the Dockerfile, so
+        // assert on the placeholder rather than on the scratch dir's name.
+        let image = docker.base.local_image.as_deref().unwrap();
+        assert!(
+            image.ends_with(":{CIABATTA_COMMIT}"),
+            "the {{CIABATTA_COMMIT}} placeholder must survive YAML quoting, got {image:?}"
+        );
+        assert!(
+            docker
+                .base
+                .pre
+                .as_deref()
+                .unwrap_or_default()
+                .contains("$CIABATTA_COMMIT -f"),
+            "the pre command should survive verbatim, got {:?}",
+            docker.base.pre
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A config whose `registries:` key already has entries must gain the new
+    /// one rather than a second, duplicate top-level key.
+    #[test]
+    fn adding_to_an_existing_key_does_not_duplicate_it() {
+        let document = "system:\n  ci: github\n\nregistries:\n  nexus:\n    url: https://a\n";
+        let merged = crate::format::insert_under(
+            document,
+            "registries",
+            "  ecr:\n    url: 1.dkr.ecr.us-east-1.amazonaws.com\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            merged.lines().filter(|l| *l == "registries:").count(),
+            1,
+            "a duplicate top-level key would make the file unparseable"
+        );
+        let parsed: CiabattaConfig =
+            crate::format::from_str(&merged, crate::format::Format::Yaml).unwrap();
+        assert_eq!(parsed.registries.len(), 2);
+        assert_eq!(parsed.registries["nexus"].url, "https://a");
     }
 
     #[test]

@@ -24,10 +24,10 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
-use crate::config::{CIABATTA_DIR, CONFIG_FILE, CiabattaConfig, load_config_file};
+use crate::config::{CIABATTA_DIR, CiabattaConfig, config_path, load_config_file};
 use crate::run::RunStep;
 
-/// Directory inside a member's `.ciabatta/` holding one TOML file per workflow.
+/// Directory inside a member's `.ciabatta/` holding one file per workflow.
 pub const WORKFLOWS_DIR: &str = "workflows";
 
 /// How deep below the workspace root to look for members. Deep enough for the
@@ -69,34 +69,56 @@ const SKIP_DIRS: &[&str] = &[
 pub struct WorkspaceMeta {
     /// This sub-workspace's name across the monorepo. Defaults to the directory
     /// name, which is usually what you'd have typed anyway.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     /// One line on what lives here. `ciabatta list` prints it.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     /// Who owns this sub-workspace — a name, handle, or team.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub owner: Option<String>,
     /// Other sub-workspaces this one depends on, as `"<member>"` (their
     /// same-named workflow, when they have one) or `"<member>:<workflow>"` (one
     /// specific workflow). Applies to every workflow defined here, so the
     /// common case — "we need whatever `proto` does first" — is one line.
     #[serde(default)]
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub depends_on: Vec<String>,
     /// Free-form labels for search (`ciabatta list --search backend`).
     #[serde(default)]
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<String>,
     /// Tools every workflow here needs on `PATH`; see [`ToolSpec`].
     #[serde(default)]
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub requires: Vec<String>,
     /// `.env` file path(s), relative to this sub-workspace, sourced before any
     /// of its workflows run.
+    ///
+    /// Unset means `.env` — the conventional thing needs no configuration.
+    /// Setting it *replaces* that default rather than adding to it, which is
+    /// what "use this file instead" has to mean for it to be useful.
     #[serde(default, deserialize_with = "crate::run::string_or_vec")]
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub env_file: Vec<String>,
+    /// The checked-in template the `.env` is generated from when it's missing —
+    /// conventionally `.env.default`.
+    ///
+    /// Required of any workspace whose builds declare `REQUIRED_ENV`: those
+    /// builds cannot run without those variables, and a repo that doesn't write
+    /// down what they are is one a new person can't build. See
+    /// [`crate::environment::files`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub env_default: Option<String>,
     /// Environment variables applied to every step defined here — the standard
     /// set a sub-workspace wants its scripts to be able to count on.
     #[serde(default)]
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub env: BTreeMap<String, String>,
     /// Set on the monorepo root's own config when the root is only an umbrella
     /// (shared `[toolchain]` and `[env]`) rather than a package of its own.
     #[serde(default)]
+    #[serde(skip_serializing_if = "crate::format::is_false")]
     pub umbrella: bool,
 }
 
@@ -121,34 +143,43 @@ pub struct WorkspaceMeta {
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
 pub struct Workflow {
     /// What running this workflow accomplishes.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     /// Who owns it. Falls back to the sub-workspace's owner.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub owner: Option<String>,
     /// Workflows in other sub-workspaces that must finish first, on top of
     /// whatever `[workspace] depends_on` already declares. Same
     /// `"<member>"` / `"<member>:<workflow>"` spelling.
     #[serde(default)]
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub needs: Vec<String>,
     /// Tools this workflow needs on `PATH`, applied to all of its steps.
     #[serde(default)]
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub requires: Vec<String>,
     /// `.env` file path(s) relative to the sub-workspace, sourced before the
     /// graph runs.
     #[serde(default, deserialize_with = "crate::run::string_or_vec")]
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub env_file: Vec<String>,
     /// Variables that must be set and non-empty, or the run is refused up front.
     #[serde(default, rename = "REQUIRED_ENV")]
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub required_env: Vec<String>,
     /// Environment variables applied to every step of this workflow.
     #[serde(default)]
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub env: BTreeMap<String, String>,
     /// Free-form labels for search.
     #[serde(default)]
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<String>,
     /// The steps themselves — the same node type the run engine executes, so a
     /// workflow gets `needs`, `on_error` recovery, conditions, timeouts and
     /// persistence for free.
     #[serde(default)]
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub steps: Vec<RunStep>,
 }
 
@@ -165,12 +196,15 @@ pub struct Workflow {
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
 pub struct ToolSpec {
     /// The command that installs it, printed verbatim when it's missing.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub hint: Option<String>,
     /// An alternative way to detect the tool when a bare `PATH` lookup won't
     /// do (a plugin, a specific version). Run through the shell; a zero exit
     /// means present.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub check: Option<String>,
     /// What the tool is for, in one line.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
 }
 
@@ -363,11 +397,24 @@ pub fn find_workspace_root(start: &Path) -> Option<PathBuf> {
     git_root.or(highest_ciabatta)
 }
 
-/// Walk down from `dir` collecting every directory that holds a
-/// `.ciabatta/ciabatta.toml`. Nested members are allowed, so the walk keeps
-/// descending past one it just found.
+/// Every directory at or below `root` that holds a ciabatta config, in path
+/// order — the sub-workspaces a build would load.
+///
+/// Public because migration has to cover exactly the set of files discovery
+/// covers: a converter that finds fewer files than the loader does leaves a
+/// repo half-migrated in a way nobody notices until a build.
+pub fn member_dirs(root: &Path) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    let _ = collect_member_dirs(root, 0, &mut dirs);
+    dirs.sort();
+    dirs
+}
+
+/// Walk down from `dir` collecting every directory that holds a ciabatta
+/// config. Nested members are allowed, so the walk keeps descending past one it
+/// just found.
 fn collect_member_dirs(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) -> Result<()> {
-    if dir.join(CIABATTA_DIR).join(CONFIG_FILE).is_file() {
+    if config_path(dir).is_some() {
         out.push(dir.to_path_buf());
     }
     if depth >= MAX_SCAN_DEPTH {
@@ -400,8 +447,10 @@ fn collect_member_dirs(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) -> Resu
 
 /// Load one member: its config, its `[workspace]` identity, and its workflows.
 fn load_member(root: &Path, dir: &Path) -> Result<Member> {
-    let config_path = dir.join(CIABATTA_DIR).join(CONFIG_FILE);
-    let config = load_config_file(&config_path)?;
+    let config_file = config_path(dir).ok_or_else(|| {
+        anyhow::anyhow!("No ciabatta config in {}", dir.join(CIABATTA_DIR).display())
+    })?;
+    let config = load_config_file(&config_file)?;
     let meta = config.workspace.clone().unwrap_or_default();
 
     let rel = dir
@@ -434,8 +483,8 @@ fn load_member(root: &Path, dir: &Path) -> Result<Member> {
 }
 
 /// Collect a member's workflows from both places they can be written: one file
-/// per workflow under `.ciabatta/workflows/`, and inline `[workflows.<name>]`
-/// tables in its `ciabatta.toml`.
+/// per workflow under `.ciabatta/workflows/`, and inline `workflows:` entries
+/// in its `ciabatta.yaml`.
 ///
 /// A name defined in both is an error rather than a silent precedence rule —
 /// two definitions of "build" that drift apart is the exact confusion this tool
@@ -452,34 +501,21 @@ fn load_workflows(
         .collect();
 
     let workflow_dir = dir.join(CIABATTA_DIR).join(WORKFLOWS_DIR);
-    let Ok(entries) = std::fs::read_dir(&workflow_dir) else {
-        return Ok(workflows);
-    };
 
-    let mut files: Vec<PathBuf> = entries
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| p.extension().is_some_and(|e| e == "toml"))
-        .collect();
-    files.sort();
-
-    for path in files {
+    for path in crate::format::config_files_in(&workflow_dir) {
         let Some(name) = path.file_stem().and_then(|s| s.to_str()) else {
             continue;
         };
-        let content = std::fs::read_to_string(&path)
-            .with_context(|| format!("Failed to read workflow file '{}'", path.display()))?;
-        let workflow: Workflow = toml::from_str(&content)
-            .with_context(|| format!("Failed to parse workflow file '{}'", path.display()))?;
+        let workflow: Workflow = crate::format::load(&path)
+            .with_context(|| format!("Failed to load workflow file '{}'", path.display()))?;
 
         if config.workflows.contains_key(name) {
             bail!(
-                "Sub-workspace '{}' defines the workflow '{}' twice: in {} and as [workflows.{}] \
-                 in its ciabatta.toml. Keep one.",
+                "Sub-workspace '{}' defines the workflow '{}' twice: in {} and under \
+                 `workflows:` in its ciabatta config. Keep one.",
                 member,
                 name,
                 path.display(),
-                name
             );
         }
         workflows.insert(name.to_string(), workflow);
@@ -623,17 +659,87 @@ mod tests {
         dir
     }
 
+    /// Write a member whose config is in the pre-0.2.0 format. Most fixtures
+    /// here are TOML, which keeps the back-compat reader exercised by every
+    /// discovery test rather than by one token case.
     fn write_member(root: &Path, rel: &str, config: &str) -> PathBuf {
+        write_member_as(root, rel, "ciabatta.toml", config)
+    }
+
+    fn write_member_as(root: &Path, rel: &str, file: &str, config: &str) -> PathBuf {
         let dir = root.join(rel);
         std::fs::create_dir_all(dir.join(CIABATTA_DIR)).unwrap();
-        std::fs::write(dir.join(CIABATTA_DIR).join(CONFIG_FILE), config).unwrap();
+        std::fs::write(dir.join(CIABATTA_DIR).join(file), config).unwrap();
         dir
     }
 
     fn write_workflow(member: &Path, name: &str, body: &str) {
+        write_workflow_as(member, &format!("{name}.toml"), body);
+    }
+
+    fn write_workflow_as(member: &Path, file: &str, body: &str) {
         let dir = member.join(CIABATTA_DIR).join(WORKFLOWS_DIR);
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join(format!("{name}.toml")), body).unwrap();
+        std::fs::write(dir.join(file), body).unwrap();
+    }
+
+    /// The format ciabatta writes from 0.2.0. Discovery, workflow loading and
+    /// the `depends_on` wiring must all behave identically to the TOML fixtures
+    /// the rest of this module uses.
+    #[test]
+    fn discovers_yaml_members_and_workflows() {
+        let root = scratch("discover_yaml");
+        let api = write_member_as(
+            &root,
+            "packages/api",
+            "ciabatta.yaml",
+            "workspace:\n  name: api\n  owner: Ada\n  depends_on: [proto]\n",
+        );
+        write_workflow_as(
+            &api,
+            "build.yaml",
+            "description: Build the API\nsteps:\n  - name: compile\n    run: cargo build\n",
+        );
+        write_member_as(
+            &root,
+            "packages/proto",
+            "ciabatta.yml",
+            "workspace:\n  name: proto\n",
+        );
+
+        let ws = Workspace::load(&root).unwrap();
+        let names: Vec<&str> = ws.members.iter().map(|m| m.name.as_str()).collect();
+        assert_eq!(names, vec!["api", "proto"]);
+
+        let api = ws.member("api").unwrap();
+        assert_eq!(api.owner(), "Ada");
+        assert_eq!(api.meta.depends_on, vec!["proto".to_string()]);
+        let build = api.workflows.get("build").expect("build workflow loaded");
+        assert_eq!(build.description.as_deref(), Some("Build the API"));
+        assert_eq!(build.steps.len(), 1);
+        assert_eq!(build.steps[0].run.as_deref(), Some("cargo build"));
+    }
+
+    /// A member mid-migration has both files; the YAML one is the config.
+    #[test]
+    fn yaml_wins_over_a_leftover_toml_config() {
+        let root = scratch("both_formats");
+        let dir = root.join("pkg");
+        std::fs::create_dir_all(dir.join(CIABATTA_DIR)).unwrap();
+        std::fs::write(
+            dir.join(CIABATTA_DIR).join("ciabatta.toml"),
+            "[workspace]\nname = \"old\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join(CIABATTA_DIR).join("ciabatta.yaml"),
+            "workspace:\n  name: new\n",
+        )
+        .unwrap();
+
+        let ws = Workspace::load(&root).unwrap();
+        let names: Vec<&str> = ws.members.iter().map(|m| m.name.as_str()).collect();
+        assert_eq!(names, vec!["new"], "the migrated file must win");
     }
 
     #[test]

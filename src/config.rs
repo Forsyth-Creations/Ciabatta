@@ -1,10 +1,20 @@
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 pub const CIABATTA_DIR: &str = ".ciabatta";
-pub const CONFIG_FILE: &str = "ciabatta.toml";
+/// The stem of a project's config file. The extension is whatever format it's
+/// written in — see [`crate::format`], which resolves the two.
+pub const CONFIG_STEM: &str = "ciabatta";
+/// The config file ciabatta writes for a new project.
+pub const CONFIG_FILE: &str = "ciabatta.yaml";
+
+/// The config file inside `dir`'s `.ciabatta/`, in whichever format it's
+/// written in, or `None` when that directory holds no config at all.
+pub fn config_path(dir: &Path) -> Option<PathBuf> {
+    crate::format::find(&dir.join(CIABATTA_DIR), CONFIG_STEM)
+}
 
 /// Environment variable overriding the interface every ciabatta web server binds
 /// to. Defaults to loopback; set it to `0.0.0.0` to expose the servers outside a
@@ -29,38 +39,54 @@ pub fn bind_host() -> String {
 
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
 pub struct CiabattaConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub system: Option<SystemConfig>,
     /// The `[workspace]` table: this directory's identity as a sub-workspace of
     /// a monorepo — its name, owner, and what it depends on. Written by
     /// `ciabatta init --lib`; absent for a standalone project.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub workspace: Option<crate::workspace::WorkspaceMeta>,
     /// Workflows written inline as `[workflows.<name>]`, for a sub-workspace
     /// small enough not to want a file each. The usual home is
     /// `.ciabatta/workflows/<name>.toml`.
     #[serde(default)]
+    #[serde(skip_serializing_if = "HashMap::is_empty")]
     pub workflows: HashMap<String, crate::workspace::Workflow>,
     /// How to install the build tools workflows declare in `requires`. Usually
     /// written once at the monorepo root and inherited by every sub-workspace.
     #[serde(default)]
+    #[serde(skip_serializing_if = "HashMap::is_empty")]
     pub toolchain: HashMap<String, crate::workspace::ToolSpec>,
     #[serde(default)]
+    #[serde(skip_serializing_if = "HashMap::is_empty")]
     pub registries: HashMap<String, RegistryConfig>,
     #[serde(rename = "recipies", default)]
+    #[serde(skip_serializing_if = "HashMap::is_empty")]
     pub recipes: HashMap<String, RecipeEntry>,
     /// Named menus. A menu groups recipes so they can be pushed/pulled together
     /// with `--cookbook <menu>`; each value lists the recipe names it contains.
     #[serde(default)]
+    #[serde(skip_serializing_if = "HashMap::is_empty")]
     pub menus: HashMap<String, Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub analyze: Option<AnalyzeConfig>,
     /// Settings for the `ciabatta ai` assistant.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub ai: Option<AiConfig>,
+    /// Build caching for this workspace: what its builds read, what they write,
+    /// and whether to reuse the result. Off unless the workspace opts in — see
+    /// [`crate::cache`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache: Option<crate::cache::CacheConfig>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
 pub struct SystemConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub ci: Option<String>,
     /// Container runtime (`docker` or `podman`). When unset, ciabatta auto-detects
     /// what's installed at run time (see [`resolve_container_cmd`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub containers: Option<String>,
 }
 
@@ -68,8 +94,10 @@ pub struct SystemConfig {
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
 pub struct AnalyzeConfig {
     /// A file listing project requirements, one per line (`id` or `id, description`).
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub requirements: Option<String>,
     /// A CSV tracing requirements to source files (columns: requirement, file).
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub trace: Option<String>,
 }
 
@@ -80,24 +108,31 @@ pub struct AiConfig {
     /// the latter two both cover any OpenAI-compatible endpoint (OpenAI, vLLM,
     /// Ollama, LM Studio, …); `vllm` just defaults the endpoint to
     /// http://localhost:8000.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
     /// Base URL of the API. Defaults per provider (api.anthropic.com /
     /// api.openai.com / localhost:8000 for vLLM); point it at a local or
     /// remote server for self-hosted models.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub endpoint: Option<String>,
     /// Model name. Defaults per provider.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     /// Name of the environment variable holding the API key
     /// (default: ANTHROPIC_API_KEY or OPENAI_API_KEY).
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub api_key_env: Option<String>,
     /// Verify the endpoint's TLS certificate. Defaults to true; set to false
     /// for a self-hosted vLLM/OpenAI endpoint behind a self-signed cert.
+    // Not skipped when false: this defaults to `true`, so omitting `false`
+    // would silently turn it back on.
     #[serde(default = "default_true")]
     pub tls_verify: bool,
     /// Container base images the assistant may spin up as sandboxes via the
     /// configured runtime ([system].containers → podman/docker). Any number of
     /// images; the assistant can only use images listed here.
     #[serde(default)]
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub images: Vec<String>,
     /// Command that proves the project still builds/tests after the assistant
     /// changes code (e.g. `cargo build`, `cargo test`, `npm run build`). When
@@ -106,17 +141,20 @@ pub struct AiConfig {
     /// auto-detects a sensible command from the project's manifests; set it to
     /// an empty string to disable the verification gate entirely.
     #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub verify: Option<String>,
     /// Ceiling on the model's reply length per request. Claude requires an
     /// explicit value (default 8192); for OpenAI-compatible endpoints it is only
     /// sent when set, since some local servers reject it. Raise it if large
     /// edits or plans are being truncated mid-tool-call.
     #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u64>,
     /// Cap on model⇄tool round trips per question (default 50). A large refactor
     /// spanning many files can exceed the default; raise it for long autonomous
     /// tasks, lower it to fail fast on a confused model.
     #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub max_tool_rounds: Option<usize>,
 }
 
@@ -139,25 +177,33 @@ impl Default for AiConfig {
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct RegistryConfig {
     pub url: String,
+    // Not skipped when false: this defaults to `true`, so omitting `false`
+    // would silently turn it back on.
     #[serde(default = "default_true")]
     pub tls_verify: bool,
     #[serde(default)]
+    #[serde(skip_serializing_if = "crate::format::is_false")]
     pub needs_auth: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub login_script: Option<String>,
     /// Optional explicit type; inferred from registry name if absent.
     #[serde(rename = "type")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub registry_type: Option<String>,
     /// Nexus only: the repository to publish into (e.g. `raw-hosted`,
     /// `npm-hosted`). When set, `url` is treated as the bare Nexus host and the
     /// `/repository/<repository>` segment is appended automatically. When unset,
     /// `url` is used as the full repository URL (backwards compatible).
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub repository: Option<String>,
     /// Nexus raw only: an optional path prefix prepended to every recipe's
     /// `publish_path`, so raw artifacts land under a common folder.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub base_path: Option<String>,
     /// Nexus only: the repository format, selecting how the main push happens.
     /// One of `raw` (HTTP PUT, the default), `npm` (`npm publish`), or `pypi`
     /// (`twine upload`).
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub format: Option<String>,
 }
 
@@ -241,12 +287,19 @@ pub struct RecipeEntry {
     #[serde(flatten)]
     pub base: SimpleRecipe,
     /// Push-direction overrides (any field set here wins over `base`).
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub push: Option<SimpleRecipe>,
     /// Pull-direction overrides (any field set here wins over `base`).
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub pull: Option<SimpleRecipe>,
     /// Run-direction definition: a DAG of dependent script steps (usually in
     /// a separate flowchart file). Unlike push/pull this is not a `SimpleRecipe`.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub run: Option<crate::run::RunRecipe>,
+    /// Cache settings for this recipe, overriding the workspace's. Most
+    /// projects set `cache:` once at the top level and never write this.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache: Option<crate::cache::CacheConfig>,
 }
 
 /// Where a recipe publishes to. Either a single remote path (the classic form,
@@ -280,23 +333,29 @@ impl PublishPath {
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
 pub struct SimpleRecipe {
     /// Named registry from [registries] section.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub registry: Option<String>,
     /// Local filesystem path for the artifact.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub local_artifact_path: Option<String>,
     /// Docker/ECR only: a local image reference (`name` or `name:tag`) to push.
     /// ciabatta retags it to the registry's target reference before pushing
     /// (`docker tag <local_image> <url>/<publish_path>`), and on pull retags the
     /// pulled image back to this name. When set, `publish_path` is the remote
     /// image reference; if omitted, the local reference is reused verbatim.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub local_image: Option<String>,
     /// Destination path in the registry; supports {CIABATTA_*} variable
     /// substitution, or a list of local file globs (see [`PublishPath`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub publish_path: Option<PublishPath>,
     /// For list-form `publish_path`: a leading path fragment stripped from each
     /// matched file's relative path before it's joined under `{CIABATTA_PATH}`.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub strip_prefix: Option<String>,
     /// Path to a bash script to run instead of the built-in registry action.
     /// Legacy alias for the `main` stage (kept for backwards compatibility).
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub bash_script: Option<String>,
 
     // ─── Stage overrides ────────────────────────────────────────────────────
@@ -304,12 +363,16 @@ pub struct SimpleRecipe {
     // run via `sh -c` with all CIABATTA_* / CI variables in its environment.
     // When unset, the stage falls back to its built-in default.
     /// Override the `login` stage (default: registry login_script or credentials).
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub login: Option<String>,
     /// Override the `pre-push` / `pre-pull` stage (default: no-op).
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub pre: Option<String>,
     /// Override the `push` / `pull` stage (default: the built-in registry action).
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub main: Option<String>,
     /// Override the `post-push` / `post-pull` stage (default: no-op).
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub post: Option<String>,
 }
 
@@ -474,14 +537,13 @@ pub fn find_root(start: &Path) -> Option<PathBuf> {
     }
 }
 
-/// Load the config discovered at `<root>/.ciabatta/ciabatta.toml`. Returns the
-/// default (empty) config when that file doesn't exist.
+/// Load the config discovered in `<root>/.ciabatta/`, in whichever format it's
+/// written in. Returns the default (empty) config when there is no config file.
 pub fn load_config(root: &Path) -> Result<CiabattaConfig> {
-    let path = root.join(CIABATTA_DIR).join(CONFIG_FILE);
-    if !path.exists() {
-        return Ok(CiabattaConfig::default());
+    match config_path(root) {
+        Some(path) => load_config_file(&path),
+        None => Ok(CiabattaConfig::default()),
     }
-    load_config_file(&path)
 }
 
 /// Load and parse a specific config file (used by the `--config` flag),
@@ -489,10 +551,7 @@ pub fn load_config(root: &Path) -> Result<CiabattaConfig> {
 /// [`load_config`], a missing or unparseable file is an error — the caller
 /// pointed at this file explicitly.
 pub fn load_config_file(path: &Path) -> Result<CiabattaConfig> {
-    let content = std::fs::read_to_string(path)
-        .with_context(|| format!("Failed to read {}", path.display()))?;
-    let mut config: CiabattaConfig =
-        toml::from_str(&content).with_context(|| format!("Failed to parse {}", path.display()))?;
+    let mut config: CiabattaConfig = crate::format::load(path)?;
 
     // Registries may reference environment variables (with bash-style defaults)
     // so the same config can target different endpoints per environment.
@@ -1160,5 +1219,146 @@ type = "nexus"
             RegistryKind::Nexus
         );
         assert_eq!(RegistryKind::from("my-ecr"), RegistryKind::Ecr);
+    }
+}
+
+#[cfg(test)]
+mod yaml_tests {
+    use super::*;
+
+    fn yaml(s: &str) -> CiabattaConfig {
+        crate::format::from_str(s, crate::format::Format::Yaml).expect("yaml config should parse")
+    }
+
+    /// The schema leans on `#[serde(flatten)]` (a recipe's shared base) wrapped
+    /// around an untagged enum (`publish_path`, one path or a list of globs).
+    /// That pairing is the one thing most likely to behave differently between
+    /// the two parsers, so it gets a test of its own.
+    #[test]
+    fn yaml_handles_flattened_bases_and_untagged_publish_paths() {
+        let cfg = yaml(
+            r#"
+registries:
+  nexus:
+    url: http://localhost:8527
+    repository: raw-hosted
+recipies:
+  single:
+    registry: nexus
+    publish_path: team/app/{CIABATTA_COMMIT}/app.tar.gz
+    push:
+      pre: python bundle.py
+  many:
+    registry: nexus
+    publish_path:
+      - dist/*.tar.gz
+      - build/app.bin
+    strip_prefix: dist/
+"#,
+        );
+
+        let single = cfg.recipes["single"].push_recipe();
+        assert_eq!(single.registry.as_deref(), Some("nexus"));
+        assert_eq!(
+            single.publish_path,
+            Some(PublishPath::Single(
+                "team/app/{CIABATTA_COMMIT}/app.tar.gz".to_string()
+            ))
+        );
+        assert_eq!(single.pre.as_deref(), Some("python bundle.py"));
+
+        let many = cfg.recipes["many"].push_recipe();
+        assert_eq!(
+            many.publish_path,
+            Some(PublishPath::Many(vec![
+                "dist/*.tar.gz".to_string(),
+                "build/app.bin".to_string()
+            ]))
+        );
+        assert_eq!(many.strip_prefix.as_deref(), Some("dist/"));
+    }
+
+    /// `env_file`/`when`/`skip_if` accept one-or-many through a custom
+    /// deserializer, and steps carry bools and ints with `#[serde(default)]`.
+    #[test]
+    fn yaml_handles_run_steps_and_one_or_many_fields() {
+        let cfg = yaml(
+            r#"
+recipies:
+  svc:
+    run:
+      env_file: .env
+      REQUIRED_ENV: [API_URL]
+      steps:
+        - name: build
+          run: cargo build
+          retries: 2
+          tags: [fast]
+        - name: ship
+          run: make ship
+          needs: [build]
+          when:
+            - env.RUN_ENV == prod
+          persistent: false
+"#,
+        );
+
+        let run = cfg.recipes["svc"].run_recipe().expect("run present");
+        assert_eq!(run.env_file, vec![".env".to_string()]);
+        assert_eq!(run.required_env, vec!["API_URL".to_string()]);
+        assert_eq!(run.steps.len(), 2);
+        assert_eq!(run.steps[0].retries, 2);
+        assert_eq!(run.steps[1].when, vec!["env.RUN_ENV == prod".to_string()]);
+        assert_eq!(run.steps[1].needs, vec!["build".to_string()]);
+    }
+
+    /// A config written in either format must produce the same value, or the
+    /// migration isn't a migration.
+    #[test]
+    fn the_two_formats_agree() {
+        let from_toml: CiabattaConfig = crate::format::from_str(
+            r#"
+[workspace]
+name = "api"
+depends_on = ["proto:generate"]
+
+[recipies.app]
+registry = "ecr"
+local_image = "app:latest"
+publish_path = "app:{CIABATTA_COMMIT}"
+"#,
+            crate::format::Format::Toml,
+        )
+        .unwrap();
+
+        let from_yaml = yaml(
+            r#"
+workspace:
+  name: api
+  depends_on: [proto:generate]
+recipies:
+  app:
+    registry: ecr
+    local_image: app:latest
+    publish_path: app:{CIABATTA_COMMIT}
+"#,
+        );
+
+        assert_eq!(
+            from_toml.workspace.as_ref().unwrap().name,
+            from_yaml.workspace.as_ref().unwrap().name
+        );
+        assert_eq!(
+            from_toml.workspace.as_ref().unwrap().depends_on,
+            from_yaml.workspace.as_ref().unwrap().depends_on
+        );
+        assert_eq!(
+            from_toml.recipes["app"].push_recipe().publish_path,
+            from_yaml.recipes["app"].push_recipe().publish_path
+        );
+        assert_eq!(
+            from_toml.recipes["app"].base.local_image,
+            from_yaml.recipes["app"].base.local_image
+        );
     }
 }

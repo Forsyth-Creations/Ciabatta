@@ -1,14 +1,19 @@
 mod ai;
 mod analyze;
+mod cache;
 mod ci;
 mod cli;
 mod config;
 mod configure;
+mod convert;
 mod daemon;
 mod environment;
 mod example;
+mod format;
 mod git;
+mod migrate;
 mod registry;
+mod remote_cache;
 mod run;
 mod runner;
 mod todo;
@@ -23,7 +28,10 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use clap::Parser;
 
-use cli::{AiCommand, Cli, Commands, ConfigCommand, ConfigureCommand, DaemonCommand};
+use cli::{
+    AiCommand, CacheCommand, Cli, Commands, ConfigCommand, ConfigureCommand, DaemonCommand,
+    RemoteCacheCommand, SelfCommand,
+};
 use config::{CiabattaConfig, find_root, load_config, load_config_file};
 use environment::CiabattaEnv;
 use runner::RunMode;
@@ -208,14 +216,55 @@ async fn main() -> Result<()> {
             ConfigCommand::Reference => {
                 print_config_help();
             }
+            ConfigCommand::Migrate { dry_run, path } => {
+                cmd_config_migrate(path.as_deref(), dry_run)?;
+            }
         },
 
         Commands::Configure { subcommand } => {
             cmd_configure(subcommand)?;
         }
 
-        Commands::Todo { task, detach, port } => {
-            cmd_todo(task, detach, port).await?;
+        Commands::Todo {
+            task,
+            global,
+            detach,
+            port,
+        } => {
+            cmd_todo(task, global, detach, port).await?;
+        }
+
+        Commands::DryRun {
+            targets,
+            diff,
+            json,
+            env,
+            local,
+            config,
+        } => {
+            cmd_dry_run(&targets, diff, json, &env, local, config.as_deref()).await?;
+        }
+
+        Commands::Cache { subcommand } => {
+            cmd_cache(subcommand)?;
+        }
+
+        Commands::RemoteCache { subcommand } => {
+            cmd_remote_cache(subcommand).await?;
+        }
+
+        Commands::Zelf { subcommand } => {
+            cmd_self(subcommand).await?;
+        }
+
+        Commands::Convert {
+            script,
+            name,
+            workflow,
+            dry_run,
+            force,
+        } => {
+            convert::run(&script, name.as_deref(), workflow, dry_run, force)?;
         }
     }
 
@@ -928,16 +977,44 @@ fn init_daemon_logging() -> Result<()> {
 }
 
 /// Dispatch `ciabatta todo`:
-///   - a TASK string adds the task and exits
+///   - a TASK string adds the task to the current project and exits
 ///   - otherwise open the todo page in the daemon's web app
 ///
-/// The task list is personal and lives in `~/.ciabatta/todos.json`, so adding
-/// from the command line doesn't need the daemon at all.
-async fn cmd_todo(task: Option<String>, detach: bool, port: Option<u16>) -> Result<()> {
+/// Adding from the command line scopes the task to whichever project the
+/// working directory is in, so `ciabatta todo "fix the flaky test"` typed in a
+/// repo lands on that repo's list rather than on one shared pile. Typed outside
+/// any project it's unscoped, and shows up everywhere.
+///
+/// The list lives in `~/.ciabatta/todos.json`, so adding doesn't need the
+/// daemon — but the project *id* comes from the daemon's registry, which is
+/// what the web app's switcher selects on. Registering is a local computation
+/// (a hash of the path), so this works with the daemon down.
+async fn cmd_todo(
+    task: Option<String>,
+    global: bool,
+    detach: bool,
+    port: Option<u16>,
+) -> Result<()> {
     if let Some(text) = task {
-        let store = todo::Store::open()?;
-        let added = store.add(&text)?;
-        println!("Added task #{}: {}", added.id, added.text);
+        // `--global` files it on the global list; otherwise it belongs to
+        // whichever project the working directory is in — and outside any
+        // project there is nothing else it could be.
+        let project = if global { None } else { current_project_id() };
+        let added = add_todo(&text, project.as_deref()).await?;
+
+        match (&project, global) {
+            (Some(_), _) => println!("Added task #{}: {}", added.id, added.text),
+            (None, true) => println!(
+                "Added task #{} to the global list: {}",
+                added.id, added.text
+            ),
+            (None, false) => println!(
+                "Added task #{} to the global list: {}\n\
+                 (this directory isn't inside a ciabatta project, so there's no \
+                 project list to add it to)",
+                added.id, added.text
+            ),
+        }
         return Ok(());
     }
 
@@ -1102,6 +1179,14 @@ async fn cmd_watch(
         bail!("No command given. Usage: ciabatta watch <command>");
     }
 
+    // A watched command must see the same environment a run would: the
+    // workspace's `.env` (or whatever `env_file` names instead), plus the
+    // CIABATTA_* variables. Watching `npm run dev` and having it behave
+    // differently from `ciabatta run dev` because one sourced `.env` and the
+    // other didn't is the kind of difference that costs an afternoon.
+    let watch_env = resolve_watch_env()?;
+    print_watch_env(&watch_env);
+
     let created: serde_json::Value = client
         .post(session.daemon.url("/api/watch/sessions"))
         .json(&serde_json::json!({
@@ -1109,6 +1194,7 @@ async fn cmd_watch(
             "command": command,
             "triggers": triggers,
             "max_lines": max_lines,
+            "env": watch_env,
         }))
         .send()
         .await?
@@ -1134,6 +1220,141 @@ async fn cmd_watch(
     }
 
     tail_watch_session(&client, &session, id).await
+}
+
+/// Add a task, through the daemon when one is already running.
+///
+/// The daemon keeps the list in memory and rewrites the file on every change,
+/// so a CLI process that wrote the file directly would have its task
+/// disappear the next time the daemon saved. Going through the API when
+/// there's a daemon to go through keeps one writer.
+///
+/// With no daemon running, this writes the file itself — and deliberately does
+/// *not* start one. `ciabatta todo "…"` is a one-line note; spawning a
+/// background web server to take it would be a strange thing to do.
+async fn add_todo(text: &str, project: Option<&str>) -> Result<todo::Todo> {
+    if let Some(daemon) = daemon::find_running().await
+        && let Ok(client) = daemon.client()
+    {
+        let response = client
+            .post(daemon.url("/api/todos"))
+            .json(&serde_json::json!({ "text": text, "project": project }))
+            .send()
+            .await;
+
+        // A daemon that's up but unhappy shouldn't lose the task: fall through
+        // and write it locally rather than reporting a failure.
+        match response {
+            Ok(response) if response.status().is_success() => {
+                let todos: Vec<todo::Todo> = response.json().await?;
+                if let Some(added) = todos.iter().max_by_key(|t| t.id) {
+                    return Ok(added.clone());
+                }
+            }
+            Ok(response) => {
+                tracing::debug!(
+                    "the daemon refused the todo ({}); writing it locally",
+                    response.status()
+                );
+            }
+            Err(e) => tracing::debug!("couldn't reach the daemon ({e}); writing the todo locally"),
+        }
+    }
+
+    todo::Store::open()?.add(text, project)
+}
+
+/// The project id for the current directory, if it's inside one.
+///
+/// Computed rather than looked up, so this doesn't touch the registry file the
+/// running daemon holds in memory — writing it here would leave the daemon's
+/// copy stale and the two disagreeing about which projects exist. Registration
+/// stays where it belongs: the `POST /api/projects` every command that opens
+/// the web app already makes.
+fn current_project_id() -> Option<String> {
+    let cwd = env::current_dir().ok()?;
+    let root = find_root(&cwd)?;
+    let canonical = root.canonicalize().unwrap_or(root);
+    Some(daemon::projects::project_id(&canonical))
+}
+
+/// The environment a watched command runs with.
+///
+/// The same resolution a run does — CIABATTA_* variables from git or CI, then
+/// the workspace's env files layered underneath — so `ciabatta watch "npm run
+/// dev"` and a `dev` workflow step see the same thing.
+///
+/// Never fatal: a watch is somebody looking at output, and refusing to start
+/// one because a project's config didn't load would be the wrong trade. A
+/// problem is reported and the command runs with the ambient environment.
+fn resolve_watch_env() -> Result<BTreeMap<String, String>> {
+    let cwd = env::current_dir().context("Failed to get current directory")?;
+    let Some(root) = find_root(&cwd) else {
+        return Ok(BTreeMap::new());
+    };
+
+    let config = match load_config(&root) {
+        Ok(config) => config,
+        Err(e) => {
+            eprintln!(
+                "note: couldn't read this project's config ({e:#}); watching with the ambient environment"
+            );
+            return Ok(BTreeMap::new());
+        }
+    };
+
+    // Build variables first, so an explicit CIABATTA_* value wins over a file.
+    let mut vars = build_env_vars(&config, &[], false, &root, false).unwrap_or_default();
+
+    let meta = config.workspace.clone().unwrap_or_default();
+    let resolved = environment::files::resolve(&meta, &root);
+
+    // Which keys the env files define. Kept separately because `vars` is seeded
+    // from the whole ambient environment, and handing back all of it would make
+    // both the printed list and the daemon payload mostly noise.
+    let mut from_files: Vec<String> = Vec::new();
+    if !resolved.files.is_empty() {
+        for file in &resolved.files {
+            if let Ok(content) = std::fs::read_to_string(root.join(file)) {
+                from_files.extend(run::parse_env_content(&content).into_iter().map(|(k, _)| k));
+            }
+        }
+        match run::load_env_files(&resolved.files, &root, &vars) {
+            Ok(merged) => vars = merged,
+            Err(e) => eprintln!("note: couldn't source this workspace's env files ({e:#})"),
+        }
+    }
+
+    // Only what ciabatta contributes: the CIABATTA_* variables it resolved, and
+    // whatever this workspace's env files define. Everything else the command
+    // sees is inherited from the shell, and re-listing the shell's environment
+    // back at the user would bury the two lines that matter.
+    Ok(vars
+        .into_iter()
+        .filter(|(key, _)| key.starts_with("CIABATTA_") || from_files.contains(key))
+        .collect())
+}
+
+/// Show what the watched command will see.
+///
+/// Values are printed, not hidden: this is the user's own terminal, showing
+/// their own project's environment, and a redacted list would defeat the point
+/// — which is being able to see at a glance that `API_URL` is pointing at the
+/// wrong thing. What is *not* printed is the ambient environment the process
+/// already had; only what ciabatta resolved and is adding.
+fn print_watch_env(vars: &BTreeMap<String, String>) {
+    if vars.is_empty() {
+        println!("Environment: nothing resolved — running with your shell's environment.");
+        println!();
+        return;
+    }
+
+    println!("Environment ({} variable(s)):", vars.len());
+    let width = vars.keys().map(|k| k.len()).max().unwrap_or(0);
+    for (key, value) in vars {
+        println!("  {key:<width$}  {value}");
+    }
+    println!();
 }
 
 /// Print the watch sessions the daemon owns, newest first.
@@ -1717,6 +1938,762 @@ async fn run_plain(
     Ok(())
 }
 
+// ─── The remote cache ───────────────────────────────────────────────────────
+
+/// Dispatch `ciabatta remote-cache …`.
+async fn cmd_remote_cache(subcommand: RemoteCacheCommand) -> Result<()> {
+    use remote_cache::client::{Client, Credential, Credentials};
+
+    match subcommand {
+        RemoteCacheCommand::Init {
+            into,
+            port,
+            storage,
+            force,
+        } => {
+            let dir =
+                into.unwrap_or(env::current_dir().context("Failed to get current directory")?);
+            std::fs::create_dir_all(&dir)
+                .with_context(|| format!("Failed to create {}", dir.display()))?;
+
+            if let Some(existing) = remote_cache::ServerConfig::find(&dir)
+                && !force
+            {
+                bail!(
+                    "{} already exists. Use --force to overwrite it.",
+                    existing.display()
+                );
+            }
+
+            let port = port.unwrap_or(remote_cache::DEFAULT_PORT);
+            let path = dir.join(format!(
+                "{}.{}",
+                remote_cache::CONFIG_STEM,
+                format::YAML_EXT
+            ));
+            std::fs::write(&path, remote_cache::starter_config(port, &storage))
+                .with_context(|| format!("Failed to write {}", path.display()))?;
+
+            println!("Wrote {}", path.display());
+            println!();
+            println!("Next:");
+            println!("  1. Read it — `auth.mode` is `open`, which means anyone who can reach");
+            println!("     the port can read and overwrite cached artifacts. Fine on a trusted");
+            println!("     network; set `token` or `ldap` before exposing it further.");
+            println!("  2. ciabatta remote-cache start");
+            println!("  3. On each developer's machine:");
+            println!("       ciabatta remote-cache login http://<this-host>:{port}");
+            println!("       ciabatta cache init --remote http://<this-host>:{port}");
+            Ok(())
+        }
+
+        RemoteCacheCommand::Start { config, port } => {
+            let cwd = env::current_dir().context("Failed to get current directory")?;
+            let path = match config {
+                Some(path) => path,
+                None => remote_cache::ServerConfig::find(&cwd).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "No remote-cache config in {}. Create one with \
+                         `ciabatta remote-cache init`.",
+                        cwd.display()
+                    )
+                })?,
+            };
+
+            let (mut server_config, _) = remote_cache::ServerConfig::load(&path)?;
+            if let Some(port) = port {
+                server_config.server.port = port;
+            }
+            remote_cache::server::serve(server_config).await
+        }
+
+        RemoteCacheCommand::Login {
+            url,
+            username,
+            password_env,
+            no_tls_verify,
+        } => {
+            let tls_verify = !no_tls_verify;
+            if !tls_verify {
+                eprintln!(
+                    "warning: certificate verification is off for {url}. The connection is \
+                     encrypted but the server's identity is not checked, so the build \
+                     artifacts it serves are only as trustworthy as the network."
+                );
+            }
+
+            let client = Client::with_token(&url, tls_verify, None)?;
+
+            // Ask the server what it wants before prompting for anything, so an
+            // open cache doesn't demand credentials it will ignore.
+            let health = client.health().await?;
+            let needs_credentials = health.auth != "open" && health.auth != "none";
+
+            let (username, password) = if needs_credentials {
+                let username = match username {
+                    Some(name) => name,
+                    None => prompt_line(&format!("Username for {url}: "))?,
+                };
+                let password = match &password_env {
+                    Some(var) => env::var(var)
+                        .with_context(|| format!("--password-env names {var}, but it isn't set"))?,
+                    None => prompt_secret(&format!(
+                        "{} for {url}: ",
+                        if health.auth == "token" {
+                            "Token"
+                        } else {
+                            "Password"
+                        }
+                    ))?,
+                };
+                (username, password)
+            } else {
+                println!("{url} accepts anyone who can reach it (auth.mode: open).");
+                (username.unwrap_or_default(), String::new())
+            };
+
+            let session = client.login(&username, &password).await?;
+
+            let mut credentials = Credentials::load();
+            credentials.set(
+                &url,
+                Credential {
+                    token: session.token,
+                    user: session.user.name.clone(),
+                    expires_at: session.expires_at.clone(),
+                    release: health.release.clone(),
+                    tls_verify,
+                },
+            );
+            credentials.save()?;
+
+            anyhow::ensure!(
+                health.ok,
+                "{url} answered, but reported itself unhealthy — check its log before \
+                 pointing builds at it."
+            );
+
+            println!(
+                "Logged in to {url} as {}{} (ciabatta {} on the server).",
+                session.user.name,
+                if session.user.can_write {
+                    ""
+                } else {
+                    " (read-only)"
+                },
+                health.version,
+            );
+            if let Some(when) = session.expires_at {
+                println!("The session lasts until {when}.");
+            }
+            if !session.user.groups.is_empty() {
+                println!("Groups: {}", session.user.groups.join(", "));
+            }
+
+            // Mention a newer ciabatta here rather than on every build.
+            if let Some(release) = &health.release
+                && let Some(notice) = remote_cache::releases::UpdateStatus::compare(
+                    release,
+                    remote_cache::releases::current_platform(),
+                )
+                .notice()
+            {
+                println!();
+                println!("{notice}");
+            }
+
+            println!();
+            println!("Point a workspace at it with:");
+            println!("  ciabatta cache init --remote {url}");
+            Ok(())
+        }
+
+        RemoteCacheCommand::Logout { url } => {
+            let mut credentials = Credentials::load();
+            match url {
+                Some(url) => {
+                    // Tell the server too, so the session really ends rather
+                    // than merely being forgotten locally.
+                    if let Ok(client) = Client::saved(&url) {
+                        let _ = client.logout().await;
+                    }
+                    if credentials.remove(&url) {
+                        credentials.save()?;
+                        println!("Logged out of {url}.");
+                    } else {
+                        println!("Wasn't logged in to {url}.");
+                    }
+                }
+                None => {
+                    let urls: Vec<String> = credentials.servers.keys().cloned().collect();
+                    if urls.is_empty() {
+                        println!("Not logged in to any remote cache.");
+                        return Ok(());
+                    }
+                    for url in &urls {
+                        if let Ok(client) = Client::saved(url) {
+                            let _ = client.logout().await;
+                        }
+                        credentials.remove(url);
+                    }
+                    credentials.save()?;
+                    println!("Logged out of {} remote cache(s).", urls.len());
+                }
+            }
+            Ok(())
+        }
+
+        RemoteCacheCommand::Status { url } => {
+            let url = match url {
+                Some(url) => url,
+                None => configured_remote()?.ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "No remote cache is configured for this workspace, and none was named.\n\
+                         Usage: ciabatta remote-cache status <URL>"
+                    )
+                })?,
+            };
+
+            let client = Client::saved(&url)?;
+            let stats = client.stats().await?;
+            print_remote_status(&url, &stats);
+            Ok(())
+        }
+
+        RemoteCacheCommand::AddUser { name, read_only } => {
+            let token = remote_cache::auth::generate_token();
+            let hash = cache::hash_bytes(token.as_bytes());
+
+            println!("Token for {name} (shown once — the server only ever stores its hash):");
+            println!();
+            println!("  {token}");
+            println!();
+            println!("Add this under `auth.users` in the server's config:");
+            println!();
+            println!("  - name: {name}");
+            println!("    token_sha256: \"{hash}\"");
+            if read_only {
+                println!("    read_only: true");
+            }
+            println!();
+            println!("Then set `auth.mode: token` and restart the server.");
+            println!("They log in with:");
+            println!("  ciabatta remote-cache login <URL> --username {name}");
+            Ok(())
+        }
+    }
+}
+
+/// The remote cache URL this workspace is configured to use, if any.
+fn configured_remote() -> Result<Option<String>> {
+    let cwd = env::current_dir().context("Failed to get current directory")?;
+    let Some(root) = find_root(&cwd) else {
+        return Ok(None);
+    };
+    let config = load_config(&root)?;
+    Ok(config
+        .cache
+        .as_ref()
+        .and_then(|c| c.remote())
+        .map(|r| r.url.clone()))
+}
+
+/// Print a remote cache's stats.
+fn print_remote_status(url: &str, stats: &serde_json::Value) {
+    println!("{url}");
+
+    let storage = &stats["storage"];
+    println!(
+        "  storage    {} entr(ies), {}",
+        storage["entries"].as_u64().unwrap_or(0),
+        storage["human"].as_str().unwrap_or("0 B"),
+    );
+
+    let counters = &stats["counters"];
+    let hits = counters["hits"].as_u64().unwrap_or(0);
+    let misses = counters["misses"].as_u64().unwrap_or(0);
+    match stats["hit_rate"].as_f64() {
+        Some(rate) => println!("  hit rate   {rate:.1}%  ({hits} hit, {misses} miss)"),
+        None => println!("  hit rate   nothing looked up yet"),
+    }
+    println!(
+        "  served     {}",
+        cache::store::human_size(counters["bytes_served"].as_u64().unwrap_or(0))
+    );
+    println!(
+        "  retention  {}",
+        stats["retention"]["description"].as_str().unwrap_or("—")
+    );
+    println!(
+        "  sessions   {} live",
+        stats["sessions"].as_u64().unwrap_or(0)
+    );
+
+    if let Some(projects) = stats["projects"].as_array()
+        && !projects.is_empty()
+    {
+        println!();
+        println!("Projects:");
+        for entry in projects {
+            let project = &entry["project"];
+            let counters = &entry["counters"];
+            println!(
+                "  {:<24} {:<38} {} hit / {} miss",
+                project["name"].as_str().unwrap_or("?"),
+                project["id"].as_str().unwrap_or("?"),
+                counters["hits"].as_u64().unwrap_or(0),
+                counters["misses"].as_u64().unwrap_or(0),
+            );
+        }
+    }
+}
+
+// ─── self update ────────────────────────────────────────────────────────────
+
+/// Dispatch `ciabatta self update`.
+///
+/// The binary comes from the cache the workspace already trusts for artifacts,
+/// and is verified against the SHA-256 that cache advertised before anything on
+/// disk is touched.
+async fn cmd_self(subcommand: SelfCommand) -> Result<()> {
+    let SelfCommand::Update { from, check, force } = subcommand;
+
+    let url = match from {
+        Some(url) => url,
+        None => configured_remote()?.ok_or_else(|| {
+            anyhow::anyhow!(
+                "No remote cache is configured for this workspace, so there's nowhere to \
+                 update from.\nName one with `ciabatta self update --from <URL>`."
+            )
+        })?,
+    };
+
+    let client = remote_cache::client::Client::saved(&url)?;
+    let release = client.release().await?;
+    let platform = remote_cache::releases::current_platform();
+
+    let status = remote_cache::releases::UpdateStatus::compare(&release, platform);
+    match &status {
+        remote_cache::releases::UpdateStatus::Unavailable => {
+            println!("{url} has no ciabatta build for {platform}.");
+            if !release.builds.is_empty() {
+                let have: Vec<&str> = release.builds.keys().map(|s| s.as_str()).collect();
+                println!("It carries builds for: {}.", have.join(", "));
+            }
+            return Ok(());
+        }
+        remote_cache::releases::UpdateStatus::Unknown(why) => {
+            bail!("Couldn't work out what's currently installed: {why}");
+        }
+        remote_cache::releases::UpdateStatus::UpToDate if !force => {
+            println!(
+                "Already running what {url} serves (ciabatta {}).",
+                release.version
+            );
+            return Ok(());
+        }
+        _ => {}
+    }
+
+    let build = release
+        .build(platform)
+        .context("the release check said there was a build for this platform")?;
+
+    if check {
+        println!("An update is available from {url}:");
+        println!("  version  {}", release.version);
+        println!("  size     {}", cache::store::human_size(build.size));
+        println!("  sha256   {}", build.sha256);
+        if let Some(notes) = &release.notes {
+            println!("  notes    {notes}");
+        }
+        println!("\nInstall it with `ciabatta self update`.");
+        return Ok(());
+    }
+
+    println!(
+        "Downloading ciabatta {} for {platform} from {url} ({})…",
+        release.version,
+        cache::store::human_size(build.size)
+    );
+    let bytes = client.download_release(platform).await?;
+
+    // `install` re-checks the hash before it touches anything, so a truncated
+    // download costs a retry rather than a broken installation.
+    let path = remote_cache::releases::install(&bytes, &build.sha256)?;
+    println!(
+        "Installed ciabatta {} to {}",
+        release.version,
+        path.display()
+    );
+    if let Some(notes) = &release.notes {
+        println!("\n{notes}");
+    }
+    Ok(())
+}
+
+/// Read a line from the terminal.
+fn prompt_line(message: &str) -> Result<String> {
+    use std::io::Write;
+    print!("{message}");
+    std::io::stdout().flush()?;
+    let mut line = String::new();
+    std::io::stdin().read_line(&mut line)?;
+    Ok(line.trim().to_string())
+}
+
+/// Read a secret from the terminal without echoing it.
+///
+/// Falls back to a visible read when the terminal won't turn echo off (a pipe,
+/// a CI job) — with a warning, because silently echoing a password would be
+/// worse than saying so.
+fn prompt_secret(message: &str) -> Result<String> {
+    use std::io::Write;
+
+    print!("{message}");
+    std::io::stdout().flush()?;
+
+    match read_without_echo() {
+        Ok(secret) => {
+            println!();
+            Ok(secret)
+        }
+        Err(_) => {
+            println!();
+            eprintln!(
+                "note: this terminal won't hide input, so what you type will be visible. \
+                 Use --password-env to avoid typing it at all."
+            );
+            let mut line = String::new();
+            std::io::stdin().read_line(&mut line)?;
+            Ok(line.trim().to_string())
+        }
+    }
+}
+
+/// Read a line with terminal echo disabled.
+fn read_without_echo() -> Result<String> {
+    use crossterm::terminal;
+
+    terminal::enable_raw_mode().context("this terminal won't switch to raw mode")?;
+    let mut secret = String::new();
+    let result = (|| -> Result<()> {
+        loop {
+            match crossterm::event::read()? {
+                crossterm::event::Event::Key(key) => match key.code {
+                    crossterm::event::KeyCode::Enter => return Ok(()),
+                    crossterm::event::KeyCode::Backspace => {
+                        secret.pop();
+                    }
+                    crossterm::event::KeyCode::Char('c')
+                        if key
+                            .modifiers
+                            .contains(crossterm::event::KeyModifiers::CONTROL) =>
+                    {
+                        bail!("cancelled");
+                    }
+                    crossterm::event::KeyCode::Char(c) => secret.push(c),
+                    _ => {}
+                },
+                _ => continue,
+            }
+        }
+    })();
+    let _ = terminal::disable_raw_mode();
+    result?;
+    Ok(secret)
+}
+
+// ─── Caching ────────────────────────────────────────────────────────────────
+
+/// Dispatch `ciabatta dry-run`: plan what a run would reuse, and run nothing.
+///
+/// A cache is a promise that skipping work is safe. Nobody should have to take
+/// that on faith, so this answers the question directly — for every step,
+/// whether it would be reused, and when it wouldn't, which of its three
+/// dependencies moved.
+async fn cmd_dry_run(
+    targets: &[String],
+    show_diff: bool,
+    as_json: bool,
+    env_flags: &[String],
+    local: bool,
+    config: Option<&Path>,
+) -> Result<()> {
+    let cwd = env::current_dir().context("Failed to get current directory")?;
+    let (root, cfg) = load_project(config)?;
+
+    // Quiet when producing JSON: a stray "resolved variables" banner on stdout
+    // would make the output unparseable.
+    let vars = build_env_vars(&cfg, env_flags, local, &root, !as_json)?;
+    let store = cache::graph::store_for(&root)?;
+
+    // Compile the same graph a real run would, so the preview can't disagree
+    // with what happens next.
+    let workspace = workspace::Workspace::discover(&cwd).ok();
+    let (steps, recipe_cache) = resolve_dry_run_steps(&cwd, &root, &cfg, targets, &workspace)?;
+
+    let context = cache::cli::WorkspaceContext {
+        workspace: workspace.as_ref(),
+        root: root.clone(),
+        config: &cfg,
+        recipe_cache,
+    };
+    let plan = cache::graph::plan_graph(&steps, &context, &cache::cli::env_map(&vars), &store)?;
+
+    if as_json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&cache::cli::plan_json(&plan))?
+        );
+        return Ok(());
+    }
+
+    cache::cli::print_plan(&plan, &store, show_diff);
+    Ok(())
+}
+
+/// Resolve the steps a dry run should plan, from workflow names, recipe names,
+/// or (with neither) every run-capable recipe in the project.
+///
+/// Returns the steps plus the recipe-level cache settings when exactly one
+/// recipe was named — a recipe's own `cache:` applies to its whole graph, and
+/// with several named there's no single answer.
+fn resolve_dry_run_steps(
+    cwd: &Path,
+    root: &Path,
+    cfg: &CiabattaConfig,
+    targets: &[String],
+    workspace: &Option<workspace::Workspace>,
+) -> Result<(Vec<run::RunStep>, Option<cache::CacheConfig>)> {
+    // A named workflow compiles across the whole monorepo.
+    if let (Some(ws), Some(first)) = (workspace.as_ref(), targets.first())
+        && ws.workflow_names().iter().any(|name| name == first)
+    {
+        let selection = workspace::graph::Selection::default();
+        let (_, graph) = workspace::graph::prepare_many(cwd, targets, &selection)?;
+        return Ok((graph.steps, None));
+    }
+
+    let names = if targets.is_empty() {
+        let mut runnable: Vec<String> = cfg
+            .recipes
+            .iter()
+            .filter(|(_, entry)| entry.run.is_some())
+            .map(|(name, _)| name.clone())
+            .collect();
+        runnable.sort();
+        if runnable.is_empty() {
+            bail!(
+                "Nothing to plan: this project defines no runnable recipes and no \
+                 workflow was named.\nTry `ciabatta list` to see what exists."
+            );
+        }
+        runnable
+    } else {
+        targets.to_vec()
+    };
+
+    let mut steps: Vec<run::RunStep> = Vec::new();
+    let mut recipe_cache = None;
+    for name in &names {
+        let entry = cfg.recipes.get(name).ok_or_else(|| {
+            anyhow::anyhow!(
+                "'{name}' is neither a workflow nor a recipe in this project. \
+                 Run `ciabatta list` to see what there is."
+            )
+        })?;
+        let definition = entry.run_recipe().ok_or_else(|| {
+            anyhow::anyhow!("Recipe '{name}' has no `run:` section, so there's nothing to plan.")
+        })?;
+        if names.len() == 1 {
+            recipe_cache = entry.cache.clone();
+        }
+        steps.extend(run::resolve_run(definition, name, root)?.steps);
+    }
+
+    Ok((steps, recipe_cache))
+}
+
+/// Dispatch `ciabatta cache …`.
+fn cmd_cache(subcommand: CacheCommand) -> Result<()> {
+    let cwd = env::current_dir().context("Failed to get current directory")?;
+    let root = find_root(&cwd).unwrap_or_else(|| cwd.clone());
+
+    match subcommand {
+        CacheCommand::Init {
+            enable,
+            remote,
+            force,
+        } => {
+            let proposal = cache::cli::propose(&root);
+
+            println!("Looking at {} …\n", root.display());
+            if proposal.inputs.is_empty() {
+                println!(
+                    "Nothing recognizable as source was found here. The `cache:` section \
+                     will be written with the parts you need to fill in marked TODO —\n\
+                     `inputs` is the one that has to be right."
+                );
+            } else {
+                println!("Inputs (a change to any of these means a rebuild):");
+                for pattern in &proposal.inputs {
+                    let why = proposal
+                        .reasons
+                        .iter()
+                        .find(|(p, _)| p == pattern)
+                        .map(|(_, why)| *why)
+                        .unwrap_or("");
+                    println!("  {pattern:<20} {why}");
+                }
+            }
+            if proposal.outputs.is_empty() {
+                println!(
+                    "\nNo build output directory was found yet, so `outputs` is left for you \
+                     to fill in.\nWith none declared there's nothing to restore, and every \
+                     build runs."
+                );
+            } else {
+                println!("\nOutputs (restored on a hit, and verified before one is granted):");
+                for pattern in &proposal.outputs {
+                    println!("  {pattern}");
+                }
+            }
+
+            // Enabling a cache whose inputs or outputs are still TODO would
+            // turn caching "on" and then quietly never hit, which reads as the
+            // feature being broken rather than as the config being unfinished.
+            let enable = if enable && !proposal.is_usable() {
+                println!(
+                    "\nNot turning caching on yet: with the gaps above, every build would \
+                     still run.\nFill them in, then set `enabled: true`."
+                );
+                false
+            } else {
+                enable
+            };
+
+            let path = cache::cli::write_cache_section(
+                &root,
+                &proposal,
+                enable,
+                remote.as_deref(),
+                force,
+            )?;
+            println!("\nWrote the cache section to {}", path.display());
+
+            // A recipe or step with its own `cache:` wins over what was just
+            // written. Say so, or "caching is on" followed by nothing being
+            // cached reads as the feature being broken.
+            let overrides = cache::cli::overriding_steps(&load_config(&root)?);
+            if !overrides.is_empty() {
+                println!();
+                println!(
+                    "Note: these declare their own `cache:`, which wins over the section \
+                     above —"
+                );
+                for (name, enabled) in &overrides {
+                    println!(
+                        "  {name:<32} {}",
+                        if *enabled {
+                            "cached with its own settings"
+                        } else {
+                            "still off"
+                        }
+                    );
+                }
+                println!(
+                    "Remove those to inherit the workspace's settings, or fill them in \
+                     where they are."
+                );
+            }
+
+            if enable {
+                println!("\nCaching is on. Check it with `ciabatta dry-run <recipe>`.");
+            } else {
+                println!(
+                    "Caching is still off — review the section, then set `enabled: true`.\n\
+                     Preview what it would do first with `ciabatta dry-run <recipe>`."
+                );
+            }
+            if remote.is_some() {
+                println!(
+                    "The remote's project id is filled in the first time this workspace \
+                     connects. Commit it."
+                );
+            }
+            Ok(())
+        }
+
+        CacheCommand::Status => {
+            let store = cache::graph::store_for(&root)?;
+            cache::cli::print_status(&store)
+        }
+
+        CacheCommand::Clean { yes } => {
+            let store = cache::graph::store_for(&root)?;
+            let stats = store.stats()?;
+            if stats.entries == 0 {
+                println!("The local cache is already empty.");
+                return Ok(());
+            }
+            if !yes {
+                print!(
+                    "Delete {} cached entr(ies) ({})? [y/N]: ",
+                    stats.entries,
+                    cache::store::human_size(stats.size)
+                );
+                use std::io::Write;
+                std::io::stdout().flush()?;
+                let mut answer = String::new();
+                std::io::stdin().read_line(&mut answer)?;
+                if !matches!(answer.trim().to_lowercase().as_str(), "y" | "yes") {
+                    println!("Left it alone.");
+                    return Ok(());
+                }
+            }
+            let removed = store.clear()?;
+            println!("Removed {removed} entr(ies).");
+            Ok(())
+        }
+
+        CacheCommand::Prune {
+            max_age,
+            max_size,
+            max_entries,
+            dry_run,
+        } => {
+            let store = cache::graph::store_for(&root)?;
+            let policy = cache::cli::retention_from_flags(max_age, max_size, max_entries);
+            cache::cli::print_prune(&store, &policy, dry_run)
+        }
+    }
+}
+
+/// Dispatch `ciabatta config migrate`: convert this checkout's TOML config to
+/// YAML.
+///
+/// Defaults to the whole workspace rather than the current directory. A
+/// monorepo's config is spread across every member, and converting one package
+/// while leaving its siblings behind is the state most likely to confuse
+/// somebody later.
+fn cmd_config_migrate(path: Option<&Path>, dry_run: bool) -> Result<()> {
+    let cwd = env::current_dir().context("Failed to get current directory")?;
+    let root = match path {
+        Some(p) => p.to_path_buf(),
+        None => workspace::find_workspace_root(&cwd)
+            .or_else(|| find_root(&cwd))
+            .unwrap_or(cwd),
+    };
+
+    println!(
+        "Migrating ciabatta config under {} to YAML…\n",
+        root.display()
+    );
+    let report = migrate::migrate(&root, dry_run)?;
+    migrate::print_report(&report, dry_run)
+}
+
 fn cmd_init(ci: Option<&str>, containers: Option<&str>, force: bool) -> Result<()> {
     use config::{CIABATTA_DIR, CONFIG_FILE};
     use std::fs;
@@ -1727,24 +2704,26 @@ fn cmd_init(ci: Option<&str>, containers: Option<&str>, force: bool) -> Result<(
     let dir = cwd.join(CIABATTA_DIR);
     let config_path = dir.join(CONFIG_FILE);
 
-    if config_path.exists() && !force {
+    if let Some(existing) = config::config_path(&cwd)
+        && !force
+    {
         bail!(
-            ".ciabatta/ciabatta.toml already exists.\n\
-             Use --force to overwrite, or edit it directly."
+            "{} already exists.\n\
+             Use --force to overwrite, or edit it directly.",
+            existing.display()
         );
     }
 
     fs::create_dir_all(&dir).with_context(|| format!("Failed to create {}", dir.display()))?;
 
-    let toml = build_starter_toml(ci, containers);
-    fs::write(&config_path, &toml)
+    fs::write(&config_path, build_starter_config(ci, containers))
         .with_context(|| format!("Failed to write {}", config_path.display()))?;
 
     println!("Initialized ciabatta project in {}", cwd.display());
     println!("Created: {}", config_path.display());
     println!();
     println!("Next steps:");
-    println!("  1. Edit .ciabatta/ciabatta.toml to define your registries and recipes.");
+    println!("  1. Edit .ciabatta/ciabatta.yaml to define your registries and recipes.");
     println!("  2. Run `ciabatta list` to verify your recipes are recognized.");
     println!("  3. Run `ciabatta push --dry-run <recipe>` to preview what will happen.");
     println!("  4. Run `ciabatta tui` to open the interactive browser.");
@@ -1778,13 +2757,15 @@ fn cmd_init_lib(
     let config_path = dir.join(CONFIG_FILE);
     let workflow_path = dir
         .join(workspace::WORKFLOWS_DIR)
-        .join(format!("{workflow}.toml"));
+        .join(format!("{workflow}.{}", format::YAML_EXT));
 
-    if config_path.exists() && !force {
+    if let Some(existing) = config::config_path(&cwd)
+        && !force
+    {
         bail!(
             "{} already exists.\n\
              Use --force to overwrite, or add a workflow by hand under .ciabatta/{}/.",
-            config_path.display(),
+            existing.display(),
             workspace::WORKFLOWS_DIR
         );
     }
@@ -1806,7 +2787,7 @@ fn cmd_init_lib(
 
     fs::write(
         &config_path,
-        build_lib_toml(&name, description, owner.as_deref(), depends_on),
+        build_lib_config(&name, description, owner.as_deref(), depends_on),
     )
     .with_context(|| format!("Failed to write {}", config_path.display()))?;
 
@@ -1864,30 +2845,30 @@ fn git_user_name() -> Option<String> {
     (!name.is_empty()).then_some(name)
 }
 
-/// The `ciabatta.toml` written by `init --lib`: a sub-workspace's identity, with
+/// The `ciabatta.yaml` written by `init --lib`: a sub-workspace's identity, with
 /// the parts it should fill in left visible rather than omitted.
-fn build_lib_toml(
+fn build_lib_config(
     name: &str,
     description: Option<&str>,
     owner: Option<&str>,
     depends_on: &[String],
 ) -> String {
     let description_line = match description {
-        Some(text) => format!("description = {text:?}"),
-        None => "description = \"\"          # TODO: one line on what lives here".to_string(),
+        Some(text) => format!("  description: {}", yaml_scalar(text)),
+        None => "  description: \"\"          # TODO: one line on what lives here".to_string(),
     };
     let owner_line = match owner {
-        Some(text) => format!("owner       = {text:?}"),
-        None => "owner       = \"\"          # TODO: who to ask about this package".to_string(),
+        Some(text) => format!("  owner: {}", yaml_scalar(text)),
+        None => "  owner: \"\"                # TODO: who to ask about this package".to_string(),
     };
     let depends_line = if depends_on.is_empty() {
-        "depends_on  = []           # e.g. [\"proto:generate\", \"common\"]".to_string()
+        "  depends_on: []           # e.g. [\"proto:generate\", \"common\"]".to_string()
     } else {
         format!(
-            "depends_on  = [{}]",
+            "  depends_on: [{}]",
             depends_on
                 .iter()
-                .map(|d| format!("{d:?}"))
+                .map(|d| yaml_scalar(d))
                 .collect::<Vec<_>>()
                 .join(", ")
         )
@@ -1901,18 +2882,29 @@ fn build_lib_toml(
 # Who this package is in the monorepo, and what it needs before it can build.
 # `ciabatta list` shows all of this, so nobody has to open your scripts to find
 # out what they do or who owns them.
-[workspace]
-name        = {name:?}
+workspace:
+  name: {name}
 {description_line}
 {owner_line}
 {depends_line}
-tags        = []           # free-form labels, searchable with `ciabatta list -s`
-requires    = []           # tools every workflow here needs on PATH
-# env_file  = ".env"       # sourced before any workflow here runs
+  tags: []                 # free-form labels, searchable with `ciabatta list -s`
+  requires: []             # tools every workflow here needs on PATH
+  # env_file: .env         # sourced before any workflow here runs
+  # env_default: .env.default   # the template .env is generated from
 
-# Standard environment variables for every step defined in this package.
-# [workspace.env]
-# RUST_LOG = "info"
+  # Standard environment variables for every step defined in this package.
+  # env:
+  #   RUST_LOG: info
+
+# ─── Caching ───────────────────────────────────────────────────────────────────
+# Off by default. Opt in, declare what a build reads and what it produces, and
+# ciabatta will skip the work when neither has changed. `ciabatta cache init`
+# walks you through it; `ciabatta dry-run <recipe>` shows what would be reused.
+#
+# cache:
+#   enabled: true
+#   inputs:  ["src/**/*.rs", "Cargo.toml"]
+#   outputs: ["target/release/{name}"]
 
 # ─── Workflows ─────────────────────────────────────────────────────────────────
 # One file per workflow, under .ciabatta/workflows/. Any sub-workspace that
@@ -1921,25 +2913,28 @@ requires    = []           # tools every workflow here needs on PATH
 #
 # Small packages can write them inline instead:
 #
-# [workflows.test]
-# description = "Run the unit tests"
-# [[workflows.test.steps]]
-# name        = "unit"
-# description = "cargo test"
-# run         = "cargo test"
+# workflows:
+#   test:
+#     description: Run the unit tests
+#     steps:
+#       - name: unit
+#         description: cargo test
+#         run: cargo test
 
 # ─── Registries and recipes ────────────────────────────────────────────────────
 # Publishing targets for this package, if it publishes anything. A workflow step
-# with `kind = "push"` and `recipe = "<name>"` runs one of these as a graph node.
+# with `kind: push` and `recipe: <name>` runs one of these as a graph node.
 #
-# [registries.nexus]
-# url        = "https://nexus.example.com"
-# repository = "raw-hosted"
+# registries:
+#   nexus:
+#     url: https://nexus.example.com
+#     repository: raw-hosted
 #
-# [recipies.binary]
-# registry            = "nexus"
-# local_artifact_path = "target/release/{name}"
-# publish_path        = "{name}/{{CIABATTA_BRANCH}}/{{CIABATTA_COMMIT}}/{name}"
+# recipies:
+#   binary:
+#     registry: nexus
+#     local_artifact_path: target/release/{name}
+#     publish_path: "{name}/{{CIABATTA_BRANCH}}/{{CIABATTA_COMMIT}}/{name}"
 "#
     )
 }
@@ -1948,8 +2943,8 @@ requires    = []           # tools every workflow here needs on PATH
 /// schema is trying to establish — describe it, own it, declare what it needs.
 fn build_starter_workflow(workflow: &str, member: &str, owner: Option<&str>) -> String {
     let owner_line = match owner {
-        Some(text) => format!("owner       = {text:?}"),
-        None => "owner       = \"\"          # TODO: who owns this workflow".to_string(),
+        Some(text) => format!("owner: {}", yaml_scalar(text)),
+        None => "owner: \"\"          # TODO: who owns this workflow".to_string(),
     };
 
     format!(
@@ -1959,74 +2954,105 @@ fn build_starter_workflow(workflow: &str, member: &str, owner: Option<&str>) -> 
 # package with `ciabatta {workflow} --only {member}`. See the graph first with
 # `ciabatta {workflow} --graph`.
 
-description = "TODO: what running this accomplishes"
+description: "TODO: what running this accomplishes"
 {owner_line}
 
 # Workflows in other sub-workspaces that must finish first. "other" means their
 # workflow of this same name; "other:generate" names a specific one.
-needs        = []
+needs: []
 
 # Tools every step here needs on PATH. Missing ones are reported before anything
-# runs, with the install command from the root's [toolchain] section.
-requires     = []
+# runs, with the install command from the root's `toolchain:` section.
+requires: []
 
-# REQUIRED_ENV = ["API_TOKEN"]   # refuse to start unless these are set
-# env_file     = ".env"          # sourced before the run
+# REQUIRED_ENV: [API_TOKEN]   # refuse to start unless these are set
+# env_file: .env              # sourced before the run
 
-[[steps]]
-name        = "{workflow}"
-description = "TODO: what this step does, and what it expects to be true first"
-run         = "echo 'replace me with the real {workflow} command'"
-# script    = "scripts/{workflow}.sh"   # …or a script, run from this package
-# requires  = ["cargo"]                 # tools this step in particular needs
-# timeout   = "10m"                     # kill it past this; the graph carries on
-# retries   = 1                         # extra attempts, for flaky steps
-# needs     = ["some-earlier-step"]     # ordering within this workflow
+steps:
+  - name: {workflow}
+    description: "TODO: what this step does, and what it expects to be true first"
+    run: echo 'replace me with the real {workflow} command'
+    # script: scripts/{workflow}.sh   # …or a script, run from this package
+    # requires: [cargo]               # tools this step in particular needs
+    # timeout: 10m                    # kill it past this; the graph carries on
+    # retries: 1                      # extra attempts, for flaky steps
+    # needs: [some-earlier-step]      # ordering within this workflow
 
-# A long-running step — a dev server, a watcher — that the graph must not wait
-# for. It starts, everything downstream is released, and the ciabatta daemon
-# takes ownership of it as a watch session, so it keeps running after the run
-# finishes. Follow it with `ciabatta watch --attach <ID>` (the run prints the
-# id), or find it later with `ciabatta watch --list`.
-#
-# [[steps]]
-# name        = "dev-server"
-# description = "Serve the app for the e2e steps"
-# run         = "npm run dev"
-# persistent  = true
+  # A long-running step — a dev server, a watcher — that the graph must not wait
+  # for. It starts, everything downstream is released, and the ciabatta daemon
+  # takes ownership of it as a watch session, so it keeps running after the run
+  # finishes. Follow it with `ciabatta watch --attach <ID>` (the run prints the
+  # id), or find it later with `ciabatta watch --list`.
+  #
+  # - name: dev-server
+  #   description: Serve the app for the e2e steps
+  #   run: npm run dev
+  #   persistent: true
 
-# Publishing is just another node on the graph: a step whose kind is "push",
-# naming a recipe from this package's ciabatta.toml.
-#
-# [[steps]]
-# name        = "publish"
-# description = "Publish the built artifact"
-# kind        = "push"
-# recipe      = "binary"
-# needs       = ["{workflow}"]
+  # Publishing is just another node on the graph: a step whose kind is "push",
+  # naming a recipe from this package's ciabatta.yaml.
+  #
+  # - name: publish
+  #   description: Publish the built artifact
+  #   kind: push
+  #   recipe: binary
+  #   needs: [{workflow}]
 "#
     )
 }
 
-fn build_starter_toml(ci: Option<&str>, containers: Option<&str>) -> String {
+/// Quote a value for YAML when it needs it, and leave it bare when it doesn't.
+///
+/// Bare scalars read far better in a scaffolded file, but a value starting with
+/// a special character — or one that YAML would read as a bool, null, or number
+/// — has to be quoted or it changes meaning.
+fn yaml_scalar(value: &str) -> String {
+    const SPECIAL_LEAD: &[char] = &[
+        '-', '?', ':', ',', '[', ']', '{', '}', '#', '&', '*', '!', '|', '>', '\'', '"', '%', '@',
+        '`',
+    ];
+    let looks_special = value.is_empty()
+        || value.starts_with(SPECIAL_LEAD)
+        || value.trim() != value
+        || value.contains(": ")
+        || value.contains(" #")
+        || value.contains('\n')
+        || matches!(
+            value.to_ascii_lowercase().as_str(),
+            "true" | "false" | "yes" | "no" | "on" | "off" | "null" | "~"
+        )
+        || value.parse::<f64>().is_ok();
+
+    if looks_special {
+        // serde_yaml_ng quotes and escapes exactly as the parser expects.
+        serde_yaml_ng::to_string(value)
+            .map(|s| s.trim_end().trim_start_matches("--- ").to_string())
+            .unwrap_or_else(|_| format!("{value:?}"))
+    } else {
+        value.to_string()
+    }
+}
+
+fn build_starter_config(ci: Option<&str>, containers: Option<&str>) -> String {
     // When the runtime isn't pinned, leave it commented out so ciabatta
     // auto-detects podman/docker at run time.
     let containers_line = match containers {
-        Some(c) => format!("containers = {c:?}"),
+        Some(c) => format!("  containers: {}", yaml_scalar(c)),
         None => {
-            r#"# containers = "docker"  # docker | podman (auto-detected when unset)"#.to_string()
+            r#"  # containers: docker   # docker | podman (auto-detected when unset)"#.to_string()
         }
     };
 
     let ci_line = match ci {
-        Some(s) => format!("ci = {:?}", s),
+        Some(s) => format!("  ci: {}", yaml_scalar(s)),
         None => {
             // Auto-detect from environment.
-            let detected = detect_ci();
-            if let Some(ref name) = detected {
-                format!("ci = {:?}  # auto-detected", name)
-            } else {
-                r#"# ci = "github"  # Uncomment and set: gitlab | github | jenkins | circleci | azure | bitbucket"#.to_string()
+            match detect_ci() {
+                Some(name) => format!("  ci: {}  # auto-detected", yaml_scalar(&name)),
+                None => {
+                    r#"  # ci: github   # gitlab | github | jenkins | circleci | azure | bitbucket"#
+                        .to_string()
+                }
             }
         }
     };
@@ -2035,77 +3061,104 @@ fn build_starter_toml(ci: Option<&str>, containers: Option<&str>) -> String {
         r#"# Ciabatta configuration
 # Run `ciabatta config reference` for full documentation.
 
-[system]
+system:
 {ci_line}
 {containers_line}
 
 # ─── Registries ────────────────────────────────────────────────────────────────
-# Define each registry you publish to. The section name is used as the registry
-# identifier in recipes. Supported types (auto-detected from name):
+# Define each registry you publish to. The key is the registry identifier used
+# in recipes. Supported types (auto-detected from the name):
 #   nexus, artifactory → HTTP PUT/GET
 #   s3                 → aws s3 cp
 #   docker             → docker push/pull
 #   ecr                → AWS ECR (auto-login)
 #
-# [registries.nexus]
-# url          = "https://nexus.example.com/repository/releases/"
-# tls_verify   = true
-# needs_auth   = true
-# login_script = ".ciabatta/nexus_login.sh"
+# registries:
+#   nexus:
+#     url: https://nexus.example.com/repository/releases/
+#     tls_verify: true
+#     needs_auth: true
+#     login_script: .ciabatta/nexus_login.sh
 #
-# [registries.ecr]
-# url        = "123456789.dkr.ecr.us-east-1.amazonaws.com"
-# needs_auth = false   # ciabatta auto-fetches the ECR token
+#   ecr:
+#     url: 123456789.dkr.ecr.us-east-1.amazonaws.com
+#     needs_auth: false   # ciabatta auto-fetches the ECR token
 
 # ─── Recipes ───────────────────────────────────────────────────────────────────
 # Each recipe describes how to push (and optionally pull) one artifact.
 # Variables available in publish_path: {{CIABATTA_BRANCH}}, {{CIABATTA_COMMIT}},
 #                                      {{CIABATTA_TAG}}, {{CIABATTA_BUILD_NUMBER}}
 #
-# Registry-based recipe (HTTP or S3 upload):
-# [recipies.my_artifact]
-# registry            = "nexus"
-# local_artifact_path = "dist/app.tar.gz"
-# publish_path        = "myteam/app/{{CIABATTA_BRANCH}}/{{CIABATTA_COMMIT}}/app.tar.gz"
+# recipies:
+#   # Registry-based recipe (HTTP or S3 upload):
+#   my_artifact:
+#     registry: nexus
+#     local_artifact_path: dist/app.tar.gz
+#     publish_path: "myteam/app/{{CIABATTA_BRANCH}}/{{CIABATTA_COMMIT}}/app.tar.gz"
 #
-# Bash script recipe (full control):
-# [recipies.my_script]
-# bash_script = "scripts/publish.sh"
+#   # Script recipe (full control):
+#   my_script:
+#     bash_script: scripts/publish.sh
 #
-# Push/pull pair (different actions for each direction):
-# [recipies.my_docker.push]
-# bash_script = "scripts/docker_push.sh"
-# [recipies.my_docker.pull]
-# bash_script = "scripts/docker_pull.sh"
+#   # Push/pull pair (different actions for each direction):
+#   my_docker:
+#     push:
+#       bash_script: scripts/docker_push.sh
+#     pull:
+#       bash_script: scripts/docker_pull.sh
 #
 # ─── Stages ────────────────────────────────────────────────────────────────────
 # Every push runs four stages: login → pre-push → push → post-push
 # Every pull runs four stages:  login → pre-pull → pull → post-pull
 # Override any stage with an arbitrary command (bash, python, a binary, …):
-#   login = "..."   pre = "..."   main = "..."   post = "..."
+#   login: ...   pre: ...   main: ...   post: ...
 # Unset stages use their defaults (login uses the registry login_script or
 # CIABATTA_<REGISTRY>_USER/PASS credentials; pre/post do nothing; main runs the
 # built-in registry action). Commands get all CIABATTA_* vars in their env.
 #
-# [recipies.frontend.push]
-# pre  = "python scripts/bundle.py"
-# post = "./scripts/notify.sh deployed"
+# recipies:
+#   frontend:
+#     push:
+#       pre: python scripts/bundle.py
+#       post: ./scripts/notify.sh deployed
 #
 # ─── Runs ──────────────────────────────────────────────────────────────────────
 # `ciabatta run <recipe>` executes a DAG of dependent script steps (login →
-# pre-run → run → post-run). The steps live in a separate flowchart
-# file; each step runs a script and may declare `needs` and an `on_error`
-# recovery node. See `ciabatta config reference`, or design one visually with
+# pre-run → run → post-run). The steps live in a separate flowchart file; each
+# step runs a script and may declare `needs` and an `on_error` recovery node.
+# See `ciabatta config reference`, or design one visually with
 # `ciabatta run --build` (and watch a run with `ciabatta run <r> --gui`).
 #
-# [recipies.web.run]
-# flowchart = ".ciabatta/runs.toml"      # each entry is a series of steps
-# env_file  = ".env"                     # .env file(s) sourced before running
+# recipies:
+#   web:
+#     run:
+#       flowchart: .ciabatta/runs.yaml   # each entry is a series of steps
+#       env_file: .env                   # .env file(s) sourced before running
+#
+# ─── Environment ───────────────────────────────────────────────────────────────
+# Ciabatta sources `.env` from the project root by default — you don't have to
+# say so. Point `env_file` somewhere else to override that for this workspace,
+# and name the checked-in template every `.env` is generated from:
+#
+# workspace:
+#   env_file: config/dev.env
+#   env_default: .env.default
+#
+# ─── Caching ───────────────────────────────────────────────────────────────────
+# Off by default. Declare what a build reads and what it writes, and ciabatta
+# reuses the previous result when neither changed. `ciabatta cache init` sets
+# this up for you; `ciabatta dry-run <recipe>` previews hits and rebuilds.
+#
+# cache:
+#   enabled: true
+#   inputs:  ["src/**/*", "package.json"]
+#   outputs: ["dist/**/*"]
+#   remote:  true          # also read/write the shared remote cache
 #
 # ─── Credentials ───────────────────────────────────────────────────────────────
 # When a registry has no login_script, ciabatta reads per-registry credentials:
 #   CIABATTA_<REGISTRY>_USER  /  CIABATTA_<REGISTRY>_PASS
-# e.g. for [registries.nexus]: CIABATTA_NEXUS_USER / CIABATTA_NEXUS_PASS.
+# e.g. for `registries.nexus`: CIABATTA_NEXUS_USER / CIABATTA_NEXUS_PASS.
 # Nexus/Artifactory use them for HTTP basic auth; docker runs `docker login`.
 "#,
         ci_line = ci_line,
@@ -2141,7 +3194,7 @@ fn detect_ci() -> Option<String> {
 
 fn list_recipes(cfg: &CiabattaConfig) {
     if cfg.recipes.is_empty() {
-        println!("No recipes defined. Add [recipies.<name>] sections to .ciabatta/ciabatta.toml.");
+        println!("No recipes defined. Add `recipies:` entries to .ciabatta/ciabatta.yaml.");
         return;
     }
 
@@ -2231,10 +3284,13 @@ const CONFIG_HELP: &str = r#"
 Ciabatta Configuration Reference
 =================================
 
-Location: <project-root>/.ciabatta/ciabatta.toml
+Location: <project-root>/.ciabatta/ciabatta.yaml
 
 The project root is the directory that CONTAINS the .ciabatta directory.
 All paths in recipes are relative to this root.
+
+Ciabatta writes YAML from 0.2.0. Older `.toml` files still load exactly as they
+did — `ciabatta config migrate` converts a whole checkout when you're ready.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 THE MONOREPO SCHEMA
@@ -2252,35 +3308,42 @@ Any workflow name then becomes a command:
   ciabatta build --graph      # show the graph, run nothing
   ciabatta build --dry-run    # walk every step, execute nothing
   ciabatta build --only api   # start from one package (deps still come along)
+  ciabatta dry-run build      # what would be reused from the cache, and why not
   ciabatta list               # every workflow, its owner, and what it does
   ciabatta list -s proto      # ...filtered
 
 The monorepo root is your git root; every directory beneath it with a
-.ciabatta/ciabatta.toml is a sub-workspace.
+.ciabatta/ciabatta.yaml is a sub-workspace.
 
-[workspace]                  # this package's identity (ciabatta init --lib)
-  name        = "api"          # what other packages refer to it by
+workspace:                   # this package's identity (ciabatta init --lib)
+  name: api                    # what other packages refer to it by
                                # (defaults to the directory name)
-  description = "REST API"     # shown by `ciabatta list`
-  owner       = "Ada"          # who to ask about it
-  depends_on  = ["proto:generate", "common"]
+  description: REST API        # shown by `ciabatta list`
+  owner: Ada                   # who to ask about it
+  depends_on: [proto:generate, common]
                                # other sub-workspaces this one needs, applied
                                # to EVERY workflow here. "common" means their
                                # workflow of the same name (skipped if they
                                # have none); "proto:generate" names one exactly.
-  tags        = ["backend"]    # free-form labels, searchable with `list -s`
-  requires    = ["cargo"]      # tools every workflow here needs on PATH
-  env_file    = ".env"         # sourced before any workflow here runs
-  umbrella    = true           # on the ROOT config only: "I'm not a package,
-                               # just shared [toolchain] and settings"
+  tags: [backend]              # free-form labels, searchable with `list -s`
+  requires: [cargo]            # tools every workflow here needs on PATH
+  env_file: .env               # sourced before any workflow here runs.
+                               # Unset means `.env`; setting it REPLACES that
+                               # default rather than adding to it.
+  env_default: .env.default    # the checked-in template `.env` is generated
+                               # from. REQUIRED of any package whose workflows
+                               # declare REQUIRED_ENV — see ENVIRONMENT below.
+  umbrella: true               # on the ROOT config only: "I'm not a package,
+                               # just shared toolchain and settings"
 
-[workspace.env]              # standard variables for every step defined here
-  RUST_LOG = "info"
+  env:                         # standard variables for every step defined here
+    RUST_LOG: info
 
-[toolchain.<tool>]           # how to install what workflows `require`.
-  hint        = "brew install protobuf"   # printed when the tool is missing
-  check       = "protoc --version"        # optional: a smarter test than PATH
-  description = "Protocol buffer compiler"
+toolchain:                   # how to install what workflows `require`
+  protoc:
+    hint: brew install protobuf     # printed when the tool is missing
+    check: protoc --version         # optional: a smarter test than PATH
+    description: Protocol buffer compiler
 
   Usually written once at the monorepo root and inherited by every package.
   Missing tools are reported together, BEFORE the first step runs, with these
@@ -2290,104 +3353,304 @@ The monorepo root is your git root; every directory beneath it with a
 WORKFLOWS
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-One file per workflow: .ciabatta/workflows/<name>.toml — the filename IS the
-workflow name. Small packages can write them inline as [workflows.<name>]
-instead (but not both: a name defined twice is an error).
+One file per workflow: .ciabatta/workflows/<name>.yaml — the filename IS the
+workflow name. Small packages can write them inline under `workflows:` instead
+(but not both: a name defined twice is an error).
 
-  description  = "Compile the service binary"   # what running this achieves
-  owner        = "Ada"                          # falls back to the package's
-  needs        = ["proto:generate"]             # cross-package deps, on top of
-                                                # [workspace] depends_on
-  requires     = ["cargo"]                      # tools all its steps need
-  env_file     = ".env.build"                   # relative to this package
-  REQUIRED_ENV = ["API_TOKEN"]                  # refuse to start unless set
-  tags         = ["rust"]
+  description: Compile the service binary   # what running this achieves
+  owner: Ada                                # falls back to the package's
+  needs: [proto:generate]                   # cross-package deps, on top of
+                                            # workspace.depends_on
+  requires: [cargo]                         # tools all its steps need
+  env_file: .env.build                      # relative to this package
+  REQUIRED_ENV: [API_TOKEN]                 # refuse to start unless set
+  tags: [rust]
 
-  [env]                                         # vars for all its steps
-  PROFILE = "release"
+  env:                                      # vars for all its steps
+    PROFILE: release
 
-  [[steps]]
-  name        = "compile"
-  description = "Build the release binary"      # what it does...
-  owner       = "Ada"                           # ...and who to ask
-  run         = "cargo build --release"         # an inline shell command
-  script      = "scripts/build.sh"              # ...or a script, run from
-                                                # THIS package's directory
-  needs       = ["fetch"]                       # ordering WITHIN this workflow
-                                                # (cross-package deps go on the
-                                                #  workflow, not the step)
-  requires    = ["cargo", "protoc"]             # tools this step needs
-  timeout     = "10m"                           # "30s" "10m" "1h30m", or
-                                                # seconds. Past it the step is
-                                                # killed (with everything it
-                                                # spawned) and marked failed —
-                                                # and the graph keeps going.
-  retries     = 2                               # extra attempts, for flaky steps
-  persistent  = true                            # a dev server that never exits:
-                                                # started, dependents released
-                                                # immediately, and handed to the
-                                                # daemon as a watch session, so
-                                                # it OUTLIVES the run. The run
-                                                # prints its id:
-                                                #   ciabatta watch --attach <ID>
-                                                #   ciabatta watch --stop   <ID>
-                                                #   ciabatta watch --list
-  continue_on_error = true                      # its failure skips dependents
-                                                # but doesn't stop the run
-  kind        = "push"                          # a special, identifiable phase:
-                                                # push | setup | build | test |
-                                                # deploy | anything you like
-  recipe      = "binary"                        # with kind = "push": the
-                                                # [recipies] entry to publish.
-                                                # The step's action becomes
-                                                # `ciabatta push binary`.
-  when        = "RUN_ENV == prod"               # conditions (see Runs, below)
-  skip_if     = "IN_CI"
-  on_error    = "fix"                           # route failures to a recovery
-                                                # node, same as a run flowchart
+  steps:
+    - name: compile
+      description: Build the release binary # what it does...
+      owner: Ada                            # ...and who to ask
+      run: cargo build --release            # an inline shell command
+      script: scripts/build.sh              # ...or a script, run from THIS
+                                            # package's directory
+      needs: [fetch]                        # ordering WITHIN this workflow
+                                            # (cross-package deps go on the
+                                            #  workflow, not the step)
+      requires: [cargo, protoc]             # tools this step needs
+      timeout: 10m                          # "30s" "10m" "1h30m", or seconds.
+                                            # Past it the step is killed (with
+                                            # everything it spawned) and marked
+                                            # failed — and the graph keeps going.
+      retries: 2                            # extra attempts, for flaky steps
+      persistent: true                      # a dev server that never exits:
+                                            # started, dependents released
+                                            # immediately, and handed to the
+                                            # daemon as a watch session, so it
+                                            # OUTLIVES the run. The run prints
+                                            # its id:
+                                            #   ciabatta watch --attach <ID>
+                                            #   ciabatta watch --stop   <ID>
+                                            #   ciabatta watch --list
+      continue_on_error: true               # its failure skips dependents but
+                                            # doesn't stop the run
+      kind: push                            # a special, identifiable phase:
+                                            # push | setup | build | test |
+                                            # deploy | anything you like
+      recipe: binary                        # with kind: push, the `recipies`
+                                            # entry to publish. The step's
+                                            # action becomes
+                                            # `ciabatta push binary`.
+      when: RUN_ENV == prod                 # conditions (see Runs, below)
+      skip_if: IN_CI
+      on_error: fix                         # route failures to a recovery node,
+                                            # same as a run flowchart
 
-  [steps.env]
-  CARGO_TERM_COLOR = "always"
+      env:
+        CARGO_TERM_COLOR: always
+
+      cache:                                # per-step cache override; most
+        inputs: ["proto/**/*"]              # steps inherit the workspace's
 
 Cross-package wiring, in full:
 
   Every step of workflow A with no `needs` of its own waits for every terminal
   step of each workflow A depends on. So `api`'s build declaring
-  depends_on = ["proto:generate"] means api's first step doesn't start until
+  depends_on: [proto:generate] means api's first step doesn't start until
   proto's last one has finished — and `ciabatta build --graph` shows you exactly
   that, node by node, labelled with the package each came from.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+CACHING
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-[system]
-  ci         = "gitlab"    # CI/CD system for auto-resolving build variables.
-                            # Options: gitlab, github, jenkins, circleci,
-                            #          travis, azure, bitbucket
-  containers = "docker"    # Container runtime. Options: docker, podman.
-                            # When unset, ciabatta auto-detects what's installed:
-                            # it prefers podman, falls back to docker, and asks
-                            # you to choose if BOTH are present.
+Off until a workspace opts in. A cache that turns itself on is a cache that
+will one day serve somebody a stale artifact they never asked to be kept.
+
+  ciabatta cache init          look at the directory, propose inputs and outputs
+  ciabatta dry-run <target>    what would be reused, and why not — runs nothing
+  ciabatta dry-run <t> --diff  ...with the lines that changed
+  ciabatta cache status        what the local store is holding
+  ciabatta cache prune --max-age 30d
+  ciabatta cache clean
+
+cache:
+  enabled: true
+  inputs:  ["src/**/*", "Cargo.toml"]   # what the build READS
+  outputs: ["target/release/app"]       # what the build WRITES
+  exclude: [target]                     # never counted as an input, so a build
+                                        # can't invalidate itself with its own
+                                        # output. Does NOT filter `outputs`.
+  env: [PROFILE]                        # variables the RESULT depends on
+
+  remote:                               # the shared cache (project-level: put
+    url: http://cache.example.com:8380  # this in the MONOREPO ROOT's config)
+    project: 7f3a-…                     # assigned by the server on first
+                                        # contact and written back here. COMMIT
+                                        # IT: it's what makes every checkout and
+                                        # every CI runner resolve to the same
+                                        # project rather than registering a new
+                                        # one under the same name.
+    read_only: true                     # read the cache, never write to it —
+                                        # what a fork's CI should get
+    tls_verify: true                    # verify the server's certificate.
+                                        # Turn it off for a self-signed or
+                                        # internal CA cert this machine doesn't
+                                        # have — but with it off, HTTPS is an
+                                        # encrypted channel to whoever answered,
+                                        # so the artifacts are only as
+                                        # trustworthy as the network.
+    enabled: true                       # turn it off without deleting settings
+
+A stage has exactly THREE dependencies, and any of them changing is a rebuild:
+
+  1. its input files,
+  2. the environment variables it declared in `cache.env`,
+  3. the outputs of the stages it `needs`.
+
+The third is what makes a graph cacheable rather than just a directory: change
+a .proto file and `proto:generate` misses, its outputs change, and every stage
+downstream of it misses too — each for a reason it can name.
+
+Two things worth knowing:
+
+  * An undeclared input is a WRONG ANSWER, not a slow one. If a build reads a
+    file that isn't in `inputs`, changing that file won't change the key and the
+    cache will confidently hand back the wrong artifact. That's why `cache init`
+    scaffolds `inputs` from the directory's real contents, and why `dry-run`
+    exists.
+
+  * Outputs are verified, not assumed. A key match says the inputs didn't
+    change; it says nothing about whether somebody deleted `dist/` or edited a
+    generated file by hand. So the outputs are hashed too, and a mismatch is a
+    restore or a rebuild.
+
+Settings can be written at three levels — the workspace (`cache:`), a recipe
+(`recipies.<name>.cache`), or a single step (`steps[].cache`). The most specific
+one wins WHOLE rather than merging field by field: half-inherited inputs would
+be very hard to reason about, and getting inputs wrong is how a cache serves the
+wrong answer.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+THE REMOTE CACHE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+A small server anyone can stand up, so a team's builds stop repeating each
+other's work. It stores artifacts on its own filesystem, in the same layout the
+local cache uses.
+
+  ciabatta remote-cache init                 write a server config
+  ciabatta remote-cache start                run it
+  ciabatta remote-cache login <URL>          connect this machine
+  ciabatta remote-cache status               hits, misses, storage, retention
+  ciabatta remote-cache add-user <name>      mint a token
+  ciabatta cache init --remote <URL>         point a workspace at it
+
+Its config (remote-cache.yaml, read by `remote-cache start`):
+
+server:
+  bind: 0.0.0.0            # a shared cache only loopback can reach is useless
+  port: 8380
+  storage: storage         # artifact store + project registry, relative to
+                           # this file
+  sweep_every: 1h          # how often retention runs, and binaries are rescanned
+
+retention:                 # age is measured from LAST USE, not from when an
+  max_age: 30d             # artifact was built — the thing everyone still
+  max_size: 10GB           # depends on shouldn't be evicted for being old
+  max_entries: 50000       # remove all three to keep everything forever
+
+auth:
+  mode: open               # open | token | ldap
+  session_ttl: 30d
+
+  users:                   # token mode
+    - name: ci
+      token_sha256: "…"    # from `remote-cache add-user`; the token itself is
+      read_only: true      # shown once and never stored
+    - name: root
+      token_sha256: "…"
+      admin: true          # may manage users. Only ever granted here, or by
+                           # another admin — never by a request to the server.
+
+  ldap:                    # ldap mode — bind against your directory over LDAPS
+    url: ldaps://ldap.example.com:636
+    bind_dn: "uid={username},ou=people,dc=example,dc=com"   # a DN template…
+    base_dn: "dc=example,dc=com"                            # …or search for it
+    user_filter: "(uid={username})"
+    search_dn: "cn=ciabatta,ou=services,dc=example,dc=com"  # service account
+    search_password_env: CIABATTA_LDAP_PASSWORD
+    required_group: "cn=engineering,ou=groups,dc=example,dc=com"
+    group_attribute: memberOf
+    write_groups: ["cn=ci,ou=groups,dc=example,dc=com"]     # others read-only
+    tls_verify: true       # leave this on. LDAPS without verification is an
+                           # encrypted channel to whoever answered.
+
+releases:                  # the ciabatta builds this cache hands out
+  version: "0.2.0"
+  notes: "What changed"
+  binaries:
+    linux:   /srv/ciabatta/ciabatta-linux-x86_64
+    windows: /srv/ciabatta/ciabatta-windows-x86_64.exe
+    macos:   /srv/ciabatta/ciabatta-macos-aarch64
+
+  The server hashes these and mentions the version in every reply, so a client
+  on something older is told. `ciabatta self update` fetches the new build from
+  the same server it already trusts for artifacts, checks it against the
+  advertised SHA-256, and only then replaces the binary.
+
+    ciabatta self update --check     is there one?
+    ciabatta self update             install it
+
+  The HASH decides, not the version string: rebuild and copy a new binary over
+  the same path and your team still gets updated, because what's advertised is
+  the content — which is also what the client verifies.
+
+  Read access is a convenience; WRITE access is trust. Whoever can write to a
+  cache decides what everyone else's build produces, which is why `read_only`
+  exists on both a token user and an LDAP group.
+
+  The server serves an admin page at its root — open http://<host>:8380/ in a
+  browser. It shows the hit rate and what's stored, and it mints credentials:
+  the token is displayed once, and only its SHA-256 is kept, so a lost one is
+  reissued rather than recovered. Server-managed users live in
+  <storage>/users.json alongside the artifacts; the `auth.users` in this file
+  stay yours, and the page will neither shadow nor delete them.
+
+  Who may mint one:
+    token / ldap  an admin — a user with `admin: true`, granted in this config
+                  or by an existing admin
+    open          anyone who can reach it, because open mode already means "I
+                  trust this network" and refusing would leave no way to mint
+                  the first credential. But a user created on an OPEN server is
+                  never an admin, or somebody could grant themselves lasting
+                  control while the door was open and keep it after it was shut.
+
+  So the migration from open to authenticated is: create the users you want on
+  the page, add one `admin: true` user to `auth.users` below, set
+  `auth.mode: token`, and restart.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ENVIRONMENT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Three rules, in the order they apply:
+
+  1. `.env` is the default. A workspace that says nothing gets `.env` from its
+     own directory. Nobody should have to configure the conventional thing.
+
+  2. `workspace.env_file` overrides it — and REPLACES it rather than adding to
+     it, which is what "use this file instead" has to mean to be useful for
+     keeping dev and prod settings apart. It accepts a list, applied in order.
+
+  3. `workspace.env_default` is where a missing `.env` comes from. `.env` is
+     gitignored, so a fresh checkout doesn't have one; the checked-in template
+     does. Naming it means ciabatta GENERATES the `.env` rather than failing on
+     a variable the developer has never heard of. It's only ever created when
+     absent, so your edits survive.
+
+And one requirement that follows from the third: a workspace whose workflows
+declare REQUIRED_ENV must declare `env_default`. Not bureaucracy — it's what
+makes rule 3 possible. A repo where the required variables are written down
+somewhere reviewable is a repo a new person can build.
+
+`ciabatta watch` sources the same files a run would and prints exactly what it
+resolved before the command starts, so a watched dev server and a `dev` workflow
+step can't quietly see different environments.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-[analyze]                  # Optional inputs for `ciabatta analyze`
-  requirements = "reqs.txt"  # File of requirements: `id` or `id, description`
-  trace        = "trace.csv" # CSV of `requirement,file` connections
-                             # (paths are relative to the project root;
-                             #  --requirements / --trace override these)
+system:
+  ci: gitlab               # CI/CD system for auto-resolving build variables.
+                           # Options: gitlab, github, jenkins, circleci,
+                           #          travis, azure, bitbucket
+  containers: docker       # Container runtime. Options: docker, podman.
+                           # When unset, ciabatta auto-detects what's installed:
+                           # it prefers podman, falls back to docker, and asks
+                           # you to choose if BOTH are present.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-[ai]                       # Settings for `ciabatta ai` (run `ciabatta ai setup`)
-  provider    = "claude"     # claude | openai | vllm (openai & vllm both speak
-                             # the OpenAI format; vllm defaults to localhost:8000)
-  endpoint    = "https://api.anthropic.com"   # or e.g. http://localhost:8000
-  model       = "claude-opus-4-8"
-  api_key_env = "ANTHROPIC_API_KEY"  # env var holding the API key
-  tls_verify  = true         # false to skip cert checks for a self-signed
-                             # vLLM/OpenAI dev endpoint
-  images      = ["python:3.12", "node:22"]    # sandbox base images the AI may
-                             # spin up via podman/docker ([system].containers)
+analyze:                   # Optional inputs for `ciabatta analyze`
+  requirements: reqs.txt   # File of requirements: `id` or `id, description`
+  trace: trace.csv         # CSV of `requirement,file` connections
+                           # (paths are relative to the project root;
+                           #  --requirements / --trace override these)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+ai:                        # Settings for `ciabatta ai` (run `ciabatta ai setup`)
+  provider: claude         # claude | openai | vllm (openai & vllm both speak
+                           # the OpenAI format; vllm defaults to localhost:8000)
+  endpoint: https://api.anthropic.com     # or e.g. http://localhost:8000
+  model: claude-opus-4-8
+  api_key_env: ANTHROPIC_API_KEY   # env var holding the API key
+  tls_verify: true         # false to skip cert checks for a self-signed
+                           # vLLM/OpenAI dev endpoint
+  images: ["python:3.12", "node:22"]      # sandbox base images the AI may spin
+                           # up via podman/docker (system.containers)
 
   The assistant's learned state (architecture tags, the file→architecture
   mind map, and its 1-100 confidence score) lives in .ciabatta/ai/brain.json.
@@ -2399,32 +3662,35 @@ Cross-package wiring, in full:
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-[registries.<name>]
-  url          = "https://..."    # Base URL of the registry (required)
-  tls_verify   = true             # Verify TLS certificate (default: true)
-  needs_auth   = true             # Whether auth is needed (informational)
-  login_script = "./login.sh"     # Optional: run this script before push/pull
-  type         = "nexus"          # Override type detection. Options:
+registries:
+  <name>:
+    url: https://...              # Base URL of the registry (required)
+    tls_verify: true              # Verify TLS certificate (default: true)
+    needs_auth: true              # Whether auth is needed (informational)
+    login_script: ./login.sh      # Optional: run this before push/pull
+    type: nexus                   # Override type detection. Options:
                                   # nexus, s3, artifactory, docker, ecr
 
-  Nexus-only fields (select the target repository and format):
-  repository   = "raw-hosted"     # Nexus repo name. When set, `url` is the bare
+    # Nexus-only fields (select the target repository and format):
+    repository: raw-hosted        # Nexus repo name. When set, `url` is the bare
                                   # Nexus host and /repository/<repository> is
                                   # appended automatically. When unset, `url` is
                                   # used as the full repository URL.
-  base_path    = "builds"         # raw only: prefix prepended to every recipe's
+    base_path: builds             # raw only: prefix prepended to every recipe's
                                   # publish_path (where raw files land)
-  format       = "raw"            # Nexus repository format. Options:
+    format: raw                   # Nexus repository format. Options:
                                   #   raw  → HTTP PUT/GET      (default)
                                   #   npm  → `npm publish`
                                   #   pypi → `twine upload`
 
   Example — publish an npm package to a Nexus npm repo:
-    [registries.npm]
-    type       = "nexus"
-    url        = "http://localhost:8527"
-    repository = "npm-hosted"
-    format     = "npm"
+
+    registries:
+      npm:
+        type: nexus
+        url: http://localhost:8527
+        repository: npm-hosted
+        format: npm
 
   Auth for all formats uses CIABATTA_<NAME>_USER / _PASS (npm also accepts a
   CIABATTA_<NAME>_TOKEN bearer token). npm requires `npm` on PATH; pypi requires
@@ -2434,7 +3700,7 @@ Cross-package wiring, in full:
   The `url` and `login_script` fields expand environment variables, with
   bash-style defaults, so one config can target different environments:
 
-    url = "https://${NEXUS_HOST:-nexus.example.com}/repository/releases/"
+    url: "https://${NEXUS_HOST:-nexus.example.com}/repository/releases/"
 
     ${VAR}            value of VAR (empty if unset)
     ${VAR:-default}   VAR if set & non-empty, otherwise `default`
@@ -2450,47 +3716,59 @@ Cross-package wiring, in full:
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-[recipies.<name>]                    ← simple recipe (push and pull use same action)
-  registry           = "nexus"       # Registry name from [registries]
-  local_artifact_path = "dist/"      # Local path relative to project root
-  publish_path       = "group/{CIABATTA_BRANCH}/{CIABATTA_COMMIT}/artifact"
-  bash_script        = "scripts/publish.sh"   # Alternative: run a script
+recipies:                  # (yes, spelled that way — it always has been)
 
-[recipies.<name>]                    ← docker/ecr image recipe
-  registry     = "myecr"             # a docker- or ecr-type registry
-  local_image  = "app:latest"        # a locally-built image (name or name:tag)
-  publish_path = "app:{CIABATTA_COMMIT}"   # remote image ref (repo[:tag])
-  # ciabatta retags local_image to <registry url>/<publish_path> and pushes it,
-  # so you don't bake the registry URL into your build. `pull` retags the pulled
-  # image back to local_image. When publish_path is omitted, local_image is
-  # reused as the remote reference.
+  simple:                            # push and pull use the same action
+    registry: nexus                  # registry name from `registries`
+    local_artifact_path: dist/       # local path relative to project root
+    publish_path: "group/{CIABATTA_BRANCH}/{CIABATTA_COMMIT}/artifact"
+    bash_script: scripts/publish.sh  # alternative: run a script
 
-[recipies.<name>.push]               ← push/pull recipe with separate actions
-  bash_script = "scripts/push.sh"
-[recipies.<name>.pull]
-  bash_script = "scripts/pull.sh"
+  image:                             # docker/ecr image recipe
+    registry: myecr                  # a docker- or ecr-type registry
+    local_image: app:latest          # a locally-built image (name or name:tag)
+    publish_path: "app:{CIABATTA_COMMIT}"   # remote image ref (repo[:tag])
+    # ciabatta retags local_image to <registry url>/<publish_path> and pushes
+    # it, so you don't bake the registry URL into your build. `pull` retags the
+    # pulled image back to local_image. When publish_path is omitted,
+    # local_image is reused as the remote reference.
+
+  split:                             # separate push and pull actions
+    push:
+      bash_script: scripts/push.sh
+    pull:
+      bash_script: scripts/pull.sh
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 Runs — a DAG of dependent script steps (`ciabatta run`)
 
-  A run is a third recipe direction (alongside push/pull) that executes a graph
-  of dependent script "steps" instead of a registry transfer. It moves through
-  the same four phases: login → pre-run → run → post-run. The `run` phase
-  executes the step DAG; login/pre/post are optional command hooks.
+  A recipe IS a script. A run is a third recipe direction (alongside push/pull)
+  that executes a graph of dependent script "steps" instead of a registry
+  transfer. It moves through the same four phases: login → pre-run → run →
+  post-run. The `run` phase executes the step DAG; login/pre/post are optional
+  command hooks.
 
-  [recipies.<name>.run]
-    flowchart = ".ciabatta/runs.toml"       # separate file holding the steps
-    entry     = "web"                       # entry to use (default: recipe name)
-    env_file  = ".env"                      # .env file(s) sourced before running
-    login = "..."   pre = "..."   post = "..."   # optional phase hooks
+  Already have a script? `ciabatta convert --script scripts/build.sh` reads it,
+  works out the tools it calls, the variables it reads, the files it writes and
+  the description in its header comment, and writes the recipe for you.
+
+  recipies:
+    web:
+      run:
+        flowchart: .ciabatta/runs.yaml   # separate file holding the steps
+        entry: web                       # entry to use (default: recipe name)
+        env_file: .env                   # .env file(s) sourced before running
+        login: "..."
+        pre: "..."
+        post: "..."
 
   `env_file` sources one or more `.env` files (a string or a list, relative to
   the project root) before anything runs, so the run's phases and steps see
   their `KEY=VALUE` lines. Values already resolved (CI, git, or `-e`) win, and a
   sourced value can satisfy a `REQUIRED_ENV` entry. It may also be set on the
   flowchart entry. A path may contain `{VAR}` placeholders to pick the file at
-  run time — `env_file = ".env.{RUN_ENV}"` sources `.env.dev` or `.env.prod`
+  run time — `env_file: ".env.{RUN_ENV}"` sources `.env.dev` or `.env.prod`
   (pass `-e RUN_ENV=dev`, or set it in the environment).
 
   The flowchart file lists steps. Each step runs a `script` (a bash file) or an
@@ -2499,63 +3777,63 @@ Runs — a DAG of dependent script steps (`ciabatta run`)
   `needs` are eligible to run; the graph must be acyclic.
 
   A step may be skipped by condition (evaluated against the run's env):
-    when    = "env.RUN_ENV == prod"       # run ONLY if all conditions hold
-    skip_if = "env.IN_CI == true"         # skip if ANY condition holds
+    when: env.RUN_ENV == prod        # run ONLY if all conditions hold
+    skip_if: env.IN_CI == true       # skip if ANY condition holds
   Each takes one condition or a list (multiple criteria). Conditions are
   `VAR == value`, `VAR != value`, bare `VAR` (truthy), or `!VAR`; the `env.`
   prefix is optional. A skipped step counts as satisfied, so its dependents
   still run.
 
-    # .ciabatta/runs.toml
-    [web]
-      [[web.steps]]
-      name = "build"
-      script = "scripts/build.sh"
+    # .ciabatta/runs.yaml
+    web:
+      steps:
+        - name: build
+          script: scripts/build.sh
 
-      [[web.steps]]
-      name = "migrate"
-      script  = "scripts/migrate.sh"
-      needs   = ["build"]
-      on_error = "fix_migrate"        # on failure, go to the recovery node
+        - name: migrate
+          script: scripts/migrate.sh
+          needs: [build]
+          on_error: fix_migrate       # on failure, go to the recovery node
 
-      [[web.steps]]                   # a recovery node: offers fix choices
-      name = "fix_migrate"
-      recover = true
-      message = "Migration failed — choose how to recover:"
-      retry   = "migrate"             # re-run this step after a successful fix
-      options = [
-        { label = "Roll back",   script = "scripts/rollback.sh" },
-        { label = "Force unlock", run = "make unlock", default = true },
-      ]
+        - name: fix_migrate           # a recovery node: offers fix choices
+          recover: true
+          message: "Migration failed — choose how to recover:"
+          retry: migrate              # re-run this step after a successful fix
+          options:
+            - label: Roll back
+              script: scripts/rollback.sh
+            - label: Force unlock
+              run: make unlock
+              default: true
 
-      [[web.steps]]
-      name = "release"
-      script = "scripts/release.sh"
-      needs  = ["migrate"]
-      when   = "env.RUN_ENV == prod"      # only release in prod
+        - name: release
+          script: scripts/release.sh
+          needs: [migrate]
+          when: env.RUN_ENV == prod   # only release in prod
 
   Recovery: when a step with `on_error` fails, its recovery node offers a choice
   of fix `options`. With `--gui` you pick one in the browser; otherwise (plain /
-  CI) the option marked `default = true` runs automatically, or the run fails
+  CI) the option marked `default: true` runs automatically, or the run fails
   if none is. After a fix succeeds, `retry` re-runs the named step. Retry loops
   are bounded so a persistently failing step can't spin forever.
 
     ciabatta run [RECIPE…]           run recipes (all run-capable if none named)
     ciabatta run web --gui           live web view: flowchart, logs, fix-it buttons
-    ciabatta run --build             open the visual builder; copy the TOML it emits
+    ciabatta run --build             open the visual builder
+    ciabatta dry-run web             what would be reused, and why not
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-[menus]                              ← group recipes so you can run a subset
+menus:                     ← group recipes so you can run a subset
 
   A menu names a list of recipes. `ciabatta push --cookbook <menu>` (or
   `--menu <menu>`) runs only the recipes on that menu, instead of naming each
   recipe by hand or pushing everything.
 
-    [menus]
-    frontend = ["release_frontend", "release_assets"]
-    backend  = ["release_backend"]
-    release  = ["release_frontend", "release_assets", "release_backend"]
+    menus:
+      frontend: [release_frontend, release_assets]
+      backend:  [release_backend]
+      release:  [release_frontend, release_assets, release_backend]
 
   Usage:
     ciabatta push --cookbook frontend            # just the frontend menu
@@ -2577,17 +3855,19 @@ Stages (state machine)
   Override any stage with an arbitrary command (bash, python, a compiled
   binary, …). Unset stages fall back to their defaults.
 
-    login = "..."   # default: registry login_script, or CIABATTA_<REG>_USER/PASS
-    pre   = "..."   # default: nothing
-    main  = "..."   # default: the built-in registry push/pull (or bash_script)
-    post  = "..."   # default: nothing
+    login: "..."   # default: registry login_script, or CIABATTA_<REG>_USER/PASS
+    pre:   "..."   # default: nothing
+    main:  "..."   # default: the built-in registry push/pull (or bash_script)
+    post:  "..."   # default: nothing
 
   Stage commands run via `sh -c` from the project root, with every CIABATTA_*
   and CI variable available in their environment (use $CIABATTA_COMMIT, etc.).
 
-  [recipies.frontend.push]      # overrides only apply to the push direction
-    pre  = "python scripts/bundle.py"
-    post = "./scripts/notify.sh deployed"
+    recipies:
+      frontend:
+        push:                     # overrides only apply to the push direction
+          pre: python scripts/bundle.py
+          post: ./scripts/notify.sh deployed
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -2595,8 +3875,8 @@ Credentials (when a registry has no login_script)
 
   ciabatta reads per-registry credentials from the environment:
     CIABATTA_<REGISTRY>_USER   CIABATTA_<REGISTRY>_PASS
-  where <REGISTRY> is the registry's section name, uppercased. For example,
-  [registries.nexus] → CIABATTA_NEXUS_USER / CIABATTA_NEXUS_PASS.
+  where <REGISTRY> is the registry's key, uppercased. For example,
+  `registries.nexus` → CIABATTA_NEXUS_USER / CIABATTA_NEXUS_PASS.
 
     nexus / artifactory  → sent as HTTP basic auth
     docker               → `docker login <host> -u $USER --password-stdin`
@@ -2614,8 +3894,12 @@ Available substitution variables in publish_path:
                              /{CIABATTA_TAG}                       (when a tag is set)
                              /{CIABATTA_BRANCH}/{CIABATTA_COMMIT}  (otherwise)
 
-These are populated automatically from the CI system defined in [system].
+These are populated automatically from the CI system defined in `system`.
 You can override any of them with: ciabatta push -e CIABATTA_BRANCH=my-branch
+
+Note that a `{VAR}` placeholder must be QUOTED in YAML — a bare `{` starts a
+flow mapping. `publish_path: "app/{CIABATTA_COMMIT}"`, not `publish_path:
+app/{CIABATTA_COMMIT}`.
 
 Working locally? `ciabatta push --local` (or `export CIABATTA_ENV=local`) derives
 CIABATTA_BRANCH / _COMMIT / _TAG / _BUILD_NUMBER from your local git history
@@ -2630,37 +3914,45 @@ does. Run `ciabatta source` to print the variables as shell `export` lines:
 publish_path: a single remote path, or a list of local file globs
 
   # Single remote destination (supports {VAR} substitution):
-  publish_path = "team/app/{CIABATTA_COMMIT}/app.tar.gz"
+  publish_path: "team/app/{CIABATTA_COMMIT}/app.tar.gz"
 
   # A list of local globs: each matched file uploads under {CIABATTA_PATH},
   # preserving its path relative to the project root. `strip_prefix` trims a
   # leading fragment from that relative path first.
-  publish_path = ["dist/*.tar.gz", "build/*.bin"]
-  strip_prefix = "dist/"        # dist/app.tar.gz -> {CIABATTA_PATH}/app.tar.gz
+  publish_path: ["dist/*.tar.gz", "build/*.bin"]
+  strip_prefix: "dist/"        # dist/app.tar.gz -> {CIABATTA_PATH}/app.tar.gz
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 Example:
 
-  [system]
-  ci         = "github"
-  containers = "docker"
+  system:
+    ci: github
+    containers: docker
 
-  [registries.nexus]
-  url          = "https://nexus.example.com/repository/releases/"
-  tls_verify   = true
-  needs_auth   = true
-  login_script = ".ciabatta/nexus_login.sh"
+  registries:
+    nexus:
+      url: https://nexus.example.com/repository/releases/
+      tls_verify: true
+      needs_auth: true
+      login_script: .ciabatta/nexus_login.sh
 
-  [recipies.frontend]
-  registry            = "nexus"
-  local_artifact_path = "frontend/dist"
-  publish_path        = "frontend/{CIABATTA_BRANCH}/{CIABATTA_COMMIT}/dist.tar.gz"
+  recipies:
+    frontend:
+      registry: nexus
+      local_artifact_path: frontend/dist
+      publish_path: "frontend/{CIABATTA_BRANCH}/{CIABATTA_COMMIT}/dist.tar.gz"
 
-  [recipies.backend.push]
-  bash_script = "scripts/build_and_push.sh"
-  [recipies.backend.pull]
-  bash_script = "scripts/pull_backend.sh"
+    backend:
+      push:
+        bash_script: scripts/build_and_push.sh
+      pull:
+        bash_script: scripts/pull_backend.sh
+
+  cache:
+    enabled: true
+    inputs:  ["frontend/src/**/*", "frontend/package.json"]
+    outputs: ["frontend/dist/**/*"]
 "#;
 
 async fn run_tui_browser() -> Result<()> {
@@ -2771,8 +4063,110 @@ async fn cmd_analyze(
 
 #[cfg(test)]
 mod tests {
-    use super::root_from_config_path;
+    use super::{
+        build_lib_config, build_starter_config, build_starter_workflow, root_from_config_path,
+        yaml_scalar,
+    };
     use std::path::{Path, PathBuf};
+
+    /// A scaffold that doesn't parse is worse than no scaffold: the first thing
+    /// the user does is run a command against it.
+    #[test]
+    fn every_scaffold_ciabatta_writes_is_valid_yaml() {
+        let config = build_starter_config(Some("github"), Some("podman"));
+        let parsed: crate::config::CiabattaConfig =
+            crate::format::from_str(&config, crate::format::Format::Yaml)
+                .expect("the starter config parses");
+        assert_eq!(
+            parsed.system.as_ref().and_then(|s| s.ci.as_deref()),
+            Some("github")
+        );
+        assert_eq!(
+            parsed.system.as_ref().and_then(|s| s.containers.as_deref()),
+            Some("podman")
+        );
+
+        // The un-pinned form leaves both commented out, so it must still parse
+        // and must not invent values.
+        let bare: crate::config::CiabattaConfig = crate::format::from_str(
+            &build_starter_config(None, None),
+            crate::format::Format::Yaml,
+        )
+        .expect("the un-pinned starter config parses");
+        assert!(bare.registries.is_empty() && bare.recipes.is_empty());
+
+        let lib = build_lib_config(
+            "api",
+            Some("The public REST API"),
+            Some("Ada"),
+            &["proto:generate".to_string()],
+        );
+        let parsed: crate::config::CiabattaConfig =
+            crate::format::from_str(&lib, crate::format::Format::Yaml)
+                .expect("the --lib config parses");
+        let meta = parsed.workspace.expect("workspace identity written");
+        assert_eq!(meta.name.as_deref(), Some("api"));
+        assert_eq!(meta.description.as_deref(), Some("The public REST API"));
+        assert_eq!(meta.owner.as_deref(), Some("Ada"));
+        assert_eq!(meta.depends_on, vec!["proto:generate".to_string()]);
+
+        // The TODO form leaves empty strings behind for the user to fill in.
+        let todo: crate::config::CiabattaConfig = crate::format::from_str(
+            &build_lib_config("api", None, None, &[]),
+            crate::format::Format::Yaml,
+        )
+        .expect("the un-filled --lib config parses");
+        let meta = todo.workspace.expect("workspace identity written");
+        assert_eq!(meta.description.as_deref(), Some(""));
+        assert!(meta.depends_on.is_empty());
+
+        let workflow: crate::workspace::Workflow = crate::format::from_str(
+            &build_starter_workflow("build", "api", Some("Ada")),
+            crate::format::Format::Yaml,
+        )
+        .expect("the starter workflow parses");
+        assert_eq!(workflow.owner.as_deref(), Some("Ada"));
+        assert_eq!(
+            workflow.steps.len(),
+            1,
+            "only the live step, not the commented ones"
+        );
+        assert_eq!(workflow.steps[0].name, "build");
+    }
+
+    /// Names come from `git config user.name` and directory names, so they can
+    /// hold anything. A value YAML would read as something else has to be quoted.
+    #[test]
+    fn scaffolded_values_survive_being_yaml_hostile() {
+        for value in [
+            "Ada",
+            "O'Brien, Ada",
+            "yes",
+            "no",
+            "true",
+            "1.5",
+            "#1 fan",
+            "- dash",
+        ] {
+            let config = build_lib_config("pkg", Some(value), Some(value), &[]);
+            let parsed: crate::config::CiabattaConfig =
+                crate::format::from_str(&config, crate::format::Format::Yaml)
+                    .unwrap_or_else(|e| panic!("{value:?} broke the scaffold: {e}"));
+            let meta = parsed.workspace.expect("workspace identity written");
+            assert_eq!(meta.description.as_deref(), Some(value));
+            assert_eq!(meta.owner.as_deref(), Some(value));
+        }
+    }
+
+    #[test]
+    fn yaml_scalar_only_quotes_what_needs_it() {
+        assert_eq!(yaml_scalar("api"), "api");
+        assert_eq!(yaml_scalar("Ada Lovelace"), "Ada Lovelace");
+        // Values YAML would otherwise read as a bool/number/null get quoted.
+        assert_ne!(yaml_scalar("true"), "true");
+        assert_ne!(yaml_scalar("42"), "42");
+        assert_ne!(yaml_scalar(""), "");
+    }
 
     #[test]
     fn root_from_ciabatta_layout_is_two_levels_up() {

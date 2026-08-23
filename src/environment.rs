@@ -8,6 +8,7 @@
 //!   * anything else (or unset) → resolve from the configured CI system.
 
 pub mod cache;
+pub mod files;
 
 use std::collections::HashMap;
 use std::path::Path;

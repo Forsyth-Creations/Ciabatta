@@ -1,6 +1,6 @@
 [package]
 name = "ciabatta"
-version = "0.1.23"
+version = "0.2.0"
 edition = "2024"
 description = "A command line tool for publishing artifacts to various registries"
 license = "MIT"
@@ -53,6 +53,10 @@ tokio-stream = { version = "0.1", features = ["sync"] }
 include_dir = "0.7"
 async-stream = "0.3"
 rand = "0.8"
+serde_yaml_ng = "0.10"
+sha2 = "0.10"
+uuid = { version = "1", features = ["v4", "serde"] }
+ldap3 = { version = "0.12", default-features = false, features = ["tls-rustls-ring"] }
 
 # Killing a timed-out or abandoned step means killing its whole process group:
 # `sh -c "…"` forks rather than execs, so signalling the shell alone orphans

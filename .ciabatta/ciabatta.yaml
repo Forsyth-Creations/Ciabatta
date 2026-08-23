@@ -1,0 +1,40 @@
+# Converted from ciabatta.toml by `ciabatta config migrate`.
+# Comments in the original weren't carried over — ciabatta.toml is still there
+# if you want them back. Ciabatta now reads this file instead.
+system:
+  containers: docker
+workspace:
+  name: ciabatta
+  description: Monorepo orchestration and artifact publishing CLI
+  owner: Henry Forsyth
+  tags:
+  - rust
+  - cli
+  - tooling
+  requires:
+  - cargo
+toolchain:
+  cargo:
+    hint: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+    description: The Rust toolchain (cargo, rustc, clippy, rustfmt)
+  yarn:
+    hint: corepack enable && corepack prepare yarn@4 --activate
+    description: Yarn 4, which drives the tool_frontend build
+registries:
+  nexus:
+    url: http://localhost:8527
+    tls_verify: false
+    needs_auth: true
+    repository: raw-hosted
+    format: raw
+recipies:
+  ciabatta_binary:
+    registry: nexus
+    local_artifact_path: target/release/ciabatta
+    publish_path: ciabatta/{CIABATTA_BRANCH}/{CIABATTA_COMMIT}/ciabatta
+ai:
+  provider: openai
+  endpoint: http://localhost:11434
+  model: llama3.1:8b
+  api_key_env: OPENAI_API_KEY
+  tls_verify: true

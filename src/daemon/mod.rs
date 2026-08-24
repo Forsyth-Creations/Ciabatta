@@ -387,13 +387,34 @@ async fn wait_for_startup(port: u16, expected_version: &str) -> Result<DaemonHan
 }
 
 /// Re-launch this executable as a detached `ciabatta daemon serve`, with its
-/// stdio discarded so it survives the parent exiting.
+/// stdio pointed away from the terminal so it survives the parent exiting.
 ///
-/// Mirrors the detach pattern the todo app used before the daemon existed.
+/// Mirrors the detach pattern the todo app used before the daemon existed, with
+/// one difference: stderr goes to `daemon.log` rather than to `/dev/null`.
+/// `tracing` writes to that file itself, so this is only for what `tracing`
+/// never sees — the runtime's own last words. A double panic, an abort, a
+/// failed allocation and a stack overflow all print to stderr and then kill the
+/// process, and discarding them is exactly why a daemon that dies mid-run looks
+/// like it vanished for no reason.
 fn spawn_detached(port: u16) -> Result<()> {
     use std::process::{Command, Stdio};
 
     let exe = std::env::current_exe().context("Failed to locate the ciabatta executable")?;
+
+    // Best effort: a daemon that can't open its log is still better than no
+    // daemon, so a failure here falls back to the old behaviour.
+    let errors = log_path()
+        .ok()
+        .and_then(|path| {
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+                .ok()
+        })
+        .map(Stdio::from)
+        .unwrap_or_else(Stdio::null);
+
     Command::new(exe)
         .arg("daemon")
         .arg("serve")
@@ -401,7 +422,7 @@ fn spawn_detached(port: u16) -> Result<()> {
         .arg(port.to_string())
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(errors)
         .spawn()
         .context("Failed to start the ciabatta daemon in the background")?;
     Ok(())

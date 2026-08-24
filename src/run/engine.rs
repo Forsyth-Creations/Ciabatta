@@ -233,6 +233,13 @@ pub async fn execute(
                 )
                 .await?;
 
+                // The graph is done: tell the shared cache which of its
+                // entries this run leant on, so they age from now rather than
+                // from whenever they were last downloaded.
+                if let Some(session) = cache.as_mut() {
+                    session.finish().await;
+                }
+
                 if let Some(summary) = cache.as_ref().and_then(|c| c.stats.summary()) {
                     let _ = tx
                         .send(ProgressUpdate::Log(name.to_string(), summary))

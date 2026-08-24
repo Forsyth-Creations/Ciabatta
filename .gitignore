@@ -18,3 +18,5 @@ ciabatta-analyze.json
 !.yarn/sdks
 !.yarn/versions
 .pnp.*
+.ciabatta/cache/
+.key

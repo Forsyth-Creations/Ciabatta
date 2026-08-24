@@ -5,6 +5,7 @@ pub mod ecr;
 pub mod nexus;
 pub mod s3;
 
+use crate::color;
 use crate::config::{RegistryConfig, RegistryKind, infer_registry_kind};
 use anyhow::{Context, Result};
 use std::collections::HashMap;
@@ -55,15 +56,120 @@ impl<'a> LogSink<'a> {
 }
 
 /// Reduce one newline-delimited output line to what a terminal would ultimately
-/// display: the text after the final `\r`, trimmed, or `None` if empty. See
-/// [`push_output_lines`] for why carriage-return frames are collapsed.
-fn clean_line(line: &str) -> Option<&str> {
-    let visible = line.rsplit('\r').next().unwrap_or(line).trim_end();
+/// display, trimmed, or `None` if that comes to nothing.
+///
+/// A progress bar is one line rewritten over and over, and there are two ways
+/// tools do the rewriting. The old one is a carriage return. The other — vite,
+/// esbuild, cargo, anything built on a modern terminal library — is to erase
+/// the line and move the cursor back to column one with escape sequences, which
+/// a `\r` split never sees. Miss those and every frame survives, so a
+/// forty-second build arrives as a single line tens of thousands of characters
+/// wide, and the one thing anybody wanted from it — the last frame — is at the
+/// far end of it.
+///
+/// So the line is replayed: text accumulates, and anything that returns to the
+/// start of the line or wipes it discards what came before. What's left is the
+/// state a terminal would be showing when the newline arrived.
+fn clean_line(line: &str) -> Option<String> {
+    let visible = last_frame(line);
+    let visible = visible.trim_end();
     if visible.is_empty() {
         None
     } else {
-        Some(visible)
+        Some(visible.to_string())
     }
+}
+
+/// The text a terminal would still be displaying at the end of `line`.
+///
+/// Only the sequences that *destroy* what precedes them are acted on — a
+/// carriage return, a move to column one, and an erase covering the start of
+/// the line. Everything else, colour included, is left exactly where it was:
+/// this collapses progress frames, it does not strip formatting.
+fn last_frame(line: &str) -> String {
+    let mut kept = String::with_capacity(line.len());
+    let mut rest = line;
+
+    while let Some(at) = rest.find(['\r', '\u{1b}']) {
+        let (before, from) = rest.split_at(at);
+        kept.push_str(before);
+
+        // `\r\n` is a line ending that got this far, not a rewrite.
+        if let Some(after) = from.strip_prefix("\r\n") {
+            kept.push('\n');
+            rest = after;
+            continue;
+        }
+        if let Some(after) = from.strip_prefix('\r') {
+            kept.clear();
+            rest = after;
+            continue;
+        }
+
+        let Some(escape) = csi(from) else {
+            // Not a CSI (or a truncated one): keep the byte and move on rather
+            // than dropping output nobody asked us to interpret.
+            kept.push_str(&from[..1]);
+            rest = &from[1..];
+            continue;
+        };
+
+        if escape.wipes_line_start() {
+            kept.clear();
+        } else {
+            kept.push_str(escape.text);
+        }
+        rest = &from[escape.text.len()..];
+    }
+
+    kept.push_str(rest);
+    kept
+}
+
+/// One CSI escape at the front of a string: `ESC [ params intermediates final`.
+struct Csi<'a> {
+    /// The whole sequence, as written.
+    text: &'a str,
+    params: &'a str,
+    final_byte: u8,
+}
+
+impl Csi<'_> {
+    /// Whether a terminal acting on this would destroy the start of the line.
+    fn wipes_line_start(&self) -> bool {
+        match self.final_byte {
+            // Cursor to an absolute column: only column one (the default)
+            // starts the line over. `ESC[40G` is a tool laying out a table.
+            b'G' | b'`' => matches!(self.params, "" | "0" | "1"),
+            // Erase in line: 1 clears to the cursor, 2 clears all of it.
+            // 0 (the default) clears to the *end* and leaves the start alone.
+            b'K' => matches!(self.params, "1" | "2"),
+            _ => false,
+        }
+    }
+}
+
+/// Parse a CSI sequence at the start of `s`, if there is a complete one.
+fn csi(s: &str) -> Option<Csi<'_>> {
+    let body = s.strip_prefix("\u{1b}[")?;
+    let params_len = body
+        .bytes()
+        .take_while(|b| matches!(b, 0x30..=0x3f))
+        .count();
+    let intermediates = body[params_len..]
+        .bytes()
+        .take_while(|b| matches!(b, 0x20..=0x2f))
+        .count();
+    let final_byte = *body.as_bytes().get(params_len + intermediates)?;
+    if !(0x40..=0x7e).contains(&final_byte) {
+        return None;
+    }
+    let len = "\u{1b}[".len() + params_len + intermediates + 1;
+    Some(Csi {
+        text: &s[..len],
+        params: &body[..params_len],
+        final_byte,
+    })
 }
 
 /// Drive a spawned child to completion, streaming its stdout and stderr into
@@ -331,7 +437,11 @@ pub async fn run_script(
     use std::process::Stdio;
     use tokio::process::Command;
 
-    let child = Command::new("bash")
+    let mut command = Command::new("bash");
+    // Colour first, the caller's environment second: a script that sets
+    // `FORCE_COLOR=0` still means it.
+    color::request(&mut command);
+    let child = command
         .arg(script)
         .envs(env_vars)
         .stdout(Stdio::piped())
@@ -381,6 +491,10 @@ pub async fn run_shell_command_opts(
     use tokio::process::Command;
 
     let mut command = Command::new("sh");
+    // The command's stdout is a pipe, so it will assume nobody is watching and
+    // turn colour off. Tell it otherwise — before `envs`, so a step that asked
+    // for plain output keeps it.
+    color::request(&mut command);
     command
         .arg("-c")
         .arg(cmd)
@@ -605,6 +719,65 @@ mod tests {
                 "Completed 2.0 MiB/2.0 MiB".to_string(),
                 "upload: ./a to s3://b/a".to_string(),
             ]
+        );
+    }
+
+    /// The modern spelling of a progress bar: erase the line, jump to column
+    /// one, draw the next frame. `vite`, `esbuild` and `cargo` all do this, and
+    /// missing it turns a whole build into one line thousands of characters
+    /// wide with the answer buried at the end.
+    #[test]
+    fn push_output_lines_collapses_cursor_drawn_progress() {
+        let mut log = Vec::new();
+        let raw = concat!(
+            "transforming (1) index.html",
+            "\u{1b}[2K\u{1b}[1G",
+            "transforming (94) react/index.js",
+            "\u{1b}[2K\u{1b}[1G",
+            "\u{1b}[32m✓\u{1b}[39m 1300 modules transformed.\n",
+        );
+        push_output_lines(&mut log, raw.as_bytes(), "");
+        assert_eq!(
+            log,
+            vec!["\u{1b}[32m✓\u{1b}[39m 1300 modules transformed.".to_string()],
+            "only the last frame survives — and its colours survive with it"
+        );
+    }
+
+    /// Collapsing frames must not become stripping formatting: the escapes that
+    /// paint are exactly what the run view is being asked to render.
+    #[test]
+    fn colour_escapes_are_carried_through_untouched() {
+        let mut log = Vec::new();
+        push_output_lines(&mut log, "\u{1b}[36mvite v5\u{1b}[39m\n".as_bytes(), "");
+        assert_eq!(log, vec!["\u{1b}[36mvite v5\u{1b}[39m".to_string()]);
+    }
+
+    /// Only the erases and moves that destroy the start of the line count. A
+    /// tool laying a line out in columns, or clearing to the end of it, is not
+    /// starting over.
+    #[test]
+    fn cursor_moves_that_keep_the_line_are_left_alone() {
+        assert_eq!(
+            clean_line("name\u{1b}[40Gvalue").as_deref(),
+            Some("name\u{1b}[40Gvalue"),
+            "a jump to column 40 is a table, not a rewrite"
+        );
+        assert_eq!(
+            clean_line("kept\u{1b}[0Kgone-to-the-right").as_deref(),
+            Some("kept\u{1b}[0Kgone-to-the-right"),
+            "erase-to-end leaves everything before the cursor"
+        );
+        assert_eq!(
+            clean_line("dropped\u{1b}[1Kkept").as_deref(),
+            Some("kept"),
+            "erase-to-cursor wipes the start of the line"
+        );
+
+        // A truncated escape at the end of a chunk must not eat the output.
+        assert_eq!(
+            clean_line("still here\u{1b}[").as_deref(),
+            Some("still here\u{1b}[")
         );
     }
 

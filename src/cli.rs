@@ -392,6 +392,46 @@ pub enum Commands {
         subcommand: Option<ConfigureCommand>,
     },
 
+    /// Explain one target: where it lives, and everything it depends on.
+    ///
+    /// The two questions a monorepo makes hard to answer, together — *where was
+    /// this written down?* and *why did it rebuild?* Prints the file the target
+    /// is declared in, the directory it runs in, the chain of targets that
+    /// reaches it, its input and output files, the variables it keys on, the
+    /// commands it runs, and what the cache would do with all of it.
+    ///
+    ///   ciabatta why api:build       one step of a workflow
+    ///   ciabatta why build           every step of the workflow called build
+    ///   ciabatta why api:build --all  ...naming every input file
+    ///   ciabatta why api:build --json
+    Why {
+        /// The target: a graph node (`api:build`), a bare step name, or a whole
+        /// workflow or recipe.
+        #[arg(name = "TARGET")]
+        target: String,
+
+        /// List every input and output file by name, instead of counting them.
+        ///
+        /// The files are printed in the order they're hashed into the cache
+        /// key, so this is how you find the one that shouldn't be there — a
+        /// generated file nobody excluded, a stray backup, a vendored tree —
+        /// when the count looks wrong.
+        #[arg(long, short)]
+        all: bool,
+
+        /// Print the answer as JSON, for scripting.
+        #[arg(long)]
+        json: bool,
+
+        /// Set an environment variable (KEY=VALUE), as a run would.
+        #[arg(short = 'e', long = "env", value_name = "KEY=VALUE")]
+        env: Vec<String>,
+
+        /// Derive CIABATTA_* variables from local git.
+        #[arg(long)]
+        local: bool,
+    },
+
     /// Show what a run would reuse from the cache and what it would rebuild.
     ///
     /// Runs nothing. For every step it prints the decision — up to date, a

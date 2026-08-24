@@ -523,6 +523,20 @@ __metadata:
   languageName: node
   linkType: hard
 
+"@fontsource/barlow-condensed@npm:^5.3.0":
+  version: 5.3.0
+  resolution: "@fontsource/barlow-condensed@npm:5.3.0"
+  checksum: 10c0/0b2a913cc5e75ca66cdeddbc5304be3fff5dbb374f70e82cdf515f4fec32871bb5dd50e16fe3faf2bc2f656b387be475dd95d039463a035b583209d625c94643
+  languageName: node
+  linkType: hard
+
+"@fontsource/barlow@npm:^5.3.0":
+  version: 5.3.0
+  resolution: "@fontsource/barlow@npm:5.3.0"
+  checksum: 10c0/2efe5abb3dac2ef2eb3ae9a3fd5acdc6955daf85efc1b5439081003e2d67ea90d62aae1d54fd1dcf6fc0eccfc815174bb77e70120a4973c0142431827d0b9c6d
+  languageName: node
+  linkType: hard
+
 "@isaacs/fs-minipass@npm:^4.0.0":
   version: 4.0.1
   resolution: "@isaacs/fs-minipass@npm:4.0.1"
@@ -1365,6 +1379,8 @@ __metadata:
   dependencies:
     "@emotion/react": "npm:^11.13.3"
     "@emotion/styled": "npm:^11.13.0"
+    "@fontsource/barlow": "npm:^5.3.0"
+    "@fontsource/barlow-condensed": "npm:^5.3.0"
     "@mui/icons-material": "npm:^6.1.6"
     "@mui/material": "npm:^6.1.6"
     "@tanstack/react-query": "npm:^5.59.16"

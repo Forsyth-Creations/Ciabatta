@@ -53,9 +53,17 @@ pub struct CacheConfig {
     /// Whether caching is on. Absent or false means every build runs, which is
     /// the behaviour of every ciabatta before 0.2.0 and the one a project keeps
     /// until it says otherwise.
+    ///
+    /// Tri-state on purpose. Cache settings are declared at three levels —
+    /// workspace, recipe, target — and a target that writes `inputs:` without
+    /// mentioning `enabled` means "these are my files", not "turn caching off".
+    /// A plain `bool` cannot tell that apart from an explicit `enabled: false`,
+    /// which is exactly the difference [`crate::cache::graph::effective`] has to
+    /// respect for per-target dependencies to be usable. Use [`Self::is_on`]
+    /// rather than reading this directly.
     #[serde(default)]
-    #[serde(skip_serializing_if = "crate::format::is_false")]
-    pub enabled: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
 
     /// Glob patterns for the files a build reads, relative to the workspace
     /// directory. Changing any of them changes the key, and so forces a
@@ -162,13 +170,20 @@ fn default_true() -> bool {
 }
 
 impl CacheConfig {
+    /// Whether caching was asked for. An unset `enabled` is off, the same as
+    /// `false` — the difference between the two only matters when one level's
+    /// settings are layered over another's.
+    pub fn is_on(&self) -> bool {
+        self.enabled.unwrap_or(false)
+    }
+
     /// Why this config isn't caching, in one line, or `None` when it is.
     ///
     /// Enabled but with no `inputs` counts as off: with nothing to hash, every
     /// build would key the same and the first result would be served forever.
     /// Treating that as "off" is safer than treating it as "always hit".
     pub fn why_disabled(&self) -> Option<&'static str> {
-        if !self.enabled {
+        if !self.is_on() {
             Some("caching is off (set `cache.enabled: true` to turn it on)")
         } else if self.inputs.is_empty() {
             Some("no `cache.inputs` are declared, so there's nothing to key on")
@@ -192,15 +207,109 @@ impl CacheConfig {
     /// `exclude: dist`), applying it to outputs as well would erase them and
     /// quietly turn caching off. Hence two named methods rather than one
     /// function with a flag.
+    /// A sub-workspace's files are never a super-workspace's inputs: see
+    /// [`nested_workspaces`].
     pub fn hash_inputs(&self, dir: &Path) -> Result<Vec<FileHash>> {
-        hash_matching(dir, &self.inputs, &self.exclude)
+        let mut exclude = self.exclude.clone();
+        exclude.extend(nested_workspaces(dir));
+        hash_matching(dir, &self.inputs, &exclude)
+    }
+
+    /// The files this build reads, listed but not hashed — see
+    /// [`list_matching`].
+    pub fn list_inputs(&self, dir: &Path) -> Result<Vec<FileHash>> {
+        let mut exclude = self.exclude.clone();
+        exclude.extend(nested_workspaces(dir));
+        list_matching(dir, &self.inputs, &exclude)
+    }
+
+    /// The files this build writes, listed but not hashed.
+    pub fn list_outputs(&self, dir: &Path) -> Result<Vec<FileHash>> {
+        list_matching(dir, &self.outputs, &[])
     }
 
     /// Hash the files this build writes. Never filtered by `exclude`.
+    ///
+    /// Nor by [`nested_workspaces`]: a step that legitimately writes into a
+    /// sub-workspace's tree (a generator putting stubs where the package that
+    /// consumes them lives) has to be able to record what it produced, and
+    /// unlike an undeclared input an over-broad output can only ever cost a
+    /// rebuild.
     pub fn hash_outputs(&self, dir: &Path) -> Result<Vec<FileHash>> {
         hash_matching(dir, &self.outputs, &[])
     }
 }
+
+/// Sub-workspaces nested under `dir`, as paths relative to it.
+///
+/// A monorepo root's `inputs` are written as globs like `packages/**/*`, and
+/// those globs cannot help but sweep up every member package underneath. That
+/// is the wrong answer twice over: the root's key changes whenever any package
+/// changes (so the root never hits), and the package's own key already covers
+/// those files (so the work is duplicated). Each member owns its own cache
+/// entry; the super-workspace's job is the files nobody else claimed.
+///
+/// So any directory below `dir` that opted in with its own `.ciabatta/` is
+/// excluded from `dir`'s inputs automatically, and — because the scan stops at
+/// the first one it finds down each branch — a sub-sub-workspace is excluded by
+/// its own parent rather than counted twice.
+///
+/// A member can still opt back in by naming files under it explicitly: exclude
+/// patterns are matched against the relative path, so `inputs` reaching into a
+/// nested workspace loses only what that workspace already owns.
+pub fn nested_workspaces(dir: &Path) -> Vec<String> {
+    let mut found = Vec::new();
+    collect_nested(dir, dir, 0, &mut found);
+    found
+}
+
+/// How deep to look for nested sub-workspaces. Matches the workspace scanner's
+/// own limit, so the two agree about what counts as a member.
+const MAX_NEST_DEPTH: usize = 6;
+
+fn collect_nested(root: &Path, dir: &Path, depth: usize, found: &mut Vec<String>) {
+    if depth >= MAX_NEST_DEPTH {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        // A dot-directory is never a member, and descending into build output
+        // and dependency trees is thousands of directories for no answer.
+        if name.starts_with('.') || SKIP_SCAN_DIRS.contains(&name.as_ref()) {
+            continue;
+        }
+        if path.join(crate::config::CIABATTA_DIR).is_dir() {
+            if let Ok(rel) = path.strip_prefix(root) {
+                found.push(rel.to_string_lossy().replace('\\', "/"));
+            }
+            // Stop here: whatever is below belongs to this member, not to us.
+            continue;
+        }
+        collect_nested(root, &path, depth + 1, found);
+    }
+}
+
+/// Directories never worth descending into when looking for nested members.
+const SKIP_SCAN_DIRS: &[&str] = &[
+    "node_modules",
+    "target",
+    "dist",
+    "build",
+    "out",
+    "vendor",
+    "venv",
+    "__pycache__",
+    "coverage",
+    "tmp",
+];
 
 // ─── Hashing ────────────────────────────────────────────────────────────────
 
@@ -211,6 +320,13 @@ pub struct FileHash {
     /// computed on Windows matches one computed on Linux.
     pub path: String,
     /// Hex SHA-256 of the file's contents.
+    ///
+    /// Empty for a file that was *listed* rather than hashed — see
+    /// [`list_matching`], which is what `ciabatta why --all` and the run summary
+    /// use. Omitted from JSON when empty so a consumer sees a missing field
+    /// rather than a blank hash it might mistake for a real one. Never empty in
+    /// a stored manifest or a cache key, where it is the whole point.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub sha256: String,
     /// Size in bytes, for reporting.
     pub size: u64,
@@ -244,15 +360,56 @@ fn hex(bytes: &[u8]) -> String {
 /// to hand directory entries back in — the same tree on two machines has to
 /// produce the same key or the cache is worthless.
 ///
-/// Directories and anything matching `exclude` are skipped. A pattern that
-/// matches nothing is not an error: `outputs` legitimately match nothing before
-/// the first build, and an `inputs` pattern for an optional file is a normal
-/// thing to write.
+/// A pattern that resolves to a **directory** means everything under it, at
+/// any depth. `inputs: [src]`, `inputs: [src/]` and `inputs: ["src/**/*"]` are
+/// the same declaration, and `assets/**` — which globs to the directories under
+/// `assets/` rather than to their files — collects the files inside them
+/// instead of quietly collecting nothing. Getting this wrong is the expensive
+/// kind of wrong: a pattern that silently matches no files leaves a build
+/// keyed on an empty input set, which hits forever.
+///
+/// Anything matching `exclude` is skipped, directories included — excluding a
+/// directory excludes the tree below it. A pattern that matches nothing is not
+/// an error: `outputs` legitimately match nothing before the first build, and
+/// an `inputs` pattern for an optional file is a normal thing to write.
 pub fn hash_matching(dir: &Path, patterns: &[String], exclude: &[String]) -> Result<Vec<FileHash>> {
+    matching(dir, patterns, exclude, true)
+}
+
+/// The same expansion as [`hash_matching`], without reading a single byte.
+///
+/// For the times somebody wants to know *what* a target depends on rather than
+/// what it currently hashes to — the run summary and the web viewer both list
+/// every input of every step, and hashing a monorepo's worth of sources to
+/// print a count would make simply looking at the graph as expensive as
+/// building it. The `sha256` of each returned file is empty.
+pub fn list_matching(dir: &Path, patterns: &[String], exclude: &[String]) -> Result<Vec<FileHash>> {
+    matching(dir, patterns, exclude, false)
+}
+
+fn matching(
+    dir: &Path,
+    patterns: &[String],
+    exclude: &[String],
+    hash: bool,
+) -> Result<Vec<FileHash>> {
     let mut seen: BTreeMap<String, FileHash> = BTreeMap::new();
 
     for pattern in patterns {
-        let joined = dir.join(pattern);
+        // `glob` has no notion of a trailing slash; strip it so `src/` reaches
+        // the directory itself and is then walked like any other. A leading
+        // `./` goes too, or it would survive into every relative path the walk
+        // produces and no stored manifest would ever match.
+        let trimmed = pattern
+            .trim_end_matches(['/', '\\'])
+            .trim_start_matches("./")
+            .trim_start_matches(".\\");
+        // `.` — the whole workspace — is a pattern people write and glob does
+        // not resolve to anything useful.
+        let joined = match trimmed {
+            "" | "." => dir.to_path_buf(),
+            trimmed => dir.join(trimmed),
+        };
         let Some(pattern_str) = joined.to_str() else {
             continue;
         };
@@ -260,32 +417,63 @@ pub fn hash_matching(dir: &Path, patterns: &[String], exclude: &[String]) -> Res
             .with_context(|| format!("Invalid cache pattern '{pattern}'"))?;
 
         for entry in entries.flatten() {
-            if !entry.is_file() {
-                continue;
-            }
-            let Ok(rel) = entry.strip_prefix(dir) else {
-                continue;
-            };
-            let rel = rel.to_string_lossy().replace('\\', "/");
-            if is_excluded(&rel, dir, exclude) {
-                continue;
-            }
-            if seen.contains_key(&rel) {
-                continue;
-            }
-            let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
-            seen.insert(
-                rel.clone(),
-                FileHash {
-                    path: rel,
-                    sha256: hash_file(&entry)?,
-                    size,
-                },
-            );
+            collect_into(dir, &entry, exclude, hash, &mut seen)?;
         }
     }
 
     Ok(seen.into_values().collect())
+}
+
+/// Hash `path` into `seen` — or, when it is a directory, everything beneath it.
+fn collect_into(
+    dir: &Path,
+    path: &Path,
+    exclude: &[String],
+    hash: bool,
+    seen: &mut BTreeMap<String, FileHash>,
+) -> Result<()> {
+    let Ok(rel) = path.strip_prefix(dir) else {
+        return Ok(());
+    };
+    // An empty `rel` is `dir` itself — what `inputs: [.]` resolves to. It is a
+    // directory to walk, never a file to hash.
+    let rel = rel.to_string_lossy().replace('\\', "/");
+    if !rel.is_empty() && is_excluded(&rel, dir, exclude) {
+        return Ok(());
+    }
+
+    if path.is_dir() {
+        // Sorted so the walk order — and so any error a caller sees — doesn't
+        // depend on the filesystem. The hashes end up in a BTreeMap either way.
+        let mut children: Vec<PathBuf> = std::fs::read_dir(path)
+            .with_context(|| format!("Failed to read {}", path.display()))?
+            .flatten()
+            .map(|entry| entry.path())
+            .collect();
+        children.sort();
+        for child in children {
+            collect_into(dir, &child, exclude, hash, seen)?;
+        }
+        return Ok(());
+    }
+
+    if rel.is_empty() || !path.is_file() || seen.contains_key(&rel) {
+        return Ok(());
+    }
+    let size = path.metadata().map(|m| m.len()).unwrap_or(0);
+    seen.insert(
+        rel.clone(),
+        FileHash {
+            path: rel,
+            sha256: if hash {
+                hash_file(path)?
+            } else {
+                String::new()
+            },
+            size,
+        },
+    );
+    Ok(())
 }
 
 /// Whether `rel` (a `/`-separated path relative to `dir`) matches any exclude
@@ -677,6 +865,112 @@ mod tests {
     }
 
     #[test]
+    fn a_directory_pattern_reaches_every_file_below_it() {
+        let dir = scratch("nested");
+        write(&dir, "src/main.rs", "fn main() {}");
+        write(&dir, "src/a/b/c/deep.rs", "// deep");
+        write(&dir, "src/a/b/other.rs", "// other");
+
+        // The three spellings of "everything under src" must agree. A pattern
+        // that silently matched nothing would leave a build keyed on an empty
+        // input set — which hits forever.
+        let bare = hash_matching(&dir, &["src".to_string()], &[]).unwrap();
+        let slashed = hash_matching(&dir, &["src/".to_string()], &[]).unwrap();
+        let globbed = hash_matching(&dir, &["src/**/*".to_string()], &[]).unwrap();
+
+        assert_eq!(bare.len(), 3, "a bare directory means the tree below it");
+        assert_eq!(bare, slashed);
+        assert_eq!(bare, globbed);
+        assert!(bare.iter().any(|f| f.path == "src/a/b/c/deep.rs"));
+
+        // Paths are `/`-separated whatever the platform, so a key computed on
+        // Windows matches one computed on Linux.
+        assert!(bare.iter().all(|f| !f.path.contains('\\')));
+
+        // Excluding a directory excludes the tree below it.
+        let trimmed = hash_matching(&dir, &["src".to_string()], &["src/a/b".to_string()]).unwrap();
+        assert_eq!(
+            trimmed.iter().map(|f| f.path.as_str()).collect::<Vec<_>>(),
+            vec!["src/main.rs"]
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A super-workspace's globs cannot help but sweep up its members. Each
+    /// member owns its own cache entry, so counting its files again upstream
+    /// means the root never hits and the work is done twice.
+    #[test]
+    fn a_super_workspace_ignores_its_sub_workspaces() {
+        let dir = scratch("members");
+        write(&dir, "tools/shared.sh", "# shared");
+        write(
+            &dir,
+            "packages/api/.ciabatta/ciabatta.yaml",
+            "workspace:\n  name: api\n",
+        );
+        write(&dir, "packages/api/src/main.rs", "fn main() {}");
+        write(&dir, "packages/api/nested/deep.rs", "// still the api's");
+        write(&dir, "packages/loose/notes.md", "not a workspace");
+
+        assert_eq!(nested_workspaces(&dir), vec!["packages/api".to_string()]);
+
+        let config = CacheConfig {
+            enabled: Some(true),
+            inputs: vec![".".to_string()],
+            ..Default::default()
+        };
+        let inputs = config.hash_inputs(&dir).unwrap();
+        let paths: Vec<&str> = inputs.iter().map(|f| f.path.as_str()).collect();
+
+        assert!(paths.contains(&"tools/shared.sh"));
+        assert!(
+            paths.contains(&"packages/loose/notes.md"),
+            "a plain directory is still the super-workspace's to claim"
+        );
+        assert!(
+            !paths.iter().any(|p| p.starts_with("packages/api/")),
+            "a member's files belong to the member: {paths:?}"
+        );
+
+        // Outputs are not filtered the same way: a generator writing stubs into
+        // the package that consumes them must still be able to record them.
+        let producing = CacheConfig {
+            outputs: vec!["packages/api/nested/**/*".to_string()],
+            ..Default::default()
+        };
+        assert_eq!(producing.hash_outputs(&dir).unwrap().len(), 1);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Listing must see exactly what hashing sees, or a summary would describe
+    /// a different build from the one that runs.
+    #[test]
+    fn listing_matches_hashing_without_reading_a_byte() {
+        let dir = scratch("listing");
+        write(&dir, "src/a.rs", "fn a() {}");
+        write(&dir, "src/b/c.rs", "fn c() {}");
+
+        let patterns = vec!["src".to_string()];
+        let hashed = hash_matching(&dir, &patterns, &[]).unwrap();
+        let listed = list_matching(&dir, &patterns, &[]).unwrap();
+
+        assert_eq!(
+            hashed.iter().map(|f| &f.path).collect::<Vec<_>>(),
+            listed.iter().map(|f| &f.path).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            hashed.iter().map(|f| f.size).sum::<u64>(),
+            listed.iter().map(|f| f.size).sum::<u64>()
+        );
+        assert!(listed.iter().all(|f| f.sha256.is_empty()));
+        assert!(hashed.iter().all(|f| !f.sha256.is_empty()));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn caching_is_off_until_it_is_asked_for() {
         let off = CacheConfig::default();
         assert!(off.why_disabled().unwrap().contains("caching is off"));
@@ -684,13 +978,13 @@ mod tests {
         // Enabled but with nothing to hash is not a cache — every build would
         // key identically and the first result would be served forever.
         let empty = CacheConfig {
-            enabled: true,
+            enabled: Some(true),
             ..Default::default()
         };
         assert!(empty.why_disabled().unwrap().contains("cache.inputs"));
 
         let real = CacheConfig {
-            enabled: true,
+            enabled: Some(true),
             inputs: vec!["src/**/*".into()],
             ..Default::default()
         };
@@ -735,7 +1029,7 @@ mod tests {
         write(&dir, "dist/app", "compiled");
 
         let config = CacheConfig {
-            enabled: true,
+            enabled: Some(true),
             inputs: vec!["src/**/*".into(), "dist/**/*".into()],
             outputs: vec!["dist/**/*".into()],
             exclude: vec!["dist".into()],
@@ -813,7 +1107,7 @@ mod tests {
             dir: work.clone(),
             commands: vec!["make".into()],
             config: CacheConfig {
-                enabled: true,
+                enabled: Some(true),
                 inputs: vec!["src/**/*.rs".into()],
                 outputs: vec!["dist/**/*".into()],
                 ..Default::default()
@@ -928,7 +1222,7 @@ mod tests {
             dir: work.clone(),
             commands: vec!["make".into()],
             config: CacheConfig {
-                enabled: true,
+                enabled: Some(true),
                 inputs: vec!["src/**/*.rs".into()],
                 outputs: vec!["dist/**/*".into()],
                 ..Default::default()
@@ -1001,7 +1295,7 @@ mod tests {
             dir: work.clone(),
             commands: vec!["make".into()],
             config: CacheConfig {
-                enabled: true,
+                enabled: Some(true),
                 inputs: vec!["src/**/*.rs".into()],
                 outputs: vec![],
                 ..Default::default()

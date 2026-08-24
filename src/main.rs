@@ -3,6 +3,7 @@ mod analyze;
 mod cache;
 mod ci;
 mod cli;
+mod color;
 mod config;
 mod configure;
 mod convert;
@@ -27,6 +28,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use clap::Parser;
+use owo_colors::OwoColorize;
 
 use cli::{
     AiCommand, CacheCommand, Cli, Commands, ConfigCommand, ConfigureCommand, DaemonCommand,
@@ -41,7 +43,30 @@ use std::collections::BTreeMap;
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    init_logging(cli.debug);
+    // `daemon serve` installs its own subscriber, writing to
+    // ~/.ciabatta/daemon.log. It has to be the only one: `try_init` cannot
+    // replace a subscriber, so installing the CLI's stderr one here first meant
+    // the daemon's file logger silently lost the race and every daemon log line
+    // went to a stderr that is /dev/null in the background.
+    let daemon_serve = matches!(
+        &cli.command,
+        Commands::Daemon {
+            subcommand: DaemonCommand::Serve { .. }
+        }
+    );
+    // A server run in the foreground is expected to narrate what it serves:
+    // its request log is the whole point of starting it in a terminal, and
+    // `warn` would show an operator nothing at all. Every other command keeps
+    // the quiet default — a CLI that logs at itself is noise.
+    let server_foreground = matches!(
+        &cli.command,
+        Commands::RemoteCache {
+            subcommand: RemoteCacheCommand::Start { .. }
+        }
+    );
+    if !daemon_serve {
+        init_logging(cli.debug, server_foreground);
+    }
     tracing::debug!("debug logging enabled");
 
     match cli.command {
@@ -234,6 +259,24 @@ async fn main() -> Result<()> {
             cmd_todo(task, global, detach, port).await?;
         }
 
+        Commands::Why {
+            target,
+            all,
+            json,
+            env,
+            local,
+        } => {
+            let cwd = env::current_dir().context("Failed to get current directory")?;
+            // The same variables a run would resolve, so the cache verdict this
+            // prints is the verdict that run would get.
+            let cfg = find_root(&cwd)
+                .and_then(|root| load_config(&root).ok())
+                .unwrap_or_default();
+            let root = find_root(&cwd).unwrap_or_else(|| cwd.clone());
+            let vars = build_env_vars(&cfg, &env, local, &root, false)?;
+            run::why::run(&cwd, &target, &vars, json, all)?;
+        }
+
         Commands::DryRun {
             targets,
             diff,
@@ -389,7 +432,7 @@ async fn cmd_workflow(args: cli::WorkflowArgs, bare_name: bool) -> Result<()> {
     if args.gui {
         // The daemon owns the run, so it compiles the graph itself from the
         // same declarations rather than being handed our copy.
-        report_env_dependencies(&cfg, &ws.root, &[name], &vars, false);
+        report_run_dependencies(&cfg, &ws.root, &[name], &vars, false);
         return cmd_workflow_gui(&args, &workflows, &ws.root, vars).await;
     }
 
@@ -530,7 +573,7 @@ async fn cmd_run_recipes(
 
     if args.gui {
         runner::validate_recipes(&cfg, &root, &names, &vars, &RunMode::Run)?;
-        report_env_dependencies(&cfg, &root, &names, &vars, false);
+        report_run_dependencies(&cfg, &root, &names, &vars, false);
         return cmd_run_gui(args.port, names, vars, args.dry_run).await;
     }
     execute_recipes(
@@ -545,25 +588,36 @@ async fn cmd_run_recipes(
     .await
 }
 
-/// Print every environment variable the named runs depend on, before any of
-/// them starts.
+/// Print the summation of what the named runs depend on, before any of them
+/// starts: the targets that will be built, and the environment they'll be
+/// built in.
 ///
-/// A run's steps are shell scripts, and the difference between "works here" and
-/// "fails there" is far more often a variable than the graph. Ciabatta already
-/// resolves the whole environment before the first step — `REQUIRED_ENV`, the
-/// `.env` files it sources, the `[env]` tables that cascade down to each step,
-/// and the `$VAR`s the commands read — so it may as well say so, in the same
-/// spirit as printing the graph before running it.
+/// Both halves exist for the same reason. A run's steps are shell scripts, and
+/// the difference between "works here" and "fails there" is far more often a
+/// variable, an undeclared input, or a package pulled in from three directories
+/// away than it is the graph itself. Ciabatta has already resolved all of it
+/// before the first step runs — `REQUIRED_ENV`, the `.env` files it sources, the
+/// `[env]` tables that cascade to each step, each target's inputs, outputs and
+/// declared variables — so it may as well say so, in the same spirit as printing
+/// the graph before executing it.
 ///
 /// Secret-looking names are listed with their values masked: this output goes
 /// into CI logs.
-fn report_env_dependencies(
+fn report_run_dependencies(
     cfg: &CiabattaConfig,
     root: &Path,
     names: &[String],
     vars: &HashMap<String, String>,
     to_stderr: bool,
 ) {
+    let say = |text: String| {
+        if to_stderr {
+            eprintln!("{text}");
+        } else {
+            println!("{text}");
+        }
+    };
+
     for name in names {
         let Some(recipe) = cfg.recipes.get(name).and_then(|e| e.run_recipe()) else {
             continue;
@@ -573,13 +627,11 @@ fn report_env_dependencies(
         let Ok(resolved) = run::resolve_run(recipe, name, root) else {
             continue;
         };
-        let Some(text) = run::envdeps::collect(&resolved, root, vars).render(name) else {
-            continue;
-        };
-        if to_stderr {
-            eprintln!("{text}");
-        } else {
-            println!("{text}");
+        if let Some(text) = run::deps::report(cfg, root, name, &resolved.steps, vars) {
+            say(text);
+        }
+        if let Some(text) = run::envdeps::collect(&resolved, root, vars).render(name) {
+            say(text);
         }
     }
 }
@@ -952,8 +1004,17 @@ async fn cmd_daemon_logs(lines: usize, follow: bool) -> Result<()> {
 /// The daemon is normally spawned detached with its stdio pointed at /dev/null,
 /// so anything written to stderr would be lost. The individual servers this
 /// replaced just used `println!` and accepted that.
+///
+/// Which is also why this installs a panic hook. The default one writes to
+/// stderr, so a daemon that panics — in a request handler, in a run's engine
+/// task, anywhere — leaves *no* trace at all: the process either dies or the
+/// work silently stops, and the log ends mid-sentence. Routing panics through
+/// `tracing` is the difference between "the daemon crashed" and a file, a line,
+/// and a stack.
 fn init_daemon_logging() -> Result<()> {
+    use std::io::IsTerminal;
     use tracing_subscriber::EnvFilter;
+    use tracing_subscriber::fmt::writer::MakeWriterExt;
 
     let path = daemon::log_path()?;
     let file = std::fs::OpenOptions::new()
@@ -962,18 +1023,86 @@ fn init_daemon_logging() -> Result<()> {
         .open(&path)
         .with_context(|| format!("Failed to open {}", path.display()))?;
 
-    let filter = EnvFilter::try_from_env("CIABATTA_LOG")
-        .unwrap_or_else(|_| EnvFilter::new("ciabatta=info,tower_http=warn"));
+    let directives = std::env::var("CIABATTA_LOG")
+        .unwrap_or_else(|_| "ciabatta=info,tower_http=warn".to_string());
 
-    // `try_init` rather than `init`: `main` may already have installed a
-    // subscriber via `init_logging`, and losing that race shouldn't be fatal.
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_writer(file)
-        .with_ansi(false)
-        .try_init();
+    // Run in the foreground and the terminal is where you are looking, so log
+    // there as well. In the background stderr *is* this file (see
+    // `spawn_detached`), and teeing would write every line twice.
+    let tee = std::io::stderr().is_terminal();
+
+    // `try_init` rather than `init`: losing a race with another subscriber
+    // shouldn't be fatal. `main` deliberately doesn't install one for this
+    // command — see the note there.
+    //
+    // Which task a line came from matters here in a way it doesn't on the CLI:
+    // a run, its progress fold, and the HTTP handlers all interleave.
+    macro_rules! subscriber {
+        ($writer:expr) => {
+            tracing_subscriber::fmt()
+                .with_env_filter(EnvFilter::new(&directives))
+                .with_thread_names(true)
+                .with_target(true)
+                .with_writer($writer)
+                .with_ansi(false)
+                .try_init()
+        };
+    }
+    let _ = if tee {
+        subscriber!(file.and(std::io::stderr))
+    } else {
+        subscriber!(file)
+    };
+
+    install_panic_logger();
+
+    tracing::info!(
+        log = %path.display(),
+        filter = %directives,
+        "daemon logging started (raise it with CIABATTA_LOG=ciabatta=debug)"
+    );
 
     Ok(())
+}
+
+/// Log panics instead of losing them to a discarded stderr.
+///
+/// The backtrace is captured with `force_capture`, so it is there without the
+/// operator having thought to set `RUST_BACKTRACE` before the crash they didn't
+/// know was coming — which is the only time it would have helped.
+fn install_panic_logger() {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let location = info
+            .location()
+            .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
+            .unwrap_or_else(|| "unknown location".to_string());
+
+        // `payload_as_str` isn't stable, so unwrap the two shapes `panic!`
+        // actually produces.
+        let message = info
+            .payload()
+            .downcast_ref::<&str>()
+            .map(|s| s.to_string())
+            .or_else(|| info.payload().downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "<non-string panic payload>".to_string());
+
+        let thread = std::thread::current();
+        let thread = thread.name().unwrap_or("unnamed").to_string();
+
+        tracing::error!(
+            target: "ciabatta::panic",
+            %location,
+            %thread,
+            "panic: {message}\n{}",
+            std::backtrace::Backtrace::force_capture()
+        );
+
+        // Still run whatever was there before — in the foreground
+        // (`ciabatta daemon serve`) that is the default hook, and its stderr
+        // message is what the operator watching the terminal expects to see.
+        previous(info);
+    }));
 }
 
 /// Dispatch `ciabatta todo`:
@@ -1472,7 +1601,11 @@ async fn tail_watch_session(
 /// than `0`/`false`. For finer-grained control the `CIABATTA_LOG` environment
 /// variable is honored directly as a `tracing` env-filter (e.g.
 /// `CIABATTA_LOG=ciabatta=trace`), overriding the flag-derived default.
-fn init_logging(debug_flag: bool) {
+///
+/// `verbose` raises the floor from `warn` to `info` for commands that exist to
+/// keep running and report — today that is `remote-cache start`, whose request
+/// log is the reason anyone runs it in a terminal.
+fn init_logging(debug_flag: bool, verbose: bool) {
     use tracing_subscriber::{EnvFilter, fmt};
 
     let debug = debug_flag
@@ -1483,10 +1616,10 @@ fn init_logging(debug_flag: bool) {
             })
             .unwrap_or(false);
 
-    let default_directive = if debug {
-        "ciabatta=debug"
-    } else {
-        "ciabatta=warn"
+    let default_directive = match (debug, verbose) {
+        (true, _) => "ciabatta=debug",
+        (false, true) => "ciabatta=info",
+        (false, false) => "ciabatta=warn",
     };
     let filter = EnvFilter::try_from_env("CIABATTA_LOG")
         .unwrap_or_else(|_| EnvFilter::new(default_directive));
@@ -1497,6 +1630,56 @@ fn init_logging(debug_flag: bool) {
         .with_target(false)
         .with_writer(std::io::stderr)
         .try_init();
+}
+
+/// Turn a rejected remote-cache request into an answer somebody can act on.
+///
+/// A credential the server says is expired or unknown is dead for good — no
+/// retry brings it back. Two things follow, and neither happened before:
+///
+/// * **Drop it.** Keeping a credential you've been told is finished means every
+///   later command fails the same way, and the file quietly accumulates logins
+///   that can never work again.
+/// * **Say if you're logged in to the same server under another name.** One
+///   machine answers to `localhost` and to `127.0.0.1`, credentials are keyed by
+///   the URL that was typed, and a workspace config naming one while the login
+///   used the other produces a server that has genuinely never heard of you.
+///   That is a confusing thing to work out from first principles and a cheap
+///   thing to be told.
+///
+/// Anything that isn't an authentication failure is passed straight through.
+fn explain_auth_failure(url: &str, error: anyhow::Error) -> anyhow::Error {
+    use remote_cache::client::{Credentials, ServerError};
+
+    let Some(server_error) = error.downcast_ref::<ServerError>() else {
+        return error;
+    };
+    if !server_error.is_auth_failure() {
+        return error;
+    }
+
+    let mut credentials = Credentials::load();
+    let siblings = credentials.same_server_as(url);
+    // Only a credential the server has actively disowned gets thrown away.
+    // "No credential" means there was nothing there to begin with.
+    if server_error.session_is_dead() && credentials.remove(url) {
+        // Best-effort: failing to write the file must not replace the server's
+        // explanation with one about the filesystem.
+        let _ = credentials.save();
+    }
+
+    let mut message = format!("{server_error}");
+    if !siblings.is_empty() {
+        message.push_str(&format!(
+            "\n\nYou are logged in to {} — the same machine under a different name. \
+             This command used {url}, which is what your workspace config \
+             (cache.remote.url) names.\n\
+             Either log in to it:  ciabatta remote-cache login {url}\n\
+             or point the workspace at the one you already have.",
+            siblings.join(", "),
+        ));
+    }
+    anyhow::anyhow!(message)
 }
 
 /// Dispatch `ciabatta configure` (interactive registry setup) and its `auto`
@@ -1812,7 +1995,7 @@ async fn execute_recipes(
     // goes to stderr when the TUI is about to take the screen, so it survives
     // in the scrollback the same way the graph drawing does.
     if mode == RunMode::Run {
-        report_env_dependencies(cfg, root, names, vars, use_tui);
+        report_run_dependencies(cfg, root, names, vars, use_tui);
     }
 
     // Resolve the container runtime once up front so every recipe shares it and
@@ -1830,6 +2013,15 @@ async fn execute_recipes(
         Err(e) => return Err(e),
     }
     let cfg = &cfg;
+
+    // What a step's command is allowed to emit depends on who ends up reading
+    // it: the plain runner prints its lines through to this terminal, the TUI
+    // styles and wraps them itself.
+    color::decide(if use_tui {
+        color::Consumer::Tui
+    } else {
+        color::Consumer::Terminal
+    });
 
     if !use_tui {
         run_plain(cfg, root, names, vars, dry_run, mode).await
@@ -1873,18 +2065,30 @@ async fn run_plain(
         .await;
     });
 
+    // Which recipe a line belongs to is structure, not content: dimmed, so what
+    // the eye lands on is the command output it prefixes. A run that isn't in
+    // colour gets the same text with no escapes at all — see [`color`].
+    let tag = |name: &str| format!("[{name}]").style(color::faint()).to_string();
+
     let mut any_failed = false;
     while let Some(update) = rx.recv().await {
         match update {
-            ProgressUpdate::Started(name) => println!("[{name}] started"),
+            ProgressUpdate::Started(name) => println!("{} started", tag(&name)),
             ProgressUpdate::StageStarted { recipe, stage } => {
-                println!("[{recipe}] ▶ {}", stage.label(mode))
+                println!(
+                    "{} {} {}",
+                    tag(&recipe),
+                    "▶".style(color::active()),
+                    stage.label(mode)
+                )
             }
             ProgressUpdate::StageFinished { recipe, stage, ran } => {
                 if !ran {
                     println!(
-                        "[{recipe}]   {} (default, nothing to do)",
-                        stage.label(mode)
+                        "{}   {}",
+                        tag(&recipe),
+                        format!("{} (default, nothing to do)", stage.label(mode))
+                            .style(color::faint())
                     );
                 }
             }
@@ -1894,24 +2098,43 @@ async fn run_plain(
                 total,
             } => {
                 let pct = (done * 100).checked_div(total).unwrap_or(0);
-                println!("[{recipe}]   {done}/{total} files ({pct}%)");
+                println!("{}   {done}/{total} files ({pct}%)", tag(&recipe));
             }
-            ProgressUpdate::Log(name, line) => println!("[{name}] {line}"),
+            ProgressUpdate::Log(name, line) => println!("{} {line}", tag(&name)),
             ProgressUpdate::StepStarted { recipe, step } => {
-                println!("[{recipe}] ▶ step: {step}")
+                println!(
+                    "{} {} step: {step}",
+                    tag(&recipe),
+                    "▶".style(color::active())
+                )
             }
             ProgressUpdate::StepFinished { recipe, step, ok } => {
-                println!("[{recipe}]   {} step: {step}", if ok { "✓" } else { "✗" })
+                let mark = if ok {
+                    "✓".style(color::good())
+                } else {
+                    "✗".style(color::bad())
+                };
+                println!("{}   {mark} step: {step}", tag(&recipe))
             }
             ProgressUpdate::StepSkipped {
                 recipe,
                 step,
                 reason,
             } => {
-                println!("[{recipe}]   ⊘ skipped step: {step} ({reason})")
+                println!(
+                    "{}   {} skipped step: {step} ({reason})",
+                    tag(&recipe),
+                    "⊘".style(color::warn())
+                )
             }
+            // The command's own output, escapes and all — it was asked for
+            // colour precisely because these lines end up here unaltered.
             ProgressUpdate::StepLog { recipe, step, line } => {
-                println!("[{recipe}]   [{step}] {line}")
+                println!(
+                    "{}   {} {line}",
+                    tag(&recipe),
+                    format!("[{step}]").style(color::faint())
+                )
             }
             ProgressUpdate::StepNeedsChoice {
                 recipe,
@@ -1919,14 +2142,20 @@ async fn run_plain(
                 message,
                 options,
             } => {
-                println!("[{recipe}] ⚠ {step}: {message}");
+                println!(
+                    "{} {} {step}: {message}",
+                    tag(&recipe),
+                    "⚠".style(color::warn())
+                );
                 for (i, opt) in options.iter().enumerate() {
-                    println!("[{recipe}]     [{i}] {opt}");
+                    println!("{}     [{i}] {opt}", tag(&recipe));
                 }
             }
-            ProgressUpdate::Completed(name) => println!("[{name}] ✓ completed"),
+            ProgressUpdate::Completed(name) => {
+                println!("{} {} completed", tag(&name), "✓".style(color::good()))
+            }
             ProgressUpdate::Failed(name, err) => {
-                eprintln!("[{name}] ✗ failed: {err}");
+                eprintln!("{} {} failed: {err}", tag(&name), "✗".style(color::bad()));
                 any_failed = true;
             }
         }
@@ -2155,7 +2384,10 @@ async fn cmd_remote_cache(subcommand: RemoteCacheCommand) -> Result<()> {
             };
 
             let client = Client::saved(&url)?;
-            let stats = client.stats().await?;
+            let stats = match client.stats().await {
+                Ok(stats) => stats,
+                Err(e) => return Err(explain_auth_failure(&url, e)),
+            };
             print_remote_status(&url, &stats);
             Ok(())
         }
@@ -3488,10 +3720,33 @@ Two things worth knowing:
     restore or a rebuild.
 
 Settings can be written at three levels — the workspace (`cache:`), a recipe
-(`recipies.<name>.cache`), or a single step (`steps[].cache`). The most specific
-one wins WHOLE rather than merging field by field: half-inherited inputs would
-be very hard to reason about, and getting inputs wrong is how a cache serves the
-wrong answer.
+(`recipies.<name>.cache`), or a single target (`steps[].cache`). Each level is
+layered over the one above it FIELD BY FIELD, so a target declares only what
+differs:
+
+  steps:
+    - name: build
+      cache:
+        env: [PROFILE]     # keeps the workspace's inputs, outputs and exclude
+
+A list a target does declare replaces the inherited one whole — half-merged
+input globs would be very hard to reason about. `enabled` is only ever decided
+by a level that says it explicitly, so declaring a dependency can neither turn
+caching off nor turn it on; a single target opts out with `enabled: false`.
+
+An `inputs`/`outputs` entry naming a DIRECTORY means everything under it, at any
+depth: `inputs: [src]`, `inputs: ["src/"]` and `inputs: ["src/**/*"]` are the
+same declaration, and `inputs: [.]` is the whole workspace.
+
+Sub-workspaces are excluded from a super-workspace's inputs automatically: any
+directory below it with its own `.ciabatta/` owns its files, and its own cache
+entry covers them. Without that, a root whose inputs are `packages/**/*` would
+never hit — every package's change would be its change too.
+
+  ciabatta why <target>        where a target is declared, what it depends on,
+                               and what the cache would do with it
+  ciabatta why <target> --all  ...naming every input and output file, in the
+                               order they are hashed into the key
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 THE REMOTE CACHE
@@ -3555,6 +3810,18 @@ releases:                  # the ciabatta builds this cache hands out
     linux:   /srv/ciabatta/ciabatta-linux-x86_64
     windows: /srv/ciabatta/ciabatta-windows-x86_64.exe
     macos:   /srv/ciabatta/ciabatta-macos-aarch64
+
+log:                       # one line as a request arrives, one as it leaves
+  requests: true
+  headers: true            # credential-bearing headers are logged <redacted>
+
+`remote-cache start` logs at info by default — the request log is the reason to
+run it in a terminal. Raise it with CIABATTA_LOG=ciabatta=debug.
+
+Sessions live in `storage/sessions.json` and survive a restart, so a config edit
+or a new binary doesn't sign the whole team out. Only the SHA-256 of each bearer
+token is stored, exactly as for `users.json`: the file says who is signed in and
+when their session lapses, never how to be them.
 
   The server hashes these and mentions the version in every reply, so a client
   on something older is told. `ciabatta self update` fetches the new build from

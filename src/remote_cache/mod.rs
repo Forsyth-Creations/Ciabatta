@@ -68,6 +68,54 @@ pub struct ServerConfig {
     /// about a new version and can update from here.
     #[serde(default)]
     pub releases: releases::ReleaseConfig,
+
+    /// What the server writes to its log for each request it handles.
+    #[serde(default)]
+    pub log: LogConfig,
+}
+
+/// How much the server says about the traffic it serves.
+///
+/// A cache that hands back the wrong artifact, refuses a login, or 404s a key
+/// somebody swears they uploaded is debugged from the outside — from what the
+/// client sent and what the server answered. Both sides of that are logged by
+/// default, because the alternative is asking an operator to reproduce a
+/// problem they've already had.
+///
+/// ```yaml
+/// log:
+///   requests: true
+///   headers:  true
+/// ```
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct LogConfig {
+    /// One line as each request arrives, and one as its response leaves.
+    #[serde(default = "default_true")]
+    pub requests: bool,
+
+    /// Include the request's headers on the arrival line.
+    ///
+    /// Credential-bearing headers (`authorization`, `cookie`, `proxy-
+    /// authorization`, `x-api-key`) are logged as `<redacted>` — the point is
+    /// to see *that* a credential was sent and in what form, never what it was.
+    /// A cache log is a file somebody will eventually paste into a ticket.
+    #[serde(default = "default_true")]
+    pub headers: bool,
+}
+
+impl Default for LogConfig {
+    /// Hand-written so the defaults match what parsing an absent `log:` section
+    /// produces, rather than the `false` a derive would give.
+    fn default() -> Self {
+        LogConfig {
+            requests: true,
+            headers: true,
+        }
+    }
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// Where the server listens and where it puts things.
@@ -223,6 +271,15 @@ auth:
 #     linux: /srv/ciabatta/ciabatta-linux-x86_64
 #     windows: /srv/ciabatta/ciabatta-windows-x86_64.exe
 #     macos: /srv/ciabatta/ciabatta-macos-aarch64
+
+# ─── Logging ───────────────────────────────────────────────────────────────────
+# One line as each request arrives and one as its response leaves, so a cache
+# miss nobody can explain can be read back off the wire. Credential-bearing
+# headers are logged as <redacted>. Raise the detail with
+# CIABATTA_LOG=ciabatta=debug.
+log:
+  requests: true
+  headers: true
 "#
     )
 }

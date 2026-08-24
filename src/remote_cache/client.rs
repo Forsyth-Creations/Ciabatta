@@ -122,6 +122,60 @@ impl Credentials {
             .map(|c| c.tls_verify)
             .unwrap_or(true)
     }
+
+    /// Other saved logins that are almost certainly the *same server* under a
+    /// different name.
+    ///
+    /// One machine is reachable as `localhost`, as `127.0.0.1`, and as `[::1]`,
+    /// and a credential is keyed by the URL somebody typed rather than by the
+    /// server it reached. So `remote-cache login http://127.0.0.1:8380` followed
+    /// by a workspace configured for `http://localhost:8380` leaves you logged
+    /// in to a server that tells you it has never heard of you — which is true,
+    /// and useless.
+    ///
+    /// Only loopback names are treated this way. Two DNS names for one host is
+    /// a thing this can't know from here, and guessing at it would be worse
+    /// than saying nothing.
+    pub fn same_server_as(&self, url: &str) -> Vec<String> {
+        let Some((host, port)) = host_and_port(url) else {
+            return Vec::new();
+        };
+        if !is_loopback(&host) {
+            return Vec::new();
+        }
+        self.servers
+            .keys()
+            .filter(|saved| normalize(saved) != normalize(url))
+            .filter(|saved| host_and_port(saved).is_some_and(|(h, p)| p == port && is_loopback(&h)))
+            .cloned()
+            .collect()
+    }
+}
+
+/// The host and port of a URL, lowercased, without pulling in a URL parser for
+/// the two fields anybody here needs.
+fn host_and_port(url: &str) -> Option<(String, String)> {
+    let rest = normalize(url)
+        .split_once("://")
+        .map(|(_, rest)| rest.to_string())
+        .unwrap_or_else(|| normalize(url));
+    let authority = rest.split(['/', '?']).next()?.to_lowercase();
+    // An IPv6 literal is bracketed, so the last colon is the port separator
+    // only when it comes after the closing bracket.
+    match authority.rsplit_once(':') {
+        Some((host, port)) if !port.contains(']') && port.chars().all(|c| c.is_ascii_digit()) => {
+            Some((host.to_string(), port.to_string()))
+        }
+        _ => Some((authority, String::new())),
+    }
+}
+
+/// Whether a host name is this machine talking to itself.
+fn is_loopback(host: &str) -> bool {
+    matches!(
+        host.trim_matches(['[', ']']),
+        "localhost" | "127.0.0.1" | "::1" | "0.0.0.0"
+    )
 }
 
 /// The credentials file holds bearer tokens; nobody else on the machine needs
@@ -320,6 +374,25 @@ impl Client {
 
     /// Upload a build's outputs and then its manifest.
     ///
+    /// Report the keys a run reused, so the server ages them from now.
+    ///
+    /// A short timeout, because nothing waits on the answer: this runs at the
+    /// end of a build that has already produced everything it was asked for.
+    pub async fn touch(&self, project: &str, keys: &[String]) -> Result<()> {
+        let response = self
+            .authed(
+                self.http
+                    .post(self.url(&format!("/api/projects/{project}/cache/touch"))),
+            )
+            .timeout(TIMEOUT)
+            .json(&serde_json::json!({ "keys": keys }))
+            .send()
+            .await
+            .context("Could not reach the remote cache")?;
+        let _: serde_json::Value = parse(response).await?;
+        Ok(())
+    }
+
     /// Manifest last, always: it is what makes the entry visible, so writing it
     /// before the files it names would publish an entry that can't be restored.
     pub async fn upload(&self, project: &str, key: &str, entry: &Entry, dir: &Path) -> Result<()> {
@@ -407,6 +480,54 @@ pub struct LoginResponse {
     pub user: Identity,
 }
 
+/// A failure the server explained for itself.
+///
+/// Carried as its own error type rather than a formatted string so a caller can
+/// ask *what kind* of failure it was — see [`ServerError::session_is_dead`] —
+/// without matching on English prose that is free to be reworded.
+#[derive(Debug, Clone)]
+pub struct ServerError {
+    /// The server's own message, fit to print verbatim.
+    pub message: String,
+    /// Its machine-readable tag, when it sent one.
+    pub code: Option<String>,
+}
+
+impl std::fmt::Display for ServerError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.message)
+    }
+}
+
+impl std::error::Error for ServerError {}
+
+impl ServerError {
+    /// Whether the credential that produced this is dead for good.
+    ///
+    /// An expired session and one the server has never heard of are both
+    /// finished: no retry, no backoff and no amount of waiting brings either
+    /// back. Only a fresh login will, which is why it's worth knowing — a
+    /// client that keeps a credential it has been told is dead will fail this
+    /// way on every command until somebody works out why.
+    pub fn session_is_dead(&self) -> bool {
+        matches!(
+            self.code.as_deref(),
+            Some("session_expired" | "session_unknown")
+        )
+    }
+
+    /// Whether the server refused this for want of a usable credential, in any
+    /// of the ways it can.
+    ///
+    /// Wider than [`Self::session_is_dead`]: having *no* credential for a URL
+    /// is not a credential to throw away, but it is the same question from the
+    /// caller's side — "why won't it let me in, when I know I logged in?" —
+    /// and deserves the same help.
+    pub fn is_auth_failure(&self) -> bool {
+        self.session_is_dead() || self.code.as_deref() == Some("no_credential")
+    }
+}
+
 /// Turn a response into `T`, surfacing the server's own error message.
 ///
 /// A cache that says "your session has expired, log in again" is worth
@@ -416,10 +537,22 @@ async fn parse<T: serde::de::DeserializeOwned>(response: reqwest::Response) -> R
     let body = response.text().await.unwrap_or_default();
 
     if !status.is_success() {
-        bail!("{}", error_message(status, &body));
+        return Err(anyhow::Error::new(ServerError {
+            message: error_message(status, &body),
+            code: error_code(&body),
+        }));
     }
 
     serde_json::from_str(&body).context("The remote cache returned something unexpected")
+}
+
+/// The failure's machine-readable tag, when the server sent one.
+fn error_code(body: &str) -> Option<String> {
+    serde_json::from_str::<serde_json::Value>(body)
+        .ok()?
+        .get("code")?
+        .as_str()
+        .map(str::to_string)
 }
 
 /// The most useful thing that can be said about a failed response: the server's
@@ -458,6 +591,21 @@ pub async fn try_restore(client: &Client, project: &str, key: &str, dir: &Path) 
             eprintln!("note: the remote cache is unavailable ({e:#}); building locally");
             false
         }
+    }
+}
+
+/// Tell the remote cache which entries a run reused, so retention ages them
+/// from now.
+///
+/// One request for the whole run, and entirely best-effort: this is bookkeeping
+/// that keeps a shared cache useful, and no part of it is worth a line of
+/// output on a build that otherwise succeeded.
+pub async fn try_touch(client: &Client, project: &str, keys: &[String]) {
+    if keys.is_empty() {
+        return;
+    }
+    if let Err(e) = client.touch(project, keys).await {
+        tracing::debug!("couldn't refresh {} cache entr(ies): {e:#}", keys.len());
     }
 }
 
@@ -570,6 +718,80 @@ mod tests {
         );
         assert!(!credentials.tls_verify("https://self-signed"));
         assert!(!credentials.tls_verify("https://self-signed/"));
+    }
+
+    /// The exact confusion this exists to end: logged in as `127.0.0.1`, with a
+    /// workspace configured for `localhost`, told by the server that it has
+    /// never heard of you — which is true, and on its own useless.
+    #[test]
+    fn a_loopback_login_under_another_name_is_recognised_as_the_same_server() {
+        let mut credentials = Credentials::default();
+        let credential = Credential {
+            token: "t".into(),
+            user: "ada".into(),
+            expires_at: None,
+            release: None,
+            tls_verify: true,
+        };
+        credentials.set("http://127.0.0.1:8380", credential.clone());
+        credentials.set("http://cache.example.com:8380", credential.clone());
+
+        assert_eq!(
+            credentials.same_server_as("http://localhost:8380/"),
+            vec!["http://127.0.0.1:8380".to_string()],
+            "a trailing slash and a different loopback spelling are the same machine"
+        );
+
+        // A different port is a different server, loopback or not.
+        assert!(
+            credentials
+                .same_server_as("http://localhost:9999")
+                .is_empty()
+        );
+
+        // And two DNS names for one host is not something this can know, so it
+        // must not claim to.
+        assert!(
+            credentials
+                .same_server_as("http://cache.internal:8380")
+                .is_empty(),
+            "guessing at DNS aliases would be worse than saying nothing"
+        );
+    }
+
+    /// A dead session has to be recognisable without matching on prose, or the
+    /// client can never safely act on it.
+    #[test]
+    fn a_dead_session_is_told_apart_from_any_other_failure() {
+        let dead = |code: &str| ServerError {
+            message: "whatever the server said".into(),
+            code: Some(code.into()),
+        };
+        assert!(dead("session_expired").session_is_dead());
+        assert!(dead("session_unknown").session_is_dead());
+
+        // Missing credentials are fixed by logging in, not by discarding one.
+        assert!(!dead("no_credential").session_is_dead());
+        assert!(
+            !ServerError {
+                message: "Unknown project 'nope'".into(),
+                code: None,
+            }
+            .session_is_dead(),
+            "an untagged failure must never be read as an auth failure"
+        );
+    }
+
+    #[test]
+    fn a_failure_carries_the_servers_code_when_it_sent_one() {
+        let body = serde_json::json!({
+            "error": "This cache has no record of your session",
+            "code": "session_unknown",
+        })
+        .to_string();
+        assert_eq!(error_code(&body).as_deref(), Some("session_unknown"));
+        assert_eq!(error_code("<html>nginx</html>"), None);
+        assert_eq!(error_code(r#"{"error":"no code here"}"#), None);
     }
 
     /// A cache that says "your session has expired, log in again" is worth

@@ -22,8 +22,8 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use axum::body::Bytes;
-use axum::extract::{DefaultBodyLimit, Path, Query, State};
-use axum::http::{StatusCode, header};
+use axum::extract::{ConnectInfo, DefaultBodyLimit, Path, Query, State};
+use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::IntoResponse;
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
@@ -75,7 +75,7 @@ impl AppState {
             store: Arc::new(store),
             projects: Arc::new(projects),
             users: Arc::new(users),
-            sessions: Arc::new(Sessions::new()),
+            sessions: Arc::new(Sessions::open(&config.server.storage)),
             release: Arc::new(std::sync::RwLock::new(release)),
             started_at: crate::cache::store::now(),
             config: Arc::new(config),
@@ -92,18 +92,32 @@ impl AppState {
         }
 
         let token = bearer(headers).ok_or_else(|| {
-            ApiError::new(
+            ApiError::coded(
                 StatusCode::UNAUTHORIZED,
+                CODE_NO_CREDENTIAL,
                 "This cache requires authentication. Run `ciabatta remote-cache login <URL>`.",
             )
         })?;
 
-        self.sessions.resolve(&token).ok_or_else(|| {
-            ApiError::new(
+        match self.sessions.lookup(&token) {
+            auth::Lookup::Live(identity) => Ok(identity),
+            auth::Lookup::Expired { at } => Err(ApiError::coded(
                 StatusCode::UNAUTHORIZED,
-                "Your session has expired. Run `ciabatta remote-cache login <URL>` again.",
-            )
-        })
+                CODE_SESSION_EXPIRED,
+                format!(
+                    "Your session expired at {at}. Run `ciabatta remote-cache login <URL>` again."
+                ),
+            )),
+            // Not the same thing as expiry, and saying so saves somebody
+            // staring at a credential whose own expiry date is months away.
+            auth::Lookup::Unknown => Err(ApiError::coded(
+                StatusCode::UNAUTHORIZED,
+                CODE_SESSION_UNKNOWN,
+                "This cache has no record of your session — it was revoked, or it was \
+                 issued by a different server (check the URL and the host name you \
+                 logged in with). Run `ciabatta remote-cache login <URL>` again.",
+            )),
+        }
     }
 
     /// Who's making this request, and are they allowed to change anything?
@@ -161,13 +175,38 @@ fn bearer(headers: &header::HeaderMap) -> Option<String> {
 pub struct ApiError {
     status: StatusCode,
     message: String,
+    /// A stable machine-readable tag, when the client can *do* something about
+    /// this particular failure.
+    ///
+    /// The message is for a person and is free to be rewritten; a client that
+    /// wants to act on a failure — clear a credential it now knows is dead,
+    /// say — must not have to match on English prose to do it.
+    code: Option<&'static str>,
 }
+
+/// The session the caller presented was issued here, and its time is up.
+pub const CODE_SESSION_EXPIRED: &str = "session_expired";
+/// This server has no record of the session at all: revoked, or issued
+/// somewhere else. Either way the credential holding it is dead for good, and
+/// a client should stop presenting it.
+pub const CODE_SESSION_UNKNOWN: &str = "session_unknown";
+/// No credential was presented at all.
+pub const CODE_NO_CREDENTIAL: &str = "no_credential";
 
 impl ApiError {
     fn new(status: StatusCode, message: impl std::fmt::Display) -> Self {
         ApiError {
             status,
             message: message.to_string(),
+            code: None,
+        }
+    }
+
+    /// Tag this failure so a client can act on it without reading the message.
+    fn coded(status: StatusCode, code: &'static str, message: impl std::fmt::Display) -> Self {
+        ApiError {
+            code: Some(code),
+            ..Self::new(status, message)
         }
     }
 
@@ -188,7 +227,21 @@ impl From<anyhow::Error> for ApiError {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> axum::response::Response {
-        (self.status, Json(json!({ "error": self.message }))).into_response()
+        // Every route failure passes through here, which makes it the one place
+        // that can promise the reason reached the log as well as the client. A
+        // 5xx is the server's own fault and is logged as an error; a 4xx is the
+        // client's and is logged as a warning, because a wall of 404s from one
+        // misconfigured runner should not read as the server falling over.
+        if self.status.is_server_error() {
+            tracing::error!(status = self.status.as_u16(), "{}", self.message);
+        } else {
+            tracing::warn!(status = self.status.as_u16(), "{}", self.message);
+        }
+        let mut body = json!({ "error": self.message });
+        if let Some(code) = self.code {
+            body["code"] = json!(code);
+        }
+        (self.status, Json(body)).into_response()
     }
 }
 
@@ -206,6 +259,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/stats", get(stats))
         .route("/api/projects", get(list_projects).post(register_project))
         .route("/api/projects/{id}", delete(forget_project))
+        .route("/api/projects/{id}/cache/touch", post(touch_entries))
         .route(
             "/api/projects/{id}/cache/{key}",
             get(get_entry).put(put_entry),
@@ -221,8 +275,149 @@ pub fn router(state: AppState) -> Router {
         // The admin page, last so no API path can be shadowed by it.
         .route("/", get(admin_page))
         .layer(DefaultBodyLimit::max(MAX_ARTIFACT_BYTES))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            log_request,
+        ))
         .layer(tower_http::trace::TraceLayer::new_for_http())
         .with_state(state)
+}
+
+// ─── Request logging ────────────────────────────────────────────────────────
+
+/// Header names whose values must never reach a log file.
+///
+/// Matched case-insensitively against the whole name, not by prefix: the point
+/// is a short, auditable list rather than a heuristic that quietly stops
+/// covering a header somebody adds later.
+const REDACTED_HEADERS: &[&str] = &[
+    "authorization",
+    "proxy-authorization",
+    "cookie",
+    "set-cookie",
+    "x-api-key",
+    "x-auth-token",
+];
+
+/// Log every request as it arrives and every response as it leaves.
+///
+/// A shared cache is debugged from the outside — "my CI runner gets a 401",
+/// "this key 404s but I uploaded it" — and answering those without the traffic
+/// in front of you is guesswork. So the arrival line carries the method, the
+/// full path and query, the peer, and (unless turned off) the request's headers
+/// with credentials redacted; the departure line carries the status, the size,
+/// and how long it took.
+///
+/// Both lines carry the same `req` id so they can be paired in a busy log, and
+/// both are `info` — an operator who started a server expects to see it serving.
+/// Turn the pair off with `log.requests: false`, or drop the whole server to
+/// `CIABATTA_LOG=ciabatta=warn`.
+async fn log_request(
+    State(state): State<AppState>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    if !state.config.log.requests {
+        return next.run(request).await;
+    }
+
+    // Read out of the extensions rather than extracted, so a router driven
+    // without a listener — every test in this file, and any future in-process
+    // caller — logs `-` for the peer instead of failing the request outright.
+    // A log line must never be able to break the thing it is describing.
+    let peer = request
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|ConnectInfo(addr)| addr.to_string())
+        .unwrap_or_else(|| "-".to_string());
+
+    // Monotonically increasing per process: enough to pair two lines, and
+    // cheaper than a UUID on a path that runs for every artifact byte served.
+    static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let id = NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+    let method = request.method().clone();
+    // `path_and_query` rather than the path alone: `?project=…` is exactly the
+    // sort of thing that turns out to be the bug.
+    let target = request
+        .uri()
+        .path_and_query()
+        .map(|pq| pq.to_string())
+        .unwrap_or_else(|| request.uri().path().to_string());
+
+    if state.config.log.headers {
+        tracing::info!(
+            req = id,
+            %peer,
+            "→ {method} {target} {{{}}}",
+            render_headers(request.headers())
+        );
+    } else {
+        tracing::info!(req = id, %peer, "→ {method} {target}");
+    }
+
+    let started = std::time::Instant::now();
+    let response = next.run(request).await;
+    let elapsed = started.elapsed();
+
+    let status = response.status();
+    // Streamed and empty responses carry no Content-Length; saying nothing
+    // beats printing a dash somebody has to work out the meaning of.
+    let size = response
+        .headers()
+        .get(header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .map(|bytes| format!(", {bytes} bytes"))
+        .unwrap_or_default();
+
+    // The status the client got is the fact worth reading, so a failing
+    // response is logged at a level that survives a quieter filter — even
+    // though `ApiError` has already explained the reason above it.
+    let line = format!(
+        "← {} {method} {target} in {:.1}ms{size}",
+        status.as_u16(),
+        elapsed.as_secs_f64() * 1000.0,
+    );
+    if status.is_server_error() {
+        tracing::error!(req = id, "{line}");
+    } else if status.is_client_error() {
+        tracing::warn!(req = id, "{line}");
+    } else {
+        tracing::info!(req = id, "{line}");
+    }
+
+    response
+}
+
+/// The request's headers as one `name=value` list, with credentials redacted.
+fn render_headers(headers: &HeaderMap) -> String {
+    headers
+        .iter()
+        .map(|(name, value)| {
+            let name = name.as_str();
+            if REDACTED_HEADERS
+                .iter()
+                .any(|h| name.eq_ignore_ascii_case(h))
+            {
+                // The *shape* of the credential is the useful part — "they sent
+                // a bearer token" versus "they sent nothing at all" is most of
+                // a 401 investigation — so keep the scheme and drop the secret.
+                let scheme = value
+                    .to_str()
+                    .ok()
+                    .and_then(|v| v.split_whitespace().next().map(str::to_string))
+                    .filter(|scheme| scheme.chars().all(|c| c.is_ascii_alphabetic()))
+                    .map(|scheme| format!("{scheme} "))
+                    .unwrap_or_default();
+                return format!("{name}={scheme}<redacted>");
+            }
+            match value.to_str() {
+                Ok(value) => format!("{name}={value}"),
+                Err(_) => format!("{name}=<{} bytes>", value.len()),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 // ─── Health, identity, stats ────────────────────────────────────────────────
@@ -436,6 +631,58 @@ async fn get_entry(
         }
     }
 }
+
+#[derive(Deserialize)]
+struct TouchPayload {
+    #[serde(default)]
+    keys: Vec<String>,
+}
+
+/// Mark entries as still in use, without downloading them.
+///
+/// Retention ages an artifact from when it was last *used*, so that the thing
+/// everyone depends on isn't evicted for being old. That only works if the
+/// server hears about the uses — and after the first download it stops hearing
+/// about most of them, because the client mirrors the entry into its local
+/// store and every later build is answered from there without the network being
+/// touched at all. The artifact the whole team relies on daily therefore looks,
+/// from here, like one nobody has wanted since the day it was built.
+///
+/// So a run reports the keys it reused locally, in one request at the end
+/// rather than one per step, and they age from now.
+///
+/// Deliberately allowed to any authenticated caller rather than to writers
+/// only: keeping an artifact you are actively using alive is not a way to
+/// change what anybody else builds, and a read-only CI runner that couldn't do
+/// it would watch the cache it depends on expire underneath it.
+async fn touch_entries(
+    State(state): State<AppState>,
+    headers: header::HeaderMap,
+    Path(id): Path<String>,
+    Json(payload): Json<TouchPayload>,
+) -> ApiResult<Json<serde_json::Value>> {
+    state.identify(&headers)?;
+    require_project(&state, &id)?;
+
+    // A key this server doesn't have is not an error: the client is reporting
+    // what *it* reused, and some of that may only ever have existed locally.
+    let mut refreshed = 0usize;
+    for key in payload.keys.iter().take(MAX_TOUCH_KEYS) {
+        let scoped = scoped_key(&id, key);
+        if state.store.get(&scoped)?.is_some() {
+            state.store.touch(&scoped)?;
+            refreshed += 1;
+        }
+    }
+
+    Ok(Json(json!({ "ok": true, "refreshed": refreshed })))
+}
+
+/// How many keys one keep-alive request may refresh.
+///
+/// A graph has as many keys as it has steps, and this bounds the work a single
+/// request can ask of the server no matter what a client sends.
+const MAX_TOUCH_KEYS: usize = 2_000;
 
 /// Store an entry's manifest.
 ///
@@ -750,13 +997,19 @@ pub async fn serve(config: ServerConfig) -> Result<()> {
     announce(&state, &listen);
     tokio::spawn(sweeper(state.clone(), listen.sweep_every.clone()));
 
-    axum::serve(listener, router(state))
-        .with_graceful_shutdown(async {
-            let _ = tokio::signal::ctrl_c().await;
-            tracing::info!("shutting the remote cache down");
-        })
-        .await
-        .context("The remote cache server stopped unexpectedly")
+    // `into_make_service_with_connect_info` rather than a plain service: the
+    // peer address is half of what makes a request log worth having, since
+    // "which runner is doing this?" is the first question about any of it.
+    axum::serve(
+        listener,
+        router(state).into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(async {
+        let _ = tokio::signal::ctrl_c().await;
+        tracing::info!("shutting the remote cache down");
+    })
+    .await
+    .context("The remote cache server stopped unexpectedly")
 }
 
 /// Print what an operator needs to see on startup, including the two things
@@ -770,6 +1023,7 @@ fn announce(state: &AppState, listen: &Listen) {
     println!("  storage:   {}", listen.storage.display());
     println!("  retention: {}", state.config.retention.describe());
     println!("  auth:      {}", state.config.auth.mode);
+    println!("  logging:   {}", describe_logging(&state.config.log));
 
     let release = state.release.read().unwrap();
     if release.is_empty() {
@@ -798,6 +1052,18 @@ fn announce(state: &AppState, listen: &Listen) {
     );
 }
 
+/// What the request log will and won't contain, in one line.
+fn describe_logging(log: &super::LogConfig) -> String {
+    if !log.requests {
+        return "off (set log.requests: true to trace requests)".to_string();
+    }
+    let mut parts = vec!["requests"];
+    if log.headers {
+        parts.push("headers (credentials redacted)");
+    }
+    parts.join(" · ")
+}
+
 /// Periodically apply the retention policy and rescan the advertised binaries.
 ///
 /// Rescanning is what lets an operator upgrade their team by copying a file:
@@ -821,6 +1087,13 @@ async fn sweeper(state: AppState, every: String) {
             ),
             Ok(_) => {}
             Err(e) => tracing::warn!("retention sweep failed: {e:#}"),
+        }
+
+        // Sessions age out the same way artifacts do, and this is the one
+        // place already asking "what's past its time?" on a timer.
+        match state.sessions.prune_expired() {
+            0 => {}
+            dropped => tracing::info!("retention: dropped {dropped} expired session(s)"),
         }
 
         let rescanned = state.config.releases.scan();
@@ -1251,6 +1524,103 @@ mod tests {
     }
 
     /// The admin page has to be reachable without credentials — it is where you
+    /// The artifact everyone depends on is the one the server stops hearing
+    /// about, because after the first download every client answers from its
+    /// own mirror. Retention ages from last use, so without this the most
+    /// useful entry in a shared cache is the one most likely to be evicted.
+    #[tokio::test]
+    async fn a_locally_reused_entry_can_be_kept_alive_without_downloading_it() {
+        let dir = scratch("touch");
+        let state = open_state(&dir);
+        let app = router(state.clone());
+
+        let project = state
+            .projects
+            .resolve(None, "monorepo", None)
+            .expect("project registers");
+        let scoped = scoped_key(&project.id, "abc123");
+
+        // An entry that was built a fortnight ago and never fetched since.
+        let stale = "2026-08-09T00:00:00+00:00".to_string();
+        state
+            .store
+            .write_manifest(&Entry {
+                key: scoped.clone(),
+                target: "build".to_string(),
+                workspace: project.id.clone(),
+                inputs: Vec::new(),
+                outputs: Vec::new(),
+                env: Default::default(),
+                upstream: Default::default(),
+                created_at: stale.clone(),
+                last_used_at: Some(stale.clone()),
+                size: 0,
+                duration_ms: 0,
+            })
+            .unwrap();
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::post(format!("/api/projects/{}/cache/touch", project.id))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "keys": ["abc123", "never-existed"] }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let entry = state.store.get(&scoped).unwrap().expect("still stored");
+        assert!(
+            entry.last_touched() > stale.as_str(),
+            "the entry must age from now, not from when it was last downloaded"
+        );
+
+        // A key the server has never held is the client reporting something
+        // that only ever existed locally, not an error.
+        assert!(
+            state
+                .store
+                .get(&scoped_key(&project.id, "never-existed"))
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    /// A request log is a file somebody will eventually paste into a ticket, so
+    /// it must show that a credential was sent without showing what it was.
+    #[test]
+    fn logged_headers_keep_the_scheme_and_drop_the_secret() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            "Bearer s3cr3t-token".parse().unwrap(),
+        );
+        headers.insert(header::COOKIE, "session=s3cr3t".parse().unwrap());
+        headers.insert("x-api-key", "s3cr3t".parse().unwrap());
+        headers.insert(header::USER_AGENT, "ciabatta/0.2.1".parse().unwrap());
+        headers.insert(header::CONTENT_LENGTH, "4096".parse().unwrap());
+
+        let rendered = render_headers(&headers);
+        assert!(
+            !rendered.contains("s3cr3t"),
+            "a credential reached the log: {rendered}"
+        );
+        assert!(
+            rendered.contains("authorization=Bearer <redacted>"),
+            "the *shape* of the credential is most of a 401 investigation: {rendered}"
+        );
+        assert!(rendered.contains("cookie=<redacted>"), "{rendered}");
+        assert!(rendered.contains("x-api-key=<redacted>"), "{rendered}");
+
+        // Everything else is logged as sent — that's the point.
+        assert!(rendered.contains("user-agent=ciabatta/0.2.1"), "{rendered}");
+        assert!(rendered.contains("content-length=4096"), "{rendered}");
+    }
+
     /// sign in to get them.
     #[tokio::test]
     async fn the_admin_page_is_served_without_a_session() {

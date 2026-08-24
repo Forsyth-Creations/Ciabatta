@@ -149,7 +149,7 @@ async fn status(
 
     let cache = config.cache.unwrap_or_default();
     Ok(Json(json!({
-        "enabled": cache.enabled,
+        "enabled": cache.is_on(),
         "why_disabled": cache.why_disabled(),
         "inputs": cache.inputs,
         "outputs": cache.outputs,

@@ -217,21 +217,66 @@ pub fn commands_of(step: &RunStep) -> Vec<String> {
     commands
 }
 
-/// Merge cache settings from the levels that can declare them, most specific
-/// winning.
+/// Merge cache settings from the three levels that can declare them —
+/// workspace, recipe, target — with the most specific level winning each field
+/// it actually mentions.
 ///
 /// A monorepo wants `cache.inputs` written once per workspace, not once per
-/// step — but a single step that reads something unusual has to be able to say
-/// so. So a step's settings, when it has any, replace the workspace's rather
-/// than merging field by field: half-inherited inputs would be very hard to
-/// reason about, and getting inputs wrong is how a cache serves the wrong
-/// answer.
+/// target; but a target that reads a file none of its neighbours do, or that
+/// switches on a variable of its own, has to be able to say so without
+/// restating everything else. So each level is layered over the one above it
+/// field by field: a list the target declares replaces the inherited one whole
+/// (half-merged input globs would be very hard to reason about), and a list it
+/// leaves out is inherited unchanged.
+///
+/// `enabled` is the field that makes this safe rather than clever, and it is
+/// why it is an `Option`. A target writing
+///
+/// ```yaml
+/// cache:
+///   env: [PROFILE]
+/// ```
+///
+/// means "I also depend on PROFILE" — it must not silently turn off the
+/// caching its workspace switched on, and it must not silently turn caching
+/// *on* for a workspace that never asked. Only an explicit `enabled:` at some
+/// level decides, and the most specific explicit one wins, so a single target
+/// can still opt out with `enabled: false`.
 pub fn effective(
     workspace: Option<&CacheConfig>,
     recipe: Option<&CacheConfig>,
     step: Option<&CacheConfig>,
 ) -> CacheConfig {
-    step.or(recipe).or(workspace).cloned().unwrap_or_default()
+    let mut merged = workspace.cloned().unwrap_or_default();
+    for over in [recipe, step].into_iter().flatten() {
+        layer(&mut merged, over);
+    }
+    merged
+}
+
+/// Apply one level's declarations over what it inherited.
+fn layer(base: &mut CacheConfig, over: &CacheConfig) {
+    if let Some(enabled) = over.enabled {
+        base.enabled = Some(enabled);
+    }
+    if !over.inputs.is_empty() {
+        base.inputs = over.inputs.clone();
+    }
+    if !over.outputs.is_empty() {
+        base.outputs = over.outputs.clone();
+    }
+    if !over.env.is_empty() {
+        base.env = over.env.clone();
+    }
+    if !over.exclude.is_empty() {
+        base.exclude = over.exclude.clone();
+    }
+    // The remote is a property of the project, not of a target within it (see
+    // `Session::warn_about_ignored_remotes`), so a level only ever adds one
+    // where none was inherited.
+    if over.remote.is_some() {
+        base.remote = over.remote.clone();
+    }
 }
 
 /// Where the store for a project lives.
@@ -292,7 +337,7 @@ mod tests {
         let context = Fixed {
             dir: dir.clone(),
             config: CacheConfig {
-                enabled: true,
+                enabled: Some(true),
                 inputs: vec!["src/**/*".into()],
                 outputs: vec!["dist/**/*".into()],
                 ..Default::default()
@@ -334,7 +379,7 @@ mod tests {
         let context = Fixed {
             dir: dir.clone(),
             config: CacheConfig {
-                enabled: true,
+                enabled: Some(true),
                 inputs: vec!["src/**/*".into()],
                 outputs: vec!["dist/**/*".into()],
                 ..Default::default()
@@ -373,7 +418,7 @@ mod tests {
         let context = Fixed {
             dir: dir.clone(),
             config: CacheConfig {
-                enabled: true,
+                enabled: Some(true),
                 inputs: vec!["src/**/*".into()],
                 outputs: vec!["dist/**/*".into()],
                 ..Default::default()
@@ -446,27 +491,56 @@ mod tests {
     }
 
     #[test]
-    fn the_most_specific_cache_settings_win_whole() {
+    fn a_target_declares_only_what_differs_and_inherits_the_rest() {
         let workspace = CacheConfig {
-            enabled: true,
+            enabled: Some(true),
             inputs: vec!["src/**/*".into()],
             outputs: vec!["dist/**/*".into()],
-            ..Default::default()
-        };
-        let step_level = CacheConfig {
-            enabled: true,
-            inputs: vec!["proto/**/*".into()],
+            exclude: vec!["dist".into()],
             ..Default::default()
         };
 
         assert_eq!(effective(Some(&workspace), None, None), workspace);
-        assert_eq!(
-            effective(Some(&workspace), None, Some(&step_level)),
-            step_level,
-            "a step's settings replace the workspace's rather than merging — \
-             half-inherited inputs would be very hard to reason about"
-        );
         assert_eq!(effective(None, None, None), CacheConfig::default());
+
+        // The whole point of per-target dependencies: naming one extra variable
+        // must not cost the target its inputs, its outputs, or its caching.
+        let declares_env = CacheConfig {
+            env: vec!["PROFILE".into()],
+            ..Default::default()
+        };
+        let merged = effective(Some(&workspace), None, Some(&declares_env));
+        assert_eq!(merged.env, vec!["PROFILE".to_string()]);
+        assert_eq!(merged.inputs, workspace.inputs);
+        assert_eq!(merged.outputs, workspace.outputs);
+        assert_eq!(merged.exclude, workspace.exclude);
+        assert!(
+            merged.is_on(),
+            "declaring a dependency must not turn caching off"
+        );
+
+        // A list it does declare replaces the inherited one whole.
+        let declares_inputs = CacheConfig {
+            inputs: vec!["proto/**/*".into()],
+            ..Default::default()
+        };
+        let merged = effective(Some(&workspace), None, Some(&declares_inputs));
+        assert_eq!(merged.inputs, vec!["proto/**/*".to_string()]);
+        assert_eq!(merged.outputs, workspace.outputs);
+
+        // And an explicit `enabled: false` on the target still wins.
+        let opts_out = CacheConfig {
+            enabled: Some(false),
+            ..Default::default()
+        };
+        assert!(!effective(Some(&workspace), None, Some(&opts_out)).is_on());
+
+        // A target can't switch caching on for a workspace that never asked.
+        let no_workspace_opinion = CacheConfig {
+            inputs: vec!["proto/**/*".into()],
+            ..Default::default()
+        };
+        assert!(!effective(None, None, Some(&no_workspace_opinion)).is_on());
     }
 
     #[test]

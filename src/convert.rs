@@ -666,7 +666,7 @@ echo "api: built with LOG_LEVEL=${LOG_LEVEL:-info}"
         // inputs can't be inferred, and caching on wrong inputs serves stale
         // artifacts.
         let cache = step.cache.as_ref().expect("cache section written");
-        assert!(!cache.enabled);
+        assert!(!cache.is_on());
         assert!(cache.inputs.is_empty());
         assert_eq!(cache.outputs, vec!["dist/**/*".to_string()]);
     }

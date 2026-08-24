@@ -9,10 +9,12 @@
 //! [`crate::daemon::routes::run`].
 
 pub mod cached;
+pub mod deps;
 pub mod engine;
 pub mod envdeps;
 pub mod filter;
 pub mod view;
+pub mod why;
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};

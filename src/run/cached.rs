@@ -39,6 +39,16 @@ pub struct Session {
     fingerprints: BTreeMap<String, String>,
     /// Remote cache to consult, when this project has one configured.
     remote: Option<Remote>,
+    /// Keys this run reused without asking the remote for them.
+    ///
+    /// The first time an entry is restored it is mirrored into the local store,
+    /// and from then on every build is answered locally without a byte crossing
+    /// the network. That is the point — but it means the shared cache stops
+    /// hearing about the artifact everyone depends on, and its retention policy,
+    /// which ages entries from last use, eventually evicts the most useful thing
+    /// in it. So the uses it can't see are collected here and reported once,
+    /// when the run finishes.
+    reused_locally: Vec<String>,
     /// What happened, for the summary at the end.
     pub stats: Stats,
 }
@@ -138,6 +148,7 @@ impl Session {
             recipe_cache,
             fingerprints: BTreeMap::new(),
             remote: None,
+            reused_locally: Vec::new(),
             stats: Stats::default(),
         })
     }
@@ -274,6 +285,7 @@ impl Session {
         match decision {
             Decision::Fresh { key, outputs } => {
                 self.stats.fresh += 1;
+                self.keep_alive(&key);
                 self.record_saved(&key);
                 self.remember(&step.name, &dir, &config)?;
                 Ok(Action::Skip {
@@ -281,9 +293,12 @@ impl Session {
                 })
             }
             Decision::Hit { key, source, .. } => {
-                // A local hit still has to be restored; a remote one already was.
+                // A local hit still has to be restored; a remote one already was
+                // — and a remote one told the server it was wanted on the way
+                // past, so only the local case needs reporting.
                 if source == Source::Local {
                     self.store.restore(&key, &dir)?;
+                    self.keep_alive(&key);
                 }
                 self.stats.restored += 1;
                 self.record_saved(&key);
@@ -386,6 +401,34 @@ impl Session {
             )
             .await;
         }
+    }
+
+    /// Note that an entry was used, for the end-of-run report to the server.
+    fn keep_alive(&mut self, key: &str) {
+        // Only worth collecting when there's a server to tell. A step reused
+        // twice in one graph is one use as far as retention is concerned.
+        if self.remote.is_some() && !self.reused_locally.iter().any(|k| k == key) {
+            self.reused_locally.push(key.to_string());
+        }
+    }
+
+    /// Tell the remote cache which of its entries this run relied on.
+    ///
+    /// Called once, after the graph finishes, so a two-hundred-step build sends
+    /// one request rather than two hundred. Entirely best-effort: the build has
+    /// already succeeded, and nothing here is worth reporting to whoever ran it.
+    pub async fn finish(&mut self) {
+        let Some(remote) = &self.remote else { return };
+        if self.reused_locally.is_empty() {
+            return;
+        }
+        crate::remote_cache::client::try_touch(
+            &remote.client,
+            &remote.project,
+            &self.reused_locally,
+        )
+        .await;
+        self.reused_locally.clear();
     }
 
     /// Point out a `cache.remote` declared on a sub-workspace, which does

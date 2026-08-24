@@ -38,3 +38,33 @@ ai:
   model: llama3.1:8b
   api_key_env: OPENAI_API_KEY
   tls_verify: true
+
+cache:
+  # What this workspace's builds read and write. Getting `inputs` right
+  # is the part that matters: a build that reads a file not listed here
+  # will be handed a stale result when that file changes.
+  enabled: true
+  inputs:
+    - "src/**/*"   # source
+    - "Cargo.toml"   # the Rust manifest
+    - "Cargo.lock"   # pinned Rust dependencies
+    - "package.json"   # the Node manifest
+    - "Dockerfile"   # the image definition
+  outputs:
+    - "target/release/ciabatta"
+  # Never treated as inputs, so a build can't invalidate itself.
+  exclude:
+    - ".git"
+    - "node_modules"
+    - "target"
+    - "target/debug"
+    - "target/release"
+  # Variables the build's result depends on. A build that behaves
+  # differently under a different PROFILE must list it here.
+  env: []
+  remote:
+    project: ac795309-137d-47c4-a9ac-e9b84af48d8f
+    url: http://127.0.0.1:8380/
+    # `project` is filled in by the server the first time this
+    # workspace connects. Commit it: it's what makes every checkout
+    # and every CI runner resolve to the same project.

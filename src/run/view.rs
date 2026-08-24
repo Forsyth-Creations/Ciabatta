@@ -90,6 +90,16 @@ pub struct StepView {
     /// conditions. Together with `env` these are the edges the graph view
     /// draws between a variable and the steps that depend on it.
     env_refs: Vec<String>,
+
+    // ─── Dependencies ───────────────────────────────────────────────────────
+    /// The five things this target is defined by: the files it reads, the files
+    /// it writes, the variables it keys on, the commands it runs, and the
+    /// targets it needs.
+    ///
+    /// The graph already showed the last of those. The other four were only
+    /// ever visible by opening the config, which is precisely when somebody is
+    /// asking why a step rebuilt — so the answer belongs next to the step.
+    deps: crate::run::deps::TargetDeps,
 }
 
 #[derive(Serialize, Clone)]
@@ -265,6 +275,15 @@ pub fn initial_state(
             .with_context(|| format!("Recipe '{name}' has no [run] definition"))?;
         let resolved = resolve_run(run, name, root)?;
 
+        // One walk for the whole graph, keyed by step name: every node's
+        // inputs, outputs, declared variables and commands, resolved through
+        // the same settings the cache itself uses.
+        let mut deps: std::collections::HashMap<String, crate::run::deps::TargetDeps> =
+            crate::run::deps::collect(config, root, &resolved.steps)
+                .into_iter()
+                .map(|target| (target.name.clone(), target))
+                .collect();
+
         let mut steps = Vec::new();
         let mut edges = Vec::new();
         for step in &resolved.steps {
@@ -311,6 +330,10 @@ pub fn initial_state(
                     .map(|(key, value)| (key.clone(), envdeps::shown(key, value)))
                     .collect(),
                 env_refs: envdeps::step_refs(step),
+                // A recovery node has no build and so no dependencies; the
+                // default is the honest empty answer rather than a missing key
+                // the viewer would have to special-case.
+                deps: deps.remove(&step.name).unwrap_or_default(),
             });
         }
 

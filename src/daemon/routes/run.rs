@@ -21,6 +21,7 @@ use axum::extract::{Path, State};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use futures::FutureExt;
 use futures::stream::Stream;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -40,6 +41,24 @@ pub fn router() -> Router<AppState> {
         .route("/api/run/runs/{id}", get(detail))
         .route("/api/run/runs/{id}/stream", get(stream))
         .route("/api/run/runs/{id}/choose", post(choose))
+}
+
+/// Take a lock, surviving a poisoned one.
+///
+/// A run's state is touched by the engine's fold task and by every HTTP handler
+/// that reads it. If one of them panics while holding this lock, the default
+/// `.unwrap()` turns that single fault into a panic on *every* subsequent
+/// request — burying the one panic that mattered under a hundred that didn't.
+/// The data behind it is a view model rebuilt from the next update, so reading
+/// it after a panic is worth doing and worth saying out loud.
+fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|poisoned| {
+        tracing::error!(
+            "recovering a run lock poisoned by an earlier panic — the panic \
+             itself is logged above, and is the fault worth reading"
+        );
+        poisoned.into_inner()
+    })
 }
 
 // ─── Runs ───────────────────────────────────────────────────────────────────
@@ -62,7 +81,7 @@ pub struct Run {
 
 impl Run {
     fn summary(&self) -> Value {
-        let state = self.state.lock().unwrap();
+        let state = lock(&self.state);
         json!({
             "id": self.id,
             "project": self.project,
@@ -90,16 +109,16 @@ impl Runs {
 
     fn insert(&self, run: Run) -> Arc<Run> {
         let run = Arc::new(run);
-        self.inner.lock().unwrap().insert(run.id, run.clone());
+        lock(&self.inner).insert(run.id, run.clone());
         run
     }
 
     fn get(&self, id: u64) -> Option<Arc<Run>> {
-        self.inner.lock().unwrap().get(&id).cloned()
+        lock(&self.inner).get(&id).cloned()
     }
 
     fn list(&self) -> Vec<Arc<Run>> {
-        let mut all: Vec<Arc<Run>> = self.inner.lock().unwrap().values().cloned().collect();
+        let mut all: Vec<Arc<Run>> = lock(&self.inner).values().cloned().collect();
         all.sort_by_key(|r| std::cmp::Reverse(r.id));
         all
     }
@@ -267,18 +286,75 @@ async fn create(
         changed: Arc::new(tokio::sync::Notify::new()),
     });
 
+    let id = run.id;
+    tracing::info!(
+        run = id,
+        root = %root.display(),
+        recipes = ?names,
+        dry_run = payload.dry_run,
+        "starting run"
+    );
+
+    // Why the run stopped, when it stopped for a reason the engine couldn't
+    // report itself. Written by the run task before it drops its sender, and
+    // read by the fold task once the channel closes — which is the moment it
+    // knows nothing else is coming.
+    let stopped: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+
     // Fold progress into the view model, waking SSE subscribers as it lands.
     {
         let seq = run.seq.clone();
         let changed = run.changed.clone();
+        let stopped = stopped.clone();
+        let expected = names.clone();
         tokio::spawn(async move {
+            let mut reported: Vec<String> = Vec::new();
             while let Some(update) = progress_rx.recv().await {
-                gui_state.lock().unwrap().apply(update);
+                // Logged here rather than in the engine because this is the one
+                // place every update passes through, and because a daemon that
+                // dies mid-run leaves this trail: the last step logged is the
+                // step it died in.
+                trace(id, &update);
+                match &update {
+                    runner::ProgressUpdate::Completed(recipe)
+                    | runner::ProgressUpdate::Failed(recipe, _) => reported.push(recipe.clone()),
+                    _ => {}
+                }
+                lock(&gui_state).apply(update);
                 seq.fetch_add(1, Ordering::Relaxed);
                 changed.notify_waiters();
             }
-            // The engine dropped its sender: the run is over. Wake subscribers
-            // one last time so they see the final state and close.
+
+            // The senders are gone: nothing further can arrive. A recipe with no
+            // verdict by now will never get one — its task died without
+            // reporting, which is what a panic inside the engine looks like from
+            // out here. Saying so is the difference between a run that shows an
+            // error and a run that spins in the browser until someone reloads.
+            let orphaned: Vec<String> = expected
+                .into_iter()
+                .filter(|name| !reported.contains(name))
+                .collect();
+
+            if !orphaned.is_empty() {
+                let reason = lock(&stopped)
+                    .clone()
+                    .unwrap_or_else(|| "the run stopped without reporting why".to_string());
+                tracing::error!(
+                    run = id,
+                    recipes = ?orphaned,
+                    "the run ended without a verdict: {reason}"
+                );
+                for name in orphaned {
+                    lock(&gui_state).apply(runner::ProgressUpdate::Failed(
+                        name,
+                        format!("{reason} — see `ciabatta daemon logs`"),
+                    ));
+                    seq.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+
+            // Wake subscribers one last time so they see the final state and
+            // close.
             changed.notify_waiters();
         });
     }
@@ -290,7 +366,10 @@ async fn create(
         ..Default::default()
     };
     tokio::spawn(async move {
-        let _ = runner::run_all_ctl(
+        // `catch_unwind` for a panic in the engine's own frame; tokio turns a
+        // panic in a task the engine spawned into an `Err` instead, so both
+        // shapes have to be handled to end up with one explanation.
+        let outcome = std::panic::AssertUnwindSafe(runner::run_all_ctl(
             &config,
             &root,
             &names,
@@ -299,11 +378,88 @@ async fn create(
             RunMode::Run,
             ctl,
             progress_tx,
-        )
+        ))
+        .catch_unwind()
         .await;
+
+        let reason = match outcome {
+            Ok(Ok(())) => {
+                tracing::info!(run = id, "run finished");
+                return;
+            }
+            Ok(Err(err)) => {
+                tracing::error!(run = id, "run failed: {err:#}");
+                format!("{err:#}")
+            }
+            Err(payload) => {
+                let message = payload
+                    .downcast_ref::<&str>()
+                    .map(|s| s.to_string())
+                    .or_else(|| payload.downcast_ref::<String>().cloned())
+                    .unwrap_or_else(|| "<non-string panic payload>".to_string());
+                tracing::error!(
+                    run = id,
+                    "the run's engine panicked: {message} — the panic entry \
+                     above has the location and stack"
+                );
+                format!("ciabatta itself panicked: {message}")
+            }
+        };
+
+        // For the fold task to hand to any recipe the engine never reported on.
+        // Set before this task ends, because ending is what closes the channel
+        // and sends the fold task looking for it.
+        *lock(&stopped) = Some(reason);
     });
 
     Ok(Json(run.summary()))
+}
+
+/// One log line per progress update, at the level its content deserves.
+///
+/// Step boundaries are `info` because they are the timeline somebody reads
+/// after a crash; a step's own output is `debug`, because a build's thousand
+/// lines are not that timeline — but they are there under
+/// `CIABATTA_LOG=ciabatta=debug` when the crash is inside one of them.
+fn trace(run: u64, update: &runner::ProgressUpdate) {
+    use runner::ProgressUpdate as P;
+    match update {
+        P::Started(recipe) => tracing::info!(run, %recipe, "recipe started"),
+        P::StageStarted { recipe, stage } => {
+            tracing::info!(run, %recipe, stage = ?stage, "stage started")
+        }
+        P::StageFinished { recipe, stage, ran } => {
+            tracing::debug!(run, %recipe, stage = ?stage, ran, "stage finished")
+        }
+        P::TransferProgress {
+            recipe,
+            done,
+            total,
+        } => tracing::debug!(run, %recipe, done, total, "transfer progress"),
+        P::Log(recipe, line) => tracing::debug!(run, %recipe, "{line}"),
+        P::StepStarted { recipe, step } => tracing::info!(run, %recipe, %step, "step started"),
+        P::StepFinished { recipe, step, ok } => {
+            if *ok {
+                tracing::info!(run, %recipe, %step, "step finished")
+            } else {
+                tracing::warn!(run, %recipe, %step, "step failed")
+            }
+        }
+        P::StepSkipped {
+            recipe,
+            step,
+            reason,
+        } => tracing::info!(run, %recipe, %step, %reason, "step skipped"),
+        P::StepLog { recipe, step, line } => tracing::debug!(run, %recipe, %step, "{line}"),
+        P::StepNeedsChoice {
+            recipe,
+            step,
+            message,
+            ..
+        } => tracing::info!(run, %recipe, %step, %message, "step is waiting for a choice"),
+        P::Completed(recipe) => tracing::info!(run, %recipe, "recipe completed"),
+        P::Failed(recipe, err) => tracing::error!(run, %recipe, "recipe failed: {err}"),
+    }
 }
 
 /// Every variable the named recipes need before they can start, given `env`.
@@ -418,7 +574,7 @@ async fn choose(
 
 /// The run's view state plus its identity, as one payload.
 fn snapshot(run: &Run) -> Value {
-    let mut value = serde_json::to_value(&*run.state.lock().unwrap()).unwrap_or_else(|_| json!({}));
+    let mut value = serde_json::to_value(&*lock(&run.state)).unwrap_or_else(|_| json!({}));
     value["run"] = run.summary();
     value["seq"] = json!(run.seq.load(Ordering::Relaxed));
     value
@@ -434,6 +590,25 @@ fn get_run(state: &AppState, id: u64) -> RouteResult<Arc<Run>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The reason [`lock`] exists: one panic must not turn every later read of
+    /// a run into a panic of its own, because the first one is the one worth
+    /// reading and the rest are noise on top of it.
+    #[test]
+    fn a_poisoned_run_lock_is_recovered_rather_than_re_panicking() {
+        let value = Arc::new(Mutex::new(7));
+
+        let poisoner = Arc::clone(&value);
+        let panicked = std::thread::spawn(move || {
+            let _guard = poisoner.lock().unwrap();
+            panic!("while holding the lock");
+        })
+        .join();
+        assert!(panicked.is_err(), "the helper thread should have panicked");
+        assert!(value.is_poisoned());
+
+        assert_eq!(*lock(&value), 7);
+    }
     use crate::daemon::app::router;
     use crate::daemon::app::tests::test_state;
 

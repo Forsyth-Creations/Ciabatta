@@ -408,14 +408,14 @@ pub fn overriding_steps(config: &CiabattaConfig) -> Vec<(String, bool)> {
 
     for (name, entry) in &config.recipes {
         if let Some(cache) = &entry.cache {
-            found.push((name.clone(), cache.enabled));
+            found.push((name.clone(), cache.is_on()));
         }
         let Some(run) = entry.run_recipe() else {
             continue;
         };
         for step in &run.steps {
             if let Some(cache) = &step.cache {
-                found.push((format!("{name}.{}", step.name), cache.enabled));
+                found.push((format!("{name}.{}", step.name), cache.is_on()));
             }
         }
     }
@@ -696,7 +696,7 @@ mod tests {
         let config: CiabattaConfig =
             crate::format::from_str(&block, crate::format::Format::Yaml).unwrap();
         let cache = config.cache.unwrap();
-        assert!(!cache.enabled);
+        assert!(!cache.is_on());
         assert!(cache.inputs.is_empty());
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -718,7 +718,7 @@ mod tests {
             .unwrap_or_else(|e| panic!("generated cache section didn't parse: {e}\n\n{block}"));
 
         let cache = config.cache.expect("cache section written");
-        assert!(cache.enabled);
+        assert!(cache.is_on());
         assert!(cache.inputs.contains(&"src/**/*".to_string()));
         assert_eq!(cache.outputs, vec!["dist/**/*".to_string()]);
         assert!(cache.exclude.contains(&"dist".to_string()));
@@ -754,7 +754,7 @@ mod tests {
 
         let config: CiabattaConfig = crate::format::load(&path).unwrap();
         assert_eq!(config.workspace.unwrap().name.as_deref(), Some("api"));
-        assert!(config.cache.unwrap().enabled);
+        assert!(config.cache.unwrap().is_on());
 
         // A second run refuses rather than clobbering what's there…
         let err = write_cache_section(&dir, &proposal, true, None, false).unwrap_err();
@@ -763,7 +763,7 @@ mod tests {
         // …unless asked to.
         assert!(write_cache_section(&dir, &proposal, false, None, true).is_ok());
         let config: CiabattaConfig = crate::format::load(&path).unwrap();
-        assert!(!config.cache.unwrap().enabled);
+        assert!(!config.cache.unwrap().is_on());
         assert_eq!(
             rendered.matches("\ncache:").count(),
             1,
@@ -801,7 +801,7 @@ mod tests {
             .expect("a step-level cache: must not block the workspace section");
 
         let config: CiabattaConfig = crate::format::load(&path).unwrap();
-        assert!(config.cache.expect("workspace section written").enabled);
+        assert!(config.cache.expect("workspace section written").is_on());
         assert!(
             config.recipes["build"].run_recipe().unwrap().steps[0]
                 .cache

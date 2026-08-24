@@ -1296,7 +1296,6 @@ mod tests {
             verify: Some("cargo test".into()),
             max_tokens: Some(16384),
             max_tool_rounds: Some(80),
-            ..Default::default()
         };
         let block = format!("ai:\n{}", crate::format::yaml_block(&ai).unwrap());
         let out = crate::format::set_top_level("system:\n  ci: github\n", "ai", &block);

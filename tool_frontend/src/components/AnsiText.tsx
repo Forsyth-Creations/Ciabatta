@@ -206,47 +206,53 @@ function readExtendedColor(
 /**
  * The 16 named colours, per theme mode.
  *
- * A terminal's palette assumes its own background; ours is a warm off-white or a
- * warm near-black, and the raw xterm values fail against both — `bright white`
- * is invisible on paper, plain `blue` is unreadable on black. These are the
- * standard hues held to a legible contrast against each mode's surface.
+ * A terminal's palette assumes its own background; ours is Cloud or Midnight,
+ * and the raw xterm values fail against both — `bright white` is invisible on
+ * paper, plain `blue` is unreadable on Midnight. So these are the brand's own
+ * hues (see `theme.ts`) mapped onto the eight ANSI names, held to a legible
+ * contrast against each mode's surface.
+ *
+ * The mapping is by *meaning*, not by hue arithmetic: a tool writing "green"
+ * means success, and Spring and Pine are what success looks like here. Magenta
+ * and cyan have no brand equivalent and are held at the same lightness as their
+ * neighbours, so a colourful build log still reads as one palette.
  */
 const PALETTE: Record<"light" | "dark", string[]> = {
   dark: [
-    "#5c554c", // black
-    "#e57373", // red
-    "#7ec97e", // green
-    "#e0b458", // yellow
-    "#79a6d2", // blue
-    "#c792ea", // magenta
-    "#6fc3c9", // cyan
-    "#d6cfc5", // white
-    "#7d746a", // bright black
-    "#ff8a80",
-    "#a5e0a5",
-    "#f2ce7b",
-    "#a3c6e8",
-    "#dcb0f7",
-    "#8fe0e5",
-    "#f5efe6",
+    "#3A4A5C", // black — Charcoal lifted toward Navy, so it is not invisible
+    "#F17D6A", // red — Coral
+    "#7BC78C", // green — Spring
+    "#F0C341", // yellow — Gold
+    "#6D9BCC", // blue — Sky
+    "#B98BD1", // magenta
+    "#6FC3C9", // cyan
+    "#D1D1D1", // white — Mist
+    "#6A6A6A", // bright black — Slate
+    "#F79E8E", // bright red
+    "#9BD8A8", // bright green
+    "#F5D36F", // bright yellow
+    "#8FB4DA", // bright blue
+    "#CDA8E0", // bright magenta
+    "#8FE0E5", // bright cyan
+    "#F4F4F4", // bright white — Cloud
   ],
   light: [
-    "#3b342c", // black
-    "#c62828", // red
-    "#2e7d32", // green
-    "#8a6100", // yellow
-    "#1565c0", // blue
-    "#7b1fa2", // magenta
-    "#00696e", // cyan
-    "#6b6259", // white — a mid grey, since true white is not text on paper
-    "#8a8078", // bright black
-    "#e53935",
-    "#388e3c",
-    "#a97400",
-    "#1976d2",
-    "#8e24aa",
-    "#00838f",
-    "#4a423a",
+    "#3A3A3A", // black — Charcoal
+    "#AE3D29", // red — Coral, deepened to carry text on Cloud
+    "#4A8D62", // green — Pine
+    "#9A6512", // yellow — Amber, deepened for the same reason
+    "#204D71", // blue — Forsyth Blue
+    "#7B3E96", // magenta
+    "#0F6F74", // cyan
+    "#6A6A6A", // white — Slate, since true white is not text on paper
+    "#A0A0A0", // bright black — Gray
+    "#C64A33", // bright red
+    "#3F7A54", // bright green
+    "#D98F2D", // bright yellow — Amber
+    "#4576A6", // bright blue — Steel
+    "#8E24AA", // bright magenta
+    "#00838F", // bright cyan
+    "#3A3A3A", // bright white — back to Charcoal: this is the darkest ink
   ],
 };
 

@@ -18,6 +18,7 @@
 //! poison it.
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use anyhow::{Context, Result, bail};
@@ -313,18 +314,72 @@ impl Session {
     }
 }
 
-/// The sessions a running server has issued.
+/// The sessions a server has issued, surviving its restarts.
 ///
-/// In memory only: a restart signs everybody out, which for a cache is an
-/// acceptable trade against persisting anything token-shaped to disk.
+/// **No token is stored.** A session is keyed by the SHA-256 of its bearer
+/// token and holds nothing else that could be replayed — exactly the property
+/// that makes `users.json` safe to keep next to the artifacts, and the reason
+/// this file is safe too. Somebody who reads it learns who is logged in and
+/// when their session lapses; they cannot log in as any of them.
+///
+/// That's what makes durability the right default. A remote cache is restarted
+/// for the reasons any server is — a config edit, a new binary to hand out, a
+/// host reboot — and signing out every developer and every CI runner each time
+/// turns a thirty-second restart into a morning of `remote-cache login`. Worse,
+/// it does it silently: the next build just starts missing the cache.
+///
+/// Expired sessions are dropped when the file is loaded and whenever one is
+/// touched, so the file cannot grow without bound.
+///
+/// Persistence is best-effort in one direction only: failing to *write* costs
+/// the sessions issued since the last successful write and is logged, but never
+/// fails a login. Failing to *read* — a truncated or hand-edited file — starts
+/// empty, which is the old behaviour and asks people to log in again rather
+/// than guessing at what the file meant.
 #[derive(Debug, Default)]
 pub struct Sessions {
+    /// Where the table is kept, or `None` for a purely in-memory table (tests,
+    /// and any future embedded use).
+    path: Option<PathBuf>,
     inner: Mutex<HashMap<String, Session>>,
 }
 
 impl Sessions {
-    pub fn new() -> Self {
-        Self::default()
+    /// Open (or create) the durable session table under `storage`.
+    ///
+    /// `Sessions::default()` is the in-memory table that does not outlive the
+    /// process — what a test wants, and nothing a server should use.
+    ///
+    /// Never fails: a cache whose sessions file can't be read is a cache whose
+    /// users log in again, not a cache that won't start.
+    pub fn open(storage: &Path) -> Self {
+        let path = storage.join("sessions.json");
+        let mut loaded: HashMap<String, Session> = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|raw| serde_json::from_str::<Vec<Session>>(&raw).ok())
+            .map(|sessions| {
+                sessions
+                    .into_iter()
+                    .map(|session| (session.token_sha256.clone(), session))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let before = loaded.len();
+        loaded.retain(|_, session| session.is_live());
+        if before > 0 {
+            tracing::info!(
+                "restored {} live session(s) from {} ({} expired)",
+                loaded.len(),
+                path.display(),
+                before - loaded.len()
+            );
+        }
+
+        Sessions {
+            path: Some(path),
+            inner: Mutex::new(loaded),
+        }
     }
 
     /// Issue a session for `identity`, returning the bearer token to hand back.
@@ -337,31 +392,66 @@ impl Sessions {
             issued_at: now.to_rfc3339(),
             expires_at: (now + chrono::Duration::seconds(ttl_seconds)).to_rfc3339(),
         };
-        self.inner
-            .lock()
-            .unwrap()
-            .insert(session.token_sha256.clone(), session.clone());
+        {
+            let mut guard = self.inner.lock().unwrap();
+            guard.insert(session.token_sha256.clone(), session.clone());
+            self.save(&guard);
+        }
         (token, session)
     }
 
-    /// Look a bearer token up, dropping it if it has expired.
-    pub fn resolve(&self, token: &str) -> Option<Identity> {
+    /// Look a bearer token up, saying *why* it didn't work.
+    ///
+    /// The distinction matters to whoever is reading the error. "Expired" is
+    /// something the client can see coming and the server can date; "unknown"
+    /// means this cache has no record of the session at all — it was revoked,
+    /// or it was issued by a different server, or (before sessions were
+    /// persisted) the server has restarted since. Answering "expired" to all
+    /// three sends people looking at a clock when the clock is fine.
+    pub fn lookup(&self, token: &str) -> Lookup {
         let hash = crate::cache::hash_bytes(token.as_bytes());
         let mut guard = self.inner.lock().unwrap();
         match guard.get(&hash) {
-            Some(session) if session.is_live() => Some(session.identity.clone()),
-            Some(_) => {
+            Some(session) if session.is_live() => Lookup::Live(session.identity.clone()),
+            Some(session) => {
+                let expired_at = session.expires_at.clone();
                 guard.remove(&hash);
-                None
+                self.save(&guard);
+                Lookup::Expired { at: expired_at }
             }
-            None => None,
+            None => Lookup::Unknown,
         }
     }
 
     /// End a session.
     pub fn revoke(&self, token: &str) -> bool {
         let hash = crate::cache::hash_bytes(token.as_bytes());
-        self.inner.lock().unwrap().remove(&hash).is_some()
+        let mut guard = self.inner.lock().unwrap();
+        let removed = guard.remove(&hash).is_some();
+        if removed {
+            // A logout that a restart undoes is not a logout.
+            self.save(&guard);
+        }
+        removed
+    }
+
+    /// Drop every session whose time is up, and say how many went.
+    ///
+    /// Called on the server's retention sweep, alongside the artifact eviction
+    /// it already does. Expiry is deliberately *not* enforced by pruning on
+    /// every write: a session that has lapsed but is still in the table is what
+    /// lets [`Self::lookup`] answer "it expired at 3pm on Tuesday" rather than
+    /// "never heard of it", and that is by far the more useful of the two to
+    /// somebody whose credential looks perfectly fine from their side.
+    pub fn prune_expired(&self) -> usize {
+        let mut guard = self.inner.lock().unwrap();
+        let before = guard.len();
+        guard.retain(|_, session| session.is_live());
+        let removed = before - guard.len();
+        if removed > 0 {
+            self.save(&guard);
+        }
+        removed
     }
 
     /// How many sessions are live, for the status page.
@@ -373,6 +463,61 @@ impl Sessions {
             .filter(|s| s.is_live())
             .count()
     }
+
+    /// Write the table out, if this one is durable.
+    ///
+    /// Takes the guard the caller already holds, so the file can never be
+    /// written from a snapshot that a concurrent login has already moved past.
+    fn save(&self, sessions: &HashMap<String, Session>) {
+        let Some(path) = &self.path else { return };
+        let mut ordered: Vec<&Session> = sessions.values().collect();
+        // Sorted so a restart, a diff, or an operator reading the file sees a
+        // stable order rather than the hash map's.
+        ordered.sort_by(|a, b| a.issued_at.cmp(&b.issued_at));
+
+        if let Err(e) = write_sessions(path, &ordered) {
+            tracing::warn!(
+                "couldn't persist sessions to {} ({e:#}) — everyone stays signed in \
+                 until this server restarts",
+                path.display()
+            );
+        }
+    }
+}
+
+fn write_sessions(path: &Path, sessions: &[&Session]) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("Failed to create {}", parent.display()))?;
+    }
+    let body = serde_json::to_string_pretty(sessions)?;
+    std::fs::write(path, body).with_context(|| format!("Failed to write {}", path.display()))?;
+    restrict_permissions(path);
+    Ok(())
+}
+
+#[cfg(unix)]
+fn restrict_permissions(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+}
+
+#[cfg(not(unix))]
+fn restrict_permissions(_path: &Path) {}
+
+/// What a bearer token turned out to be.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Lookup {
+    /// A live session, and who it belongs to.
+    Live(Identity),
+    /// A session this server issued, whose time is up.
+    Expired {
+        /// When it lapsed, RFC 3339 — so the error can say so rather than
+        /// leaving somebody to guess whether it was minutes or weeks ago.
+        at: String,
+    },
+    /// No record of it at all.
+    Unknown,
 }
 
 /// A fresh opaque token.
@@ -780,7 +925,7 @@ mod tests {
 
     #[test]
     fn sessions_expire_and_can_be_revoked() {
-        let sessions = Sessions::new();
+        let sessions = Sessions::default();
         let identity = Identity {
             name: "ada".into(),
             can_write: true,
@@ -790,7 +935,7 @@ mod tests {
 
         let (token, session) = sessions.issue(identity.clone(), 3600);
         assert!(session.is_live());
-        assert_eq!(sessions.resolve(&token), Some(identity.clone()));
+        assert_eq!(sessions.lookup(&token), Lookup::Live(identity.clone()));
         assert_eq!(sessions.live_count(), 1);
 
         // The token itself is never stored — only its hash.
@@ -800,15 +945,72 @@ mod tests {
             crate::cache::hash_bytes(token.as_bytes())
         );
 
-        assert!(sessions.resolve("some-other-token").is_none());
+        assert_eq!(sessions.lookup("some-other-token"), Lookup::Unknown);
         assert!(sessions.revoke(&token));
-        assert!(sessions.resolve(&token).is_none());
+        assert_eq!(
+            sessions.lookup(&token),
+            Lookup::Unknown,
+            "a revoked session is gone, not merely out of time"
+        );
         assert!(!sessions.revoke(&token), "revoking twice is not a success");
 
-        // An already-expired session never resolves.
+        // An already-expired session never resolves — and says so precisely,
+        // which is the difference between "check your clock" and "check your
+        // URL".
         let (expired, _) = sessions.issue(identity, -1);
-        assert!(sessions.resolve(&expired).is_none());
+        assert!(matches!(sessions.lookup(&expired), Lookup::Expired { .. }));
         assert_eq!(sessions.live_count(), 0);
+
+        // Looking it up dropped it, so the second answer is that there's no
+        // record of it at all.
+        assert_eq!(sessions.lookup(&expired), Lookup::Unknown);
+    }
+
+    /// The point of persisting them: restarting the server must not sign the
+    /// whole team out and quietly turn every build into a cache miss.
+    #[test]
+    fn sessions_survive_a_restart_without_storing_a_token() {
+        let dir = std::env::temp_dir().join(format!("ciab_sess_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let identity = Identity {
+            name: "ada".into(),
+            can_write: true,
+            is_admin: false,
+            groups: vec!["cn=devs".into()],
+        };
+
+        let sessions = Sessions::open(&dir);
+        let (token, _) = sessions.issue(identity.clone(), 3600);
+        let (expired, _) = sessions.issue(identity.clone(), -1);
+        let (logged_out, _) = sessions.issue(identity.clone(), 3600);
+        assert!(sessions.revoke(&logged_out));
+        drop(sessions);
+
+        // A new process, same storage.
+        let restarted = Sessions::open(&dir);
+        assert_eq!(restarted.lookup(&token), Lookup::Live(identity));
+        assert_eq!(restarted.live_count(), 1);
+        assert!(
+            matches!(restarted.lookup(&expired), Lookup::Unknown),
+            "an expired session must not come back to life — it isn't even loaded"
+        );
+        assert_eq!(
+            restarted.lookup(&logged_out),
+            Lookup::Unknown,
+            "a logout a restart undoes is not a logout"
+        );
+
+        // Whoever reads the file learns who is signed in, never how to be them.
+        let raw = std::fs::read_to_string(dir.join("sessions.json")).unwrap();
+        assert!(raw.contains("ada"));
+        assert!(
+            !raw.contains(&token),
+            "the bearer token must never be stored"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

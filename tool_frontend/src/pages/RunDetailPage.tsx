@@ -30,12 +30,16 @@ import { Position, type Edge, type Node } from "@xyflow/react";
 import { streamUrl } from "../api/client";
 import {
   useChoose,
+  undeclaredEnv,
   type RecipeView,
   type RunState,
   type StepStatus,
   type StepView,
+  type TargetDeps,
 } from "../api/run";
+import { humanizeBytes } from "../api/cache";
 import type { EnvVar } from "../api/types";
+import { AnsiText } from "../components/AnsiText";
 import { GraphCanvas } from "../components/GraphCanvas";
 import {
   EnvPanel,
@@ -54,6 +58,14 @@ const envNodeId = (key: string) => `env::${key}`;
 /** The variable a node id names, or null when the node is a step. */
 const envKeyOf = (id: string): string | null =>
   id.startsWith("env::") ? id.slice("env::".length) : null;
+
+/** Node ids for the file sets a target reads and writes, namespaced the same
+ *  way so a step named `in` can't collide with one. */
+const inputNodeId = (key: string) => `in::${key}`;
+const outputNodeId = (step: string) => `out::${step}`;
+
+/** Whether a node id names a file set rather than a step. */
+const isFileNode = (id: string) => id.startsWith("in::") || id.startsWith("out::");
 
 /** How far the graph fades what a highlighted variable doesn't reach. */
 const DIMMED = 0.18;
@@ -136,14 +148,18 @@ function RecipePanel({
   // Variables are dependencies, so the graph draws them like every other
   // dependency. The toggle is for the graphs where they'd crowd out the steps.
   const [showEnv, setShowEnv] = useState(true);
+  // Files are the other two dependencies — what a target reads, and what it
+  // writes. Off by default: on a monorepo graph they double the node count, and
+  // unlike variables they're only what you want when the question is caching.
+  const [showFiles, setShowFiles] = useState(false);
   // The variable whose dependents are lit up. "Who reads DATABASE_URL?" is the
   // question a variable node exists to answer, and on a wide graph the edges
   // alone don't answer it — so selecting one dims everything it doesn't reach.
   const [highlighted, setHighlighted] = useState<string | null>(null);
 
   const { nodes, edges } = useMemo(
-    () => buildFlow(recipe, theme, showOrder, showEnv, highlighted),
-    [recipe, theme, showOrder, showEnv, highlighted],
+    () => buildFlow(recipe, theme, showOrder, showEnv, showFiles, highlighted),
+    [recipe, theme, showOrder, showEnv, showFiles, highlighted],
   );
   const step = recipe.steps.find((s) => s.name === selectedStep);
   const highlightedVar = recipe.env.vars.find((v) => v.key === highlighted);
@@ -180,6 +196,23 @@ function RecipePanel({
             label={
               <Typography variant="caption" color="text.secondary">
                 Environment
+              </Typography>
+            }
+            sx={{ mr: 0 }}
+          />
+        </Tooltip>
+        <Tooltip title="Draw the files each target reads and writes as nodes of their own: inputs feeding in from the left, outputs produced on the right. These are the file sets the cache keys on, so this is the graph the caching decision is actually made from.">
+          <FormControlLabel
+            control={
+              <Switch
+                size="small"
+                checked={showFiles}
+                onChange={(_, checked) => setShowFiles(checked)}
+              />
+            }
+            label={
+              <Typography variant="caption" color="text.secondary">
+                Files
               </Typography>
             }
             sx={{ mr: 0 }}
@@ -243,11 +276,14 @@ function RecipePanel({
         height={420}
         // Turning the environment column on and off changes the graph's
         // extent, so the view has to be re-fitted around it.
-        fitKey={showEnv ? "with-env" : "steps-only"}
+        fitKey={`${showEnv ? "env" : ""}${showFiles ? "+files" : ""}` || "steps-only"}
         // An environment node isn't a step and has no logs of its own: clicking
         // one lights up the steps that read it instead, and clicking it again
         // (or picking any step) puts the whole graph back.
         onNodeClick={(_, node) => {
+          // A file node is a label, not a place to go: it has no logs, and the
+          // step it hangs off is one edge away.
+          if (isFileNode(node.id)) return;
           const key = envKeyOf(node.id);
           if (key === null) {
             setHighlighted(null);
@@ -336,7 +372,19 @@ function LogBox({ lines }: { lines: string[] }) {
           No output yet.
         </Typography>
       ) : (
-        lines.map((line, index) => <div key={index}>{line}</div>)
+        // Steps are asked for colour (the daemon sets FORCE_COLOR, since a pipe
+        // would otherwise turn it off) and tools that cache their logs — turbo,
+        // for one — replay escapes whatever the current environment says. Either
+        // way the lines arrive carrying SGR, and printed raw they are worse than
+        // no colour at all.
+        lines.map((line, index) => (
+          <div key={index}>
+            <AnsiText
+              text={line}
+              fallbackColor={line.startsWith("[stderr]") ? "error.main" : undefined}
+            />
+          </div>
+        ))
       )}
     </Box>
   );
@@ -412,8 +460,15 @@ function StepDetails({ step, env }: { step: StepView; env: EnvVar[] }) {
   const own = new Set(Object.keys(step.env));
   const reads = env.filter((variable) => !own.has(variable.key));
 
+  // The dependency block is worth showing on its own, so "nothing to say" now
+  // means nothing to say about *any* of it.
   const bare =
-    !step.workspace && !step.description && badges.length === 0 && reads.length === 0 && own.size === 0;
+    !step.workspace &&
+    !step.description &&
+    badges.length === 0 &&
+    reads.length === 0 &&
+    own.size === 0 &&
+    !step.deps?.name;
   if (bare) return null;
 
   return (
@@ -446,8 +501,103 @@ function StepDetails({ step, env }: { step: StepView; env: EnvVar[] }) {
           ))}
         </Stack>
       )}
+
+      <TargetDependencies deps={step.deps} />
     </Stack>
   );
+}
+
+/**
+ * What this target is defined by: the files it reads, the files it writes, the
+ * variables it keys on, the commands it runs, and the targets it needs.
+ *
+ * All five in one block, in that order, because the question they answer is one
+ * question — "why did this run?" — and answering it from five places is how
+ * people end up assuming the cache is broken.
+ */
+function TargetDependencies({ deps }: { deps: TargetDeps }) {
+  // A recovery node has no build, so the daemon sends an empty target. There is
+  // nothing true to say about it.
+  if (!deps || !deps.name) return null;
+
+  const undeclared = undeclaredEnv(deps);
+
+  return (
+    <Stack spacing={0.5} sx={{ mt: 0.5 }}>
+      <DepRow
+        label="depends on"
+        value={deps.needs.length > 0 ? deps.needs.join(", ") : "nothing — it can start immediately"}
+      />
+      <DepRow
+        label="reads"
+        value={
+          deps.inputs.length === 0
+            ? "no input files declared"
+            : `${deps.input_files} file(s), ${humanizeBytes(deps.input_bytes)} — ${deps.inputs.join(", ")}`
+        }
+        title={deps.exclude.length > 0 ? `excluding ${deps.exclude.join(", ")}` : undefined}
+      />
+      <DepRow
+        label="writes"
+        value={
+          deps.outputs.length === 0
+            ? "no output files declared, so nothing could be restored"
+            : `${deps.output_files} file(s), ${humanizeBytes(deps.output_bytes)} — ${deps.outputs.join(", ")}`
+        }
+      />
+      <DepRow
+        label="keys on"
+        value={deps.env.length > 0 ? deps.env.join(", ") : "no variables"}
+        title="Variables folded into this target's cache key"
+      />
+      {deps.commands.length > 0 && <DepRow label="runs" value={deps.commands.join(" ; ")} mono />}
+      {!deps.cached && deps.why_uncached && (
+        <DepRow label="not cached" value={deps.why_uncached} />
+      )}
+      {deps.cached && undeclared.length > 0 && (
+        <Typography variant="caption" color="warning.main">
+          ⚠ reads {undeclared.join(", ")} without declaring{" "}
+          {undeclared.length === 1 ? "it" : "them"} in cache.env, so changing{" "}
+          {undeclared.length === 1 ? "it" : "them"} would not invalidate this target.
+        </Typography>
+      )}
+    </Stack>
+  );
+}
+
+function DepRow({
+  label,
+  value,
+  title,
+  mono,
+}: {
+  label: string;
+  value: string;
+  title?: string;
+  mono?: boolean;
+}) {
+  const row = (
+    <Stack direction="row" spacing={1} alignItems="baseline">
+      <Typography
+        variant="caption"
+        color="text.secondary"
+        sx={{ minWidth: 78, flexShrink: 0, textAlign: "right" }}
+      >
+        {label}
+      </Typography>
+      <Typography
+        variant="caption"
+        sx={{
+          color: "text.primary",
+          fontFamily: mono ? monoFontStack : undefined,
+          wordBreak: "break-word",
+        }}
+      >
+        {value}
+      </Typography>
+    </Stack>
+  );
+  return title ? <Tooltip title={title}>{row}</Tooltip> : row;
 }
 
 function buildFlow(
@@ -455,6 +605,7 @@ function buildFlow(
   theme: Theme,
   showOrder: boolean,
   showEnv: boolean,
+  showFiles: boolean,
   highlighted: string | null,
 ): { nodes: Node[]; edges: Edge[] } {
   const ids = recipe.steps.map((s) => s.name);
@@ -545,13 +696,184 @@ function buildFlow(
     },
   }));
 
+  if (showFiles) {
+    const files = fileFlow(recipe, theme, positioned, Boolean(lit));
+    nodes.push(...files.nodes);
+    edges.push(...files.edges);
+  }
+
   if (showEnv) {
-    const env = envFlow(recipe, theme, positioned, highlighted);
+    // Variables sit outside the file column when both are drawn, so the two
+    // kinds of dependency read as two columns rather than one pile.
+    const env = envFlow(recipe, theme, positioned, highlighted, showFiles ? 620 : 300);
     nodes.push(...env.nodes);
     edges.push(...env.edges);
   }
 
   return { nodes, edges };
+}
+
+/**
+ * The file half of the flowchart: what each target reads, and what it writes.
+ *
+ * These are two of a target's three dependencies (the third, the steps it
+ * needs, the graph already draws), and they are the two that decide whether
+ * anything runs at all. A graph that shows only the order is a graph that
+ * cannot answer "why did this rebuild?" — the answer is always a file, and
+ * until now the only way to see which files were even in scope was to open the
+ * config.
+ *
+ * Input sets are **shared** rather than drawn per step: in a monorepo every step
+ * of a package inherits that package's `cache.inputs`, so one node per distinct
+ * set feeding several steps is both smaller and truer than one node each. The
+ * duplication it collapses is real information — those steps rebuild together.
+ *
+ * Outputs are per step, because they are: two steps writing the same files
+ * would be a bug, not a shared dependency.
+ */
+function fileFlow(
+  recipe: RecipeView,
+  theme: Theme,
+  steps: Node[],
+  dimmed: boolean,
+): { nodes: Node[]; edges: Edge[] } {
+  const withDeps = recipe.steps.filter((step) => step.deps?.name);
+  if (withDeps.length === 0) return { nodes: [], edges: [] };
+
+  const xs = steps.map((node) => node.position.x);
+  const leftmost = Math.min(...xs, 0);
+  const rightmost = Math.max(...xs, 0);
+  const centre =
+    steps.length > 0 ? steps.reduce((sum, node) => sum + node.position.y, 0) / steps.length : 0;
+  const rowHeight = 74;
+  const opacity = dimmed ? DIMMED : 1;
+
+  // Steps sharing a directory and a set of input globs share a node: same
+  // declaration, same files, same reason to rebuild.
+  const inputGroups = new Map<string, { deps: TargetDeps; steps: string[] }>();
+  for (const step of withDeps) {
+    const deps = step.deps;
+    if (deps.inputs.length === 0) continue;
+    const key = `${deps.dir}\u0000${deps.inputs.join("\u0000")}`;
+    const group = inputGroups.get(key);
+    if (group) group.steps.push(step.name);
+    else inputGroups.set(key, { deps, steps: [step.name] });
+  }
+
+  const producers = withDeps.filter((step) => step.deps.outputs.length > 0);
+
+  const column = (count: number, index: number, x: number) => ({
+    x,
+    y: centre + (index - (count - 1) / 2) * rowHeight,
+  });
+
+  const shell = (color: string) => ({
+    background: theme.palette.background.paper,
+    color: theme.palette.text.primary,
+    // Dashed, like every dependency edge that isn't the run's own order: a file
+    // set is a precondition, not a step that ran before this one.
+    border: `1px dashed ${color}`,
+    borderRadius: 8,
+    fontSize: 11,
+    padding: "5px 10px",
+    minWidth: 170,
+    maxWidth: 240,
+    textAlign: "left" as const,
+    opacity,
+  });
+
+  const inputs = [...inputGroups.values()];
+  const nodes: Node[] = inputs.map((group, index) => ({
+    id: inputNodeId(group.steps[0]),
+    position: column(inputs.length, index, leftmost - 300),
+    type: "default",
+    sourcePosition: Position.Right,
+    targetPosition: Position.Left,
+    data: {
+      label: <FileNodeLabel deps={group.deps} kind="reads" />,
+      status: "pending" as StepStatus,
+    },
+    style: shell(theme.palette.info.main),
+  }));
+
+  nodes.push(
+    ...producers.map((step, index) => ({
+      id: outputNodeId(step.name),
+      position: column(producers.length, index, rightmost + 320),
+      type: "default",
+      sourcePosition: Position.Right,
+      targetPosition: Position.Left,
+      data: {
+        label: <FileNodeLabel deps={step.deps} kind="writes" />,
+        status: "pending" as StepStatus,
+      },
+      style: shell(theme.palette.success.main),
+    })),
+  );
+
+  const edges: Edge[] = inputs.flatMap((group) =>
+    group.steps.map((step) => ({
+      ...ORTHOGONAL_EDGE,
+      id: `in:${group.steps[0]}->${step}`,
+      source: inputNodeId(group.steps[0]),
+      target: step,
+      style: {
+        stroke: theme.palette.info.main,
+        strokeDasharray: "2 4",
+        opacity: dimmed ? DIMMED : 0.75,
+      },
+    })),
+  );
+
+  edges.push(
+    ...producers.map((step) => ({
+      ...ORTHOGONAL_EDGE,
+      id: `out:${step.name}`,
+      source: step.name,
+      target: outputNodeId(step.name),
+      // A finished step's outputs are on disk; a running one's are being
+      // written as you watch.
+      animated: step.status === "running",
+      style: {
+        stroke: theme.palette.success.main,
+        strokeDasharray: "2 4",
+        opacity: dimmed ? DIMMED : 0.75,
+      },
+    })),
+  );
+
+  return { nodes, edges };
+}
+
+/** A file set on the canvas: what it matches, and what that came to. */
+function FileNodeLabel({ deps, kind }: { deps: TargetDeps; kind: "reads" | "writes" }) {
+  const patterns = kind === "reads" ? deps.inputs : deps.outputs;
+  const count = kind === "reads" ? deps.input_files : deps.output_files;
+  const bytes = kind === "reads" ? deps.input_bytes : deps.output_bytes;
+
+  return (
+    <Box sx={{ textAlign: "left" }}>
+      <Typography variant="caption" sx={{ display: "block", color: "text.secondary" }}>
+        {kind === "reads" ? "reads" : "writes"} · {count} file{count === 1 ? "" : "s"} ·{" "}
+        {humanizeBytes(bytes)}
+      </Typography>
+      <Typography
+        variant="caption"
+        sx={{
+          display: "block",
+          fontFamily: monoFontStack,
+          // The globs are the declaration; a long list is truncated rather than
+          // allowed to stretch the node across the canvas.
+          overflow: "hidden",
+          textOverflow: "ellipsis",
+          whiteSpace: "nowrap",
+        }}
+        title={patterns.join(", ")}
+      >
+        {patterns.join(", ")}
+      </Typography>
+    </Box>
+  );
 }
 
 /**
@@ -571,6 +893,7 @@ function envFlow(
   theme: Theme,
   steps: Node[],
   highlighted: string | null,
+  offset: number,
 ): { nodes: Node[]; edges: Edge[] } {
   const drawn = recipe.env.vars.filter((variable) => variable.steps.length > 0);
   if (drawn.length === 0) return { nodes: [], edges: [] };
@@ -591,7 +914,7 @@ function envFlow(
     return {
       id: envNodeId(variable.key),
       position: {
-        x: leftmost - 300,
+        x: leftmost - offset,
         y: centre + (index - (drawn.length - 1) / 2) * rowHeight,
       },
       type: "default",

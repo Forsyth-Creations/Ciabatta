@@ -189,6 +189,12 @@ async fn shutdown(
 /// finds the winner healthy, and exits quietly rather than clobbering the
 /// record.
 pub async fn serve(port: u16) -> Result<()> {
+    // Every run this daemon drives is read in a browser, and the web app parses
+    // SGR escapes into styled spans. So the steps are asked for colour — the
+    // question "is the daemon's stdout a terminal?" is about a log file and has
+    // nothing to do with who ends up reading this.
+    crate::color::decide(crate::color::Consumer::Web);
+
     let host = crate::config::bind_host();
     let addr: SocketAddr = format!("{host}:{port}")
         .parse()
@@ -223,6 +229,23 @@ pub async fn serve(port: u16) -> Result<()> {
         );
     }
 
+    // The port bound, so no other daemon is alive on it. A record still
+    // sitting in ~/.ciabatta means the daemon that wrote it never reached its
+    // own shutdown path — it was killed. Said out loud at startup because the
+    // evidence is otherwise invisible: a SIGKILL (the OOM killer, a `kill -9`,
+    // a `pkill ciabatta` from a build step) leaves nothing in the log at all,
+    // and this line is what distinguishes that from a panic, which does.
+    if let Some(stale) = super::read_record() {
+        tracing::warn!(
+            previous_pid = stale.pid,
+            previous_version = %stale.version,
+            started_at = %stale.started_at,
+            "the previous daemon exited without shutting down cleanly; if there \
+             is no panic logged just above this line, it was killed from outside \
+             (OOM killer, `kill`, or a step that killed its own process tree)"
+        );
+    }
+
     let token = auth::generate_token();
     let state = AppState {
         token: token.clone(),
@@ -247,6 +270,9 @@ pub async fn serve(port: u16) -> Result<()> {
     })?;
 
     tracing::info!(
+        pid = state.pid,
+        version = %state.version,
+        log = %crate::daemon::log_path().map(|p| p.display().to_string()).unwrap_or_default(),
         "ciabatta daemon {} listening on http://{host}:{port}",
         state.version
     );
@@ -256,8 +282,9 @@ pub async fn serve(port: u16) -> Result<()> {
     let result = axum::serve(listener, router(state))
         .with_graceful_shutdown(async move {
             tokio::select! {
-                _ = signal.notified() => {}
-                _ = tokio::signal::ctrl_c() => {}
+                _ = signal.notified() => tracing::info!("shutdown requested over the API"),
+                _ = tokio::signal::ctrl_c() => tracing::info!("interrupted (SIGINT)"),
+                signal = terminated() => tracing::info!("{signal}"),
             }
             // Watched commands belong to the daemon, so they stop with it.
             watch.stop_all();
@@ -270,7 +297,44 @@ pub async fn serve(port: u16) -> Result<()> {
         let _ = super::clear_record();
     }
 
+    // Whichever way this went, say so — an ended log is otherwise the same
+    // shape whether the daemon stopped on purpose or died mid-request.
+    match &result {
+        Ok(()) => tracing::info!("ciabatta daemon stopped"),
+        Err(e) => tracing::error!("the daemon's HTTP server stopped unexpectedly: {e:#}"),
+    }
+
     result.context("The daemon's HTTP server stopped unexpectedly")
+}
+
+/// Resolves when the process is asked to terminate, naming the signal.
+///
+/// SIGTERM is how nearly everything else asks a background process to stop —
+/// `kill`, a session teardown, a container stop — and without this the daemon
+/// dies to it with the log ending mid-line, indistinguishable from a crash.
+/// SIGKILL cannot be caught at all, which is what the stale-record warning at
+/// the next startup is for.
+async fn terminated() -> String {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        let Ok(mut term) = signal(SignalKind::terminate()) else {
+            std::future::pending::<()>().await;
+            unreachable!()
+        };
+        let Ok(mut hup) = signal(SignalKind::hangup()) else {
+            std::future::pending::<()>().await;
+            unreachable!()
+        };
+        tokio::select! {
+            _ = term.recv() => "terminated (SIGTERM)".to_string(),
+            _ = hup.recv() => "hung up (SIGHUP)".to_string(),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        std::future::pending::<String>().await
+    }
 }
 
 #[cfg(test)]

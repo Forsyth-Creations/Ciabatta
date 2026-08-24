@@ -34,6 +34,56 @@ export interface StepView {
   env: Record<string, string>;
   /** Variables this step reads — in its command, cwd, or conditions. */
   env_refs: string[];
+
+  /** The five things this target is defined by. */
+  deps: TargetDeps;
+}
+
+/**
+ * Everything a target depends on, and everything it produces.
+ *
+ * The graph already draws `needs`. The other four — the files it reads, the
+ * files it writes, the variables it keys on, and the commands it runs — were
+ * only ever visible by opening the config, which is exactly when somebody is
+ * asking why a step rebuilt.
+ */
+export interface TargetDeps {
+  name: string;
+  /** The sub-workspace it came from, when the run is a monorepo graph. */
+  workspace: string | null;
+  /** Where its globs resolve from, relative to the project root. */
+  dir: string;
+
+  /** The commands it runs, as they go into its cache key. */
+  commands: string[];
+
+  /** The globs it declares, its own or the ones it inherited. */
+  inputs: string[];
+  outputs: string[];
+  /** Excluded from its inputs — including sub-workspaces excluded for it. */
+  exclude: string[];
+
+  /** What those globs currently match. */
+  input_files: number;
+  input_bytes: number;
+  output_files: number;
+  output_bytes: number;
+
+  /** Variables folded into its cache key. */
+  env: string[];
+  /** Variables it reads without declaring — not in the key, and so a risk. */
+  env_refs: string[];
+
+  needs: string[];
+
+  cached: boolean;
+  why_uncached: string | null;
+}
+
+/** The variables a target reads but never declared, so a change to one of them
+ *  would not invalidate its cache entry. */
+export function undeclaredEnv(deps: TargetDeps): string[] {
+  return deps.env_refs.filter((key) => !deps.env.includes(key));
 }
 
 export interface EdgeView {

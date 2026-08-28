@@ -200,6 +200,18 @@ pub struct RunStep {
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub env: std::collections::BTreeMap<String, String>,
 
+    /// The `.env` files this step resolves through, outermost first, as paths
+    /// relative to the run root.
+    ///
+    /// Set by the workflow compiler from the step's own workspace and every
+    /// workspace above it, so a package's `.env` answers first and anything it
+    /// doesn't set falls back outward — see [`crate::environment::files::chain`].
+    /// Empty means the step just sees the run's environment, which is every
+    /// step of a plain single-project recipe.
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub env_files: Vec<String>,
+
     /// Names of steps that must succeed before this one runs (the success DAG).
     #[serde(default)]
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -506,15 +518,33 @@ pub fn load_env_files(
     Ok(merged)
 }
 
+/// What one step's own `.env` chain resolved to.
+#[derive(Debug, Clone, Default)]
+pub struct StepEnv {
+    /// What this step sees: its workspace's `.env` layered over everything
+    /// above it, over the environment the run started with.
+    pub env: HashMap<String, String>,
+    /// The files it resolved through, outermost first — nearest last, since
+    /// that's the one that wins.
+    pub files: Vec<String>,
+}
+
 /// A run's environment, resolved as far as the inputs allow, plus whatever it
 /// still needs before it may start. Produced by [`prepare_env`].
 #[derive(Debug, Clone, Default)]
 pub struct PreparedEnv {
-    /// What every phase and step will see. Only complete when [`is_ready`] is
-    /// true; otherwise it's as far as resolution got.
+    /// What the run's phases see, and what a step with no `.env` of its own
+    /// sees. Only complete when [`is_ready`] is true; otherwise it's as far as
+    /// resolution got.
     ///
     /// [`is_ready`]: PreparedEnv::is_ready
     pub env: HashMap<String, String>,
+    /// The environment for each step that resolves through `.env` files of its
+    /// own, by step name — its workspace's, then everything above it.
+    ///
+    /// Absent for a step whose chain is empty, which is every step of a plain
+    /// single-project recipe: those see [`Self::env`] and nothing else.
+    pub steps: HashMap<String, StepEnv>,
     /// The `env_file` paths that were resolved and sourced, in order.
     pub sourced: Vec<String>,
     /// `{VAR}` placeholders in `env_file` paths with no value, so the file to
@@ -528,6 +558,37 @@ impl PreparedEnv {
     /// Whether the run may start.
     pub fn is_ready(&self) -> bool {
         self.unresolved_paths.is_empty() && self.missing_required.is_empty()
+    }
+
+    /// The environment one step sees: its own chain when it has one, the run's
+    /// otherwise.
+    pub fn for_step(&self, step: &str) -> &HashMap<String, String> {
+        self.steps.get(step).map(|s| &s.env).unwrap_or(&self.env)
+    }
+
+    /// The `.env` files one step resolved through, outermost first. Empty for a
+    /// step that just sees the run's own environment.
+    pub fn files_for(&self, step: &str) -> &[String] {
+        self.steps
+            .get(step)
+            .map(|s| s.files.as_slice())
+            .unwrap_or(&[])
+    }
+
+    /// Every file this run sourced anywhere — the run's own first, then the
+    /// steps' chains, in step-name order so a report doesn't reshuffle.
+    pub fn all_sourced(&self) -> Vec<String> {
+        let mut all = self.sourced.clone();
+        let mut names: Vec<&String> = self.steps.keys().collect();
+        names.sort();
+        for name in names {
+            for file in &self.steps[name].files {
+                if !all.contains(file) {
+                    all.push(file.clone());
+                }
+            }
+        }
+        all
     }
 
     /// Every variable a caller must supply before the run can start, in the
@@ -589,10 +650,59 @@ pub fn prepare_env(
     } else {
         load_env_files(&files, root, base)?
     };
-    let missing_required = missing_required_env(&resolved.required_env, &env);
+
+    // Each step that has a chain of its own resolves through it — from the
+    // outermost workspace down to the one it belongs to, so the nearest file
+    // wins and anything it doesn't set falls back outward.
+    //
+    // Layered over `base` rather than over the run's environment on purpose: a
+    // value already sourced from an outer `.env` would otherwise be pinned
+    // there and a package's own `.env` could never override it, which is the
+    // one thing proximity has to be able to do.
+    let mut steps: HashMap<String, StepEnv> = HashMap::new();
+    for step in &resolved.steps {
+        if step.env_files.is_empty() {
+            continue;
+        }
+        // A chain is a search path: a level with no `.env` — or one whose file
+        // a fresh checkout hasn't generated yet — falls through to the next
+        // rather than failing the run. A file the *project itself* declared is
+        // still required; that list is `resolved.env_files`, loaded above.
+        let mut chain: Vec<String> = Vec::new();
+        for raw in &step.env_files {
+            if crate::config::unresolved_vars(raw, base).is_empty() {
+                let path = crate::config::substitute_vars(raw, base)?;
+                if root.join(&path).is_file() {
+                    chain.push(path);
+                }
+            }
+        }
+        steps.insert(
+            step.name.clone(),
+            StepEnv {
+                env: load_env_files(&chain, root, base)?,
+                files: chain,
+            },
+        );
+    }
+
+    // The gate asks whether *anything* supplies each required variable, since a
+    // requirement declared by one sub-workspace is answered by that
+    // sub-workspace's own `.env`. Which step then sees which value is a matter
+    // of proximity, decided above.
+    let mut supplied = env.clone();
+    for scope in steps.values() {
+        for (key, value) in &scope.env {
+            if supplied.get(key).is_none_or(|v| v.trim().is_empty()) {
+                supplied.insert(key.clone(), value.clone());
+            }
+        }
+    }
+    let missing_required = missing_required_env(&resolved.required_env, &supplied);
 
     Ok(PreparedEnv {
         env,
+        steps,
         sourced: files,
         unresolved_paths,
         missing_required,
@@ -1529,6 +1639,97 @@ env_file = ".env.flow"
         assert!(!prepared.is_ready());
         // Nothing was read, so a missing file isn't an error at this point.
         assert!(prepared.sourced.is_empty());
+    }
+
+    /// Proximity: a step reads its own workspace's `.env` first, and falls back
+    /// outward for anything that file doesn't set.
+    #[test]
+    fn a_steps_env_resolves_nearest_first_and_falls_back_outward() {
+        let dir = std::env::temp_dir().join(format!("ciab_proximity_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("packages/api")).unwrap();
+        std::fs::create_dir_all(dir.join("packages/web")).unwrap();
+        std::fs::write(dir.join(".env"), "REGION=global\nSHARED=from-root\n").unwrap();
+        std::fs::write(
+            dir.join("packages/api/.env"),
+            "SHARED=from-api\nAPI_ONLY=yes\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("packages/web/.env"), "SHARED=from-web\n").unwrap();
+
+        let step = |name: &str, files: &[&str]| RunStep {
+            name: name.to_string(),
+            run: Some("true".into()),
+            env_files: files.iter().map(|f| f.to_string()).collect(),
+            ..Default::default()
+        };
+        let resolved = ResolvedRun {
+            steps: vec![
+                step("api:build", &[".env", "packages/api/.env"]),
+                step("web:build", &[".env", "packages/web/.env"]),
+                step("root:lint", &[]),
+            ],
+            ..Default::default()
+        };
+
+        let prepared = prepare_env(&resolved, &dir, &HashMap::new()).unwrap();
+
+        // Nearest wins.
+        assert_eq!(prepared.for_step("api:build")["SHARED"], "from-api");
+        assert_eq!(prepared.for_step("web:build")["SHARED"], "from-web");
+        // What the nearest file doesn't set comes from higher up.
+        assert_eq!(prepared.for_step("api:build")["REGION"], "global");
+        // And a sibling's file is not a fallback.
+        assert!(!prepared.for_step("web:build").contains_key("API_ONLY"));
+        // A step with no chain of its own just sees the run's environment.
+        assert!(!prepared.for_step("root:lint").contains_key("SHARED"));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The environment a run was started with still beats every file, and a
+    /// chain that names a file nobody created falls through rather than failing.
+    #[test]
+    fn the_ambient_environment_still_wins_and_a_missing_level_is_skipped() {
+        let dir = std::env::temp_dir().join(format!("ciab_prox2_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("packages/api")).unwrap();
+        std::fs::write(dir.join("packages/api/.env"), "SHARED=from-api\n").unwrap();
+
+        let resolved = ResolvedRun {
+            required_env: vec!["SHARED".to_string()],
+            steps: vec![RunStep {
+                name: "api:build".into(),
+                run: Some("true".into()),
+                // `.env` at the root was never created — a fresh checkout that
+                // hasn't generated one yet.
+                env_files: vec![".env".into(), "packages/api/.env".into()],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let prepared = prepare_env(&resolved, &dir, &HashMap::new()).unwrap();
+        assert_eq!(prepared.for_step("api:build")["SHARED"], "from-api");
+        assert_eq!(prepared.files_for("api:build"), ["packages/api/.env"]);
+        assert!(
+            prepared.is_ready(),
+            "a required variable supplied by the package that needs it satisfies the gate"
+        );
+
+        // `-e SHARED=…` (or the shell, or CI) beats the file, as it always has.
+        let prepared = prepare_env(
+            &resolved,
+            &dir,
+            &env(&[("SHARED", "from-the-command-line")]),
+        )
+        .unwrap();
+        assert_eq!(
+            prepared.for_step("api:build")["SHARED"],
+            "from-the-command-line"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

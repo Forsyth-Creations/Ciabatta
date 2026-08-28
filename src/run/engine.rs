@@ -114,27 +114,25 @@ pub async fn execute(
         crate::environment::files::require_template(&meta, root, &resolved.required_env, name)?;
     }
 
-    let target = meta
-        .env_file
-        .first()
-        .cloned()
-        .unwrap_or_else(|| crate::environment::files::DEFAULT_ENV_FILE.to_string());
-    if let Some(written) = crate::environment::files::generate_from_template(&meta, root, &target)?
-    {
+    // A fresh checkout has no `.env` — the checked-in template is what it has.
+    // Generated for the project root *and* for every sub-workspace this run
+    // touches, since a member's steps resolve through the member's own file.
+    for written in generate_missing_env(&meta, root, &resolved, dry_run)? {
         let _ = tx
             .send(ProgressUpdate::Log(
                 name.to_string(),
-                format!(
-                    "Generated {} from {}",
-                    written.display(),
-                    meta.env_default.as_deref().unwrap_or("the template")
-                ),
+                match dry_run {
+                    true => format!("[dry-run] would generate {}", written.display()),
+                    false => format!("Generated {} because it was missing", written.display()),
+                },
             ))
             .await;
     }
 
-    // With the file in place, fold the workspace's env files into the run's own
-    // — `.env` by default, or whatever `env_file` names instead.
+    // With the files in place, fold the project's own env files into the run's
+    // — `.env` by default, or whatever `env_file` names instead. A compiled
+    // workflow's members don't come in here: each of their steps carries its
+    // own chain, so one member's settings can't be read by another's steps.
     let mut resolved = resolved;
     let workspace_files = crate::environment::files::resolve(&meta, root);
     for file in workspace_files.files {
@@ -225,7 +223,7 @@ pub async fn execute(
                     &resolved,
                     name,
                     root,
-                    env_vars,
+                    &prepared,
                     dry_run,
                     ctl,
                     tx,
@@ -301,7 +299,7 @@ async fn run_dag(
     resolved: &ResolvedRun,
     recipe: &str,
     root: &Path,
-    env_vars: &HashMap<String, String>,
+    env: &super::PreparedEnv,
     dry_run: bool,
     ctl: &RunCtl,
     tx: &mpsc::Sender<ProgressUpdate>,
@@ -351,7 +349,13 @@ async fn run_dag(
         for step in ready {
             // A `when`/`skip_if` condition can exclude the step; if so, mark it
             // satisfied (so dependents proceed) and move on without running it.
-            if let Some(reason) = super::step_skip_reason(step, env_vars)? {
+            // Every one of these reads the step's *own* environment: its
+            // workspace's `.env` first, then outward. Two members of a
+            // monorepo can set the same variable to different values and
+            // each of their steps sees its own.
+            let step_env = env.for_step(&step.name);
+
+            if let Some(reason) = super::step_skip_reason(step, step_env)? {
                 state.insert(step.name.as_str(), StepState::Skipped);
                 let _ = tx
                     .send(ProgressUpdate::StepSkipped {
@@ -366,7 +370,7 @@ async fn run_dag(
             // A persistent step is started and left running: the graph moves on
             // without it, so a dev server can't hang everything behind it.
             if step.persistent && !dry_run {
-                persistent.push(start_persistent(step, recipe, root, env_vars, ctl, tx).await?);
+                persistent.push(start_persistent(step, recipe, root, step_env, ctl, tx).await?);
                 state.insert(step.name.as_str(), StepState::Started);
                 continue;
             }
@@ -376,7 +380,7 @@ async fn run_dag(
             // proceeds exactly as if it had run.
             let mut pending = None;
             if let Some(session) = cache.as_deref_mut() {
-                match session.before(step, env_vars).await {
+                match session.before(step, step_env).await {
                     Ok(super::cached::Action::Skip { note }) => {
                         state.insert(step.name.as_str(), StepState::Skipped);
                         let _ = tx
@@ -402,7 +406,7 @@ async fn run_dag(
             }
 
             let started = std::time::Instant::now();
-            let outcome = run_step_action(step, recipe, root, env_vars, dry_run, tx).await;
+            let outcome = run_step_action(step, recipe, root, step_env, dry_run, tx).await;
             match outcome {
                 Ok(()) => {
                     state.insert(step.name.as_str(), StepState::Succeeded);
@@ -425,7 +429,7 @@ async fn run_dag(
                             target,
                             recipe,
                             root,
-                            env_vars,
+                            step_env,
                             dry_run,
                             ctl,
                             tx,
@@ -518,6 +522,71 @@ impl std::fmt::Display for TimedOut {
 }
 
 impl std::error::Error for TimedOut {}
+
+/// Put a missing `.env` in place, for the project root and for every
+/// sub-workspace this run's steps come from.
+///
+/// This is the payoff for committing a template: a fresh checkout builds
+/// instead of failing on a variable nobody has heard of. It never overwrites,
+/// so an edited `.env` is safe, and it happens here — at the start of a run —
+/// rather than while a graph is merely being planned, because generating a file
+/// is a side effect and planning shouldn't have any.
+///
+/// A dry run reports what it would generate and writes nothing: "without
+/// actually running anything" has to include not leaving files behind.
+///
+/// Returns the paths written (or, on a dry run, the ones that would be).
+fn generate_missing_env(
+    meta: &crate::workspace::WorkspaceMeta,
+    root: &Path,
+    resolved: &ResolvedRun,
+    dry_run: bool,
+) -> Result<Vec<std::path::PathBuf>> {
+    use crate::environment::files;
+
+    let mut written = Vec::new();
+    let generate = |meta: &crate::workspace::WorkspaceMeta,
+                    dir: &Path|
+     -> Result<Option<std::path::PathBuf>> {
+        let target = files::target_file(meta);
+        if dry_run {
+            let would = files::template_for(meta, dir).is_some() && !dir.join(&target).exists();
+            return Ok(would.then(|| dir.join(target)));
+        }
+        files::generate_from_template(meta, dir, &target)
+    };
+
+    if let Some(path) = generate(meta, root)? {
+        written.push(path);
+    }
+
+    // Only the members this run actually touches: generating files across a
+    // whole monorepo because one package was built would be a surprise.
+    let members: Vec<&str> = resolved
+        .steps
+        .iter()
+        .filter_map(|step| step.workspace.as_deref())
+        .collect();
+    if members.is_empty() {
+        return Ok(written);
+    }
+
+    // A workspace that can't be loaded is not a reason to fail a run that was
+    // about to work: without it there is simply nothing extra to generate.
+    let Ok(workspace) = crate::workspace::Workspace::discover(root) else {
+        return Ok(written);
+    };
+    for member in &workspace.members {
+        if !members.contains(&member.name.as_str()) {
+            continue;
+        }
+        if let Some(path) = generate(&member.meta, &member.dir)? {
+            written.push(path);
+        }
+    }
+
+    Ok(written)
+}
 
 /// Check every tool the graph's steps declare in `requires` against `PATH`,
 /// reporting all of them at once with whatever fix the project documented.
@@ -1189,7 +1258,11 @@ mod tests {
             updates
         });
 
-        let result = run_dag(&resolved, "test", root, &env, false, &ctl, &tx, None).await;
+        let prepared = crate::run::PreparedEnv {
+            env,
+            ..Default::default()
+        };
+        let result = run_dag(&resolved, "test", root, &prepared, false, &ctl, &tx, None).await;
         drop(tx);
         (result, collector.await.unwrap())
     }

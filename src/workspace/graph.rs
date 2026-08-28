@@ -556,6 +556,8 @@ fn compile(
             .flat_map(|s| s.needs.iter().map(|n| n.as_str()))
             .collect();
 
+        let member_chain = env_chain(workspace, member);
+
         let mut unit_exits: Vec<String> = Vec::new();
         for step in &workflow.steps {
             let mut compiled = step.clone();
@@ -623,6 +625,18 @@ fn compile(
             env.extend(step.env.clone());
             compiled.env = env;
 
+            // The `.env` files this step resolves through, outermost first: the
+            // workspaces above it, then its own, then whatever the workflow
+            // names. Its own answers first; anything it doesn't set falls back
+            // outward. A sibling package's `.env` is never in the chain.
+            compiled.env_files = member_chain.clone();
+            for file in &workflow.env_file {
+                let path = join_rel(&member.rel, file);
+                if !compiled.env_files.contains(&path) {
+                    compiled.env_files.push(path);
+                }
+            }
+
             // Tags cascade the same way, and unlike env they accumulate: a step
             // in a package tagged "backend", in a workflow tagged "slow", is
             // both — so `--filter tag:backend` finds it without every step
@@ -647,14 +661,9 @@ fn compile(
         // leave no exits, in which case dependents simply don't wait on it.
         exits.insert(unit, unit_exits);
 
-        // `.env` paths are written relative to the sub-workspace; the run
-        // sources them relative to the monorepo root.
-        for file in member.meta.env_file.iter().chain(workflow.env_file.iter()) {
-            let path = join_rel(&member.rel, file);
-            if !graph.env_files.contains(&path) {
-                graph.env_files.push(path);
-            }
-        }
+        // A member's `.env` belongs to that member's steps and to nothing else
+        // — it rides on `compiled.env_files` above rather than being poured
+        // into one shared map where every other package would read it too.
         // A workflow that can't run without certain variables must say where
         // they're documented — and the workspace that has to say so is the one
         // that declared the requirement, not the monorepo root. Checked here
@@ -677,6 +686,58 @@ fn compile(
 
     validate_flowchart(&graph.steps, &format!("workflow '{}'", graph.label()))?;
     Ok(graph)
+}
+
+/// The `.env` files a member's steps resolve through, outermost first.
+///
+/// The monorepo root, then every sub-workspace between it and this member, then
+/// the member itself — so the member's own file answers first and anything it
+/// doesn't set falls back outward. Siblings are not in the chain: two packages
+/// that need the same variable declare it in the workspace above them, or each
+/// declares it for itself.
+fn env_chain(workspace: &Workspace, member: &Member) -> Vec<String> {
+    use crate::environment::files::Layer;
+
+    let mut layers: Vec<Layer<'_>> = Vec::new();
+    // The root is a level even when it's an umbrella — it isn't a package, but
+    // its `.env` is still the outermost thing a step falls back to.
+    if member.rel != "." {
+        layers.push(Layer {
+            rel: ".",
+            dir: &workspace.root,
+            meta: &workspace.root_meta,
+        });
+    }
+
+    let mut between: Vec<&Member> = workspace
+        .members
+        .iter()
+        .filter(|other| other.rel != "." && encloses(&other.rel, &member.rel))
+        .collect();
+    // Shallowest first, so the nearest enclosing workspace is layered last.
+    between.sort_by_key(|other| other.rel.matches('/').count());
+    for other in between {
+        layers.push(Layer {
+            rel: &other.rel,
+            dir: &other.dir,
+            meta: &other.meta,
+        });
+    }
+
+    layers.push(Layer {
+        rel: &member.rel,
+        dir: &member.dir,
+        meta: &member.meta,
+    });
+
+    crate::environment::files::chain(&layers)
+}
+
+/// Whether `outer` is a workspace directory containing `inner` — a proper
+/// ancestor, not the same directory and not a sibling with a shared prefix
+/// (`packages/api` does not enclose `packages/api-docs`).
+fn encloses(outer: &str, inner: &str) -> bool {
+    inner.starts_with(&format!("{}/", outer.trim_end_matches('/')))
 }
 
 /// Concatenate two `&[String]` lists, keeping first-seen order and dropping
@@ -995,8 +1056,11 @@ mod tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
+    /// A member's `.env` belongs to that member's steps. Pouring every
+    /// member's file into one run-wide list is how one package's settings end
+    /// up being read by another's steps.
     #[test]
-    fn env_files_are_rebased_onto_the_monorepo_root() {
+    fn env_files_ride_on_the_steps_that_resolve_through_them() {
         let root = scratch("envfiles");
         let api = member(
             &root,
@@ -1012,11 +1076,108 @@ mod tests {
         );
         let ws = Workspace::load(&root).unwrap();
         let graph = build(&ws, "build", &Selection::default()).unwrap();
+        assert!(
+            graph.env_files.is_empty(),
+            "a member's env files are its steps' business, not the whole run's"
+        );
         assert_eq!(
-            graph.env_files,
-            vec!["packages/api/.env", "packages/api/.env.build"]
+            graph.steps[0].env_files,
+            vec!["packages/api/.env", "packages/api/.env.build"],
+            "rebased onto the monorepo root, nearest last"
         );
         assert_eq!(graph.required_env, vec!["API_TOKEN".to_string()]);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Proximity: a package's own `.env` answers first, the workspaces above it
+    /// answer for what it doesn't set, and a sibling's file is never consulted.
+    #[test]
+    fn a_steps_env_chain_runs_from_the_root_down_to_its_own_workspace() {
+        let root = scratch("chain");
+        std::fs::create_dir_all(root.join(CIABATTA_DIR)).unwrap();
+        std::fs::write(
+            root.join(CIABATTA_DIR).join("ciabatta.toml"),
+            "[workspace]\nname = \"repo\"\numbrella = true\n",
+        )
+        .unwrap();
+        std::fs::write(root.join(".env"), "SHARED=from-root\n").unwrap();
+
+        let api = member(&root, "packages/api", "[workspace]\nname = \"api\"\n");
+        std::fs::write(api.join(".env"), "SHARED=from-api\n").unwrap();
+        workflow(&api, "build", "[[steps]]\nname = \"b\"\nrun = \"true\"\n");
+
+        // A sibling with a `.env` of its own, and one with none at all: the
+        // first must not leak into the second's chain, and the second falls
+        // back to the root.
+        let web = member(&root, "packages/web", "[workspace]\nname = \"web\"\n");
+        std::fs::write(web.join(".env"), "SHARED=from-web\n").unwrap();
+        workflow(&web, "build", "[[steps]]\nname = \"b\"\nrun = \"true\"\n");
+
+        let docs = member(&root, "docs", "[workspace]\nname = \"docs\"\n");
+        workflow(&docs, "build", "[[steps]]\nname = \"b\"\nrun = \"true\"\n");
+
+        let ws = Workspace::load(&root).unwrap();
+        let graph = build(&ws, "build", &Selection::default()).unwrap();
+
+        let chain = |member: &str| -> Vec<String> {
+            graph
+                .steps
+                .iter()
+                .find(|s| s.workspace.as_deref() == Some(member))
+                .unwrap()
+                .env_files
+                .clone()
+        };
+
+        assert_eq!(
+            chain("api"),
+            vec![".env".to_string(), "packages/api/.env".to_string()],
+            "the root first, the package last — the nearest file wins"
+        );
+        assert_eq!(
+            chain("docs"),
+            vec![".env".to_string()],
+            "a package with no `.env` of its own resolves higher"
+        );
+        assert!(
+            !chain("api").iter().any(|f| f.contains("web")),
+            "a sibling's `.env` is not a fallback"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A workspace nested inside another is a level of its own: the chain picks
+    /// up every enclosing workspace, and only the enclosing ones.
+    #[test]
+    fn the_chain_picks_up_every_enclosing_workspace() {
+        let root = scratch("nested");
+        std::fs::create_dir_all(root.join(CIABATTA_DIR)).unwrap();
+        std::fs::write(
+            root.join(CIABATTA_DIR).join("ciabatta.toml"),
+            "[workspace]\nname = \"repo\"\numbrella = true\n",
+        )
+        .unwrap();
+
+        let services = member(&root, "services", "[workspace]\nname = \"services\"\n");
+        std::fs::write(services.join(".env"), "TIER=services\n").unwrap();
+
+        let api = member(&root, "services/api", "[workspace]\nname = \"api\"\n");
+        std::fs::write(api.join(".env"), "TIER=api\n").unwrap();
+        workflow(&api, "build", "[[steps]]\nname = \"b\"\nrun = \"true\"\n");
+
+        // A near-miss on the path prefix: `services-legacy` encloses nothing.
+        let legacy = member(&root, "services-legacy", "[workspace]\nname = \"legacy\"\n");
+        std::fs::write(legacy.join(".env"), "TIER=legacy\n").unwrap();
+
+        let ws = Workspace::load(&root).unwrap();
+        let graph = build(&ws, "build", &Selection::default()).unwrap();
+        assert_eq!(
+            graph.steps[0].env_files,
+            vec!["services/.env".to_string(), "services/api/.env".to_string()],
+            "outermost first, and `services-legacy` is a sibling, not a parent"
+        );
+
         std::fs::remove_dir_all(&root).ok();
     }
 

@@ -749,6 +749,7 @@ async fn show_recipe_graph(
     let ws = workspace::Workspace {
         root: root.to_path_buf(),
         members: Vec::new(),
+        root_meta: Default::default(),
         toolchain: Default::default(),
         env: Default::default(),
     };

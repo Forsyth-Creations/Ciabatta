@@ -637,6 +637,20 @@ ciabatta run test --filter tag:fast --filter tag:smoke   # either one`}</Pre>
           before anything runs rather than halfway through.
         </P>
         <P>
+          <strong>Among the files themselves, nearest wins.</strong> A step in{" "}
+          <C>packages/api</C> reads <C>packages/api/.env</C>; whatever that file doesn&apos;t set
+          comes from the workspace above it, up to the monorepo root. A sibling package&apos;s{" "}
+          <C>.env</C> is never a fallback. Each step&apos;s chain is listed under the step on the{" "}
+          <Link to="/run">Run page</Link>, so &quot;which file did this value come from?&quot; has
+          a visible answer.
+        </P>
+        <P>
+          A missing <C>.env</C> is generated from the checked-in template at the start of a run —
+          the declared <C>env_default</C>, or a conventional <C>.env.example</C> /{" "}
+          <C>.env.default</C> that is simply there — for the project and for every sub-workspace
+          the run touches. It never overwrites a file that exists.
+        </P>
+        <P>
           Ciabatta snapshots the variables its <C>.env</C> files define — names and value{" "}
           <em>hashes</em>, never the values — under <C>.ciabatta/cache/</C>. When they change,
           because someone pulled a branch that adds a required variable, the next run says which

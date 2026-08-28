@@ -251,6 +251,12 @@ pub struct Workspace {
     /// Every sub-workspace found beneath it, sorted by path so output is
     /// stable between runs and machines.
     pub members: Vec<Member>,
+    /// The root's own `[workspace]` table, umbrella or not.
+    ///
+    /// An umbrella root isn't a member — it isn't a package — but it is still a
+    /// level every step resolves its environment through, so its config has to
+    /// be reachable. See [`crate::environment::files::chain`].
+    pub root_meta: WorkspaceMeta,
     /// `[toolchain]` entries, merged root-first so a member may add its own.
     pub toolchain: BTreeMap<String, ToolSpec>,
     /// The umbrella root's `[workspace.env]`: the standard variables the whole
@@ -284,9 +290,13 @@ impl Workspace {
         let mut members: Vec<Member> = Vec::new();
         let mut toolchain: BTreeMap<String, ToolSpec> = BTreeMap::new();
         let mut env: BTreeMap<String, String> = BTreeMap::new();
+        let mut root_meta = WorkspaceMeta::default();
 
         for dir in dirs {
             let member = load_member(root, &dir)?;
+            if member.rel == "." {
+                root_meta = member.meta.clone();
+            }
             // Root-level toolchain entries land first and are the ones a member
             // may then specialize, so iterate in path order and let later
             // (deeper) definitions win for their own tools.
@@ -306,6 +316,7 @@ impl Workspace {
         let workspace = Workspace {
             root: root.to_path_buf(),
             members,
+            root_meta,
             toolchain,
             env,
         };

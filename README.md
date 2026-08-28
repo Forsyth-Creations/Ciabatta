@@ -1002,7 +1002,7 @@ to be asked.
 
 ## Environment files
 
-Three rules, in the order they apply:
+Four rules, in the order they apply:
 
 1. **`.env` is the default.** A workspace that says nothing gets `.env` from its
    own directory. Nobody should have to configure the conventional thing.
@@ -1012,13 +1012,36 @@ Three rules, in the order they apply:
 3. **`env_default` is where a missing `.env` comes from.** `.env` is gitignored,
    so a fresh checkout doesn't have one; the checked-in template does. Naming it
    means ciabatta generates the `.env` rather than failing on a variable the
-   developer has never heard of.
+   developer has never heard of. A conventional template that's simply *there*
+   — `.env.default`, `.env.example`, `.env.sample`, `.env.template` — counts
+   without being declared: committing one has already said what the variables
+   are. Generation happens at the start of a run, for the project and for every
+   sub-workspace it touches, and never overwrites a file that exists.
+4. **Nearest wins, then it looks outward.** A step in `packages/api` reads
+   `packages/api/.env`; anything that file doesn't set comes from the workspace
+   above it, up to the monorepo root. A *sibling's* `.env` is never a fallback —
+   two packages that need the same variable declare it in the workspace above
+   them, or each declares it for itself.
 
 ```yaml
 workspace:
   env_file: .env               # the default; set it to override
   env_default: .env.default    # the checked-in template
 ```
+
+```
+.env                     SHARED=from-root   REGION=global
+packages/api/.env        SHARED=from-api
+packages/web/.env        SHARED=from-web
+
+api:build   sees  SHARED=from-api   REGION=global    # its own file, then outward
+web:build   sees  SHARED=from-web   REGION=global    # never api's
+```
+
+The environment a run *starts* with still beats every file, as it always has:
+the shell, the CI system, and `-e KEY=VALUE` are on top of all of this. The run
+page shows each step's chain, so "which `.env` did this value come from?" is a
+question with a visible answer.
 
 And one requirement that follows from the third: **a workspace whose workflows
 declare `REQUIRED_ENV` must declare `env_default`.** Not bureaucracy — it's what

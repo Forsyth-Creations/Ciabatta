@@ -10,17 +10,27 @@
 //! downstream of it gets a different key and misses too — each for a reason it
 //! can name, rather than everything rebuilding because one thing did.
 //!
+//! Propagation through output hashes only works for steps that *have* outputs
+//! to hash. A step that declares none — an uncached one, or one whose config
+//! lists `inputs` but no `outputs` — runs every time and fingerprints to the
+//! same empty value each time, so a key downstream of it agreeing proves
+//! nothing about whether its result moved. Those steps are tracked here as
+//! *unaccounted*, and everything behind one runs as well ([`Reason::UpstreamReran`]).
+//! That is the one case where reuse is withdrawn without a named file having
+//! changed, and it is withdrawn because the alternative is serving a stale
+//! artifact.
+//!
 //! What this produces is a *prediction*. `ciabatta dry-run` prints it and stops;
 //! the runner uses the same function and then acts on it. The two cannot
 //! disagree, which is the only way a dry run is worth reading.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 
 use super::store::Store;
-use super::{CacheConfig, Decision, Target, diff::Diff};
+use super::{CacheConfig, Decision, Reason, Target, diff::Diff};
 use crate::run::RunStep;
 
 /// One step, planned: what it would do, and why.
@@ -113,6 +123,9 @@ pub fn plan_graph(
     // Step name → the fingerprint of what it produced, carried forward to its
     // dependents as their third dependency.
     let mut fingerprints: BTreeMap<String, String> = BTreeMap::new();
+    // Steps that will run without declaring what they produce, so nothing
+    // downstream of them can be reused on the strength of an unchanged key.
+    let mut unaccounted: BTreeSet<String> = BTreeSet::new();
     let mut planned: Vec<Planned> = Vec::new();
 
     for step in steps {
@@ -147,7 +160,27 @@ pub fn plan_graph(
             upstream: upstream.clone(),
         };
 
-        let decision = super::plan(&target, env, store)?;
+        let mut decision = super::plan(&target, env, store)?;
+
+        // A step behind one that runs unaccounted has to run too. Its key can
+        // agree only because it cannot see what happened upstream.
+        let reran = reran_upstream(&step.needs, &unaccounted);
+        if !reran.is_empty()
+            && decision.is_reuse()
+            && let Some(key) = decision.key().map(str::to_string)
+        {
+            decision = Decision::Rebuild {
+                key,
+                reason: Reason::UpstreamReran { steps: reran },
+            };
+        }
+
+        // And it inherits the doubt: a step that runs without accounting for
+        // its outputs leaves its own dependents nothing to check either.
+        if !decision.is_reuse() && !config.accounts_for_its_outputs() {
+            unaccounted.insert(step.name.clone());
+        }
+
         let inputs = config.hash_inputs(&dir)?;
         let outputs = config.hash_outputs(&dir)?;
 
@@ -183,6 +216,18 @@ pub fn plan_graph(
     }
 
     Ok(Plan { steps: planned })
+}
+
+/// Which of `needs` are steps that run without accounting for their outputs.
+///
+/// Shared by the planner and the runner so `dry-run` and `run` can't disagree
+/// about which steps have to rerun behind one.
+pub fn reran_upstream(needs: &[String], unaccounted: &BTreeSet<String>) -> Vec<String> {
+    needs
+        .iter()
+        .filter(|need| unaccounted.contains(need.as_str()))
+        .cloned()
+        .collect()
 }
 
 /// The declared environment variables and their current values.
@@ -305,11 +350,50 @@ mod tests {
         }
     }
 
+    /// A context that gives each step its own cache settings, for the cases
+    /// where the difference between two steps is the point.
+    struct PerStep {
+        dir: PathBuf,
+        configs: BTreeMap<String, CacheConfig>,
+    }
+
+    impl StepContext for PerStep {
+        fn cache_config(&self, step: &RunStep) -> CacheConfig {
+            self.configs.get(&step.name).cloned().unwrap_or_default()
+        }
+        fn dir(&self, _step: &RunStep) -> PathBuf {
+            self.dir.clone()
+        }
+        fn workspace(&self, _step: &RunStep) -> String {
+            "api".to_string()
+        }
+    }
+
     fn scratch(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("ciab_graph_{name}_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    /// Record an entry under `key`, as if that step had just built what's on
+    /// disk — so a later plan can be a hit rather than a first build.
+    fn store_built(store: &Store, key: &str, dir: &Path, config: &CacheConfig) {
+        store
+            .put(
+                key,
+                dir,
+                crate::cache::store::Build {
+                    target: "build".into(),
+                    workspace: "api".into(),
+                    inputs: config.hash_inputs(dir).unwrap(),
+                    outputs: config.hash_outputs(dir).unwrap(),
+                    env: BTreeMap::new(),
+                    upstream: BTreeMap::new(),
+                    duration_ms: 10,
+                },
+            )
+            .unwrap();
     }
 
     fn write(dir: &Path, rel: &str, body: &str) {
@@ -437,6 +521,164 @@ mod tests {
             build.target.upstream.keys().collect::<Vec<_>>(),
             vec!["generate"],
             "build must not depend on lint, which it never declared"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A step that declares no outputs runs every time and fingerprints to the
+    /// same empty value whatever it did, so a dependent's key agreeing proves
+    /// nothing. Everything behind it has to run too.
+    #[test]
+    fn a_step_behind_an_unaccountable_rerun_reruns_as_well() {
+        let dir = scratch("unaccounted");
+        write(&dir, "src/a.rs", "fn a() {}");
+        write(&dir, "dist/out", "built");
+        let store = Store::at(dir.join(".cache")).unwrap();
+
+        let cached = CacheConfig {
+            enabled: Some(true),
+            inputs: vec!["src/**/*".into()],
+            outputs: vec!["dist/**/*".into()],
+            exclude: vec!["dist".into()],
+            ..Default::default()
+        };
+        // Same settings, minus the one thing that makes a rerun accountable.
+        let no_outputs = CacheConfig {
+            outputs: Vec::new(),
+            ..cached.clone()
+        };
+
+        let steps = vec![
+            step("generate", "make gen", &[]),
+            step("build", "make build", &["generate"]),
+        ];
+        let context = PerStep {
+            dir: dir.clone(),
+            configs: [
+                ("generate".to_string(), no_outputs),
+                ("build".to_string(), cached.clone()),
+            ]
+            .into_iter()
+            .collect(),
+        };
+
+        // Store what `build` would have produced, under the key it plans with,
+        // so that on its own it would be a hit.
+        let key = plan_graph(&steps, &context, &BTreeMap::new(), &store)
+            .unwrap()
+            .steps[1]
+            .decision
+            .key()
+            .unwrap()
+            .to_string();
+        store_built(&store, &key, &dir, &cached);
+
+        let plan = plan_graph(&steps, &context, &BTreeMap::new(), &store).unwrap();
+        assert!(
+            matches!(
+                &plan.steps[1].decision,
+                Decision::Rebuild {
+                    reason: Reason::UpstreamReran { steps },
+                    ..
+                } if steps == &["generate".to_string()]
+            ),
+            "a step behind an unaccountable rerun must run: {:?}",
+            plan.steps[1].decision
+        );
+
+        // The same graph, with the upstream accounting for what it produces:
+        // its key is what decides, and nothing moved, so the hit stands.
+        write(&dir, "gen/stub.rs", "// generated");
+        let accountable = PerStep {
+            dir: dir.clone(),
+            configs: [
+                (
+                    "generate".to_string(),
+                    CacheConfig {
+                        outputs: vec!["gen/**/*".into()],
+                        exclude: vec!["dist".into(), "gen".into()],
+                        ..cached.clone()
+                    },
+                ),
+                ("build".to_string(), cached.clone()),
+            ]
+            .into_iter()
+            .collect(),
+        };
+        let plan = plan_graph(&steps, &accountable, &BTreeMap::new(), &store).unwrap();
+        let build_key = plan.steps[1].decision.key().unwrap().to_string();
+        store_built(&store, &build_key, &dir, &cached);
+        let plan = plan_graph(&steps, &accountable, &BTreeMap::new(), &store).unwrap();
+        assert!(
+            plan.steps[1].is_reuse(),
+            "an upstream that can prove its outputs didn't move must not force a rerun: {:?}",
+            plan.steps[1].decision
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The doubt is inherited: it reaches past the step immediately behind the
+    /// one that reran, through any step that can't account for itself either.
+    #[test]
+    fn the_rerun_reaches_the_steps_behind_the_steps_behind_it() {
+        let dir = scratch("chain");
+        write(&dir, "src/a.rs", "fn a() {}");
+        write(&dir, "dist/out", "built");
+        let store = Store::at(dir.join(".cache")).unwrap();
+
+        let cached = CacheConfig {
+            enabled: Some(true),
+            inputs: vec!["src/**/*".into()],
+            outputs: vec!["dist/**/*".into()],
+            exclude: vec!["dist".into()],
+            ..Default::default()
+        };
+        let no_outputs = CacheConfig {
+            outputs: Vec::new(),
+            ..cached.clone()
+        };
+
+        // generate → build → test, where neither of the first two declares an
+        // output. Only `test` could be reused on its key, and it must not be.
+        let steps = vec![
+            step("generate", "make gen", &[]),
+            step("build", "make build", &["generate"]),
+            step("test", "make test", &["build"]),
+        ];
+        let context = PerStep {
+            dir: dir.clone(),
+            configs: [
+                ("generate".to_string(), no_outputs.clone()),
+                ("build".to_string(), no_outputs),
+                ("test".to_string(), cached.clone()),
+            ]
+            .into_iter()
+            .collect(),
+        };
+
+        let key = plan_graph(&steps, &context, &BTreeMap::new(), &store)
+            .unwrap()
+            .steps[2]
+            .decision
+            .key()
+            .unwrap()
+            .to_string();
+        store_built(&store, &key, &dir, &cached);
+
+        let plan = plan_graph(&steps, &context, &BTreeMap::new(), &store).unwrap();
+        assert_eq!(plan.tally(), (0, 3));
+        assert!(
+            matches!(
+                &plan.steps[2].decision,
+                Decision::Rebuild {
+                    reason: Reason::UpstreamReran { steps },
+                    ..
+                } if steps == &["build".to_string()]
+            ),
+            "the doubt must carry through `build`: {:?}",
+            plan.steps[2].decision
         );
 
         let _ = std::fs::remove_dir_all(&dir);

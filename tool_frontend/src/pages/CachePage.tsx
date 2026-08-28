@@ -326,6 +326,8 @@ function rebuildLabel(reason: RebuildReason): string {
       return "outputs were modified since they were built";
     case "no_outputs":
       return "no outputs declared, so there's nothing to restore";
+    case "upstream_reran":
+      return `${reason.steps.join(", ")} ran and declares no outputs, so there's no telling whether what this stage consumes changed`;
   }
 }
 

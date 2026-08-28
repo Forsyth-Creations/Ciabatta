@@ -388,7 +388,17 @@ async fn run_dag(
                             .await;
                         continue;
                     }
-                    Ok(super::cached::Action::Run(token)) => pending = Some(token),
+                    Ok(super::cached::Action::Run { note, token }) => {
+                        if let Some(note) = note {
+                            let _ = tx
+                                .send(ProgressUpdate::Log(
+                                    recipe.to_string(),
+                                    format!("{}: {note}", step.name),
+                                ))
+                                .await;
+                        }
+                        pending = Some(token);
+                    }
                     // A cache that can't decide costs a rebuild, never a build.
                     Err(e) => {
                         let _ = tx
@@ -415,6 +425,12 @@ async fn run_dag(
                 }
                 Err(err) => {
                     state.insert(step.name.as_str(), StepState::Failed);
+                    // It ran and left the tree in a state nothing recorded —
+                    // whatever runs on past this, by recovery or by tolerance,
+                    // can't be served from the cache behind it.
+                    if let Some(session) = cache.as_deref_mut() {
+                        session.mark_unaccounted(&step.name);
+                    }
 
                     // A recovery route takes precedence: it exists to put the
                     // run back on the rails rather than write the failure off.

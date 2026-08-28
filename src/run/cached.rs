@@ -11,14 +11,14 @@
 //! never fails a build, and it never lets a step be skipped whose outputs
 //! aren't verifiably the ones that step produces.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 
 use crate::cache::graph::StepContext;
 use crate::cache::store::{Build, Store};
-use crate::cache::{CacheConfig, Decision, FileHash, Source};
+use crate::cache::{CacheConfig, Decision, FileHash, Reason, Source};
 use crate::config::CiabattaConfig;
 use crate::remote_cache::client::Client;
 use crate::run::RunStep;
@@ -37,6 +37,14 @@ pub struct Session {
     recipe_cache: Option<CacheConfig>,
     /// Step name → fingerprint of what it produced. The third dependency.
     fingerprints: BTreeMap<String, String>,
+    /// Steps that ran without being able to say what they produced: they
+    /// declare no `cache.outputs`, or they failed and were recovered around.
+    ///
+    /// Their fingerprint is the same empty value whatever they just did, so a
+    /// dependent's key agreeing says nothing about whether what it consumes
+    /// moved. Everything behind one of these reruns — see
+    /// [`crate::cache::CacheConfig::accounts_for_its_outputs`].
+    unaccounted: BTreeSet<String>,
     /// Remote cache to consult, when this project has one configured.
     remote: Option<Remote>,
     /// Keys this run reused without asking the remote for them.
@@ -101,11 +109,18 @@ pub enum Action {
         /// What to tell the user.
         note: String,
     },
-    /// Run it. The token carries what's needed to store the result afterwards.
+    /// Run it.
     ///
-    /// Boxed because it's much the larger variant, and `Skip` is the one this
+    /// The token carries what's needed to store the result afterwards; it's
+    /// boxed because it's much the larger variant, and `Skip` is the one this
     /// exists to make common.
-    Run(Box<Pending>),
+    Run {
+        /// Why the cache didn't reuse this step, when that's worth saying —
+        /// which it is when the step's own key was fine and it is running
+        /// because something it needs reran.
+        note: Option<String>,
+        token: Box<Pending>,
+    },
 }
 
 /// A step that's about to run, holding what its entry will need.
@@ -147,6 +162,7 @@ impl Session {
             root: root.to_path_buf(),
             recipe_cache,
             fingerprints: BTreeMap::new(),
+            unaccounted: BTreeSet::new(),
             remote: None,
             reused_locally: Vec::new(),
             stats: Stats::default(),
@@ -233,17 +249,27 @@ impl Session {
             })
             .collect();
 
+        // What this step needs that ran without accounting for its outputs.
+        // Computed the same way `dry-run` computes it, so the two agree.
+        let reran = crate::cache::graph::reran_upstream(&step.needs, &self.unaccounted);
+
         if config.why_disabled().is_some() {
             self.stats.uncached += 1;
-            return Ok(Action::Run(Box::new(Pending {
-                key: None,
-                dir,
-                config,
-                workspace,
-                inputs: Vec::new(),
-                env: BTreeMap::new(),
-                upstream,
-            })));
+            // It runs regardless, and it has nothing to hash afterwards unless
+            // it declared outputs — in which case `after` still records them.
+            self.note_accountability(&step.name, &config);
+            return Ok(Action::Run {
+                note: None,
+                token: Box::new(Pending {
+                    key: None,
+                    dir,
+                    config,
+                    workspace,
+                    inputs: Vec::new(),
+                    env: BTreeMap::new(),
+                    upstream,
+                }),
+            });
         }
 
         let env_map: BTreeMap<String, String> =
@@ -259,9 +285,27 @@ impl Session {
 
         let mut decision = crate::cache::plan(&target, &env_map, &self.store)?;
 
+        // A step behind one that ran unaccounted has to run as well: its key
+        // matching only means the key cannot see what happened upstream. This
+        // is checked before the cache is consulted at all, so a remote entry
+        // can't reintroduce what the local decision just withdrew.
+        if !reran.is_empty()
+            && decision.is_reuse()
+            && let Some(key) = decision.key().map(str::to_string)
+        {
+            decision = Decision::Rebuild {
+                key,
+                reason: Reason::UpstreamReran {
+                    steps: reran.clone(),
+                },
+            };
+        }
+
         // Nothing local. Before rebuilding, ask the shared cache — somebody
         // else may already have built exactly this.
-        if let (Decision::Rebuild { key, .. }, Some(remote)) = (&decision, &self.remote) {
+        if reran.is_empty()
+            && let (Decision::Rebuild { key, .. }, Some(remote)) = (&decision, &self.remote)
+        {
             let key = key.clone();
             if crate::remote_cache::client::try_restore(&remote.client, &remote.project, &key, &dir)
                 .await
@@ -309,29 +353,42 @@ impl Session {
             }
             // `Uncached` can't reach here — a disabled config short-circuits
             // at the top of this function, before a key is ever computed.
-            Decision::Rebuild { key, .. } => {
+            Decision::Rebuild { key, reason } => {
                 self.stats.rebuilt += 1;
-                Ok(Action::Run(Box::new(Pending {
-                    key: Some(key),
-                    dir,
-                    config,
-                    workspace,
-                    inputs,
-                    env: env_declared,
-                    upstream,
-                })))
+                // Only the upstream case is worth a line: every other reason a
+                // step rebuilds is about the step itself, and `dry-run` is
+                // where anyone goes to read those.
+                let note = matches!(reason, Reason::UpstreamReran { .. })
+                    .then(|| format!("running because {}", reason.describe()));
+                self.note_accountability(&step.name, &config);
+                Ok(Action::Run {
+                    note,
+                    token: Box::new(Pending {
+                        key: Some(key),
+                        dir,
+                        config,
+                        workspace,
+                        inputs,
+                        env: env_declared,
+                        upstream,
+                    }),
+                })
             }
             Decision::Uncached { .. } => {
                 self.stats.uncached += 1;
-                Ok(Action::Run(Box::new(Pending {
-                    key: None,
-                    dir,
-                    config,
-                    workspace,
-                    inputs,
-                    env: env_declared,
-                    upstream,
-                })))
+                self.note_accountability(&step.name, &config);
+                Ok(Action::Run {
+                    note: None,
+                    token: Box::new(Pending {
+                        key: None,
+                        dir,
+                        config,
+                        workspace,
+                        inputs,
+                        env: env_declared,
+                        upstream,
+                    }),
+                })
             }
         }
     }
@@ -358,6 +415,9 @@ impl Session {
                     "note: couldn't collect {}'s outputs to cache ({e:#})",
                     step.name
                 );
+                // Nothing was recorded about what it produced, so its
+                // dependents have nothing to check: they rerun behind it.
+                self.unaccounted.insert(step.name.clone());
                 return;
             }
         };
@@ -471,6 +531,21 @@ impl Session {
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_else(|| workspace.root.display().to_string()),
         );
+    }
+
+    /// Note that a step which is about to run can't say what it produced, so
+    /// its dependents can't be reused on an unchanged key.
+    fn note_accountability(&mut self, name: &str, config: &CacheConfig) {
+        if !config.accounts_for_its_outputs() {
+            self.unaccounted.insert(name.to_string());
+        }
+    }
+
+    /// Record that a step ran and left no result the cache can account for —
+    /// it failed, or a recovery node ran in its place. What it did to the tree
+    /// is unknown, so everything downstream of it reruns.
+    pub fn mark_unaccounted(&mut self, name: &str) {
+        self.unaccounted.insert(name.to_string());
     }
 
     /// Record what a reused step's outputs fingerprint to, so its dependents
@@ -609,6 +684,165 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(stats.summary().unwrap(), "cache: 0 reused, 1 built");
+    }
+
+    fn write(dir: &Path, rel: &str, body: &str) {
+        let path = dir.join(rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, body).unwrap();
+    }
+
+    fn step(name: &str, needs: &[&str], cache: CacheConfig) -> RunStep {
+        RunStep {
+            name: name.to_string(),
+            run: Some(format!("make {name}")),
+            needs: needs.iter().map(|s| s.to_string()).collect(),
+            cache: Some(cache),
+            ..Default::default()
+        }
+    }
+
+    /// Settings a step can be reused on, and the same settings with the one
+    /// thing missing that makes a rerun accountable.
+    fn configs() -> (CacheConfig, CacheConfig) {
+        let cached = CacheConfig {
+            enabled: Some(true),
+            inputs: vec!["src/**/*".into()],
+            outputs: vec!["dist/**/*".into()],
+            exclude: vec!["dist".into()],
+            ..Default::default()
+        };
+        let no_outputs = CacheConfig {
+            outputs: Vec::new(),
+            ..cached.clone()
+        };
+        (cached, no_outputs)
+    }
+
+    /// Run every step through the session, as the engine does: ask, then store
+    /// what a step that ran produced.
+    async fn run_all(session: &mut Session, steps: &[RunStep]) -> Vec<Option<String>> {
+        let env = HashMap::new();
+        let mut notes = Vec::new();
+        for step in steps {
+            match session.before(step, &env).await.unwrap() {
+                Action::Run { note, token } => {
+                    session.after(step, token, 5).await;
+                    notes.push(note.or(Some(String::new())));
+                }
+                Action::Skip { .. } => notes.push(None),
+            }
+        }
+        notes
+    }
+
+    /// The runner has to withdraw reuse for the same reason `dry-run` predicts
+    /// it will: an upstream that reran and can't say what it produced.
+    #[tokio::test]
+    async fn a_step_behind_an_unaccountable_rerun_is_not_reused() {
+        let root = scratch("rerun");
+        write(&root, "src/a.rs", "fn a() {}");
+        write(&root, "dist/out", "built");
+        let (cached, no_outputs) = configs();
+        let steps = vec![
+            step("generate", &[], no_outputs),
+            step("build", &["generate"], cached),
+        ];
+
+        // First run: nothing is cached, so both run and `build` is stored.
+        let mut session = Session::open(&root, &CiabattaConfig::default(), None).unwrap();
+        assert_eq!(
+            run_all(&mut session, &steps)
+                .await
+                .iter()
+                .filter(|n| n.is_some())
+                .count(),
+            2,
+            "nothing is built yet, so nothing can be skipped"
+        );
+
+        // Second run, with not one file touched. `build`'s key is unchanged —
+        // but `generate` ran again and nothing recorded what it did.
+        let mut session = Session::open(&root, &CiabattaConfig::default(), None).unwrap();
+        let notes = run_all(&mut session, &steps).await;
+        let build = notes[1]
+            .as_ref()
+            .expect("build must not be reused behind an upstream that reran");
+        assert!(
+            build.contains("generate") && build.contains("cache.outputs"),
+            "the reason must name the step and what it's missing: {build}"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The other half of the same rule: an upstream that *can* prove its
+    /// outputs didn't move must not cost its dependents a rerun.
+    #[tokio::test]
+    async fn a_step_behind_an_accountable_upstream_is_still_reused() {
+        let root = scratch("accountable");
+        write(&root, "src/a.rs", "fn a() {}");
+        write(&root, "gen/stub.rs", "// generated");
+        write(&root, "dist/out", "built");
+        let (cached, _) = configs();
+        let generates = CacheConfig {
+            outputs: vec!["gen/**/*".into()],
+            exclude: vec!["dist".into(), "gen".into()],
+            ..cached.clone()
+        };
+        let steps = vec![
+            step("generate", &[], generates),
+            step("build", &["generate"], cached),
+        ];
+
+        let mut session = Session::open(&root, &CiabattaConfig::default(), None).unwrap();
+        run_all(&mut session, &steps).await;
+
+        let mut session = Session::open(&root, &CiabattaConfig::default(), None).unwrap();
+        let notes = run_all(&mut session, &steps).await;
+        assert!(
+            notes.iter().all(|n| n.is_none()),
+            "an unchanged graph must reuse everything: {notes:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A step that failed left the tree in a state nothing recorded, so what
+    /// runs on past it — by recovery, or because the failure was tolerated —
+    /// can't be served from the cache either.
+    #[tokio::test]
+    async fn nothing_downstream_of_a_failed_step_is_reused() {
+        let root = scratch("failed");
+        write(&root, "src/a.rs", "fn a() {}");
+        write(&root, "gen/stub.rs", "// generated");
+        write(&root, "dist/out", "built");
+        let (cached, _) = configs();
+        let generates = CacheConfig {
+            outputs: vec!["gen/**/*".into()],
+            exclude: vec!["dist".into(), "gen".into()],
+            ..cached.clone()
+        };
+        let steps = vec![
+            step("generate", &[], generates),
+            step("build", &["generate"], cached),
+        ];
+
+        let mut session = Session::open(&root, &CiabattaConfig::default(), None).unwrap();
+        run_all(&mut session, &steps).await;
+
+        // This time `generate` fails — the engine says so — and the run carries
+        // on to `build`, whose key hasn't moved.
+        let mut session = Session::open(&root, &CiabattaConfig::default(), None).unwrap();
+        session.mark_unaccounted("generate");
+        match session.before(&steps[1], &HashMap::new()).await.unwrap() {
+            Action::Run { .. } => {}
+            Action::Skip { note } => {
+                panic!("build was reused behind a failed upstream: {note}")
+            }
+        }
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

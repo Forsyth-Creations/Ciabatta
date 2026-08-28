@@ -81,7 +81,8 @@ export type RebuildReason =
   | { kind: "inputs_changed"; changed: string[]; total: number }
   | { kind: "outputs_missing"; missing: string[] }
   | { kind: "outputs_modified"; modified: string[] }
-  | { kind: "no_outputs" };
+  | { kind: "no_outputs" }
+  | { kind: "upstream_reran"; steps: string[] };
 
 export type ChangeKind = "added" | "removed" | "modified";
 

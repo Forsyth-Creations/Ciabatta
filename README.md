@@ -773,6 +773,22 @@ The third is what makes a *graph* cacheable rather than just a directory. Change
 a `.proto` file and `proto:generate` misses; its outputs change; every stage
 downstream of it misses too — each for a reason it can name.
 
+That propagation runs on output hashes, so it needs outputs to hash. A stage
+that declares none — an uncached one, or one that lists `inputs:` and stops —
+runs every time and looks identical afterwards no matter what it just did, so a
+downstream key agreeing proves nothing. **Anything behind such a stage runs
+too**, and says why:
+
+```
+● build   rebuild — generate ran and declares no `cache.outputs`, so there's no
+                    telling whether what this step consumes changed
+```
+
+The same holds for a stage that failed and was recovered around: what it left
+behind is unrecorded, so nothing downstream is served from the cache. Declaring
+`cache.outputs` on the stage is what buys the reuse back — then an unchanged
+output set stops the invalidation there, and only what genuinely moved rebuilds.
+
 Two things worth being explicit about:
 
 **An undeclared input is a wrong answer, not a slow one.** If a build reads a

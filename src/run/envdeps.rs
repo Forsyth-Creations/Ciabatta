@@ -173,21 +173,47 @@ pub fn collect(resolved: &ResolvedRun, root: &Path, base: &HashMap<String, Strin
         .unwrap_or_else(|| base.clone());
     let files = prepared
         .as_ref()
-        .map(|p| p.sourced.clone())
+        .map(|p| p.all_sourced())
         .unwrap_or_default();
     let missing = prepared.as_ref().map(|p| p.missing()).unwrap_or_default();
 
-    // Which `.env` file last defined each key, and to what — the run sources
-    // them in order, so the last one wins.
-    let mut from_file: HashMap<String, (String, String)> = HashMap::new();
+    // Which `.env` file last defined each key, and to what. Read once per file,
+    // then consulted per scope: the run's own chain, and each step's.
+    let mut parsed: HashMap<String, Vec<(String, String)>> = HashMap::new();
     for rel in &files {
         let Ok(content) = std::fs::read_to_string(root.join(rel)) else {
             continue;
         };
-        for (key, value) in parse_env_content(&content) {
-            from_file.insert(key, (rel.clone(), value));
-        }
+        parsed.insert(rel.clone(), parse_env_content(&content));
     }
+    let supplier = |chain: &[String], key: &str| -> Option<(String, String)> {
+        // Last file in the chain that defines it — the nearest workspace's,
+        // which is the one whose value the step actually sees.
+        chain.iter().rev().find_map(|rel| {
+            parsed.get(rel).and_then(|pairs| {
+                pairs
+                    .iter()
+                    .rev()
+                    .find(|(k, _)| k == key)
+                    .map(|(_, v)| (rel.clone(), v.clone()))
+            })
+        })
+    };
+
+    let run_chain = prepared
+        .as_ref()
+        .map(|p| p.sourced.clone())
+        .unwrap_or_default();
+    // The scope each step resolves in: its own chain when it has one, the
+    // run's otherwise.
+    let scope_of = |step: &str| -> (Vec<String>, HashMap<String, String>) {
+        match prepared.as_ref() {
+            Some(p) if !p.files_for(step).is_empty() => {
+                (p.files_for(step).to_vec(), p.for_step(step).clone())
+            }
+            _ => (run_chain.clone(), env.clone()),
+        }
+    };
 
     // Which steps touch which variable, and what a step's own `[env]` sets it
     // to. `BTreeMap`s keep both the variable list and each variable's step list
@@ -217,7 +243,9 @@ pub fn collect(resolved: &ResolvedRun, root: &Path, base: &HashMap<String, Strin
     // sources, and everything its steps read.
     let mut keys: HashSet<String> = HashSet::new();
     keys.extend(resolved.required_env.iter().cloned());
-    keys.extend(from_file.keys().cloned());
+    for pairs in parsed.values() {
+        keys.extend(pairs.iter().map(|(key, _)| key.clone()));
+    }
     keys.extend(users.keys().cloned());
     // The `{VAR}` placeholders that decide *which* `.env` file gets sourced are
     // a dependency of the run before any step exists.
@@ -229,11 +257,42 @@ pub fn collect(resolved: &ResolvedRun, root: &Path, base: &HashMap<String, Strin
         .into_iter()
         .map(|key| {
             let step_values = declared.get(&key);
-            let ambient = env.get(&key).filter(|v| !v.trim().is_empty());
 
-            // Precedence mirrors the engine: the resolved environment (shell,
-            // CI, `-e`, then a sourced file) is what a step sees unless the
-            // step declares its own value, which is layered on top.
+            // What the steps that read this variable actually see. With `.env`
+            // files resolved by proximity, two steps can read the same name and
+            // get different values — so the scopes are asked one by one rather
+            // than one run-wide map being taken as the answer.
+            let readers = users.get(&key).cloned().unwrap_or_default();
+            let mut scopes: Vec<(Vec<String>, HashMap<String, String>)> =
+                readers.iter().map(|step| scope_of(step)).collect();
+            if scopes.is_empty() {
+                scopes.push((run_chain.clone(), env.clone()));
+            }
+
+            let mut seen: Vec<(Option<String>, Option<String>)> = Vec::new();
+            for (chain, resolved_env) in &scopes {
+                let value = resolved_env
+                    .get(&key)
+                    .filter(|v| !v.trim().is_empty())
+                    .cloned();
+                // A file only supplied the value if `base` didn't already have
+                // one — a sourced file never overrides the real environment.
+                let file = match base.get(&key) {
+                    Some(v) if !v.trim().is_empty() => None,
+                    _ => supplier(chain, &key).map(|(file, _)| file),
+                };
+                let entry = (value, file);
+                if !seen.contains(&entry) {
+                    seen.push(entry);
+                }
+            }
+
+            let disagree = seen.len() > 1;
+            let (ambient, from_file) = seen.into_iter().next().unwrap_or((None, None));
+
+            // Precedence mirrors the engine: what the step's own chain resolved
+            // to is what it sees, unless the step declares its own value, which
+            // is layered on top.
             let (origin, file, value, varies) = match (ambient, step_values) {
                 (_, Some(values)) if values.len() > 1 => (Origin::Config, None, None, true),
                 (_, Some(values)) => (
@@ -242,17 +301,12 @@ pub fn collect(resolved: &ResolvedRun, root: &Path, base: &HashMap<String, Strin
                     values.iter().next().cloned().filter(|v| !v.is_empty()),
                     false,
                 ),
-                (Some(value), None) => match from_file.get(&key) {
-                    // Sourced files land in the resolved environment, so a hit
-                    // there is what supplied the value — unless `base` already
-                    // had a non-empty one, which the file never overrides.
-                    Some((file, _)) if base.get(&key).is_none_or(|v| v.trim().is_empty()) => (
-                        Origin::EnvFile,
-                        Some(file.clone()),
-                        Some(value.clone()),
-                        false,
-                    ),
-                    _ => (Origin::Environment, None, Some(value.clone()), false),
+                // The readers disagree: there is no single value to report, and
+                // claiming one would be worse than saying so.
+                (_, None) if disagree => (Origin::EnvFile, None, None, true),
+                (Some(value), None) => match from_file {
+                    Some(file) => (Origin::EnvFile, Some(file), Some(value), false),
+                    None => (Origin::Environment, None, Some(value), false),
                 },
                 (None, None) => (Origin::Unset, None, None, false),
             };

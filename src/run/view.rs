@@ -90,6 +90,14 @@ pub struct StepView {
     /// conditions. Together with `env` these are the edges the graph view
     /// draws between a variable and the steps that depend on it.
     env_refs: Vec<String>,
+    /// The `.env` files this step resolves through, outermost first — its own
+    /// workspace's last, since that's the one that wins. Empty for a step that
+    /// just sees the run's environment.
+    ///
+    /// Worth showing because "which `.env` did this value come from?" is
+    /// otherwise unanswerable in a monorepo, where two packages can set the
+    /// same variable and each step sees its own.
+    env_files: Vec<String>,
 
     // ─── Dependencies ───────────────────────────────────────────────────────
     /// The five things this target is defined by: the files it reads, the files
@@ -330,6 +338,7 @@ pub fn initial_state(
                     .map(|(key, value)| (key.clone(), envdeps::shown(key, value)))
                     .collect(),
                 env_refs: envdeps::step_refs(step),
+                env_files: step.env_files.clone(),
                 // A recovery node has no build and so no dependencies; the
                 // default is the honest empty answer rather than a missing key
                 // the viewer would have to special-case.

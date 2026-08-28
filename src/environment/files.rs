@@ -14,6 +14,11 @@
 //!    does. Naming it means ciabatta can generate the `.env` rather than
 //!    failing on a variable the developer has never heard of.
 //!
+//! Rule 3 applies to the conventional templates too: a workspace with a
+//! `.env.example` sitting in it and no `.env` gets one generated from it,
+//! declared or not. Rule 1's reasoning is the same reasoning — nobody should
+//! have to configure the conventional thing.
+//!
 //! And one requirement that follows from the third: **a workspace whose builds
 //! depend on environment variables must declare `env_default`.** Not as
 //! bureaucracy — as the thing that makes rule 3 possible. A repo where the
@@ -38,6 +43,38 @@ pub const TEMPLATE_NAMES: &[&str] = &[
     ".env.sample",
     ".env.template",
 ];
+
+/// The checked-in template a workspace's `.env` comes from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Template {
+    /// Path to the template, relative to the workspace directory.
+    pub file: String,
+    /// Whether the workspace declared it (`env_default`) or it was found by
+    /// its conventional name.
+    pub declared: bool,
+}
+
+/// The template a workspace's `.env` would be generated from.
+///
+/// A declared `env_default` wins; failing that, a conventional template that
+/// is actually sitting there counts. Somebody who committed a `.env.example`
+/// has already said what the variables are — making them also say it in the
+/// config before ciabatta will use it is asking twice.
+pub fn template_for(meta: &WorkspaceMeta, dir: &Path) -> Option<Template> {
+    if let Some(file) = meta.env_default.clone() {
+        return Some(Template {
+            file,
+            declared: true,
+        });
+    }
+    TEMPLATE_NAMES
+        .iter()
+        .find(|name| dir.join(name).is_file())
+        .map(|name| Template {
+            file: (*name).to_string(),
+            declared: false,
+        })
+}
 
 /// Which env files a workspace sources, and where they came from.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -153,7 +190,7 @@ pub fn generate_from_template(
     dir: &Path,
     target: &str,
 ) -> Result<Option<PathBuf>> {
-    let Some(template) = meta.env_default.as_deref() else {
+    let Some(template) = template_for(meta, dir) else {
         return Ok(None);
     };
 
@@ -162,14 +199,22 @@ pub fn generate_from_template(
         return Ok(None);
     }
 
-    let source = dir.join(template);
+    let source = dir.join(&template.file);
     if !source.is_file() {
+        // Only a declared template can be missing here — an undeclared one was
+        // found by looking at the disk a moment ago. A pointer at a file that
+        // isn't there is a config error worth naming; anything else is a race,
+        // and a race is not worth failing a build over.
+        if !template.declared {
+            return Ok(None);
+        }
         bail!(
             "This workspace's env_default points at {}, which doesn't exist.\n\
              Either create it, or remove env_default from the config.",
             source.display()
         );
     }
+    let template = template.file;
 
     let content = std::fs::read_to_string(&source)
         .with_context(|| format!("Failed to read {}", source.display()))?;
@@ -178,10 +223,77 @@ pub fn generate_from_template(
         std::fs::create_dir_all(parent)
             .with_context(|| format!("Failed to create {}", parent.display()))?;
     }
-    std::fs::write(&destination, header(template) + &content)
+    std::fs::write(&destination, header(&template) + &content)
         .with_context(|| format!("Failed to write {}", destination.display()))?;
 
     Ok(Some(destination))
+}
+
+/// One layer of the chain a step resolves its environment through: a workspace
+/// directory, and the config that says what it sources.
+pub struct Layer<'a> {
+    /// The workspace directory, relative to the run root (`.` for the root
+    /// itself). Env file paths are reported joined onto this.
+    pub rel: &'a str,
+    /// Its absolute directory, for deciding whether the default `.env` is
+    /// actually there.
+    pub dir: &'a Path,
+    pub meta: &'a WorkspaceMeta,
+}
+
+/// The env files a step resolves through, outermost first.
+///
+/// **Proximity, with fallback outward.** A step in `packages/api` reads
+/// `packages/api/.env` — and, for anything that file doesn't set, the values
+/// from the workspace above it, up to the monorepo root. Layered in that order
+/// so the nearest file wins, which is what "this package's settings" has to
+/// mean to be worth writing.
+///
+/// The chain is the *ancestry* of the step's own workspace and nothing else. A
+/// sibling package's `.env` is not a fallback: two packages that need the same
+/// variable say so in the workspace above them, or each says it for itself.
+/// The chain is a *search path*, not a list of requirements: a level with no
+/// `.env` simply falls through to the next, and a level whose file hasn't been
+/// generated yet (see [`generate_from_template`]) is listed all the same,
+/// because by the time the run sources it, it will be there.
+pub fn chain(layers: &[Layer<'_>]) -> Vec<String> {
+    let mut files: Vec<String> = Vec::new();
+    for layer in layers {
+        let mut found = resolve(layer.meta, layer.dir).files;
+        // A workspace with a checked-in template but no `.env` yet still
+        // belongs in the chain: a fresh checkout generates the file before it
+        // sources anything, and leaving the level out would send its steps
+        // looking one workspace too far up.
+        if found.is_empty() && template_for(layer.meta, layer.dir).is_some() {
+            found.push(target_file(layer.meta));
+        }
+        for file in found {
+            let path = join_rel(layer.rel, &file);
+            if !files.contains(&path) {
+                files.push(path);
+            }
+        }
+    }
+    files
+}
+
+/// The file a workspace's `.env` is generated as: whatever `env_file` names
+/// first, or the conventional `.env`.
+pub fn target_file(meta: &WorkspaceMeta) -> String {
+    meta.env_file
+        .first()
+        .cloned()
+        .unwrap_or_else(|| DEFAULT_ENV_FILE.to_string())
+}
+
+/// Join a workspace-relative env path onto the workspace's own path, keeping
+/// the root's `.` from turning into `./.env`.
+pub fn join_rel(rel: &str, file: &str) -> String {
+    if rel.is_empty() || rel == "." {
+        file.to_string()
+    } else {
+        format!("{}/{}", rel.trim_end_matches('/'), file)
+    }
 }
 
 /// The note at the top of a generated `.env`, saying where it came from.
@@ -326,6 +438,100 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Rule 1's reasoning, applied to rule 3: somebody who committed a
+    /// `.env.example` has already said what the variables are.
+    #[test]
+    fn a_conventional_template_is_used_without_being_declared() {
+        let dir = scratch("conventional");
+        std::fs::write(dir.join(".env.example"), "API_URL=http://localhost\n").unwrap();
+
+        let bare = WorkspaceMeta::default();
+        assert_eq!(
+            template_for(&bare, &dir),
+            Some(Template {
+                file: ".env.example".to_string(),
+                declared: false,
+            })
+        );
+
+        let written = generate_from_template(&bare, &dir, ".env").unwrap();
+        assert_eq!(written, Some(dir.join(".env")));
+        let generated = std::fs::read_to_string(dir.join(".env")).unwrap();
+        assert!(generated.contains("API_URL=http://localhost"));
+        assert!(generated.contains("Generated by ciabatta from .env.example"));
+
+        // A declared template still wins over whatever else is lying around.
+        std::fs::write(dir.join(".env.default"), "API_URL=declared\n").unwrap();
+        let declared = WorkspaceMeta {
+            env_default: Some(".env.default".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(template_for(&declared, &dir).unwrap().file, ".env.default");
+
+        // Nothing to copy from, nothing to do — not an error.
+        let empty = scratch("conventional_empty");
+        assert_eq!(template_for(&bare, &empty), None);
+        assert_eq!(generate_from_template(&bare, &empty, ".env").unwrap(), None);
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&empty);
+    }
+
+    /// The chain is the ancestry of a step's own workspace: nearest last, and a
+    /// level with nothing to source simply isn't in it.
+    #[test]
+    fn a_chain_lists_each_level_that_has_something_to_source() {
+        let root = scratch("chain");
+        std::fs::create_dir_all(root.join("packages/api")).unwrap();
+        std::fs::write(root.join(".env"), "SHARED=root\n").unwrap();
+        std::fs::write(root.join("packages/api/.env"), "SHARED=api\n").unwrap();
+        let api = root.join("packages/api");
+        let middle = root.join("packages");
+        std::fs::create_dir_all(&middle).unwrap();
+
+        let bare = WorkspaceMeta::default();
+        let files = chain(&[
+            Layer {
+                rel: ".",
+                dir: &root,
+                meta: &bare,
+            },
+            Layer {
+                rel: "packages",
+                dir: &middle,
+                meta: &bare,
+            },
+            Layer {
+                rel: "packages/api",
+                dir: &api,
+                meta: &bare,
+            },
+        ]);
+        assert_eq!(
+            files,
+            vec![".env".to_string(), "packages/api/.env".to_string()],
+            "`packages` has no `.env`, so it contributes nothing"
+        );
+
+        // A level with only a template still belongs in the chain: the run
+        // generates the file before it sources anything.
+        let fresh = scratch("chain_fresh");
+        std::fs::create_dir_all(fresh.join("packages/api")).unwrap();
+        std::fs::write(fresh.join("packages/api/.env.default"), "A=1\n").unwrap();
+        let api = fresh.join("packages/api");
+        assert_eq!(
+            chain(&[Layer {
+                rel: "packages/api",
+                dir: &api,
+                meta: &bare,
+            }]),
+            vec!["packages/api/.env".to_string()]
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&fresh);
     }
 
     #[test]

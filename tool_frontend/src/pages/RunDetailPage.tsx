@@ -468,6 +468,7 @@ function StepDetails({ step, env }: { step: StepView; env: EnvVar[] }) {
     badges.length === 0 &&
     reads.length === 0 &&
     own.size === 0 &&
+    (step.env_files?.length ?? 0) === 0 &&
     !step.deps?.name;
   if (bare) return null;
 
@@ -499,6 +500,19 @@ function StepDetails({ step, env }: { step: StepView; env: EnvVar[] }) {
           {reads.map((variable) => (
             <EnvVarChip key={variable.key} variable={variable} />
           ))}
+        </Stack>
+      )}
+
+      {(step.env_files?.length ?? 0) > 0 && (
+        <Stack direction="row" spacing={0.75} flexWrap="wrap" useFlexGap alignItems="baseline">
+          <Tooltip title="The .env files this step resolves through, outermost first. Its own workspace's file answers first; anything that file doesn't set falls back outward.">
+            <Typography variant="caption" color="text.secondary">
+              env files
+            </Typography>
+          </Tooltip>
+          <Typography variant="caption" sx={{ fontFamily: monoFontStack, wordBreak: "break-all" }}>
+            {step.env_files.join(" → ")}
+          </Typography>
         </Stack>
       )}
 

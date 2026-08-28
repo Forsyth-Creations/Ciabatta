@@ -67,8 +67,41 @@ const outputNodeId = (step: string) => `out::${step}`;
 /** Whether a node id names a file set rather than a step. */
 const isFileNode = (id: string) => id.startsWith("in::") || id.startsWith("out::");
 
-/** How far the graph fades what a highlighted variable doesn't reach. */
+/** The step a `writes` node hangs off, or null when the id isn't one. */
+const outputStepOf = (id: string): string | null =>
+  id.startsWith("out::") ? id.slice("out::".length) : null;
+
+/**
+ * Whether a node is a *dependency* — a variable or a file set — rather than a
+ * step.
+ *
+ * These are the nodes with something to say and nowhere to go: they have no
+ * logs of their own, so clicking one focuses the graph on what it touches
+ * instead of opening it.
+ */
+const isDependencyNode = (id: string) => isFileNode(id) || envKeyOf(id) !== null;
+
+/** How far the graph fades what the focused node doesn't reach. */
 const DIMMED = 0.18;
+
+/**
+ * What one click on a dependency node lights up.
+ *
+ * "Who reads DATABASE_URL?", "which steps rebuild when these sources change?",
+ * "what produced this artifact?" — three questions with the same shape, and on
+ * a wide graph the edges alone don't answer any of them. Focusing dims
+ * everything the node doesn't reach, which leaves the answer as the only thing
+ * still lit.
+ */
+interface Focus {
+  /** The focused node's id, or null when the whole graph is lit. */
+  id: string | null;
+  /** Whether a node stays lit: the focused node itself, and what it reaches. */
+  lit: (id: string) => boolean;
+}
+
+/** No focus: every node is lit, which is the graph's resting state. */
+const NO_FOCUS: Focus = { id: null, lit: () => true };
 
 export function RunDetailPage() {
   const { runId } = useParams({ from: "/run/$runId" });
@@ -152,17 +185,15 @@ function RecipePanel({
   // writes. Off by default: on a monorepo graph they double the node count, and
   // unlike variables they're only what you want when the question is caching.
   const [showFiles, setShowFiles] = useState(false);
-  // The variable whose dependents are lit up. "Who reads DATABASE_URL?" is the
-  // question a variable node exists to answer, and on a wide graph the edges
-  // alone don't answer it — so selecting one dims everything it doesn't reach.
-  const [highlighted, setHighlighted] = useState<string | null>(null);
+  // The dependency node the graph is focused on — a variable, a set of inputs,
+  // or a step's outputs. Held as a node id so all three focus the same way.
+  const [focused, setFocused] = useState<string | null>(null);
 
   const { nodes, edges } = useMemo(
-    () => buildFlow(recipe, theme, showOrder, showEnv, showFiles, highlighted),
-    [recipe, theme, showOrder, showEnv, showFiles, highlighted],
+    () => buildFlow(recipe, theme, showOrder, showEnv, showFiles, focused),
+    [recipe, theme, showOrder, showEnv, showFiles, focused],
   );
   const step = recipe.steps.find((s) => s.name === selectedStep);
-  const highlightedVar = recipe.env.vars.find((v) => v.key === highlighted);
 
   return (
     <>
@@ -190,7 +221,14 @@ function RecipePanel({
               <Switch
                 size="small"
                 checked={showEnv}
-                onChange={(_, checked) => setShowEnv(checked)}
+                onChange={(_, checked) => {
+                  setShowEnv(checked);
+                  // Focusing a node and then hiding it would dim the graph with
+                  // nothing left lit to explain why.
+                  if (!checked && focused !== null && envKeyOf(focused) !== null) {
+                    setFocused(null);
+                  }
+                }}
               />
             }
             label={
@@ -207,7 +245,12 @@ function RecipePanel({
               <Switch
                 size="small"
                 checked={showFiles}
-                onChange={(_, checked) => setShowFiles(checked)}
+                onChange={(_, checked) => {
+                  setShowFiles(checked);
+                  if (!checked && focused !== null && isFileNode(focused)) {
+                    setFocused(null);
+                  }
+                }}
               />
             }
             label={
@@ -277,44 +320,24 @@ function RecipePanel({
         // Turning the environment column on and off changes the graph's
         // extent, so the view has to be re-fitted around it.
         fitKey={`${showEnv ? "env" : ""}${showFiles ? "+files" : ""}` || "steps-only"}
-        // An environment node isn't a step and has no logs of its own: clicking
-        // one lights up the steps that read it instead, and clicking it again
-        // (or picking any step) puts the whole graph back.
+        // A dependency node — a variable, or a set of files read or written —
+        // isn't a step and has no logs of its own. Clicking one focuses the
+        // graph on the steps it touches instead; clicking it again (or picking
+        // any step) puts the whole graph back.
         onNodeClick={(_, node) => {
-          // A file node is a label, not a place to go: it has no logs, and the
-          // step it hangs off is one edge away.
-          if (isFileNode(node.id)) return;
-          const key = envKeyOf(node.id);
-          if (key === null) {
-            setHighlighted(null);
+          if (!isDependencyNode(node.id)) {
+            setFocused(null);
             onSelectStep(node.id);
             return;
           }
-          setHighlighted((current) => (current === key ? null : key));
+          setFocused((current) => (current === node.id ? null : node.id));
           onSelectStep(null);
         }}
         nodeColor={(node) => statusColor(node.data?.status as StepStatus, theme)}
       />
 
-      {highlightedVar && (
-        <Stack
-          direction="row"
-          spacing={1}
-          sx={{ mt: 1 }}
-          alignItems="center"
-          flexWrap="wrap"
-          useFlexGap
-        >
-          <EnvVarChip variable={highlightedVar} />
-          <Typography variant="caption" color="text.secondary">
-            {highlightedVar.steps.length > 0
-              ? `read by ${highlightedVar.steps.join(", ")}`
-              : "no step reads this"}
-          </Typography>
-          <Button size="small" onClick={() => setHighlighted(null)}>
-            Clear
-          </Button>
-        </Stack>
+      {focused !== null && (
+        <FocusNote recipe={recipe} focused={focused} onClear={() => setFocused(null)} />
       )}
 
       <Box sx={{ mt: 2 }}>
@@ -579,6 +602,85 @@ function TargetDependencies({ deps }: { deps: TargetDeps }) {
   );
 }
 
+/**
+ * What the graph is focused on, said in words underneath it.
+ *
+ * The dimming shows *which* nodes a dependency reaches; this says what the
+ * dependency is — the globs, what they currently match, and the steps on the
+ * other end of the edges — because a node label truncated to fit the canvas
+ * can't. It's also where Clear lives, so getting the whole graph back doesn't
+ * depend on remembering which node was clicked.
+ */
+function FocusNote({
+  recipe,
+  focused,
+  onClear,
+}: {
+  recipe: RecipeView;
+  focused: string;
+  onClear: () => void;
+}) {
+  const groups = useMemo(() => inputGroups(recipe), [recipe]);
+
+  const key = envKeyOf(focused);
+  const variable = key === null ? null : (recipe.env.vars.find((v) => v.key === key) ?? null);
+  const writer = outputStepOf(focused);
+  const producer = writer === null ? null : (recipe.steps.find((s) => s.name === writer) ?? null);
+  const group = groups.get(focused) ?? null;
+
+  // The run's shape can change under a focus — a workflow recompiles, a step
+  // is filtered out. A node that isn't there any more has nothing to say.
+  if (!variable && !producer && !group) return null;
+
+  const subject = variable
+    ? null
+    : producer
+      ? producer.deps.outputs.join(", ")
+      : group!.deps.inputs.join(", ");
+
+  const detail = variable
+    ? variable.steps.length > 0
+      ? `read by ${variable.steps.join(", ")}`
+      : "no step reads this"
+    : producer
+      ? `${producer.deps.output_files} file(s), ${humanizeBytes(
+          producer.deps.output_bytes,
+        )} — written by ${producer.name}`
+      : `${group!.deps.input_files} file(s), ${humanizeBytes(
+          group!.deps.input_bytes,
+        )} — read by ${group!.steps.join(", ")}`;
+
+  return (
+    <Stack
+      direction="row"
+      spacing={1}
+      sx={{ mt: 1 }}
+      alignItems="center"
+      flexWrap="wrap"
+      useFlexGap
+    >
+      {variable ? (
+        <EnvVarChip variable={variable} />
+      ) : (
+        <Chip
+          size="small"
+          variant="outlined"
+          color={producer ? "success" : "info"}
+          label={subject}
+          title={subject ?? undefined}
+          sx={{ fontFamily: monoFontStack, maxWidth: 420 }}
+        />
+      )}
+      <Typography variant="caption" color="text.secondary">
+        {detail}
+      </Typography>
+      <Button size="small" onClick={onClear}>
+        Clear
+      </Button>
+    </Stack>
+  );
+}
+
 function DepRow({
   label,
   value,
@@ -614,23 +716,52 @@ function DepRow({
   return title ? <Tooltip title={title}>{row}</Tooltip> : row;
 }
 
+/**
+ * The steps a dependency node's own edges reach — the ones that stay lit when
+ * it is focused.
+ *
+ * A variable reaches every step that reads it; a set of inputs reaches every
+ * step that shares the declaration (they rebuild together, which is the whole
+ * reason they share a node); a set of outputs reaches the one step that writes
+ * it. Nothing here walks past those edges: a graph that lit up steps it hasn't
+ * drawn a line to would be inventing a relationship.
+ */
+function litSteps(
+  recipe: RecipeView,
+  id: string,
+  groups: Map<string, { deps: TargetDeps; steps: string[] }>,
+): Set<string> {
+  const key = envKeyOf(id);
+  if (key !== null) {
+    return new Set(recipe.env.vars.find((variable) => variable.key === key)?.steps ?? []);
+  }
+  const writer = outputStepOf(id);
+  if (writer !== null) return new Set([writer]);
+  return new Set(groups.get(id)?.steps ?? []);
+}
+
 function buildFlow(
   recipe: RecipeView,
   theme: Theme,
   showOrder: boolean,
   showEnv: boolean,
   showFiles: boolean,
-  highlighted: string | null,
+  focused: string | null,
 ): { nodes: Node[]; edges: Edge[] } {
   const ids = recipe.steps.map((s) => s.name);
   const byName = new Map(recipe.steps.map((s) => [s.name, s]));
 
-  // Which steps a highlighted variable reaches. Null means nothing is
-  // highlighted, which is not the same as "reaches nothing".
-  const lit =
-    highlighted === null
-      ? null
-      : new Set(recipe.env.vars.find((v) => v.key === highlighted)?.steps ?? []);
+  // Input sets are grouped once, here, so the focus and the drawing agree
+  // about which steps share a node.
+  const groups = inputGroups(recipe);
+
+  const focus: Focus =
+    focused === null
+      ? NO_FOCUS
+      : (() => {
+          const reached = litSteps(recipe, focused, groups);
+          return { id: focused, lit: (id: string) => id === focused || reached.has(id) };
+        })();
 
   // Only `needs` edges define run order; error/retry branches are annotations
   // on top and would distort the layout if they drove depth.
@@ -667,7 +798,8 @@ function buildFlow(
   const nodes: Node[] = positioned.map((node) => {
     const step = byName.get(node.id);
     const color = statusColor(step?.status ?? "pending", theme);
-    const reads = lit?.has(node.id) ?? true;
+    const on = focus.lit(node.id);
+    const picked = on && focus.id !== null;
     return {
       ...node,
       style: {
@@ -675,16 +807,16 @@ function buildFlow(
         color: theme.palette.text.primary,
         // Recovery nodes are dashed: they're branches you hope never run.
         border: `2px ${step?.recover ? "dashed" : "solid"} ${
-          reads && lit ? theme.palette.secondary.main : color
+          picked ? theme.palette.secondary.main : color
         }`,
         borderRadius: 8,
         fontSize: 12,
         padding: "6px 12px",
         minWidth: 120,
-        opacity: reads ? 1 : DIMMED,
+        opacity: on ? 1 : DIMMED,
         // A ring rather than a colour swap, so a step's status stays readable
         // while it's lit.
-        boxShadow: reads && lit ? `0 0 0 3px ${theme.palette.secondary.main}55` : undefined,
+        boxShadow: picked ? `0 0 0 3px ${theme.palette.secondary.main}55` : undefined,
       },
     };
   });
@@ -704,14 +836,14 @@ function buildFlow(
             ? theme.palette.warning.main
             : theme.palette.divider,
       strokeDasharray: edge.kind === "needs" ? undefined : "5 4",
-      // While a variable is highlighted the run's own edges are context, not
-      // the subject.
-      opacity: lit ? DIMMED : 1,
+      // An edge survives the dimming only if both ends did — so a focused
+      // node's steps keep the order between them, and everything else recedes.
+      opacity: focus.lit(edge.from) && focus.lit(edge.to) ? 1 : DIMMED,
     },
   }));
 
   if (showFiles) {
-    const files = fileFlow(recipe, theme, positioned, Boolean(lit));
+    const files = fileFlow(recipe, theme, positioned, groups, focus);
     nodes.push(...files.nodes);
     edges.push(...files.edges);
   }
@@ -719,7 +851,7 @@ function buildFlow(
   if (showEnv) {
     // Variables sit outside the file column when both are drawn, so the two
     // kinds of dependency read as two columns rather than one pile.
-    const env = envFlow(recipe, theme, positioned, highlighted, showFiles ? 620 : 300);
+    const env = envFlow(recipe, theme, positioned, focus, showFiles ? 620 : 300);
     nodes.push(...env.nodes);
     edges.push(...env.edges);
   }
@@ -749,7 +881,8 @@ function fileFlow(
   recipe: RecipeView,
   theme: Theme,
   steps: Node[],
-  dimmed: boolean,
+  groups: Map<string, { deps: TargetDeps; steps: string[] }>,
+  focus: Focus,
 ): { nodes: Node[]; edges: Edge[] } {
   const withDeps = recipe.steps.filter((step) => step.deps?.name);
   if (withDeps.length === 0) return { nodes: [], edges: [] };
@@ -760,19 +893,6 @@ function fileFlow(
   const centre =
     steps.length > 0 ? steps.reduce((sum, node) => sum + node.position.y, 0) / steps.length : 0;
   const rowHeight = 74;
-  const opacity = dimmed ? DIMMED : 1;
-
-  // Steps sharing a directory and a set of input globs share a node: same
-  // declaration, same files, same reason to rebuild.
-  const inputGroups = new Map<string, { deps: TargetDeps; steps: string[] }>();
-  for (const step of withDeps) {
-    const deps = step.deps;
-    if (deps.inputs.length === 0) continue;
-    const key = `${deps.dir}\u0000${deps.inputs.join("\u0000")}`;
-    const group = inputGroups.get(key);
-    if (group) group.steps.push(step.name);
-    else inputGroups.set(key, { deps, steps: [step.name] });
-  }
 
   const producers = withDeps.filter((step) => step.deps.outputs.length > 0);
 
@@ -781,22 +901,30 @@ function fileFlow(
     y: centre + (index - (count - 1) / 2) * rowHeight,
   });
 
-  const shell = (color: string) => ({
-    background: theme.palette.background.paper,
-    color: theme.palette.text.primary,
-    // Dashed, like every dependency edge that isn't the run's own order: a file
-    // set is a precondition, not a step that ran before this one.
-    border: `1px dashed ${color}`,
-    borderRadius: 8,
-    fontSize: 11,
-    padding: "5px 10px",
-    minWidth: 170,
-    maxWidth: 240,
-    textAlign: "left" as const,
-    opacity,
-  });
+  // A file set is clickable: it focuses the graph on the steps it touches, the
+  // same way a variable does. The focused one goes solid and takes the ring —
+  // it's the subject now, not an aside.
+  const shell = (color: string, id: string) => {
+    const picked = focus.id === id;
+    return {
+      background: theme.palette.background.paper,
+      color: theme.palette.text.primary,
+      // Dashed, like every dependency edge that isn't the run's own order: a
+      // file set is a precondition, not a step that ran before this one.
+      border: `${picked ? 2 : 1}px ${picked ? "solid" : "dashed"} ${color}`,
+      borderRadius: 8,
+      fontSize: 11,
+      padding: "5px 10px",
+      minWidth: 170,
+      maxWidth: 240,
+      textAlign: "left" as const,
+      opacity: focus.lit(id) ? 1 : DIMMED,
+      boxShadow: picked ? `0 0 0 3px ${theme.palette.secondary.main}55` : undefined,
+      cursor: "pointer",
+    };
+  };
 
-  const inputs = [...inputGroups.values()];
+  const inputs = [...groups.values()];
   const nodes: Node[] = inputs.map((group, index) => ({
     id: inputNodeId(group.steps[0]),
     position: column(inputs.length, index, leftmost - 300),
@@ -807,7 +935,7 @@ function fileFlow(
       label: <FileNodeLabel deps={group.deps} kind="reads" />,
       status: "pending" as StepStatus,
     },
-    style: shell(theme.palette.info.main),
+    style: shell(theme.palette.info.main, inputNodeId(group.steps[0])),
   }));
 
   nodes.push(
@@ -821,42 +949,85 @@ function fileFlow(
         label: <FileNodeLabel deps={step.deps} kind="writes" />,
         status: "pending" as StepStatus,
       },
-      style: shell(theme.palette.success.main),
+      style: shell(theme.palette.success.main, outputNodeId(step.name)),
     })),
   );
 
+  // An edge is drawn only as brightly as the dimmer of its two ends, and the
+  // focused set's own edges are the one thing on the canvas that should be
+  // moving.
+  const fileEdge = (source: string, target: string) => ({
+    lit: focus.lit(source) && focus.lit(target),
+    animated: focus.id === source || focus.id === target,
+  });
+
   const edges: Edge[] = inputs.flatMap((group) =>
-    group.steps.map((step) => ({
-      ...ORTHOGONAL_EDGE,
-      id: `in:${group.steps[0]}->${step}`,
-      source: inputNodeId(group.steps[0]),
-      target: step,
-      style: {
-        stroke: theme.palette.info.main,
-        strokeDasharray: "2 4",
-        opacity: dimmed ? DIMMED : 0.75,
-      },
-    })),
+    group.steps.map((step) => {
+      const id = inputNodeId(group.steps[0]);
+      const { lit, animated } = fileEdge(id, step);
+      return {
+        ...ORTHOGONAL_EDGE,
+        id: `in:${group.steps[0]}->${step}`,
+        source: id,
+        target: step,
+        animated,
+        style: {
+          stroke: theme.palette.info.main,
+          strokeDasharray: "2 4",
+          strokeWidth: animated ? 2 : 1,
+          opacity: lit ? 0.75 : DIMMED,
+        },
+      };
+    }),
   );
 
   edges.push(
-    ...producers.map((step) => ({
-      ...ORTHOGONAL_EDGE,
-      id: `out:${step.name}`,
-      source: step.name,
-      target: outputNodeId(step.name),
-      // A finished step's outputs are on disk; a running one's are being
-      // written as you watch.
-      animated: step.status === "running",
-      style: {
-        stroke: theme.palette.success.main,
-        strokeDasharray: "2 4",
-        opacity: dimmed ? DIMMED : 0.75,
-      },
-    })),
+    ...producers.map((step) => {
+      const id = outputNodeId(step.name);
+      const { lit, animated } = fileEdge(step.name, id);
+      return {
+        ...ORTHOGONAL_EDGE,
+        id: `out:${step.name}`,
+        source: step.name,
+        target: id,
+        // A finished step's outputs are on disk; a running one's are being
+        // written as you watch.
+        animated: animated || step.status === "running",
+        style: {
+          stroke: theme.palette.success.main,
+          strokeDasharray: "2 4",
+          strokeWidth: animated ? 2 : 1,
+          opacity: lit ? 0.75 : DIMMED,
+        },
+      };
+    }),
   );
 
   return { nodes, edges };
+}
+
+/**
+ * Steps sharing a directory and a set of input globs, grouped.
+ *
+ * In a monorepo every step of a package inherits that package's
+ * `cache.inputs`, so one node per distinct set feeding several steps is both
+ * smaller and truer than one node each — and the duplication it collapses is
+ * real information: those steps rebuild together. Keyed by the node id the
+ * group takes, so focusing one can find its members without regrouping.
+ */
+function inputGroups(recipe: RecipeView): Map<string, { deps: TargetDeps; steps: string[] }> {
+  const byDeclaration = new Map<string, { deps: TargetDeps; steps: string[] }>();
+  for (const step of recipe.steps) {
+    const deps = step.deps;
+    if (!deps?.name || deps.inputs.length === 0) continue;
+    const key = `${deps.dir}\u0000${deps.inputs.join("\u0000")}`;
+    const group = byDeclaration.get(key);
+    if (group) group.steps.push(step.name);
+    else byDeclaration.set(key, { deps, steps: [step.name] });
+  }
+  // Re-keyed by node id now that each group's first step — the id it takes —
+  // is known. Insertion order is preserved, so the column doesn't reshuffle.
+  return new Map([...byDeclaration.values()].map((group) => [inputNodeId(group.steps[0]), group]));
 }
 
 /** A file set on the canvas: what it matches, and what that came to. */
@@ -906,7 +1077,7 @@ function envFlow(
   recipe: RecipeView,
   theme: Theme,
   steps: Node[],
-  highlighted: string | null,
+  focus: Focus,
   offset: number,
 ): { nodes: Node[]; edges: Edge[] } {
   const drawn = recipe.env.vars.filter((variable) => variable.steps.length > 0);
@@ -924,9 +1095,10 @@ function envFlow(
     variable.origin === "unset" ? theme.palette.error.main : theme.palette.secondary.main;
 
   const nodes: Node[] = drawn.map((variable, index) => {
-    const on = highlighted === null || highlighted === variable.key;
+    const id = envNodeId(variable.key);
+    const picked = focus.id === id;
     return {
-      id: envNodeId(variable.key),
+      id,
       position: {
         x: leftmost - offset,
         y: centre + (index - (drawn.length - 1) / 2) * rowHeight,
@@ -945,17 +1117,14 @@ function envFlow(
         // Dashed, like the other edges that aren't the run's own order: a
         // variable is a precondition, not a step that ran before this one.
         // The selected one goes solid — it's the subject now, not an aside.
-        border: `${highlighted === variable.key ? 2 : 1}px ${
-          highlighted === variable.key ? "solid" : "dashed"
-        } ${colorOf(variable)}`,
+        border: `${picked ? 2 : 1}px ${picked ? "solid" : "dashed"} ${colorOf(variable)}`,
         borderRadius: 20,
         fontSize: 11,
         padding: "4px 10px",
         minWidth: 140,
         textAlign: "left" as const,
-        opacity: on ? 1 : DIMMED,
-        boxShadow:
-          highlighted === variable.key ? `0 0 0 3px ${theme.palette.secondary.main}55` : undefined,
+        opacity: focus.lit(id) ? 1 : DIMMED,
+        boxShadow: picked ? `0 0 0 3px ${theme.palette.secondary.main}55` : undefined,
         cursor: "pointer",
       },
     };
@@ -966,22 +1135,23 @@ function envFlow(
   // dangling target.
   const present = new Set(recipe.steps.map((step) => step.name));
   const edges: Edge[] = drawn.flatMap((variable) => {
-    const on = highlighted === null || highlighted === variable.key;
+    const id = envNodeId(variable.key);
+    const picked = focus.id === id;
     return variable.steps
       .filter((step) => present.has(step))
       .map((step) => ({
         ...ORTHOGONAL_EDGE,
         id: `env:${variable.key}->${step}`,
-        source: envNodeId(variable.key),
+        source: id,
         target: step,
         // The selected variable's edges are the one thing on the canvas that
         // should be moving.
-        animated: highlighted === variable.key,
+        animated: picked,
         style: {
           stroke: colorOf(variable),
           strokeDasharray: "2 4",
-          strokeWidth: highlighted === variable.key ? 2 : 1,
-          opacity: on ? 0.75 : DIMMED,
+          strokeWidth: picked ? 2 : 1,
+          opacity: focus.lit(id) && focus.lit(step) ? 0.75 : DIMMED,
         },
       }));
   });

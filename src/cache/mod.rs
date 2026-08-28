@@ -228,6 +228,19 @@ impl CacheConfig {
         list_matching(dir, &self.outputs, &[])
     }
 
+    /// Whether a run of this build can be shown to have produced what it did.
+    ///
+    /// A step that declares outputs is accountable for them: they're hashed
+    /// after it runs, so its dependents' keys move exactly when its result
+    /// moved, and only then. A step that declares none fingerprints to the same
+    /// (empty) value whatever it just did, so nothing downstream can tell a
+    /// rerun that changed everything from one that changed nothing — which is
+    /// why a step behind one of those has to run too. See
+    /// [`Reason::UpstreamReran`].
+    pub fn accounts_for_its_outputs(&self) -> bool {
+        !self.outputs.is_empty()
+    }
+
     /// Hash the files this build writes. Never filtered by `exclude`.
     ///
     /// Nor by [`nested_workspaces`]: a step that legitimately writes into a
@@ -661,6 +674,10 @@ pub enum Reason {
     /// The build declares no outputs, so there is nothing to restore and
     /// nothing a hit could save.
     NoOutputs,
+    /// A step this one needs ran, and declares no outputs — so there is no
+    /// telling whether what this step consumes moved. See
+    /// [`CacheConfig::accounts_for_its_outputs`].
+    UpstreamReran { steps: Vec<String> },
 }
 
 impl Reason {
@@ -685,6 +702,11 @@ impl Reason {
             Reason::NoOutputs => {
                 "no `cache.outputs` are declared, so there'd be nothing to restore".to_string()
             }
+            Reason::UpstreamReran { steps } => format!(
+                "{} ran and declares no `cache.outputs`, so there's no telling whether what \
+                 this step consumes changed",
+                steps.join(", ")
+            ),
         }
     }
 }

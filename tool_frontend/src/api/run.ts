@@ -126,6 +126,9 @@ export interface RunSummary {
   recipes: string[];
   created_at: string;
   done: boolean;
+  /** Stop was pressed and the run hasn't finished winding down yet — a step is
+   *  being killed, or the graph is reporting what it never got to. */
+  stopping: boolean;
 }
 
 export interface RunState {
@@ -254,6 +257,25 @@ export function missingEnvFrom(error: unknown): string[] | null {
   if (!(error instanceof ApiError) || error.status !== 422) return null;
   const missing = error.body?.missing_env;
   return Array.isArray(missing) && missing.length > 0 ? (missing as string[]) : null;
+}
+
+/**
+ * Stop a run.
+ *
+ * The daemon owns the run, so this is the only way to stop one: there's no
+ * terminal holding it. It kills whatever step is executing, along with the
+ * process group that step spawned, and the graph then reports the rest as
+ * never having run.
+ *
+ * Idempotent on the daemon's side, including for a run that has already
+ * finished, so a click that loses the race is not an error.
+ */
+export function useStopRun() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (runId: number) => api.post<RunSummary>(`/api/run/runs/${runId}/stop`),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: runKeys.runs }),
+  });
 }
 
 export function useChoose(runId: number) {

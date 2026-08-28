@@ -1,6 +1,8 @@
 use anyhow::{Context, Result, bail};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::mpsc;
 
 use crate::config::{
@@ -137,8 +139,69 @@ pub struct StepChoice {
     pub option: usize,
 }
 
-/// How a run resolves recovery choices, and what happens to work that outlives
-/// it. Push/pull ignore this entirely.
+/// A run's stop switch.
+///
+/// Cloned into every recipe engine and raced against every step's action, so
+/// one press of Stop reaches whatever is executing right now — and, because the
+/// action future is dropped rather than merely abandoned, takes the step's
+/// process group with it (see [`crate::registry::run_shell_command_opts`]).
+///
+/// It's `Option`al on [`RunCtl`] rather than always present because arming it
+/// changes how a step is spawned: the command leads its own process group, so a
+/// Ctrl-C in the terminal no longer reaches it. That's right for the UIs that
+/// have a Stop button (the daemon owns the run; the TUI eats the keystroke in
+/// raw mode) and wrong for a plain `ciabatta run`, where the shell's own signal
+/// is the stop switch and works fine.
+#[derive(Clone, Default)]
+pub struct Cancel {
+    inner: Arc<CancelInner>,
+}
+
+#[derive(Default)]
+struct CancelInner {
+    stopped: AtomicBool,
+    notify: tokio::sync::Notify,
+}
+
+impl Cancel {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Ask the run to stop. Idempotent: a second press is not an escalation,
+    /// and nothing about a stop needs pressing twice.
+    pub fn stop(&self) {
+        self.inner.stopped.store(true, Ordering::SeqCst);
+        self.inner.notify.notify_waiters();
+    }
+
+    /// Whether a stop has been asked for.
+    pub fn is_stopped(&self) -> bool {
+        self.inner.stopped.load(Ordering::SeqCst)
+    }
+
+    /// Resolves once [`Self::stop`] has been called, immediately if it already
+    /// has.
+    ///
+    /// The waiter is registered *before* the flag is checked, which is what
+    /// makes this safe to race against work that might finish first: a `stop`
+    /// landing in the gap wakes this future rather than being missed.
+    pub async fn stopped(&self) {
+        loop {
+            let notified = self.inner.notify.notified();
+            if self.is_stopped() {
+                return;
+            }
+            notified.await;
+            if self.is_stopped() {
+                return;
+            }
+        }
+    }
+}
+
+/// How a run resolves recovery choices, what happens to work that outlives it,
+/// and how it's stopped. Push/pull ignore this entirely.
 #[derive(Clone)]
 pub struct RunCtl {
     /// When true, recovery nodes wait for a UI choice on `choices`; when false
@@ -153,6 +216,10 @@ pub struct RunCtl {
     /// all. Turned off where spawning a daemon would be a surprise: unit tests,
     /// and anywhere a caller asks for a self-contained run.
     pub persist_via_daemon: bool,
+    /// The run's stop switch, for a caller that offers one. `None` — the
+    /// default — is a run nobody can stop from a UI, which is every run started
+    /// from a plain terminal, where Ctrl-C already does the job.
+    pub cancel: Option<Cancel>,
 }
 
 impl Default for RunCtl {
@@ -161,6 +228,30 @@ impl Default for RunCtl {
             interactive: false,
             choices: None,
             persist_via_daemon: true,
+            cancel: None,
+        }
+    }
+}
+
+impl RunCtl {
+    /// Whether this run has been asked to stop.
+    pub fn stopped(&self) -> bool {
+        self.cancel.as_ref().is_some_and(|c| c.is_stopped())
+    }
+
+    /// Whether stopping is possible at all — which decides whether steps are
+    /// spawned into their own killable process group.
+    pub fn stoppable(&self) -> bool {
+        self.cancel.is_some()
+    }
+
+    /// Resolves when the run is asked to stop. A run with no stop switch waits
+    /// forever, so this can be selected against without a special case at every
+    /// call site.
+    pub async fn wait_for_stop(&self) {
+        match &self.cancel {
+            Some(cancel) => cancel.stopped().await,
+            None => std::future::pending().await,
         }
     }
 }
@@ -1218,6 +1309,41 @@ publish_path = "x/{MISSING_VAR}/y"
                 &RunMode::Push
             )
             .is_err()
+        );
+    }
+
+    /// The switch has to be safe to race: a stop that lands while somebody is
+    /// deciding whether to wait must wake them, not be missed.
+    #[tokio::test]
+    async fn a_stop_reaches_a_waiter_whenever_it_lands() {
+        // Already stopped before anyone waits.
+        let cancel = Cancel::new();
+        assert!(!cancel.is_stopped());
+        cancel.stop();
+        assert!(cancel.is_stopped());
+        tokio::time::timeout(std::time::Duration::from_secs(1), cancel.stopped())
+            .await
+            .expect("a stop that already happened must resolve immediately");
+
+        // Stopped while a waiter is parked on it.
+        let cancel = Cancel::new();
+        let waiting = cancel.clone();
+        let waiter = tokio::spawn(async move { waiting.stopped().await });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        cancel.stop();
+        tokio::time::timeout(std::time::Duration::from_secs(1), waiter)
+            .await
+            .expect("a parked waiter must be woken by a stop")
+            .unwrap();
+
+        // A run nobody can stop waits forever rather than reporting a stop.
+        let ctl = RunCtl::default();
+        assert!(!ctl.stoppable());
+        assert!(!ctl.stopped());
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), ctl.wait_for_stop())
+                .await
+                .is_err()
         );
     }
 }

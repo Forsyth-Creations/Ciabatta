@@ -18,7 +18,7 @@ use ratatui::{Terminal, backend::CrosstermBackend};
 use tokio::sync::mpsc;
 
 use crate::config::CiabattaConfig;
-use crate::runner::{self, ProgressUpdate, RunMode};
+use crate::runner::{self, Cancel, ProgressUpdate, RunCtl, RunMode};
 use app::App;
 
 pub async fn run(
@@ -72,14 +72,24 @@ async fn tui_loop(
     let vars_clone = env_vars.clone();
     let tx_clone = tx.clone();
 
-    tokio::spawn(async move {
-        let _ = runner::run_all(
+    // The TUI is in raw mode, so Ctrl-C arrives as a keystroke and no signal
+    // ever reaches the steps. Without a stop switch, quitting left the compiler
+    // — or the deploy — running with nothing left on screen to say so.
+    let cancel = Cancel::new();
+    let ctl = RunCtl {
+        cancel: Some(cancel.clone()),
+        ..Default::default()
+    };
+
+    let mut runner_task = tokio::spawn(async move {
+        let _ = runner::run_all_ctl(
             &config_clone,
             &root_clone,
             &names_clone,
             &vars_clone,
             dry_run,
             mode,
+            ctl,
             tx_clone,
         )
         .await;
@@ -118,6 +128,14 @@ async fn tui_loop(
                             || (key.code == KeyCode::Char('c')
                                 && key.modifiers.contains(KeyModifiers::CONTROL));
                         if quit {
+                            // Quitting a finished run is just closing the
+                            // window. Quitting a live one stops it, and waits
+                            // long enough to say so — see `wind_down`.
+                            if !app.all_done {
+                                app.stopping = true;
+                                cancel.stop();
+                                terminal.draw(|f| ui::render(f, &app))?;
+                            }
                             break;
                         }
                         match key.code {
@@ -149,9 +167,32 @@ async fn tui_loop(
         }
     }
 
+    if app.stopping {
+        wind_down(&mut runner_task).await;
+    }
+
     let success = app
         .recipes
         .iter()
         .all(|r| matches!(r.status, crate::tui::app::RecipeStatus::Success));
     Ok(success)
+}
+
+/// How long to let a stopped run tidy up before it is taken out by force.
+const WIND_DOWN: Duration = Duration::from_secs(3);
+
+/// Wait for a stopped run to finish dying, then abort it if it won't.
+///
+/// The stop switch is cooperative: the engine notices it, drops the step's
+/// action, and the drop is what kills the process group. Returning from the TUI
+/// before that has happened would restore the terminal and exit with the build
+/// still running — the exact bug the switch exists to fix. Aborting the task
+/// drops the same future, so the backstop kills the process group too; it's a
+/// backstop only because a run that reports what it stopped is nicer than one
+/// that vanishes.
+async fn wind_down(task: &mut tokio::task::JoinHandle<()>) {
+    if tokio::time::timeout(WIND_DOWN, &mut *task).await.is_err() {
+        task.abort();
+        let _ = task.await;
+    }
 }

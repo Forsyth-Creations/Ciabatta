@@ -33,6 +33,7 @@ import { Link, useNavigate } from "@tanstack/react-router";
 
 import { missingEnvFrom, useRunTargets, useRuns, useStartRun } from "../api/run";
 import { EnvDriftBanner } from "../components/EnvDriftBanner";
+import { RunStatusChip, StopButton } from "../components/RunControls";
 import { ErrorNote, Loading, PageHeader, RequireProject } from "../components/Page";
 import { monoFontStack } from "../theme";
 
@@ -235,18 +236,14 @@ function Launcher({ project }: { project: string }) {
             <Card key={run.id}>
               <CardContent sx={{ py: 1.5, "&:last-child": { pb: 1.5 } }}>
                 <Stack direction="row" alignItems="center" spacing={2}>
-                  <Chip
-                    size="small"
-                    variant="outlined"
-                    color={run.done ? "default" : "success"}
-                    label={run.done ? "finished" : "running"}
-                  />
+                  <RunStatusChip run={run} />
                   <Box sx={{ flexGrow: 1, minWidth: 0 }}>
                     <RunLink to={`/run/${run.id}`}>{run.recipes.join(", ") || "—"}</RunLink>
                     <Typography variant="caption" color="text.secondary" sx={{ display: "block" }}>
                       #{run.id} · started {new Date(run.created_at).toLocaleTimeString()}
                     </Typography>
                   </Box>
+                  {!run.done && <StopButton run={run} />}
                 </Stack>
               </CardContent>
             </Card>

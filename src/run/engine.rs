@@ -323,7 +323,7 @@ async fn run_dag(
     let mut tolerated: Vec<StepFailure> = Vec::new();
     let mut persistent: Vec<Persistent> = Vec::new();
 
-    loop {
+    'waves: loop {
         // A step is ready when it is Pending, not a recovery node, and all its
         // `needs` are satisfied. Recovery nodes are only entered via on_error.
         let ready: Vec<&RunStep> = resolved
@@ -349,6 +349,13 @@ async fn run_dag(
         // shell work (build → migrate → release); serial execution keeps their
         // logs readable and recovery prompts unambiguous.
         for step in ready {
+            // Somebody pressed Stop. Whatever was running has already been
+            // killed by the step's own future being dropped; this is the half
+            // that keeps the graph from starting anything new.
+            if ctl.stopped() {
+                break 'waves;
+            }
+
             // A `when`/`skip_if` condition can exclude the step; if so, mark it
             // satisfied (so dependents proceed) and move on without running it.
             if let Some(reason) = super::step_skip_reason(step, env_vars)? {
@@ -412,7 +419,7 @@ async fn run_dag(
             }
 
             let started = std::time::Instant::now();
-            let outcome = run_step_action(step, recipe, root, env_vars, dry_run, tx).await;
+            let outcome = run_step_action(step, recipe, root, env_vars, dry_run, ctl, tx).await;
             match outcome {
                 Ok(()) => {
                     state.insert(step.name.as_str(), StepState::Succeeded);
@@ -430,6 +437,21 @@ async fn run_dag(
                     // can't be served from the cache behind it.
                     if let Some(session) = cache.as_deref_mut() {
                         session.mark_unaccounted(&step.name);
+                    }
+
+                    // A step that failed *because* it was stopped isn't a step
+                    // that needs fixing: recovery would start new work, and
+                    // `continue_on_error` would carry on with the graph. Both
+                    // are the opposite of what was asked for.
+                    if ctl.stopped() || err.is::<Stopped>() {
+                        let _ = tx
+                            .send(ProgressUpdate::StepLog {
+                                recipe: recipe.to_string(),
+                                step: step.name.clone(),
+                                line: "■ stopped".to_string(),
+                            })
+                            .await;
+                        break 'waves;
                     }
 
                     // A recovery route takes precedence: it exists to put the
@@ -480,6 +502,25 @@ async fn run_dag(
         }
     }
 
+    // A stop ends the run here. Nothing new was started, whatever was running
+    // was killed with its process group, and the rest of the graph is reported
+    // as never having run rather than left spinning in the UI.
+    if ctl.stopped() {
+        for step in &resolved.steps {
+            if !step.recover && state.get(step.name.as_str()) == Some(&StepState::Pending) {
+                let _ = tx
+                    .send(ProgressUpdate::StepSkipped {
+                        recipe: recipe.to_string(),
+                        step: step.name.clone(),
+                        reason: "the run was stopped".to_string(),
+                    })
+                    .await;
+            }
+        }
+        stop_persistent(persistent, recipe, tx).await;
+        bail!("Run stopped.");
+    }
+
     // Steps left Pending were waiting on a branch that failed; say so, rather
     // than leaving them silently unaccounted for in the graph.
     for step in &resolved.steps {
@@ -520,6 +561,22 @@ async fn run_dag(
     }
     Ok(())
 }
+
+/// Marker error for a step killed because the run was stopped.
+///
+/// It names the failure wherever the step's error is shown, and lets the DAG
+/// loop tell it apart from a step that failed on its own — the difference
+/// between "here's a fix-it branch" and "you asked me to stop".
+#[derive(Debug)]
+struct Stopped;
+
+impl std::fmt::Display for Stopped {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "stopped")
+    }
+}
+
+impl std::error::Error for Stopped {}
 
 /// Marker error for a step killed by its own `timeout`, so the DAG loop can
 /// tell "this hung and we cut it loose" (never fatal to the rest of the graph)
@@ -904,6 +961,7 @@ async fn recover<'a>(
             env_vars,
             dry_run,
             None,
+            ctl,
             &mut sink,
         )
         .await
@@ -969,7 +1027,15 @@ async fn pick_option(
             })
             .await;
         loop {
-            match rx.recv().await {
+            let received = tokio::select! {
+                biased;
+                received = rx.recv() => received,
+                // A run waiting for somebody to pick a fix is exactly the run
+                // somebody is most likely to give up on, so Stop has to reach
+                // it here as much as it does mid-command.
+                () = ctl.wait_for_stop() => bail!("Recovery for '{}' was stopped.", node.name),
+            };
+            match received {
                 Ok(choice) if choice.recipe == recipe && choice.step == node.name => {
                     if choice.option < node.options.len() {
                         return Ok(choice.option);
@@ -1011,6 +1077,7 @@ async fn run_step_action(
     root: &Path,
     env_vars: &HashMap<String, String>,
     dry_run: bool,
+    ctl: &RunCtl,
     tx: &mpsc::Sender<ProgressUpdate>,
 ) -> Result<()> {
     let _ = tx
@@ -1042,6 +1109,7 @@ async fn run_step_action(
                 env_vars,
                 dry_run,
                 limit,
+                ctl,
                 &mut sink,
             )
             .await
@@ -1050,8 +1118,10 @@ async fn run_step_action(
         let _ = forwarder.await;
 
         // A timeout means the step is stuck, not flaky — retrying just spends
-        // the same wall-clock time over again.
-        if res.is_ok() || res.as_ref().is_err_and(|e| e.is::<TimedOut>()) {
+        // the same wall-clock time over again. Neither is a stop: `retries` is
+        // for a step that might work on a second go, and this one was told not
+        // to run at all.
+        if res.is_ok() || res.as_ref().is_err_and(|e| e.is::<TimedOut>()) || ctl.stopped() {
             break;
         }
     }
@@ -1072,6 +1142,11 @@ async fn run_step_action(
 ///
 /// `limit`, when set, caps how long the action may take; past it the child is
 /// killed and the action fails with [`TimedOut`].
+///
+/// A run with a stop switch races the action against it, and a stop wins by
+/// *dropping* the action — which is what takes the command's process group with
+/// it. Nothing else here can make a running compiler go away.
+#[allow(clippy::too_many_arguments)]
 async fn run_action(
     script: Option<&str>,
     run: Option<&str>,
@@ -1079,6 +1154,7 @@ async fn run_action(
     env_vars: &HashMap<String, String>,
     dry_run: bool,
     limit: Option<std::time::Duration>,
+    ctl: &RunCtl,
     sink: &mut LogSink<'_>,
 ) -> Result<()> {
     let Some(command) = shell_form(script, run) else {
@@ -1096,18 +1172,35 @@ async fn run_action(
         return Ok(());
     }
 
-    // `kill_on_drop` is what makes the timeout real: dropping the future has to
-    // take the stuck child with it, or the "killed" step would keep running.
-    let action = registry::run_shell_command_opts(&command, cwd, env_vars, limit.is_some(), sink);
-    match limit {
-        None => action.await,
-        Some(limit) => match tokio::time::timeout(limit, action).await {
-            Ok(result) => result,
-            Err(_) => Err(anyhow::Error::new(TimedOut).context(format!(
-                "timed out after {} and was killed",
-                format_duration(limit)
-            ))),
-        },
+    // `kill_on_drop` is what makes both the timeout and the stop switch real:
+    // dropping the future has to take the child with it, or a "killed" step
+    // would keep running. It is off for a run that has neither, so that a
+    // terminal's Ctrl-C still reaches the step's own process group.
+    let killable = limit.is_some() || ctl.stoppable();
+    let action = registry::run_shell_command_opts(&command, cwd, env_vars, killable, sink);
+    let guarded = async {
+        match limit {
+            None => action.await,
+            Some(limit) => match tokio::time::timeout(limit, action).await {
+                Ok(result) => result,
+                Err(_) => Err(anyhow::Error::new(TimedOut).context(format!(
+                    "timed out after {} and was killed",
+                    format_duration(limit)
+                ))),
+            },
+        }
+    };
+
+    tokio::select! {
+        // Biased so that a command which finished in the same breath as the
+        // stop is reported as what it was, rather than as a casualty.
+        biased;
+        result = guarded => result,
+        () = ctl.wait_for_stop() => {
+            // `guarded` — and the child with it — is dropped on the way out of
+            // this select, which is the kill.
+            Err(anyhow::Error::new(Stopped))
+        }
     }
 }
 
@@ -1183,18 +1276,33 @@ mod tests {
     /// Non-interactive (no operator to answer a recovery prompt), which is the
     /// mode CI runs in and the one these behaviours have to hold up under.
     async fn drive(steps: Vec<RunStep>, root: &Path) -> (Result<()>, Vec<ProgressUpdate>) {
+        drive_with(
+            steps,
+            root,
+            RunCtl {
+                interactive: false,
+                choices: None,
+                // Tests must not reach for — let alone start — a real daemon, so
+                // persistent steps take the in-process path here.
+                persist_via_daemon: false,
+                cancel: None,
+            },
+        )
+        .await
+    }
+
+    /// [`drive`], with control over how the run is driven — a stoppable run,
+    /// most of all.
+    async fn drive_with(
+        steps: Vec<RunStep>,
+        root: &Path,
+        ctl: RunCtl,
+    ) -> (Result<()>, Vec<ProgressUpdate>) {
         let resolved = ResolvedRun {
             steps,
             ..Default::default()
         };
         let (tx, mut rx) = mpsc::channel(256);
-        let ctl = RunCtl {
-            interactive: false,
-            choices: None,
-            // Tests must not reach for — let alone start — a real daemon, so
-            // persistent steps take the in-process path here.
-            persist_via_daemon: false,
-        };
         let env: HashMap<String, String> = std::env::vars().collect();
 
         let collector = tokio::spawn(async move {
@@ -1279,6 +1387,115 @@ mod tests {
                 "downstream".to_string(),
                 "blocked by a failed dependency".to_string()
             )]
+        );
+    }
+
+    /// Stop has to reach the step that is executing right now — not the gap
+    /// between steps, which for a ten-minute compile never comes.
+    #[tokio::test]
+    async fn a_stopped_run_kills_the_step_it_is_in_and_starts_nothing_new() {
+        // `slow` would write the marker in five seconds. Stopping it means the
+        // marker is never written: the file is the proof that the command's
+        // process group was killed rather than orphaned to finish in the
+        // background, which is what "stopped" has to mean.
+        let marker = std::env::temp_dir().join(format!("ciab_stop_{}", std::process::id()));
+        let _ = std::fs::remove_file(&marker);
+        let path = marker.to_string_lossy().to_string();
+
+        let steps = vec![
+            step("slow", &format!("sleep 5; touch '{path}'")),
+            RunStep {
+                needs: vec!["slow".into()],
+                ..step("downstream", "echo nope")
+            },
+        ];
+
+        let cancel = crate::runner::Cancel::new();
+        let ctl = RunCtl {
+            persist_via_daemon: false,
+            cancel: Some(cancel.clone()),
+            ..Default::default()
+        };
+
+        let pressed = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            pressed.stop();
+        });
+
+        let started = std::time::Instant::now();
+        let (result, updates) = drive_with(steps, Path::new("."), ctl).await;
+
+        // It came back on the stop, not on the step finishing.
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(4),
+            "a stop must not wait for the step it interrupted"
+        );
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("stopped"), "{err}");
+
+        let finished = outcomes(&updates);
+        assert!(finished.contains(&("slow".to_string(), false)));
+        assert!(
+            !finished.iter().any(|(name, _)| name == "downstream"),
+            "a stopped run must not start the next step"
+        );
+        assert_eq!(
+            skipped(&updates),
+            vec![("downstream".to_string(), "the run was stopped".to_string())]
+        );
+
+        // Well past when the killed command would have written it.
+        tokio::time::sleep(std::time::Duration::from_secs(6)).await;
+        assert!(
+            !marker.exists(),
+            "the stopped step's process survived and finished its work"
+        );
+    }
+
+    /// A stopped step is not a broken one: it must not divert into the fix-it
+    /// branch it would have taken on a genuine failure.
+    #[tokio::test]
+    async fn a_stop_does_not_trigger_recovery_or_retries() {
+        let steps = vec![
+            RunStep {
+                retries: 3,
+                on_error: Some("fix".into()),
+                ..step("slow", "sleep 5")
+            },
+            RunStep {
+                recover: true,
+                options: vec![crate::run::FixOption {
+                    label: "fix it".into(),
+                    run: Some("echo fixing".into()),
+                    default: true,
+                    ..Default::default()
+                }],
+                ..step("fix", "")
+            },
+        ];
+
+        let cancel = crate::runner::Cancel::new();
+        let ctl = RunCtl {
+            persist_via_daemon: false,
+            cancel: Some(cancel.clone()),
+            ..Default::default()
+        };
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            cancel.stop();
+        });
+
+        let started = std::time::Instant::now();
+        let (result, updates) = drive_with(steps, Path::new("."), ctl).await;
+
+        // Three retries of a five-second step would be well past this.
+        assert!(started.elapsed() < std::time::Duration::from_secs(4));
+        assert!(result.unwrap_err().to_string().contains("stopped"));
+        assert_eq!(
+            outcomes(&updates),
+            vec![("slow".to_string(), false)],
+            "neither the retries nor the recovery node may run"
         );
     }
 

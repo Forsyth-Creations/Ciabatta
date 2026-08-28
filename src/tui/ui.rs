@@ -245,7 +245,9 @@ fn wrap_line(line: &str, width: usize) -> Vec<String> {
 
 fn render_help(f: &mut Frame, area: Rect, app: &App) {
     let mode = if app.dry_run { " DRY-RUN " } else { "" };
-    let status = if app.all_done && app.any_failed() {
+    let status = if app.stopping && !app.all_done {
+        "Stopping... "
+    } else if app.all_done && app.any_failed() {
         "Failed — press [q] to close. "
     } else if app.all_done {
         "All done! "
@@ -253,7 +255,14 @@ fn render_help(f: &mut Frame, area: Rect, app: &App) {
         "Running... "
     };
 
-    let help = format!("{}{}  [↑/↓] select  [q] quit", mode, status);
+    let keys = if app.all_done {
+        "[↑/↓] select  [q] quit"
+    } else {
+        // Naming what the key does matters more here than anywhere else in this
+        // bar: before, it walked away and left the build running.
+        "[↑/↓] select  [q] stop the run and quit"
+    };
+    let help = format!("{}{}  {}", mode, status, keys);
     let p = Paragraph::new(help).style(Style::default().fg(Color::DarkGray));
     f.render_widget(p, area);
 }

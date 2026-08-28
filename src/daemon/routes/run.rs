@@ -29,7 +29,7 @@ use tokio::sync::{broadcast, mpsc};
 
 use crate::daemon::app::AppState;
 use crate::run::view::{GuiState, initial_state};
-use crate::runner::{self, RunCtl, RunMode, StepChoice};
+use crate::runner::{self, Cancel, RunCtl, RunMode, StepChoice};
 
 use super::{RouteError, RouteResult};
 
@@ -41,6 +41,7 @@ pub fn router() -> Router<AppState> {
         .route("/api/run/runs/{id}", get(detail))
         .route("/api/run/runs/{id}/stream", get(stream))
         .route("/api/run/runs/{id}/choose", post(choose))
+        .route("/api/run/runs/{id}/stop", post(stop))
 }
 
 /// Take a lock, surviving a poisoned one.
@@ -72,6 +73,9 @@ pub struct Run {
     pub state: Arc<Mutex<GuiState>>,
     /// Carries a browser's answer back to a waiting recovery step.
     pub choices: broadcast::Sender<StepChoice>,
+    /// The run's stop switch. The daemon owns the run, so this is the only way
+    /// anyone can reach it — there is no terminal to Ctrl-C.
+    pub cancel: Cancel,
     /// Bumped on every applied update, so the SSE loop can tell whether
     /// anything changed without diffing the whole state.
     pub seq: Arc<AtomicU64>,
@@ -88,6 +92,11 @@ impl Run {
             "recipes": self.recipes,
             "created_at": self.created_at,
             "done": serde_json::to_value(&*state).ok().and_then(|v| v["done"].as_bool()).unwrap_or(false),
+            // Asked to stop, but not finished stopping: a step is being killed,
+            // or the graph is on its way to reporting what it didn't run. The
+            // UI shows that rather than a Stop button that appears to do
+            // nothing for the second it takes.
+            "stopping": self.cancel.is_stopped(),
         })
     }
 }
@@ -274,6 +283,7 @@ async fn create(
 
     let (choice_tx, _) = broadcast::channel::<StepChoice>(64);
     let (progress_tx, mut progress_rx) = mpsc::channel(256);
+    let cancel = Cancel::new();
 
     let run = state.runs.insert(Run {
         id: state.runs.next_id(),
@@ -282,6 +292,7 @@ async fn create(
         created_at: chrono::Local::now().to_rfc3339(),
         state: gui_state.clone(),
         choices: choice_tx.clone(),
+        cancel: cancel.clone(),
         seq: Arc::new(AtomicU64::new(0)),
         changed: Arc::new(tokio::sync::Notify::new()),
     });
@@ -359,10 +370,12 @@ async fn create(
         });
     }
 
-    // Interactive, so recovery steps wait for a browser choice.
+    // Interactive, so recovery steps wait for a browser choice — and
+    // stoppable, because a run the daemon owns has no terminal to Ctrl-C.
     let ctl = RunCtl {
         interactive: true,
         choices: Some(choice_tx),
+        cancel: Some(cancel),
         ..Default::default()
     };
     tokio::spawn(async move {
@@ -570,6 +583,30 @@ async fn choose(
         })?;
 
     Ok(Json(json!({ "ok": true })))
+}
+
+/// Stop a run.
+///
+/// The daemon owns the run, which is what makes this the only way to stop one
+/// started from a browser: there's no terminal holding it and no Ctrl-C to
+/// send. The switch reaches whatever step is executing — the command's process
+/// group is killed — and the graph then reports what it never got to.
+///
+/// Idempotent, and deliberately not an error on a run that has already
+/// finished: "stop this" and "this is already stopped" are the same outcome,
+/// and a UI shouldn't have to race the run to avoid a red banner.
+async fn stop(State(state): State<AppState>, Path(id): Path<u64>) -> RouteResult<Json<Value>> {
+    let run = get_run(&state, id)?;
+    tracing::info!(run = id, "stopping run on request");
+    run.cancel.stop();
+
+    // Wake the SSE subscribers so the button's effect shows up immediately,
+    // rather than at whatever moment the run next produces output — which, for
+    // a step that has gone quiet, is exactly the case somebody is stopping.
+    run.seq.fetch_add(1, Ordering::Relaxed);
+    run.changed.notify_waiters();
+
+    Ok(Json(run.summary()))
 }
 
 /// The run's view state plus its identity, as one payload.

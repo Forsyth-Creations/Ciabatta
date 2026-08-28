@@ -193,6 +193,7 @@ const ENDPOINTS: EndpointGroup[] = [
       { method: "GET", path: "/api/run/runs/{id}", note: "Current state of every step." },
       { method: "GET", path: "/api/run/runs/{id}/stream", note: "SSE. Step transitions and log lines as they happen." },
       { method: "POST", path: "/api/run/runs/{id}/choose", note: "Answer a step that is waiting on a decision." },
+      { method: "POST", path: "/api/run/runs/{id}/stop", note: "Stop a run: kills the step in flight and starts nothing new." },
     ],
   },
   {
@@ -858,6 +859,15 @@ ciabatta run test --filter tag:fast --filter tag:smoke   # either one`}</Pre>
             <>Selecting any step shows its logs, streamed as they are produced.</>,
           ]}
         />
+        <SubHeading>Stopping a run</SubHeading>
+        <P>
+          <strong>Stop</strong> is on both the run list and the run page, and it is the only way to
+          end a run: the daemon owns it, so there is no terminal to interrupt. Stopping kills the
+          step that is executing — along with everything that step spawned, not just the shell —
+          starts nothing new, and reports the rest of the graph as stopped rather than leaving it
+          spinning. A <C>persistent</C> step already handed to the daemon keeps running as its own
+          watch session; stop that one from <Link to="/watch">Watch</Link>.
+        </P>
         <SubHeading>Flowchart builder</SubHeading>
         <P>
           <Link to="/run/builder">The builder</Link> is an authoring tool, not an executor. Lay out

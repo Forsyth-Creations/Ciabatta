@@ -49,6 +49,7 @@ import {
 } from "../components/EnvVars";
 import { ORTHOGONAL_EDGE, executionOrder, layeredLayout } from "../components/layout";
 import { ErrorNote, Loading } from "../components/Page";
+import { RunStatusChip, StopButton } from "../components/RunControls";
 import { monoFontStack } from "../theme";
 
 /** The node id a variable takes on the flowchart. Namespaced so a variable
@@ -96,12 +97,8 @@ export function RunDetailPage() {
             {state.dry_run && " · dry run"}
           </Typography>
         </Box>
-        <Chip
-          size="small"
-          variant="outlined"
-          color={state.done ? "default" : "success"}
-          label={state.done ? "finished" : "running"}
-        />
+        {!state.done && <StopButton run={state.run} />}
+        <RunStatusChip run={{ ...state.run, done: state.done }} />
       </Stack>
 
       {state.recipes.length > 1 && (

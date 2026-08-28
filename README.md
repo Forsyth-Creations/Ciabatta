@@ -727,7 +727,12 @@ ciabatta run --build          # visual flowchart editor → copy the generated c
 `--gui` hands the run to the daemon and opens a page at
 `http://127.0.0.1:8099/run/<id>` showing each step lighting up as it runs,
 per-step logs, and interactive recovery. The daemon owns the run, so it keeps
-going if you close the terminal. `--build` opens a visual
+going if you close the terminal — and the run list and the run page both carry a
+**Stop** button, which is how you end one. Stop kills the step that's executing
+along with everything it spawned, starts nothing new, and the rest of the graph
+is reported as stopped rather than left spinning. In the terminal's live view,
+**`q`** now does the same thing before it closes, instead of walking away from a
+build that keeps running. `--build` opens a visual
 builder that needs no project: lay out steps, edges, and recovery options, then
 copy the emitted config into your flowchart file. Already have a pipeline?
 Paste it into the builder's import box to keep editing it visually.
@@ -1315,7 +1320,9 @@ than running it in your terminal. That means:
   running and stays live in the browser. Stop it for real with
   `ciabatta watch --stop <ID>` or the Stop button.
 - `ciabatta run --gui` returns as soon as the run starts. Closing the
-  terminal — or the laptop — doesn't abandon a run mid-flight.
+  terminal — or the laptop — doesn't abandon a run mid-flight. Which is also
+  why the browser has a **Stop** button: with no terminal holding the run,
+  it's the only way to end one.
 - Stopping the daemon stops everything it owns.
 
 ### Security

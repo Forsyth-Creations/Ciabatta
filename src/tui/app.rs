@@ -82,6 +82,11 @@ pub struct App {
     pub all_done: bool,
     pub dry_run: bool,
     pub mode: RunMode,
+    /// Set when [q] was pressed on a run still in flight: the stop switch has
+    /// been thrown and the steps are being killed. The view says so, because
+    /// the alternative is a terminal that looks frozen for as long as it takes
+    /// a compiler to die.
+    pub stopping: bool,
 }
 
 impl App {
@@ -103,6 +108,7 @@ impl App {
             all_done: false,
             dry_run,
             mode,
+            stopping: false,
         }
     }
 

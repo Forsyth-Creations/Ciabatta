@@ -17,7 +17,7 @@ export interface WorkflowStep {
   owner: string | null;
   command: string | null;
   kind: string | null;
-  recipe: string | null;
+  workflow: string | null;
   /** The special, identifiable publishing phase. */
   push: boolean;
   needs: string[];

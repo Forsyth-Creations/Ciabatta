@@ -55,7 +55,7 @@ pub struct CacheConfig {
     /// until it says otherwise.
     ///
     /// Tri-state on purpose. Cache settings are declared at three levels —
-    /// workspace, recipe, target — and a target that writes `inputs:` without
+    /// workspace, workflow, target — and a target that writes `inputs:` without
     /// mentioning `enabled` means "these are my files", not "turn caching off".
     /// A plain `bool` cannot tell that apart from an explicit `enabled: false`,
     /// which is exactly the difference [`crate::cache::graph::effective`] has to
@@ -534,7 +534,7 @@ pub struct KeyInputs {
     /// Bumped when the key derivation changes, so an old cache is missed rather
     /// than misread.
     pub version: u32,
-    /// What's being cached — the recipe or workflow name.
+    /// What's being cached — the workflow or workflow name.
     pub target: String,
     /// The workspace it belongs to.
     pub workspace: String,
@@ -756,7 +756,7 @@ pub fn summarize(changed: Vec<String>) -> Reason {
 /// it.
 #[derive(Debug, Clone)]
 pub struct Target {
-    /// The recipe or workflow name.
+    /// The workflow or workflow name.
     pub name: String,
     /// The workspace the build belongs to.
     pub workspace: String,

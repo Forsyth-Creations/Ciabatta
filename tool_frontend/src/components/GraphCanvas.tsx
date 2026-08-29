@@ -10,7 +10,7 @@
  * shared positioning strategy. See `layout.ts` for the helpers.
  */
 
-import { useMemo } from "react";
+import { useCallback, useMemo, useRef } from "react";
 import { Box, useTheme } from "@mui/material";
 import {
   Background,
@@ -21,6 +21,7 @@ import {
   type Edge,
   type Node,
   type NodeMouseHandler,
+  type OnNodesChange,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 
@@ -59,6 +60,45 @@ export function GraphCanvas({
 }: GraphCanvasProps) {
   const theme = useTheme();
 
+  // The size react-flow last measured for each node, carried across rebuilds.
+  //
+  // react-flow keys a node's measured size to the *object identity* of the node
+  // it was handed (`adoptUserNodes`, via `checkEquality`). These graphs are
+  // rebuilt from scratch whenever their source data changes — for a live run,
+  // on every frame off the SSE stream — so each node arrives as a new object
+  // and its measurement is dropped. An unmeasured node renders
+  // `visibility: hidden` and loses its handle bounds, so both it and its edges
+  // vanish until a ResizeObserver round-trip restores them. That round-trip
+  // usually lands before paint, which is why the graph only *occasionally*
+  // goes blank: under a stream of updates it loses the race.
+  //
+  // Handing the measurement back on the new object is what react-flow's
+  // `measured` field is for. The node stays visible at its last known size,
+  // and the ResizeObserver still corrects it whenever the real size changes.
+  const measured = useRef(new Map<string, { width: number; height: number }>());
+
+  const onNodesChange = useCallback<OnNodesChange>((changes) => {
+    for (const change of changes) {
+      if (change.type === "dimensions" && change.dimensions) {
+        measured.current.set(change.id, change.dimensions);
+      }
+    }
+  }, []);
+
+  const sized = useMemo(() => {
+    // Forget nodes that are no longer drawn, so toggling a column on and off
+    // doesn't grow the map for the life of the page.
+    const drawn = new Set(nodes.map((node) => node.id));
+    for (const id of [...measured.current.keys()]) {
+      if (!drawn.has(id)) measured.current.delete(id);
+    }
+    return nodes.map((node) => {
+      if (node.measured) return node;
+      const size = measured.current.get(node.id);
+      return size ? { ...node, measured: size } : node;
+    });
+  }, [nodes]);
+
   // react-flow's stylesheet is written against CSS variables, so the theme is
   // applied by overriding those rather than by restyling each element.
   const themeVars = useMemo(
@@ -94,8 +134,9 @@ export function GraphCanvas({
     >
       <ReactFlow
         key={fitKey}
-        nodes={nodes}
+        nodes={sized}
         edges={edges}
+        onNodesChange={onNodesChange}
         onNodeClick={onNodeClick}
         fitView
         // These are views of computed state, not editors: dragging a node

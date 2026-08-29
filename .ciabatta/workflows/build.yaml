@@ -3,18 +3,17 @@
 # if you want them back. Ciabatta now reads this file instead.
 description: Build the daemon web app and the ciabatta binary
 owner: Henry Forsyth
+
+# Cross-package dependencies live here, on the workflow. A step's own `needs`
+# names steps *in this file*; `tool_frontend:build` is somebody else's workflow,
+# so it belongs at this level — the compiler pulls that whole unit in and orders
+# it before everything here.
+needs:
+- tool_frontend:build
 requires:
 - cargo
 steps:
-- name: frontend
-  run: yarn turbo run build --filter=ciabatta-tool-frontend
-  description: Build tool_frontend/dist, which build.rs embeds into the binary
-  requires:
-  - yarn
-  timeout: 10m
 - name: binary
   run: cargo build
   description: Compile the ciabatta CLI
   timeout: 20m
-  needs:
-  - frontend

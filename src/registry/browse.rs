@@ -3,7 +3,7 @@
 //! Nexus raw repositories, Artifactory, and most static file servers expose an
 //! HTML directory index at each folder URL. We fetch that page and scrape the
 //! `<a href>` links to present a navigable listing of the repository's folders
-//! and artifacts — handy when configuring recipes and you need to know which
+//! and artifacts — handy when configuring workflows and you need to know which
 //! paths already exist.
 
 use anyhow::{Context, Result};

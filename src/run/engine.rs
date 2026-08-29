@@ -14,7 +14,7 @@ use crate::config::CiabattaConfig;
 use crate::registry::{self, LogSink};
 use crate::runner::{ProgressUpdate, RunCtl, StageKind};
 
-use super::{ResolvedRun, RunStep, prepare_env, resolve_run};
+use super::{ResolvedRun, RunStep, prepare_env, transfer};
 
 /// How many times a single step may be re-run through recovery before the run
 /// gives up — bounds retry loops so a persistently failing step can't spin forever.
@@ -72,10 +72,12 @@ enum Ownership {
     Local(JoinHandle<()>),
 }
 
-/// Entry point for `RunMode::Run`, called from `runner::run_one`. Resolves the
-/// recipe's flowchart, then drives the four phases.
+/// Entry point for a run: drives an already-compiled workflow graph through the
+/// four phases.
+#[allow(clippy::too_many_arguments)]
 pub async fn execute(
     name: &str,
+    resolved: &ResolvedRun,
     config: &CiabattaConfig,
     root: &Path,
     env_vars: &HashMap<String, String>,
@@ -83,14 +85,7 @@ pub async fn execute(
     ctl: &RunCtl,
     tx: &mpsc::Sender<ProgressUpdate>,
 ) -> Result<()> {
-    let entry = config
-        .recipes
-        .get(name)
-        .ok_or_else(|| anyhow::anyhow!("Recipe '{}' not found", name))?;
-    let run = entry
-        .run_recipe()
-        .ok_or_else(|| anyhow::anyhow!("Recipe '{}' has no [run] definition", name))?;
-    let resolved = resolve_run(run, name, root)?;
+    let resolved = resolved.clone();
 
     // Source any configured `.env` file(s) before anything runs, layering their
     // values under whatever is already resolved (CI / git / `-e`), and gate the
@@ -106,7 +101,7 @@ pub async fn execute(
 
     // A compiled workflow graph was already checked per sub-workspace, where
     // the member that declared each requirement was known — so only a plain
-    // project recipe is checked here. Applying the root's config to a
+    // project workflow is checked here. Applying the root's config to a
     // monorepo's requirements would demand `env_default` from a repository
     // root that never declared the variables in the first place.
     let from_workspace = resolved.steps.iter().any(|step| step.workspace.is_some());
@@ -157,7 +152,7 @@ pub async fn execute(
         // Console: printed directly so it shows even in `--gui` mode, where
         // progress updates are folded into the browser view rather than stdout.
         eprintln!("[{name}] ✗ run aborted — env variable(s) empty or unset: {list}");
-        // GUI: emit a log line per missing variable into the recipe's log panel.
+        // GUI: emit a log line per missing variable into the workflow's log panel.
         let _ = tx
             .send(ProgressUpdate::Log(
                 name.to_string(),
@@ -180,7 +175,7 @@ pub async fn execute(
                 ))
                 .await;
         }
-        // Returning Err becomes a `Failed` update (shown as the recipe's error in
+        // Returning Err becomes a `Failed` update (shown as the workflow's error in
         // the GUI, and on stderr by the plain runner).
         bail!(
             "Run '{name}' cannot start: env variable(s) empty or unset: {list}. \
@@ -192,7 +187,7 @@ pub async fn execute(
     for stage in StageKind::ALL {
         let _ = tx
             .send(ProgressUpdate::StageStarted {
-                recipe: name.to_string(),
+                workflow: name.to_string(),
                 stage,
             })
             .await;
@@ -211,8 +206,7 @@ pub async fn execute(
                 let mut cache = if dry_run {
                     None
                 } else {
-                    let mut session =
-                        super::cached::Session::open(root, config, entry.cache.clone());
+                    let mut session = super::cached::Session::open(root, config);
                     if let Some(session) = session.as_mut() {
                         session.connect_remote().await;
                     }
@@ -222,6 +216,7 @@ pub async fn execute(
                 run_dag(
                     &resolved,
                     name,
+                    config,
                     root,
                     &prepared,
                     dry_run,
@@ -252,7 +247,7 @@ pub async fn execute(
 
         let _ = tx
             .send(ProgressUpdate::StageFinished {
-                recipe: name.to_string(),
+                workflow: name.to_string(),
                 stage,
                 ran,
             })
@@ -263,10 +258,10 @@ pub async fn execute(
 }
 
 /// Run an optional phase hook (login/pre/post) as a shell command, forwarding its
-/// output as recipe log lines. Returns whether a command actually ran.
+/// output as workflow log lines. Returns whether a command actually ran.
 async fn run_phase_hook(
     cmd: Option<&str>,
-    recipe: &str,
+    workflow: &str,
     root: &Path,
     env_vars: &HashMap<String, String>,
     dry_run: bool,
@@ -274,7 +269,7 @@ async fn run_phase_hook(
 ) -> Result<bool> {
     let Some(cmd) = cmd else { return Ok(false) };
     let mut log: Vec<String> = Vec::new();
-    let (line_tx, forwarder) = recipe_log_stream(tx, recipe);
+    let (line_tx, forwarder) = recipe_log_stream(tx, workflow);
     let res = {
         let mut sink = LogSink::streaming(&mut log, line_tx);
         sink.push(format!("$ {cmd}"));
@@ -297,7 +292,8 @@ async fn run_phase_hook(
 #[allow(clippy::too_many_arguments)]
 async fn run_dag(
     resolved: &ResolvedRun,
-    recipe: &str,
+    workflow: &str,
+    config: &CiabattaConfig,
     root: &Path,
     env: &super::PreparedEnv,
     dry_run: bool,
@@ -308,7 +304,7 @@ async fn run_dag(
     // Every tool the graph's steps declare has to be on PATH before anything
     // runs. Discovering a missing toolchain three steps in — as a bare "command
     // not found" from some script — is the failure mode this prevents.
-    preflight_tools(resolved, recipe, root, dry_run, tx).await?;
+    preflight_tools(resolved, workflow, root, dry_run, tx).await?;
 
     let mut state: HashMap<&str, StepState> = resolved
         .steps
@@ -359,7 +355,7 @@ async fn run_dag(
                 state.insert(step.name.as_str(), StepState::Skipped);
                 let _ = tx
                     .send(ProgressUpdate::StepSkipped {
-                        recipe: recipe.to_string(),
+                        workflow: workflow.to_string(),
                         step: step.name.clone(),
                         reason,
                     })
@@ -370,7 +366,7 @@ async fn run_dag(
             // A persistent step is started and left running: the graph moves on
             // without it, so a dev server can't hang everything behind it.
             if step.persistent && !dry_run {
-                persistent.push(start_persistent(step, recipe, root, step_env, ctl, tx).await?);
+                persistent.push(start_persistent(step, workflow, root, step_env, ctl, tx).await?);
                 state.insert(step.name.as_str(), StepState::Started);
                 continue;
             }
@@ -385,7 +381,7 @@ async fn run_dag(
                         state.insert(step.name.as_str(), StepState::Skipped);
                         let _ = tx
                             .send(ProgressUpdate::StepSkipped {
-                                recipe: recipe.to_string(),
+                                workflow: workflow.to_string(),
                                 step: step.name.clone(),
                                 reason: note,
                             })
@@ -396,7 +392,7 @@ async fn run_dag(
                         if let Some(note) = note {
                             let _ = tx
                                 .send(ProgressUpdate::Log(
-                                    recipe.to_string(),
+                                    workflow.to_string(),
                                     format!("{}: {note}", step.name),
                                 ))
                                 .await;
@@ -407,7 +403,7 @@ async fn run_dag(
                     Err(e) => {
                         let _ = tx
                             .send(ProgressUpdate::Log(
-                                recipe.to_string(),
+                                workflow.to_string(),
                                 format!("note: skipping the cache for {} ({e:#})", step.name),
                             ))
                             .await;
@@ -416,7 +412,8 @@ async fn run_dag(
             }
 
             let started = std::time::Instant::now();
-            let outcome = run_step_action(step, recipe, root, step_env, dry_run, tx).await;
+            let outcome =
+                run_step_action(step, workflow, config, root, step_env, dry_run, tx).await;
             match outcome {
                 Ok(()) => {
                     state.insert(step.name.as_str(), StepState::Succeeded);
@@ -443,7 +440,7 @@ async fn run_dag(
                             resolved,
                             step,
                             target,
-                            recipe,
+                            workflow,
                             root,
                             step_env,
                             dry_run,
@@ -462,7 +459,7 @@ async fn run_dag(
                     if step.continue_on_error || err.is::<TimedOut>() {
                         let _ = tx
                             .send(ProgressUpdate::Log(
-                                recipe.to_string(),
+                                workflow.to_string(),
                                 format!(
                                     "⚠ step '{}' failed but the graph continues: {err}",
                                     step.name
@@ -477,7 +474,7 @@ async fn run_dag(
                     }
 
                     // Nothing to fall back on: this failure ends the run.
-                    stop_persistent(persistent, recipe, tx).await;
+                    stop_persistent(persistent, workflow, tx).await;
                     bail!("Run step '{}' failed: {}", step.name, err);
                 }
             }
@@ -490,7 +487,7 @@ async fn run_dag(
         if !step.recover && state.get(step.name.as_str()) == Some(&StepState::Pending) {
             let _ = tx
                 .send(ProgressUpdate::StepSkipped {
-                    recipe: recipe.to_string(),
+                    workflow: workflow.to_string(),
                     step: step.name.clone(),
                     reason: "blocked by a failed dependency".to_string(),
                 })
@@ -498,7 +495,7 @@ async fn run_dag(
         }
     }
 
-    stop_persistent(persistent, recipe, tx).await;
+    stop_persistent(persistent, workflow, tx).await;
 
     // A step still Failed and untolerated means recovery ran out of road.
     if let Some(failed) = resolved.steps.iter().find(|s| {
@@ -611,7 +608,7 @@ fn generate_missing_env(
 /// with X" is worth knowing before a ten-minute compile, not after it.
 async fn preflight_tools(
     resolved: &ResolvedRun,
-    recipe: &str,
+    workflow: &str,
     root: &Path,
     dry_run: bool,
     tx: &mpsc::Sender<ProgressUpdate>,
@@ -649,7 +646,7 @@ async fn preflight_tools(
         for line in &lines {
             let _ = tx
                 .send(ProgressUpdate::Log(
-                    recipe.to_string(),
+                    workflow.to_string(),
                     format!("[dry-run] {line}"),
                 ))
                 .await;
@@ -658,7 +655,7 @@ async fn preflight_tools(
     }
     for line in &lines {
         let _ = tx
-            .send(ProgressUpdate::Log(recipe.to_string(), line.clone()))
+            .send(ProgressUpdate::Log(workflow.to_string(), line.clone()))
             .await;
     }
     bail!(
@@ -680,7 +677,7 @@ async fn preflight_tools(
 /// — which the log says plainly rather than leaving it to be discovered.
 async fn start_persistent(
     step: &RunStep,
-    recipe: &str,
+    workflow: &str,
     root: &Path,
     env_vars: &HashMap<String, String>,
     ctl: &RunCtl,
@@ -688,7 +685,7 @@ async fn start_persistent(
 ) -> Result<Persistent> {
     let _ = tx
         .send(ProgressUpdate::StepStarted {
-            recipe: recipe.to_string(),
+            workflow: workflow.to_string(),
             step: step.name.clone(),
         })
         .await;
@@ -701,12 +698,12 @@ async fn start_persistent(
 
     let log = |line: String| {
         let tx = tx.clone();
-        let recipe = recipe.to_string();
+        let workflow = workflow.to_string();
         let name = step.name.clone();
         async move {
             let _ = tx
                 .send(ProgressUpdate::StepLog {
-                    recipe,
+                    workflow,
                     step: name,
                     line,
                 })
@@ -748,7 +745,7 @@ async fn start_persistent(
             .await;
             Ok(Persistent {
                 step: step.name.clone(),
-                ownership: Ownership::Local(spawn_locally(&command, &cwd, env, step, recipe, tx)),
+                ownership: Ownership::Local(spawn_locally(&command, &cwd, env, step, workflow, tx)),
             })
         }
     }
@@ -800,10 +797,10 @@ fn spawn_locally(
     cwd: &Path,
     env: HashMap<String, String>,
     step: &RunStep,
-    recipe: &str,
+    workflow: &str,
     tx: &mpsc::Sender<ProgressUpdate>,
 ) -> JoinHandle<()> {
-    let (line_tx, forwarder) = step_log_stream(tx, recipe, &step.name);
+    let (line_tx, forwarder) = step_log_stream(tx, workflow, &step.name);
     let command = command.to_string();
     let cwd = cwd.to_path_buf();
     let name = step.name.clone();
@@ -832,7 +829,7 @@ fn spawn_locally(
 /// spinning forever after the run has finished is just misleading.
 async fn stop_persistent(
     running: Vec<Persistent>,
-    recipe: &str,
+    workflow: &str,
     tx: &mpsc::Sender<ProgressUpdate>,
 ) {
     for job in running {
@@ -851,7 +848,7 @@ async fn stop_persistent(
         if let Some(line) = line {
             let _ = tx
                 .send(ProgressUpdate::StepLog {
-                    recipe: recipe.to_string(),
+                    workflow: workflow.to_string(),
                     step: job.step.clone(),
                     line,
                 })
@@ -859,7 +856,7 @@ async fn stop_persistent(
         }
         let _ = tx
             .send(ProgressUpdate::StepFinished {
-                recipe: recipe.to_string(),
+                workflow: workflow.to_string(),
                 step: job.step,
                 ok: true,
             })
@@ -917,7 +914,7 @@ async fn recover<'a>(
     resolved: &'a ResolvedRun,
     failed: &'a RunStep,
     target: &str,
-    recipe: &str,
+    workflow: &str,
     root: &Path,
     env_vars: &HashMap<String, String>,
     dry_run: bool,
@@ -946,7 +943,7 @@ async fn recover<'a>(
         .clone()
         .unwrap_or_else(|| format!("Step '{}' failed — choose a fix:", failed.name));
 
-    let choice = pick_option(node, recipe, &message, &labels, ctl, tx).await?;
+    let choice = pick_option(node, workflow, &message, &labels, ctl, tx).await?;
     let option = node
         .options
         .get(choice)
@@ -955,12 +952,12 @@ async fn recover<'a>(
     // Run the chosen fix as the recovery node's action.
     let _ = tx
         .send(ProgressUpdate::StepStarted {
-            recipe: recipe.to_string(),
+            workflow: workflow.to_string(),
             step: node.name.clone(),
         })
         .await;
     let mut log: Vec<String> = Vec::new();
-    let (line_tx, forwarder) = step_log_stream(tx, recipe, &node.name);
+    let (line_tx, forwarder) = step_log_stream(tx, workflow, &node.name);
     let res = {
         let mut sink = LogSink::streaming(&mut log, line_tx);
         sink.push(format!("recover: {}", option.label));
@@ -981,7 +978,7 @@ async fn recover<'a>(
     let fixed = res.is_ok();
     let _ = tx
         .send(ProgressUpdate::StepFinished {
-            recipe: recipe.to_string(),
+            workflow: workflow.to_string(),
             step: node.name.clone(),
             ok: fixed,
         })
@@ -1018,7 +1015,7 @@ async fn recover<'a>(
 /// runs auto-pick the first `default` option, or fail if none is marked.
 async fn pick_option(
     node: &RunStep,
-    recipe: &str,
+    workflow: &str,
     message: &str,
     labels: &[String],
     ctl: &RunCtl,
@@ -1031,7 +1028,7 @@ async fn pick_option(
         let mut rx = bus.subscribe();
         let _ = tx
             .send(ProgressUpdate::StepNeedsChoice {
-                recipe: recipe.to_string(),
+                workflow: workflow.to_string(),
                 step: node.name.clone(),
                 message: message.to_string(),
                 options: labels.to_vec(),
@@ -1039,7 +1036,7 @@ async fn pick_option(
             .await;
         loop {
             match rx.recv().await {
-                Ok(choice) if choice.recipe == recipe && choice.step == node.name => {
+                Ok(choice) if choice.workflow == workflow && choice.step == node.name => {
                     if choice.option < node.options.len() {
                         return Ok(choice.option);
                     }
@@ -1076,7 +1073,8 @@ async fn pick_option(
 /// trying again.
 async fn run_step_action(
     step: &RunStep,
-    recipe: &str,
+    workflow: &str,
+    config: &CiabattaConfig,
     root: &Path,
     env_vars: &HashMap<String, String>,
     dry_run: bool,
@@ -1084,7 +1082,7 @@ async fn run_step_action(
 ) -> Result<()> {
     let _ = tx
         .send(ProgressUpdate::StepStarted {
-            recipe: recipe.to_string(),
+            workflow: workflow.to_string(),
             step: step.name.clone(),
         })
         .await;
@@ -1098,22 +1096,61 @@ async fn run_step_action(
 
     for attempt in 1..=attempts {
         let mut log: Vec<String> = Vec::new();
-        let (line_tx, forwarder) = step_log_stream(tx, recipe, &step.name);
+        let (line_tx, forwarder) = step_log_stream(tx, workflow, &step.name);
         res = {
             let mut sink = LogSink::streaming(&mut log, line_tx);
             if attempt > 1 {
                 sink.push(format!("retry {}/{}", attempt - 1, step.retries));
             }
-            run_action(
-                script,
-                run.as_deref(),
-                &cwd,
-                env_vars,
-                dry_run,
-                limit,
-                &mut sink,
-            )
-            .await
+            // A transfer step with no command of its own performs the built-in
+            // registry move; one that names a `run`/`script` runs that instead,
+            // which is how a project keeps its own publishing script while
+            // still being a node on the graph.
+            match step.transfer() {
+                Some(transfer) if script.is_none() && run.is_none() => {
+                    let action = transfer::run(
+                        step,
+                        &transfer,
+                        config,
+                        root,
+                        &cwd,
+                        env_vars,
+                        dry_run,
+                        &mut sink,
+                        |done, total| {
+                            if total > 1 {
+                                let _ = tx.try_send(ProgressUpdate::TransferProgress {
+                                    workflow: workflow.to_string(),
+                                    done,
+                                    total,
+                                });
+                            }
+                        },
+                    );
+                    match limit {
+                        None => action.await,
+                        Some(limit) => match tokio::time::timeout(limit, action).await {
+                            Ok(result) => result,
+                            Err(_) => Err(anyhow::Error::new(TimedOut).context(format!(
+                                "timed out after {} and was killed",
+                                format_duration(limit)
+                            ))),
+                        },
+                    }
+                }
+                _ => {
+                    run_action(
+                        script,
+                        run.as_deref(),
+                        &cwd,
+                        env_vars,
+                        dry_run,
+                        limit,
+                        &mut sink,
+                    )
+                    .await
+                }
+            }
         };
         // Flush all streamed lines into the UI before deciding what's next.
         let _ = forwarder.await;
@@ -1127,7 +1164,7 @@ async fn run_step_action(
 
     let _ = tx
         .send(ProgressUpdate::StepFinished {
-            recipe: recipe.to_string(),
+            workflow: workflow.to_string(),
             step: step.name.clone(),
             ok: res.is_ok(),
         })
@@ -1204,18 +1241,18 @@ fn format_duration(d: std::time::Duration) -> String {
 /// awaiting the handle guarantees every line has been folded into the UI state.
 fn step_log_stream(
     tx: &mpsc::Sender<ProgressUpdate>,
-    recipe: &str,
+    workflow: &str,
     step: &str,
 ) -> (UnboundedSender<String>, JoinHandle<()>) {
     let (line_tx, mut line_rx) = mpsc::unbounded_channel::<String>();
     let tx = tx.clone();
-    let recipe = recipe.to_string();
+    let workflow = workflow.to_string();
     let step = step.to_string();
     let handle = tokio::spawn(async move {
         while let Some(line) = line_rx.recv().await {
             let _ = tx
                 .send(ProgressUpdate::StepLog {
-                    recipe: recipe.clone(),
+                    workflow: workflow.clone(),
                     step: step.clone(),
                     line,
                 })
@@ -1225,18 +1262,18 @@ fn step_log_stream(
     (line_tx, handle)
 }
 
-/// Like [`step_log_stream`], but forwards lines as recipe-level `Log` updates
+/// Like [`step_log_stream`], but forwards lines as workflow-level `Log` updates
 /// (used by the login/pre/post phase hooks, which aren't tied to a step).
 fn recipe_log_stream(
     tx: &mpsc::Sender<ProgressUpdate>,
-    recipe: &str,
+    workflow: &str,
 ) -> (UnboundedSender<String>, JoinHandle<()>) {
     let (line_tx, mut line_rx) = mpsc::unbounded_channel::<String>();
     let tx = tx.clone();
-    let recipe = recipe.to_string();
+    let workflow = workflow.to_string();
     let handle = tokio::spawn(async move {
         while let Some(line) = line_rx.recv().await {
-            let _ = tx.send(ProgressUpdate::Log(recipe.clone(), line)).await;
+            let _ = tx.send(ProgressUpdate::Log(workflow.clone(), line)).await;
         }
     });
     (line_tx, handle)
@@ -1278,7 +1315,18 @@ mod tests {
             env,
             ..Default::default()
         };
-        let result = run_dag(&resolved, "test", root, &prepared, false, &ctl, &tx, None).await;
+        let result = run_dag(
+            &resolved,
+            "test",
+            &CiabattaConfig::default(),
+            root,
+            &prepared,
+            false,
+            &ctl,
+            &tx,
+            None,
+        )
+        .await;
         drop(tx);
         (result, collector.await.unwrap())
     }

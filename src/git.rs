@@ -5,7 +5,7 @@ use std::process::Command;
 
 /// Resolve the CIABATTA_* build variables from the local git repository rooted
 /// at (or containing) `root`. Used by `--local` and `ciabatta source` so the
-/// same recipes work on a developer machine without a CI system.
+/// same workflows work on a developer machine without a CI system.
 ///
 ///   CIABATTA_BRANCH        current branch (omitted when HEAD is detached)
 ///   CIABATTA_COMMIT        full HEAD commit SHA

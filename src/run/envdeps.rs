@@ -88,14 +88,14 @@ impl EnvReport {
 
     /// The report as a block of terminal text, or `None` when a run depends on
     /// no variables at all (in which case there is nothing worth saying).
-    pub fn render(&self, recipe: &str) -> Option<String> {
+    pub fn render(&self, workflow: &str) -> Option<String> {
         if self.is_empty() {
             return None;
         }
 
         let mut out = String::new();
         out.push_str(&format!(
-            "Environment for '{recipe}' — {} variable(s) this run depends on\n",
+            "Environment for '{workflow}' — {} variable(s) this run depends on\n",
             self.vars.len()
         ));
         if !self.files.is_empty() {

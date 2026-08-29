@@ -1,5 +1,5 @@
 /**
- * The flowchart builder: design a run DAG and copy out the TOML.
+ * The workflow builder: design a step DAG and copy out the workflow file.
  *
  * Entirely client-side, as it always was — it runs nothing and needs no
  * project, so there's no server state and no route behind it. That's why it
@@ -51,7 +51,7 @@ const STARTER: DraftStep[] = [
 export function RunBuilderPage() {
   const theme = useTheme();
   const [steps, setSteps] = useState<DraftStep[]>(STARTER);
-  const [recipeName, setRecipeName] = useState("release");
+  const [workflowName, setWorkflowName] = useState("release");
   const [copied, setCopied] = useState(false);
 
   const update = (index: number, patch: Partial<DraftStep>) =>
@@ -67,7 +67,7 @@ export function RunBuilderPage() {
     setSteps((current) => {
       const name = current[index].name;
       // Dropping a step has to drop the references to it too, or the emitted
-      // TOML names a step that doesn't exist.
+      // file names a step that doesn't exist.
       return current
         .filter((_, i) => i !== index)
         .map((s) => ({
@@ -78,22 +78,22 @@ export function RunBuilderPage() {
     });
 
   const { nodes, edges } = useMemo(() => buildPreview(steps, theme), [steps, theme]);
-  const toml = useMemo(() => emitToml(recipeName, steps), [recipeName, steps]);
+  const yaml = useMemo(() => emitWorkflow(workflowName, steps), [workflowName, steps]);
 
   return (
     <>
       <PageHeader
         title="Flowchart builder"
-        description="Design a run DAG, then copy the TOML into your ciabatta.toml. Nothing here runs — it's an authoring tool."
+        description="Design a step DAG, then save it as .ciabatta/workflows/<name>.yaml. Nothing here runs — it's an authoring tool."
       />
 
       <Grid container spacing={3}>
         <Grid size={{ xs: 12, lg: 7 }}>
           <TextField
             size="small"
-            label="Recipe name"
-            value={recipeName}
-            onChange={(e) => setRecipeName(e.target.value)}
+            label="Workflow name"
+            value={workflowName}
+            onChange={(e) => setWorkflowName(e.target.value)}
             sx={{ mb: 2, width: 240 }}
           />
 
@@ -197,13 +197,13 @@ export function RunBuilderPage() {
 
           <Stack direction="row" alignItems="center" sx={{ mt: 3, mb: 1 }}>
             <Typography variant="h3" sx={{ flexGrow: 1 }}>
-              TOML
+              YAML
             </Typography>
             <Button
               size="small"
               startIcon={<ContentCopyIcon />}
               onClick={() => {
-                navigator.clipboard.writeText(toml);
+                navigator.clipboard.writeText(yaml);
                 setCopied(true);
               }}
             >
@@ -212,7 +212,7 @@ export function RunBuilderPage() {
           </Stack>
           {copied && (
             <Alert severity="success" sx={{ mb: 1 }} onClose={() => setCopied(false)}>
-              Copied — paste it into your .ciabatta/ciabatta.toml.
+              Copied — paste it into your .ciabatta/ciabatta.yaml.
             </Alert>
           )}
           <Box
@@ -230,7 +230,7 @@ export function RunBuilderPage() {
               fontSize: 12.5,
             }}
           >
-            {toml}
+            {yaml}
           </Box>
         </Grid>
       </Grid>
@@ -284,29 +284,40 @@ function buildPreview(steps: DraftStep[], theme: Theme) {
   return { nodes, edges };
 }
 
-/** Render the draft as a `[recipies.<name>.run]` TOML block. */
-function emitToml(recipeName: string, steps: DraftStep[]): string {
-  const name = recipeName.trim() || "release";
-  const lines: string[] = [`[recipies.${name}.run]`, ""];
+/**
+ * Render the draft as a workflow file — the whole contents of
+ * `.ciabatta/workflows/<name>.yaml`, where the filename is the workflow name.
+ */
+function emitWorkflow(workflowName: string, steps: DraftStep[]): string {
+  const name = workflowName.trim() || "release";
+  const lines: string[] = [
+    `# .ciabatta/workflows/${name}.yaml — run it with \`ciabatta ${name}\``,
+    "",
+    "steps:",
+  ];
 
   for (const step of steps) {
     if (!step.name.trim()) continue;
-    lines.push(`[[recipies.${name}.run.steps]]`);
-    lines.push(`name = ${quote(step.name)}`);
-    if (step.run.trim()) lines.push(`run = ${quote(step.run)}`);
+    lines.push(`  - name: ${quote(step.name)}`);
+    if (step.run.trim()) lines.push(`    run: ${quote(step.run)}`);
     if (step.needs.length > 0) {
-      lines.push(`needs = [${step.needs.map(quote).join(", ")}]`);
+      lines.push(`    needs: [${step.needs.map(quote).join(", ")}]`);
     }
-    if (step.onError) lines.push(`on_error = ${quote(step.onError)}`);
-    if (step.recover) lines.push("recover = true");
-    lines.push("");
+    if (step.onError) lines.push(`    on_error: ${quote(step.onError)}`);
+    if (step.recover) lines.push("    recover: true");
   }
 
-  return lines.join("\n");
+  return lines.join("\n") + "\n";
 }
 
-/** TOML basic string, escaping what the format requires. */
+/**
+ * A YAML scalar. Quoted only when it has to be, since an unquoted command reads
+ * far better — but a value starting with a placeholder, or carrying a colon or
+ * a newline, must be quoted or it changes meaning.
+ */
 function quote(value: string): string {
+  const safe = /^[A-Za-z0-9_][A-Za-z0-9 _./=@+-]*$/.test(value);
+  if (safe) return value;
   const escaped = value
     .replace(/\\/g, "\\\\")
     .replace(/"/g, '\\"')

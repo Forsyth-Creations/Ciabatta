@@ -1,0 +1,13 @@
+# This package's ciabatta configuration.
+# Run `ciabatta config reference` for the full schema.
+
+# ─── Identity ──────────────────────────────────────────────────────────────────
+# Who this package is in the monorepo, and what it needs before it can build.
+# `ciabatta list` shows all of this, so nobody has to open your scripts to find
+# out what they do or who owns them.
+workspace:
+  name: tool_frontend
+  description: ""          # TODO: one line on what lives here
+  owner: Henry Forsyth
+  tags: []                 # free-form labels, searchable with `ciabatta list -s`
+  requires: []             # tools every workflow here needs on PATH

@@ -36,7 +36,6 @@ use cli::{
 };
 use config::{CiabattaConfig, find_root, load_config, load_config_file};
 use environment::CiabattaEnv;
-use runner::RunMode;
 use std::collections::BTreeMap;
 
 #[tokio::main]
@@ -70,50 +69,6 @@ async fn main() -> Result<()> {
     tracing::debug!("debug logging enabled");
 
     match cli.command {
-        Commands::Push {
-            recipes,
-            cookbooks,
-            env,
-            dry_run,
-            no_tui,
-            local,
-            config,
-        } => {
-            let (root, cfg) = load_project(config.as_deref())?;
-            // Only announce resolved variables when we're not about to take over
-            // the screen with the TUI (the output would corrupt/close it).
-            let vars = build_env_vars(&cfg, &env, local, &root, no_tui)?;
-            let names = select_transfer_names(&cfg, &cookbooks, &recipes)?;
-            execute_recipes(&cfg, &root, &names, &vars, dry_run, !no_tui, RunMode::Push).await?;
-        }
-
-        Commands::Pull {
-            recipes,
-            cookbooks,
-            env,
-            dry_run,
-            no_tui,
-            local,
-            config,
-        } => {
-            let (root, cfg) = load_project(config.as_deref())?;
-            let vars = build_env_vars(&cfg, &env, local, &root, no_tui)?;
-            let names = select_transfer_names(&cfg, &cookbooks, &recipes)?;
-            execute_recipes(&cfg, &root, &names, &vars, dry_run, !no_tui, RunMode::Pull).await?;
-        }
-
-        Commands::Run(args) => {
-            // --build is an authoring tool: it needs no project and runs nothing.
-            if args.build {
-                let session = daemon::connect(args.port).await?;
-                let url = format!("{}/run/builder", session.daemon.base_url);
-                println!("Flowchart builder: {url}");
-                daemon::open_browser(&url);
-            } else {
-                cmd_run(args).await?;
-            }
-        }
-
         Commands::Source { env } => {
             cmd_source(&env)?;
         }
@@ -136,9 +91,9 @@ async fn main() -> Result<()> {
         Commands::List {
             search,
             verbose,
-            recipes,
+            workflows,
         } => {
-            cmd_list(search.as_deref(), verbose, recipes)?;
+            cmd_list(search.as_deref(), verbose, workflows)?;
         }
 
         Commands::Init {
@@ -156,14 +111,18 @@ async fn main() -> Result<()> {
             ci,
             containers,
             force,
+            no_register,
+            port,
         } => {
-            if example {
+            // Where the new workspace ended up. `--example` writes into a
+            // sub-directory, so it reports its own root rather than the cwd.
+            let root = if example {
                 example::generate(&example::Options {
                     into,
                     nexus: nexus || all,
                     docker: docker || all,
                     force,
-                })?;
+                })?
             } else if lib {
                 cmd_init_lib(
                     name.as_deref(),
@@ -172,10 +131,18 @@ async fn main() -> Result<()> {
                     &depends_on,
                     workflow.as_deref().unwrap_or("build"),
                     force,
-                )?;
+                )?
             } else {
-                cmd_init(ci.as_deref(), containers.as_deref(), force)?;
+                cmd_init(ci.as_deref(), containers.as_deref(), force)?
+            };
+
+            if !no_register {
+                register_quietly(&root, port).await;
             }
+        }
+
+        Commands::Register { path, quiet, port } => {
+            cmd_register(path.as_deref(), quiet, port).await?;
         }
 
         Commands::Tui => {
@@ -303,11 +270,10 @@ async fn main() -> Result<()> {
         Commands::Convert {
             script,
             name,
-            workflow,
             dry_run,
             force,
         } => {
-            convert::run(&script, name.as_deref(), workflow, dry_run, force)?;
+            convert::run(&script, name.as_deref(), dry_run, force)?;
         }
     }
 
@@ -416,10 +382,10 @@ async fn cmd_workflow(args: cli::WorkflowArgs, bare_name: bool) -> Result<()> {
         return Ok(());
     }
 
-    // From here a workflow is an ordinary run: the compiled graph goes into the
-    // config as a single run-capable recipe, and the existing machinery — TUI,
-    // live view, recovery prompts — does the rest.
-    let mut cfg = load_config(&ws.root)?;
+    // From here a workflow is an ordinary run: the compiled graph becomes the
+    // resolved DAG, and the existing machinery — TUI, live view, recovery
+    // prompts — does the rest.
+    let cfg = load_config(&ws.root)?;
     // Resolved variables are echoed only when this terminal is going to keep
     // showing text: the TUI would be corrupted by it, and a --gui run reports
     // in the browser instead.
@@ -427,163 +393,25 @@ async fn cmd_workflow(args: cli::WorkflowArgs, bare_name: bool) -> Result<()> {
     let mut vars = build_env_vars(&cfg, &args.env, args.local, &ws.root, announce)?;
     source_ciabatta_vars(&mut vars, &ws.root, announce);
     report_env_drift(&ws.root, &graph.env_files, announce);
-    let name = workspace::graph::install_as_recipe(&mut cfg, graph);
+
+    let name = graph.label();
+    let resolved = workspace::graph::into_run(graph)?;
 
     if args.gui {
         // The daemon owns the run, so it compiles the graph itself from the
         // same declarations rather than being handed our copy.
-        report_run_dependencies(&cfg, &ws.root, &[name], &vars, false);
+        report_run_dependencies(&resolved, &name, &ws.root, &vars, false);
         return cmd_workflow_gui(&args, &workflows, &ws.root, vars).await;
     }
 
-    execute_recipes(
+    execute_workflow(
+        &name,
+        &resolved,
         &cfg,
         &ws.root,
-        &[name],
         &vars,
         args.dry_run,
         args.use_tui(),
-        RunMode::Run,
-    )
-    .await
-}
-
-/// Dispatch `ciabatta run`: the one command that runs a collection of scripts,
-/// whether they were written as monorepo workflows or as this project's own
-/// recipes.
-///
-/// The two used to be different commands with different flags, which meant the
-/// answer to "how do I run this?" depended on where somebody had happened to
-/// write it down. A target is now looked up in both places: workflows compile
-/// into one cross-workspace graph, recipes run as recipes, and the flags
-/// (`--filter`, `--graph`, `--dry-run`, `--gui`) mean the same thing either way.
-async fn cmd_run(args: cli::RunArgs) -> Result<()> {
-    let cwd = env::current_dir().context("Failed to get current directory")?;
-
-    // Which of the targets name monorepo workflows. A workspace that fails to
-    // load (there isn't one) simply means every target must be a recipe.
-    let workflow_names: Vec<String> = workspace::Workspace::discover(&cwd)
-        .map(|ws| ws.workflow_names())
-        .unwrap_or_default();
-    let (workflows, recipes): (Vec<String>, Vec<String>) = args
-        .targets
-        .iter()
-        .cloned()
-        .partition(|t| workflow_names.contains(t));
-
-    // Mixing the two in one invocation would have to either interleave two
-    // unrelated graphs or run them back to back, and neither is what anyone
-    // means by it. Say so instead of picking one silently.
-    if !workflows.is_empty() && !recipes.is_empty() {
-        bail!(
-            "Can't run workflows and recipes together in one graph: {} {} a workflow, \
-             {} {} a recipe in this project.\n\
-             Run them separately — the flags are the same for both.",
-            workflows.join(", "),
-            if workflows.len() == 1 { "is" } else { "are" },
-            recipes.join(", "),
-            if recipes.len() == 1 { "is" } else { "are" },
-        );
-    }
-
-    if !workflows.is_empty() {
-        if !args.cookbooks.is_empty() {
-            bail!(
-                "--cookbook groups recipes, and {} {} a workflow. Select part of a \
-                 workflow graph with --filter instead.",
-                workflows.join(", "),
-                if workflows.len() == 1 { "is" } else { "are" },
-            );
-        }
-        let mut workflows = workflows.into_iter();
-        return cmd_workflow(
-            cli::WorkflowArgs {
-                workflow: workflows.next(),
-                also: workflows.collect(),
-                only: args.only,
-                filter: args.filter,
-                isolated: args.isolated,
-                graph: args.graph,
-                env: args.env,
-                dry_run: args.dry_run,
-                tui: args.tui,
-                no_tui: args.no_tui,
-                gui: args.gui,
-                local: args.local,
-                port: args.port,
-            },
-            false,
-        )
-        .await;
-    }
-
-    cmd_run_recipes(&args, &recipes, &workflow_names).await
-}
-
-/// The recipe half of [`cmd_run`]: this project's own `[recipies.<name>.run]`
-/// entries, filtered and graphed with the same flags a workflow gets.
-async fn cmd_run_recipes(
-    args: &cli::RunArgs,
-    recipes: &[String],
-    workflow_names: &[String],
-) -> Result<()> {
-    let (root, mut cfg) = load_project(args.config.as_deref())?;
-    let mut vars = build_env_vars(&cfg, &args.env, args.local, &root, !args.use_tui())?;
-    // Auto-source the CIABATTA_* build variables from local git so every run
-    // script sees CIABATTA_BRANCH/_COMMIT/_TAG/_BUILD_NUMBER/_PATH, even when
-    // the run isn't in explicit `--local` or CI mode. Anything already resolved
-    // wins.
-    source_ciabatta_vars(&mut vars, &root, !args.use_tui() && !args.gui);
-
-    let names = select_run_names(&cfg, &args.cookbooks, recipes)?;
-    if names.is_empty() {
-        // Nothing to run here, but a monorepo around it may have plenty — the
-        // useful answer is what *can* be run, not that this directory is empty.
-        if !workflow_names.is_empty() {
-            bail!(
-                "This project defines no run-capable recipes.\n\
-                 Workflows you can run: {}.\n\
-                 See everything with `ciabatta list`.",
-                workflow_names.join(", ")
-            );
-        }
-        bail!(
-            "No run recipes found. Add a [recipies.<name>.run] section, design one with \
-             `ciabatta run --build`, or generate a worked example with `ciabatta init --example`."
-        );
-    }
-
-    // A filter narrows each recipe's step DAG the same way it narrows a
-    // workflow graph, so the flag behaves identically on both kinds of target.
-    let filters = run::filter::parse_all(&args.filter)?;
-    let pruned = apply_filter_to_recipes(&mut cfg, &root, &names, &filters)?;
-    if let Some(report) = pruned.report() {
-        eprintln!("{report}\n");
-    }
-
-    if args.graph {
-        return show_recipe_graph(&cfg, &root, &names, args.use_tui()).await;
-    }
-
-    report_env_drift(
-        &root,
-        &recipe_env_files(&cfg, &names),
-        !args.use_tui() && !args.gui,
-    );
-
-    if args.gui {
-        runner::validate_recipes(&cfg, &root, &names, &vars, &RunMode::Run)?;
-        report_run_dependencies(&cfg, &root, &names, &vars, false);
-        return cmd_run_gui(args.port, names, vars, args.dry_run).await;
-    }
-    execute_recipes(
-        &cfg,
-        &root,
-        &names,
-        &vars,
-        args.dry_run,
-        args.use_tui(),
-        RunMode::Run,
     )
     .await
 }
@@ -604,9 +432,9 @@ async fn cmd_run_recipes(
 /// Secret-looking names are listed with their values masked: this output goes
 /// into CI logs.
 fn report_run_dependencies(
-    cfg: &CiabattaConfig,
+    resolved: &run::ResolvedRun,
+    name: &str,
     root: &Path,
-    names: &[String],
     vars: &HashMap<String, String>,
     to_stderr: bool,
 ) {
@@ -618,21 +446,12 @@ fn report_run_dependencies(
         }
     };
 
-    for name in names {
-        let Some(recipe) = cfg.recipes.get(name).and_then(|e| e.run_recipe()) else {
-            continue;
-        };
-        // A recipe that won't resolve is about to fail with a far better
-        // message than anything a report could add.
-        let Ok(resolved) = run::resolve_run(recipe, name, root) else {
-            continue;
-        };
-        if let Some(text) = run::deps::report(cfg, root, name, &resolved.steps, vars) {
-            say(text);
-        }
-        if let Some(text) = run::envdeps::collect(&resolved, root, vars).render(name) {
-            say(text);
-        }
+    let cfg = load_config(root).unwrap_or_default();
+    if let Some(text) = run::deps::report(&cfg, root, name, &resolved.steps, vars) {
+        say(text);
+    }
+    if let Some(text) = run::envdeps::collect(resolved, root, vars).render(name) {
+        say(text);
     }
 }
 
@@ -656,110 +475,6 @@ fn report_env_drift(root: &Path, env_files: &[String], announce: bool) {
     if let Some(report) = drift.report() {
         eprintln!("{report}\n");
     }
-}
-
-/// Narrow every named recipe's step DAG to what the filters select, rewriting
-/// each one's run definition in place as inline steps.
-///
-/// Resolving here — rather than leaving it to the engine — is what lets
-/// `--filter` work on a recipe whose steps live in a separate flowchart file:
-/// the file is loaded, pruned, and the result handed on as if it had been
-/// written inline all along.
-fn apply_filter_to_recipes(
-    cfg: &mut CiabattaConfig,
-    root: &Path,
-    names: &[String],
-    filters: &[run::filter::Filter],
-) -> Result<run::filter::Outcome> {
-    let mut combined = run::filter::Outcome::default();
-    if filters.is_empty() {
-        return Ok(combined);
-    }
-
-    for name in names {
-        let Some(entry) = cfg.recipes.get(name) else {
-            continue;
-        };
-        let Some(recipe) = entry.run_recipe() else {
-            continue;
-        };
-        let resolved = run::resolve_run(recipe, name, root)?;
-        let (steps, outcome) = run::filter::apply(&resolved.steps, filters)
-            .with_context(|| format!("recipe '{name}'"))?;
-        combined.dropped.extend(outcome.dropped);
-        combined.cut_edges.extend(outcome.cut_edges);
-
-        // Write the pruned DAG back as inline steps: the flowchart file has
-        // already been read, and leaving the reference in place would make the
-        // engine load the unfiltered version again.
-        let entry = cfg.recipes.get_mut(name).expect("looked up above");
-        let run = entry.run.get_or_insert_with(Default::default);
-        run.flowchart = None;
-        run.entry = None;
-        run.required_env = resolved.required_env;
-        run.env_file = resolved.env_files;
-        run.steps = steps;
-    }
-    Ok(combined)
-}
-
-/// The `.env` files a set of recipes sources, for the drift check.
-fn recipe_env_files(cfg: &CiabattaConfig, names: &[String]) -> Vec<String> {
-    let mut files: Vec<String> = Vec::new();
-    for name in names {
-        let Some(recipe) = cfg.recipes.get(name).and_then(|e| e.run_recipe()) else {
-            continue;
-        };
-        for file in &recipe.env_file {
-            if !files.contains(file) {
-                files.push(file.clone());
-            }
-        }
-    }
-    files
-}
-
-/// `ciabatta run <recipe> --graph`: show the recipe's resolved step DAG without
-/// running it, in the same viewer a workflow graph gets.
-async fn show_recipe_graph(
-    cfg: &CiabattaConfig,
-    root: &Path,
-    names: &[String],
-    use_tui: bool,
-) -> Result<()> {
-    let mut steps: Vec<run::RunStep> = Vec::new();
-    for name in names {
-        let Some(recipe) = cfg.recipes.get(name).and_then(|e| e.run_recipe()) else {
-            continue;
-        };
-        let resolved = run::resolve_run(recipe, name, root)?;
-        // A recipe's steps carry no sub-workspace of their own, so the recipe
-        // name stands in — the graph view groups by it either way.
-        steps.extend(resolved.steps.into_iter().map(|mut step| {
-            step.workspace.get_or_insert_with(|| name.clone());
-            step
-        }));
-    }
-
-    let graph = workspace::graph::WorkflowGraph {
-        workflows: names.to_vec(),
-        steps,
-        ..Default::default()
-    };
-    let ws = workspace::Workspace {
-        root: root.to_path_buf(),
-        members: Vec::new(),
-        root_meta: Default::default(),
-        toolchain: Default::default(),
-        env: Default::default(),
-    };
-
-    if !use_tui {
-        print!("{}", workspace::render::graph(&ws, &graph));
-        println!("\nNothing was run (--graph).");
-        return Ok(());
-    }
-    tui::graph::explore(&ws, &graph, &run::filter::Outcome::default()).await
 }
 
 /// Hand a workflow run to the daemon and open the live graph in a browser.
@@ -811,7 +526,7 @@ async fn cmd_workflow_gui(
 }
 
 /// Dispatch `ciabatta list`: the monorepo's catalogue of workflows, then this
-/// project's own recipes.
+/// project's own workflows.
 fn cmd_list(search: Option<&str>, verbose: bool, recipes_only: bool) -> Result<()> {
     let cwd = env::current_dir().context("Failed to get current directory")?;
 
@@ -830,63 +545,13 @@ fn cmd_list(search: Option<&str>, verbose: bool, recipes_only: bool) -> Result<(
         }
     }
 
-    // The recipe list is about the project you're standing in, so it's loaded
+    // The workflow list is about the project you're standing in, so it's loaded
     // the same way `push` would load it.
     match load_project(None) {
-        Ok((_, cfg)) => list_recipes(&cfg),
+        Ok((_, cfg)) => list_workflows(&cfg),
         Err(err) if recipes_only => return Err(err),
         Err(_) => {}
     }
-    Ok(())
-}
-
-/// Dispatch `ciabatta run --gui`: hand the run to the daemon and open the
-/// live flowchart.
-///
-/// The daemon owns the run, so closing this terminal doesn't abandon it
-/// mid-flight. The command returns as soon as the run is registered; watch it
-/// in the browser, or come back to it later at the same URL.
-async fn cmd_run_gui(
-    port: Option<u16>,
-    names: Vec<String>,
-    vars: HashMap<String, String>,
-    dry_run: bool,
-) -> Result<()> {
-    let session = daemon::connect(port).await?;
-
-    let response = session
-        .daemon
-        .client()?
-        .post(session.daemon.url("/api/run/runs"))
-        .json(&serde_json::json!({
-            "project": session.project.id,
-            "recipes": names,
-            "env": vars,
-            "dry_run": dry_run,
-        }))
-        .send()
-        .await?;
-
-    // The daemon's refusals carry a useful message (missing REQUIRED_ENV, a
-    // broken flowchart); `error_for_status` would throw the body away and leave
-    // the operator with a bare status code.
-    if !response.status().is_success() {
-        let status = response.status();
-        let body: serde_json::Value = response.json().await.unwrap_or_default();
-        let message = body["error"].as_str().unwrap_or("no reason given");
-        bail!("The daemon refused to start the run ({status}): {message}");
-    }
-    let run: serde_json::Value = response.json().await?;
-
-    let id = run["id"]
-        .as_u64()
-        .context("The daemon returned no run id")?;
-    let url = format!("{}/run/{id}", session.daemon.base_url);
-
-    println!("Running: {}", names.join(", "));
-    println!("Live view: {url}");
-    println!("The daemon owns this run — it keeps going if you close this terminal.");
-    daemon::open_browser(&url);
     Ok(())
 }
 
@@ -1684,7 +1349,7 @@ fn explain_auth_failure(url: &str, error: anyhow::Error) -> anyhow::Error {
 }
 
 /// Dispatch `ciabatta configure` (interactive registry setup) and its `auto`
-/// subcommand (analyze the project and suggest recipes).
+/// subcommand (analyze the project and suggest workflows).
 fn cmd_configure(subcommand: Option<ConfigureCommand>) -> Result<()> {
     let cwd = env::current_dir().context("Failed to get current directory")?;
     // configure works whether or not the project is initialized yet: prefer an
@@ -1703,7 +1368,7 @@ fn load_project(config_path: Option<&std::path::Path>) -> Result<(PathBuf, Ciaba
 
     if let Some(p) = config_path {
         // Explicit path: load exactly this file, and derive the project root
-        // (used to resolve relative recipe paths) from its location.
+        // (used to resolve relative workflow paths) from its location.
         let cfg = load_config_file(p)?;
         let root = resolve_root_for_config(p, &cwd);
         Ok((root, cfg))
@@ -1733,7 +1398,7 @@ fn resolve_root_for_config(config_path: &Path, cwd: &Path) -> PathBuf {
 /// Derive the project root from an absolute config-file path. When the file
 /// lives in a `.ciabatta/` directory (the standard layout) the root is the
 /// directory that contains `.ciabatta`; otherwise it's the file's own parent
-/// directory, so relative recipe paths resolve alongside the config.
+/// directory, so relative workflow paths resolve alongside the config.
 fn root_from_config_path(config_abs: &Path) -> Option<PathBuf> {
     let parent = config_abs.parent()?;
     if parent.file_name() == Some(std::ffi::OsStr::new(config::CIABATTA_DIR)) {
@@ -1919,99 +1584,30 @@ fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', r"'\''"))
 }
 
-/// Resolve which recipes a push/pull run targets. Like
-/// [`config::select_recipe_names`] but run-only recipes — a `[run]` section
-/// with no push/pull transfer action — are dropped: they're pure runnable
-/// tasks, so `ciabatta push`/`pull` skips them instead of failing on
-/// "no push/pull action".
-fn select_transfer_names(
-    cfg: &CiabattaConfig,
-    cookbooks: &[String],
-    recipes: &[String],
-) -> Result<Vec<String>> {
-    let names = config::select_recipe_names(cfg, cookbooks, recipes)?;
-    Ok(names
-        .into_iter()
-        .filter(|n| cfg.recipes.get(n).is_none_or(|e| !e.is_run_only()))
-        .collect())
-}
-
-/// Resolve which recipes a run targets. Like [`config::select_recipe_names`]
-/// but the "everything" default is narrowed to run-capable recipes only, and
-/// any explicitly named recipe must actually define a `[run]` section.
-fn select_run_names(
-    cfg: &CiabattaConfig,
-    cookbooks: &[String],
-    recipes: &[String],
-) -> Result<Vec<String>> {
-    if cookbooks.is_empty() && recipes.is_empty() {
-        let mut names: Vec<String> = cfg
-            .recipes
-            .iter()
-            .filter(|(_, e)| e.run_recipe().is_some())
-            .map(|(n, _)| n.clone())
-            .collect();
-        names.sort();
-        return Ok(names);
-    }
-
-    let names = config::select_recipe_names(cfg, cookbooks, recipes)?;
-    for name in &names {
-        let entry = cfg
-            .recipes
-            .get(name)
-            .ok_or_else(|| anyhow::anyhow!("Recipe '{}' not found", name))?;
-        if entry.run_recipe().is_none() {
-            bail!(
-                "Recipe '{}' has no [run] definition, so it can't be run. \
-                 Add a [recipies.{}.run] section (see `ciabatta config reference`).",
-                name,
-                name
-            );
-        }
-    }
-    Ok(names)
-}
-
-async fn execute_recipes(
+/// Run one compiled workflow, in the terminal or the TUI.
+async fn execute_workflow(
+    name: &str,
+    resolved: &run::ResolvedRun,
     cfg: &CiabattaConfig,
     root: &Path,
-    names: &[String],
     vars: &HashMap<String, String>,
     dry_run: bool,
     use_tui: bool,
-    mode: RunMode,
 ) -> Result<()> {
-    if names.is_empty() {
-        bail!(
-            "No recipes found. Run `ciabatta list` to see available recipes, or check your .ciabatta/ciabatta.toml."
-        );
-    }
-
-    // Validate publish-path variables (push/pull) or the step DAG (run)
-    // before launching.
-    runner::validate_recipes(cfg, root, names, vars, &mode)?;
-
     // What the run depends on, environment-wise, before a step touches it. It
     // goes to stderr when the TUI is about to take the screen, so it survives
     // in the scrollback the same way the graph drawing does.
-    if mode == RunMode::Run {
-        report_run_dependencies(cfg, root, names, vars, use_tui);
-    }
+    report_run_dependencies(resolved, name, root, vars, use_tui);
 
-    // Resolve the container runtime once up front so every recipe shares it and
-    // an ambiguous/missing runtime fails fast (before any work starts). Runs
-    // run scripts, not built-in container actions, so a missing runtime there is
-    // best-effort rather than fatal.
+    // Resolve the container runtime once up front so every transfer step shares
+    // it. A workflow that never touches a container registry doesn't need one,
+    // so a missing runtime is noted rather than fatal.
     let mut cfg = cfg.clone();
     match config::resolve_container_cmd(&cfg) {
         Ok(container_cmd) => {
             cfg.system.get_or_insert_with(Default::default).containers = Some(container_cmd);
         }
-        Err(e) if mode == RunMode::Run => {
-            tracing::debug!("no container runtime resolved for run: {e}");
-        }
-        Err(e) => return Err(e),
+        Err(e) => tracing::debug!("no container runtime resolved: {e}"),
     }
     let cfg = &cfg;
 
@@ -2025,48 +1621,49 @@ async fn execute_recipes(
     });
 
     if !use_tui {
-        run_plain(cfg, root, names, vars, dry_run, mode).await
+        run_plain(name, resolved, cfg, root, vars, dry_run).await
     } else {
-        let success = tui::run(cfg, root, names, vars, dry_run, mode).await?;
+        let success = tui::run(name, resolved, cfg, root, vars, dry_run).await?;
         if !success {
-            bail!("One or more recipes failed.");
+            bail!("The workflow failed.");
         }
         Ok(())
     }
 }
 
 async fn run_plain(
+    name: &str,
+    resolved: &run::ResolvedRun,
     cfg: &CiabattaConfig,
     root: &Path,
-    names: &[String],
     vars: &HashMap<String, String>,
     dry_run: bool,
-    mode: RunMode,
 ) -> Result<()> {
     use runner::ProgressUpdate;
     use tokio::sync::mpsc;
 
     let (tx, mut rx) = mpsc::channel::<ProgressUpdate>(256);
 
+    let name_clone = name.to_string();
+    let resolved_clone = resolved.clone();
     let cfg_clone = cfg.clone();
     let root_clone = root.to_path_buf();
-    let names_clone = names.to_vec();
     let vars_clone = vars.clone();
 
     tokio::spawn(async move {
-        let _ = runner::run_all(
+        let _ = runner::run_workflow(
+            &name_clone,
+            &resolved_clone,
             &cfg_clone,
             &root_clone,
-            &names_clone,
             &vars_clone,
             dry_run,
-            mode,
             tx,
         )
         .await;
     });
 
-    // Which recipe a line belongs to is structure, not content: dimmed, so what
+    // Which workflow a line belongs to is structure, not content: dimmed, so what
     // the eye lands on is the command output it prefixes. A run that isn't in
     // colour gets the same text with no escapes at all — see [`color`].
     let tag = |name: &str| format!("[{name}]").style(color::faint()).to_string();
@@ -2075,81 +1672,88 @@ async fn run_plain(
     while let Some(update) = rx.recv().await {
         match update {
             ProgressUpdate::Started(name) => println!("{} started", tag(&name)),
-            ProgressUpdate::StageStarted { recipe, stage } => {
+            ProgressUpdate::StageStarted { workflow, stage } => {
                 println!(
                     "{} {} {}",
-                    tag(&recipe),
+                    tag(&workflow),
                     "▶".style(color::active()),
-                    stage.label(mode)
+                    stage.label()
                 )
             }
-            ProgressUpdate::StageFinished { recipe, stage, ran } => {
+            ProgressUpdate::StageFinished {
+                workflow,
+                stage,
+                ran,
+            } => {
                 if !ran {
                     println!(
                         "{}   {}",
-                        tag(&recipe),
-                        format!("{} (default, nothing to do)", stage.label(mode))
-                            .style(color::faint())
+                        tag(&workflow),
+                        format!("{} (default, nothing to do)", stage.label()).style(color::faint())
                     );
                 }
             }
             ProgressUpdate::TransferProgress {
-                recipe,
+                workflow,
                 done,
                 total,
             } => {
                 let pct = (done * 100).checked_div(total).unwrap_or(0);
-                println!("{}   {done}/{total} files ({pct}%)", tag(&recipe));
+                println!("{}   {done}/{total} files ({pct}%)", tag(&workflow));
             }
             ProgressUpdate::Log(name, line) => println!("{} {line}", tag(&name)),
-            ProgressUpdate::StepStarted { recipe, step } => {
+            ProgressUpdate::StepStarted { workflow, step } => {
                 println!(
                     "{} {} step: {step}",
-                    tag(&recipe),
+                    tag(&workflow),
                     "▶".style(color::active())
                 )
             }
-            ProgressUpdate::StepFinished { recipe, step, ok } => {
+            ProgressUpdate::StepFinished { workflow, step, ok } => {
                 let mark = if ok {
                     "✓".style(color::good())
                 } else {
                     "✗".style(color::bad())
                 };
-                println!("{}   {mark} step: {step}", tag(&recipe))
+                println!("{}   {mark} step: {step}", tag(&workflow))
             }
             ProgressUpdate::StepSkipped {
-                recipe,
+                workflow,
                 step,
                 reason,
             } => {
                 println!(
                     "{}   {} skipped step: {step} ({reason})",
-                    tag(&recipe),
+                    tag(&workflow),
                     "⊘".style(color::warn())
                 )
             }
             // The command's own output, escapes and all — it was asked for
             // colour precisely because these lines end up here unaltered.
-            ProgressUpdate::StepLog { recipe, step, line } => {
+            ProgressUpdate::StepLog {
+                workflow,
+                step,
+                line,
+            } => {
                 println!(
                     "{}   {} {line}",
-                    tag(&recipe),
+                    tag(&workflow),
                     format!("[{step}]").style(color::faint())
                 )
             }
             ProgressUpdate::StepNeedsChoice {
-                recipe,
+                workflow,
                 step,
                 message,
                 options,
             } => {
                 println!(
                     "{} {} {step}: {message}",
-                    tag(&recipe),
+                    tag(&workflow),
                     "⚠".style(color::warn())
                 );
                 for (i, opt) in options.iter().enumerate() {
-                    println!("{}     [{i}] {opt}", tag(&recipe));
+                    println!("{}     [{i}] {opt}", tag(&workflow));
                 }
             }
             ProgressUpdate::Completed(name) => {
@@ -2163,7 +1767,7 @@ async fn run_plain(
     }
 
     if any_failed {
-        bail!("One or more recipes failed.");
+        bail!("One or more workflows failed.");
     }
     Ok(())
 }
@@ -2664,13 +2268,12 @@ async fn cmd_dry_run(
     // Compile the same graph a real run would, so the preview can't disagree
     // with what happens next.
     let workspace = workspace::Workspace::discover(&cwd).ok();
-    let (steps, recipe_cache) = resolve_dry_run_steps(&cwd, &root, &cfg, targets, &workspace)?;
+    let (steps, _) = resolve_dry_run_steps(&cwd, &root, &cfg, targets, &workspace)?;
 
     let context = cache::cli::WorkspaceContext {
         workspace: workspace.as_ref(),
         root: root.clone(),
         config: &cfg,
-        recipe_cache,
     };
     let plan = cache::graph::plan_graph(&steps, &context, &cache::cli::env_map(&vars), &store)?;
 
@@ -2686,16 +2289,16 @@ async fn cmd_dry_run(
     Ok(())
 }
 
-/// Resolve the steps a dry run should plan, from workflow names, recipe names,
-/// or (with neither) every run-capable recipe in the project.
+/// Resolve the steps a dry run should plan, from workflow names, workflow names,
+/// or (with neither) every run-capable workflow in the project.
 ///
-/// Returns the steps plus the recipe-level cache settings when exactly one
-/// recipe was named — a recipe's own `cache:` applies to its whole graph, and
+/// Returns the steps plus the workflow-level cache settings when exactly one
+/// workflow was named — a workflow's own `cache:` applies to its whole graph, and
 /// with several named there's no single answer.
 fn resolve_dry_run_steps(
     cwd: &Path,
-    root: &Path,
-    cfg: &CiabattaConfig,
+    _root: &Path,
+    _cfg: &CiabattaConfig,
     targets: &[String],
     workspace: &Option<workspace::Workspace>,
 ) -> Result<(Vec<run::RunStep>, Option<cache::CacheConfig>)> {
@@ -2708,44 +2311,130 @@ fn resolve_dry_run_steps(
         return Ok((graph.steps, None));
     }
 
-    let names = if targets.is_empty() {
-        let mut runnable: Vec<String> = cfg
-            .recipes
-            .iter()
-            .filter(|(_, entry)| entry.run.is_some())
-            .map(|(name, _)| name.clone())
-            .collect();
-        runnable.sort();
-        if runnable.is_empty() {
+    bail!(
+        "'{}' is not a workflow in this project. Run `ciabatta list` to see what is.",
+        targets
+            .first()
+            .map(String::as_str)
+            .unwrap_or("(nothing named)")
+    )
+}
+
+/// Which workflow `ciabatta cache init` should describe.
+///
+/// A package with one workflow doesn't need to say which — that's the common
+/// case and asking would be noise. With several, there is no sensible default:
+/// what a `build` reads is not what a `test` reads, and guessing would write
+/// the wrong answer into the wrong file.
+fn resolve_cache_workflow(root: &Path, named: Option<&str>) -> Result<String> {
+    let dir = root
+        .join(config::CIABATTA_DIR)
+        .join(workspace::WORKFLOWS_DIR);
+    let mut available = workspace::workflow_names_in(&dir);
+    available.sort();
+
+    if let Some(name) = named {
+        if !available.iter().any(|n| n == name) {
             bail!(
-                "Nothing to plan: this project defines no runnable recipes and no \
-                 workflow was named.\nTry `ciabatta list` to see what exists."
+                "No workflow called '{name}' in {}.\n\
+                 {}",
+                dir.display(),
+                describe_available(&available)
             );
         }
-        runnable
-    } else {
-        targets.to_vec()
-    };
-
-    let mut steps: Vec<run::RunStep> = Vec::new();
-    let mut recipe_cache = None;
-    for name in &names {
-        let entry = cfg.recipes.get(name).ok_or_else(|| {
-            anyhow::anyhow!(
-                "'{name}' is neither a workflow nor a recipe in this project. \
-                 Run `ciabatta list` to see what there is."
-            )
-        })?;
-        let definition = entry.run_recipe().ok_or_else(|| {
-            anyhow::anyhow!("Recipe '{name}' has no `run:` section, so there's nothing to plan.")
-        })?;
-        if names.len() == 1 {
-            recipe_cache = entry.cache.clone();
-        }
-        steps.extend(run::resolve_run(definition, name, root)?.steps);
+        return Ok(name.to_string());
     }
 
-    Ok((steps, recipe_cache))
+    match available.len() {
+        1 => Ok(available.remove(0)),
+        0 => bail!(
+            "No workflows in {}.\n\
+             Cache settings describe what a build reads, so there has to be a build \
+             to describe. Run `ciabatta init --lib` to scaffold one.",
+            dir.display()
+        ),
+        _ => bail!(
+            "This package has several workflows, so name the one to describe:\n  {}\n\n\
+             They read different files — a `build` and a `test` shouldn't share one \
+             cache section.",
+            available.join("\n  ")
+        ),
+    }
+}
+
+/// "Available: a, b." or a nudge when there are none.
+fn describe_available(names: &[String]) -> String {
+    if names.is_empty() {
+        "This package defines none yet.".to_string()
+    } else {
+        format!("Available: {}.", names.join(", "))
+    }
+}
+
+/// `ciabatta register`: tell the daemon this directory exists.
+///
+/// Every web-facing command already registers the directory it ran in, so the
+/// switcher usually fills itself in. This is for the case it can't: a checkout
+/// you haven't run anything in yet, a machine where the web app is the way you
+/// work, or a setup script that wants the project listed before anyone opens
+/// the page.
+async fn cmd_register(path: Option<&Path>, quiet: bool, port: Option<u16>) -> Result<()> {
+    let cwd = match path {
+        Some(path) => path.to_path_buf(),
+        None => env::current_dir().context("Failed to get current directory")?,
+    };
+    let dir = cwd
+        .canonicalize()
+        .with_context(|| format!("No such directory: {}", cwd.display()))?;
+
+    // Registering a directory with no config would put a row in the switcher
+    // that every page then fails to load. Say so here, where the fix is one
+    // command away.
+    if config::config_path(&dir).is_none() {
+        bail!(
+            "{} has no .ciabatta/ directory, so there's nothing to register.\n\
+             Run `ciabatta init` here first (it registers for you), or point at \
+             a checkout that has one with --path.",
+            dir.display()
+        );
+    }
+
+    let session = daemon::connect_at(port, &dir).await?;
+
+    if quiet {
+        println!("{}", session.project.id);
+        return Ok(());
+    }
+
+    println!("Registered {} with the ciabatta daemon.", dir.display());
+    println!(
+        "  project: {} ({})",
+        session.project.name, session.project.id
+    );
+    println!("  web app: {}", session.page_url("/"));
+    Ok(())
+}
+
+/// Register a freshly-created workspace, without letting it fail the `init`.
+///
+/// Registration starts the daemon, and a daemon that won't start is a bad
+/// reason for `ciabatta init` to report failure — the config it just wrote is
+/// on disk and correct either way. So this reports what went wrong and returns.
+async fn register_quietly(root: &Path, port: Option<u16>) {
+    match daemon::connect_at(port, root).await {
+        Ok(session) => {
+            println!();
+            println!(
+                "Registered with the daemon — open it at {}",
+                session.page_url("/")
+            );
+        }
+        Err(e) => {
+            println!();
+            println!("note: couldn't register with the daemon ({e:#}).");
+            println!("      Everything else works; run `ciabatta register` to retry.");
+        }
+    }
 }
 
 /// Dispatch `ciabatta cache …`.
@@ -2755,10 +2444,12 @@ fn cmd_cache(subcommand: CacheCommand) -> Result<()> {
 
     match subcommand {
         CacheCommand::Init {
+            workflow,
             enable,
             remote,
             force,
         } => {
+            let workflow = resolve_cache_workflow(&root, workflow.as_deref())?;
             let proposal = cache::cli::propose(&root);
 
             println!("Looking at {} …\n", root.display());
@@ -2806,19 +2497,23 @@ fn cmd_cache(subcommand: CacheCommand) -> Result<()> {
                 enable
             };
 
-            let path = cache::cli::write_cache_section(
+            let written = cache::cli::write_cache_section(
                 &root,
+                &workflow,
                 &proposal,
                 enable,
                 remote.as_deref(),
                 force,
             )?;
-            println!("\nWrote the cache section to {}", path.display());
+            println!();
+            for path in &written {
+                println!("Wrote {}", path.display());
+            }
 
-            // A recipe or step with its own `cache:` wins over what was just
-            // written. Say so, or "caching is on" followed by nothing being
-            // cached reads as the feature being broken.
-            let overrides = cache::cli::overriding_steps(&load_config(&root)?);
+            // A step with its own `cache:` wins over what was just written. Say
+            // so, or "caching is on" followed by nothing being cached reads as
+            // the feature being broken.
+            let overrides = cache::cli::overriding_steps(&root, &workflow);
             if !overrides.is_empty() {
                 println!();
                 println!(
@@ -2842,11 +2537,11 @@ fn cmd_cache(subcommand: CacheCommand) -> Result<()> {
             }
 
             if enable {
-                println!("\nCaching is on. Check it with `ciabatta dry-run <recipe>`.");
+                println!("\nCaching is on. Check it with `ciabatta dry-run <workflow>`.");
             } else {
                 println!(
                     "Caching is still off — review the section, then set `enabled: true`.\n\
-                     Preview what it would do first with `ciabatta dry-run <recipe>`."
+                     Preview what it would do first with `ciabatta dry-run <workflow>`."
                 );
             }
             if remote.is_some() {
@@ -2927,7 +2622,7 @@ fn cmd_config_migrate(path: Option<&Path>, dry_run: bool) -> Result<()> {
     migrate::print_report(&report, dry_run)
 }
 
-fn cmd_init(ci: Option<&str>, containers: Option<&str>, force: bool) -> Result<()> {
+fn cmd_init(ci: Option<&str>, containers: Option<&str>, force: bool) -> Result<PathBuf> {
     use config::{CIABATTA_DIR, CONFIG_FILE};
     use std::fs;
 
@@ -2956,14 +2651,14 @@ fn cmd_init(ci: Option<&str>, containers: Option<&str>, force: bool) -> Result<(
     println!("Created: {}", config_path.display());
     println!();
     println!("Next steps:");
-    println!("  1. Edit .ciabatta/ciabatta.yaml to define your registries and recipes.");
-    println!("  2. Run `ciabatta list` to verify your recipes are recognized.");
-    println!("  3. Run `ciabatta push --dry-run <recipe>` to preview what will happen.");
-    println!("  4. Run `ciabatta tui` to open the interactive browser.");
+    println!("  1. Edit .ciabatta/ciabatta.yaml to define your registries and workflows.");
+    println!("  2. Run `ciabatta list` to verify your workflows are recognized.");
+    println!("  3. Run `ciabatta <workflow> --dry-run` to preview what would happen.");
+    println!("  4. Run `ciabatta tui` to browse your registries.");
     println!();
     println!("For config format documentation: ciabatta config reference");
 
-    Ok(())
+    Ok(cwd)
 }
 
 /// Dispatch `ciabatta init --lib`: opt this directory in as a sub-workspace of
@@ -2981,7 +2676,7 @@ fn cmd_init_lib(
     depends_on: &[String],
     workflow: &str,
     force: bool,
-) -> Result<()> {
+) -> Result<PathBuf> {
     use config::{CIABATTA_DIR, CONFIG_FILE};
     use std::fs;
 
@@ -3062,7 +2757,7 @@ fn cmd_init_lib(
     println!();
     println!("For the full schema: ciabatta config reference");
 
-    Ok(())
+    Ok(cwd)
 }
 
 /// The current git user's name, used to default a new sub-workspace's owner.
@@ -3132,7 +2827,7 @@ workspace:
 # ─── Caching ───────────────────────────────────────────────────────────────────
 # Off by default. Opt in, declare what a build reads and what it produces, and
 # ciabatta will skip the work when neither has changed. `ciabatta cache init`
-# walks you through it; `ciabatta dry-run <recipe>` shows what would be reused.
+# walks you through it; `ciabatta dry-run <workflow>` shows what would be reused.
 #
 # cache:
 #   enabled: true
@@ -3154,9 +2849,9 @@ workspace:
 #         description: cargo test
 #         run: cargo test
 
-# ─── Registries and recipes ────────────────────────────────────────────────────
+# ─── Registries and workflows ────────────────────────────────────────────────────
 # Publishing targets for this package, if it publishes anything. A workflow step
-# with `kind: push` and `recipe: <name>` runs one of these as a graph node.
+# with `kind: push` and `workflow: <name>` runs one of these as a graph node.
 #
 # registries:
 #   nexus:
@@ -3223,12 +2918,12 @@ steps:
   #   persistent: true
 
   # Publishing is just another node on the graph: a step whose kind is "push",
-  # naming a recipe from this package's ciabatta.yaml.
+  # naming a workflow from this package's ciabatta.yaml.
   #
   # - name: publish
   #   description: Publish the built artifact
   #   kind: push
-  #   recipe: binary
+  #   workflow: binary
   #   needs: [{workflow}]
 "#
     )
@@ -3300,7 +2995,7 @@ system:
 
 # ─── Registries ────────────────────────────────────────────────────────────────
 # Define each registry you publish to. The key is the registry identifier used
-# in recipes. Supported types (auto-detected from the name):
+# in workflows. Supported types (auto-detected from the name):
 #   nexus, artifactory → HTTP PUT/GET
 #   s3                 → aws s3 cp
 #   docker             → docker push/pull
@@ -3317,56 +3012,54 @@ system:
 #     url: 123456789.dkr.ecr.us-east-1.amazonaws.com
 #     needs_auth: false   # ciabatta auto-fetches the ECR token
 
-# ─── Recipes ───────────────────────────────────────────────────────────────────
-# Each recipe describes how to push (and optionally pull) one artifact.
+# ─── Workflows ─────────────────────────────────────────────────────────────────
+# A workflow is a named DAG of steps, and it is the only thing ciabatta runs.
+# `ciabatta <name>` compiles every package's workflow of that name into one
+# graph and runs it in dependency order.
+#
+# The usual home is one file per workflow — .ciabatta/workflows/<name>.yaml,
+# where the filename IS the name. A small project can write them inline here.
+#
+# workflows:
+#   release:
+#     description: Build the app and publish it
+#     REQUIRED_ENV: [API_TOKEN]        # refuse to start unless these are set
+#     steps:
+#       - name: build
+#         run: make dist
+#         requires: [make]             # reported up front if missing
+#
+#       # Publishing is a step, not a separate command: it declares what it
+#       # needs, so it cannot run before the artifact exists.
+#       - name: publish
+#         kind: push
+#         needs: [build]
+#         registry: nexus
+#         artifact: dist/app.tar.gz
+#         publish_path: "myteam/app/{{CIABATTA_BRANCH}}/{{CIABATTA_COMMIT}}/app.tar.gz"
+#
+#       # A step with its own command runs that instead of the built-in move.
+#       - name: publish-by-hand
+#         kind: push
+#         script: scripts/publish.sh
+#
+#   fetch:
+#     steps:
+#       # Pull is the same artifact the other way. `from` names the push step it
+#       # mirrors, so the registry and path are stated once.
+#       - name: fetch
+#         kind: pull
+#         from: release:publish
+#
 # Variables available in publish_path: {{CIABATTA_BRANCH}}, {{CIABATTA_COMMIT}},
 #                                      {{CIABATTA_TAG}}, {{CIABATTA_BUILD_NUMBER}}
 #
-# recipies:
-#   # Registry-based recipe (HTTP or S3 upload):
-#   my_artifact:
-#     registry: nexus
-#     local_artifact_path: dist/app.tar.gz
-#     publish_path: "myteam/app/{{CIABATTA_BRANCH}}/{{CIABATTA_COMMIT}}/app.tar.gz"
+# There are no stages: what a `pre` command used to do is a step with an edge to
+# it, and what a `post` command did is a step that `needs` the transfer. Each is
+# now a node you can see on the graph, filter, cache and fail on its own.
 #
-#   # Script recipe (full control):
-#   my_script:
-#     bash_script: scripts/publish.sh
-#
-#   # Push/pull pair (different actions for each direction):
-#   my_docker:
-#     push:
-#       bash_script: scripts/docker_push.sh
-#     pull:
-#       bash_script: scripts/docker_pull.sh
-#
-# ─── Stages ────────────────────────────────────────────────────────────────────
-# Every push runs four stages: login → pre-push → push → post-push
-# Every pull runs four stages:  login → pre-pull → pull → post-pull
-# Override any stage with an arbitrary command (bash, python, a binary, …):
-#   login: ...   pre: ...   main: ...   post: ...
-# Unset stages use their defaults (login uses the registry login_script or
-# CIABATTA_<REGISTRY>_USER/PASS credentials; pre/post do nothing; main runs the
-# built-in registry action). Commands get all CIABATTA_* vars in their env.
-#
-# recipies:
-#   frontend:
-#     push:
-#       pre: python scripts/bundle.py
-#       post: ./scripts/notify.sh deployed
-#
-# ─── Runs ──────────────────────────────────────────────────────────────────────
-# `ciabatta run <recipe>` executes a DAG of dependent script steps (login →
-# pre-run → run → post-run). The steps live in a separate flowchart file; each
-# step runs a script and may declare `needs` and an `on_error` recovery node.
-# See `ciabatta config reference`, or design one visually with
-# `ciabatta run --build` (and watch a run with `ciabatta run <r> --gui`).
-#
-# recipies:
-#   web:
-#     run:
-#       flowchart: .ciabatta/runs.yaml   # each entry is a series of steps
-#       env_file: .env                   # .env file(s) sourced before running
+# See `ciabatta config reference` for the full field listing, and watch a run in
+# the browser with `ciabatta <name> --gui`.
 #
 # ─── Environment ───────────────────────────────────────────────────────────────
 # Ciabatta sources `.env` from the project root by default — you don't have to
@@ -3380,7 +3073,7 @@ system:
 # ─── Caching ───────────────────────────────────────────────────────────────────
 # Off by default. Declare what a build reads and what it writes, and ciabatta
 # reuses the previous result when neither changed. `ciabatta cache init` sets
-# this up for you; `ciabatta dry-run <recipe>` previews hits and rebuilds.
+# this up for you; `ciabatta dry-run <workflow>` previews hits and rebuilds.
 #
 # cache:
 #   enabled: true
@@ -3425,44 +3118,43 @@ fn detect_ci() -> Option<String> {
     None
 }
 
-fn list_recipes(cfg: &CiabattaConfig) {
-    if cfg.recipes.is_empty() {
-        println!("No recipes defined. Add `recipies:` entries to .ciabatta/ciabatta.yaml.");
+/// The workflows this project's own config declares inline, for `ciabatta list`
+/// when there is no monorepo around it to enumerate.
+fn list_workflows(cfg: &CiabattaConfig) {
+    if cfg.workflows.is_empty() {
+        println!(
+            "No workflows defined here.\n\
+             Add one at .ciabatta/workflows/<name>.yaml, or run `ciabatta init --lib` \
+             to start this package off with one."
+        );
         return;
     }
 
-    println!("Available recipes:");
-    let mut names: Vec<_> = cfg.recipes.keys().collect();
+    println!("Workflows:");
+    let mut names: Vec<_> = cfg.workflows.keys().collect();
     names.sort();
     for name in names {
-        let entry = &cfg.recipes[name];
-        let push = entry.push_recipe();
-        // A recipe can define a run alongside a push/pull action; when it's
-        // run-only, prefer the "run" label over the transfer defaults.
-        let transfer_kind = if entry.push.is_some() || entry.pull.is_some() {
-            Some("push/pull")
-        } else if push.main.is_some() || push.bash_script.is_some() {
-            Some("command")
-        } else if push.registry.is_some() || push.publish_path.is_some() {
-            Some("registry")
-        } else {
-            None
-        };
-        let kind = match (transfer_kind, entry.run.is_some()) {
-            (Some(t), true) => format!("{t}, run"),
-            (Some(t), false) => t.to_string(),
-            (None, true) => "run".to_string(),
-            (None, false) => "registry".to_string(),
-        };
-        println!("  {:<30} [{}]", name, kind);
-    }
-
-    if !cfg.menus.is_empty() {
-        println!("\nMenus (run with --cookbook <name>):");
-        let mut menus: Vec<_> = cfg.menus.keys().collect();
-        menus.sort();
-        for name in menus {
-            println!("  {:<30} {}", name, cfg.menus[name].join(", "));
+        let workflow = &cfg.workflows[name];
+        let summary = workflow.description.as_deref().unwrap_or("");
+        println!("  {name:<30} {summary}");
+        for step in &workflow.steps {
+            let what = match step.direction() {
+                Some(direction) => format!(
+                    "{} → {} {}",
+                    direction.label(),
+                    step.registry.as_deref().unwrap_or("(no registry)"),
+                    step.publish_path
+                        .as_ref()
+                        .map(|p| p.display())
+                        .unwrap_or_default()
+                ),
+                None => step
+                    .run
+                    .clone()
+                    .or_else(|| step.script.clone())
+                    .unwrap_or_else(|| "(no action)".to_string()),
+            };
+            println!("      · {:<24} {}", step.name, what);
         }
     }
 }
@@ -3490,21 +3182,12 @@ fn show_config(cfg: &CiabattaConfig, root: &Path) {
         }
     }
 
-    if !cfg.recipes.is_empty() {
-        println!("\nRecipes:");
-        let mut names: Vec<_> = cfg.recipes.keys().collect();
+    if !cfg.workflows.is_empty() {
+        println!("\nWorkflows (inline):");
+        let mut names: Vec<_> = cfg.workflows.keys().collect();
         names.sort();
         for name in names {
             println!("  {}", name);
-        }
-    }
-
-    if !cfg.menus.is_empty() {
-        println!("\nMenus:");
-        let mut names: Vec<_> = cfg.menus.keys().collect();
-        names.sort();
-        for name in names {
-            println!("  {} -> {}", name, cfg.menus[name].join(", "));
         }
     }
 }
@@ -3520,7 +3203,7 @@ Ciabatta Configuration Reference
 Location: <project-root>/.ciabatta/ciabatta.yaml
 
 The project root is the directory that CONTAINS the .ciabatta directory.
-All paths in recipes are relative to this root.
+All paths in workflows are relative to this root.
 
 Ciabatta writes YAML from 0.2.0. Older `.toml` files still load exactly as they
 did — `ciabatta config migrate` converts a whole checkout when you're ready.
@@ -3629,13 +3312,14 @@ workflow name. Small packages can write them inline under `workflows:` instead
                                             #   ciabatta watch --list
       continue_on_error: true               # its failure skips dependents but
                                             # doesn't stop the run
-      kind: push                            # a special, identifiable phase:
-                                            # push | setup | build | test |
-                                            # deploy | anything you like
-      recipe: binary                        # with kind: push, the `recipies`
-                                            # entry to publish. The step's
-                                            # action becomes
-                                            # `ciabatta push binary`.
+      kind: push                            # push | pull select the built-in
+                                            # registry transfer; setup | build |
+                                            # test | deploy | anything else is
+                                            # a free-form label on the node
+      registry: nexus                       # with kind: push/pull — see
+      artifact: dist/app                    # "Publishing" below for the whole
+      publish_path: "app/{CIABATTA_COMMIT}" # set of transfer fields
+      from: release:publish                 # a pull mirroring a push step
       when: RUN_ENV == prod                 # conditions (see Runs, below)
       skip_if: IN_CI
       on_error: fix                         # route failures to a recovery node,
@@ -3720,15 +3404,40 @@ Two things worth knowing:
     generated file by hand. So the outputs are hashed too, and a mismatch is a
     restore or a rebuild.
 
-Settings can be written at three levels — the workspace (`cache:`), a recipe
-(`recipies.<name>.cache`), or a single target (`steps[].cache`). Each level is
-layered over the one above it FIELD BY FIELD, so a target declares only what
-differs:
+Cache settings live WITH THE WORKFLOW that reads those files —
+`.ciabatta/workflows/<name>.yaml`, next to the steps — because what a build
+reads is a property of that build. A `build` and a `test` in one package read
+different files, and one section per config gave them no way to say so.
+
+  # packages/api/.ciabatta/workflows/build.yaml
+  cache:
+    enabled: true
+    inputs:  ["src/**/*"]
+    outputs: ["target/release/app"]
+
+  steps:
+    - name: compile
+      run: cargo build --release
+
+A step may narrow it further with its own `cache:`, layered over the workflow's
+FIELD BY FIELD, so it declares only what differs:
 
   steps:
     - name: build
       cache:
-        env: [PROFILE]     # keeps the workspace's inputs, outputs and exclude
+        env: [PROFILE]     # keeps the workflow's inputs, outputs and exclude
+
+`ciabatta cache init [WORKFLOW]` writes that section for you, from what is
+actually in the directory. With one workflow in the package the name is
+optional; with several you name the one you mean.
+
+The shared cache SERVER is the exception and stays in `ciabatta.yaml`: it is one
+endpoint per checkout, not a property of any one build.
+
+  # .ciabatta/ciabatta.yaml
+  cache:
+    remote:
+      url: http://cache.example.com:8380
 
 A list a target does declare replaces the inherited one whole — half-merged
 input globs would be very hard to reason about. `enabled` is only ever decided
@@ -3944,7 +3653,7 @@ registries:
                                   # Nexus host and /repository/<repository> is
                                   # appended automatically. When unset, `url` is
                                   # used as the full repository URL.
-    base_path: builds             # raw only: prefix prepended to every recipe's
+    base_path: builds             # raw only: prefix prepended to every step's
                                   # publish_path (where raw files land)
     format: raw                   # Nexus repository format. Options:
                                   #   raw  → HTTP PUT/GET      (default)
@@ -3962,8 +3671,8 @@ registries:
 
   Auth for all formats uses CIABATTA_<NAME>_USER / _PASS (npm also accepts a
   CIABATTA_<NAME>_TOKEN bearer token). npm requires `npm` on PATH; pypi requires
-  `twine`. For npm/pypi recipes, `local_artifact_path` is the package tarball or
-  the `dist/` directory to publish; `publish_path` is not used.
+  `twine`. For npm/pypi, a push step's `artifact` is the package tarball or the
+  `dist/` directory to publish; `publish_path` is not used.
 
   The `url` and `login_script` fields expand environment variables, with
   bash-style defaults, so one config can target different environments:
@@ -3984,65 +3693,75 @@ registries:
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-recipies:                  # (yes, spelled that way — it always has been)
+Publishing — a step that moves an artifact (`kind: push` / `kind: pull`)
 
-  simple:                            # push and pull use the same action
-    registry: nexus                  # registry name from `registries`
-    local_artifact_path: dist/       # local path relative to project root
-    publish_path: "group/{CIABATTA_BRANCH}/{CIABATTA_COMMIT}/artifact"
-    bash_script: scripts/publish.sh  # alternative: run a script
+  Publishing is not a separate schema or a separate command. A step declares
+  `kind: push`, says what moves and where, and sits on the graph like any other
+  node: it declares what it `needs`, it appears in the dependency report, and it
+  is cached on the same terms as everything else.
 
-  image:                             # docker/ecr image recipe
-    registry: myecr                  # a docker- or ecr-type registry
-    local_image: app:latest          # a locally-built image (name or name:tag)
-    publish_path: "app:{CIABATTA_COMMIT}"   # remote image ref (repo[:tag])
-    # ciabatta retags local_image to <registry url>/<publish_path> and pushes
-    # it, so you don't bake the registry URL into your build. `pull` retags the
-    # pulled image back to local_image. When publish_path is omitted,
-    # local_image is reused as the remote reference.
+    # packages/api/.ciabatta/workflows/release.yaml
+    description: Build and publish the API binary
 
-  split:                             # separate push and pull actions
-    push:
-      bash_script: scripts/push.sh
-    pull:
-      bash_script: scripts/pull.sh
+    steps:
+      - name: build
+        run: cargo build --release
+        requires: [cargo]
+
+      - name: publish
+        kind: push
+        needs: [build]
+        registry: nexus                 # a name from `registries:`
+        artifact: target/release/api    # the local file or directory to send
+        publish_path: "api/{CIABATTA_BRANCH}/{CIABATTA_COMMIT}/api"
+
+  Fields on a transfer step:
+
+    registry       which `registries:` entry to move through
+    artifact       the local file or directory (a directory uploads file by
+                   file, recreating its structure under the publish path)
+    publish_path   the destination, with {CIABATTA_*} substitution — or a list
+                   of local globs, each uploaded under {CIABATTA_PATH}
+    strip_prefix   for the glob-list form: a leading fragment to remove from
+                   each matched file before joining it under {CIABATTA_PATH}
+    local_image    docker/ecr only: a locally-built image to retag and push,
+                   so the registry URL is never baked into your build. Then
+                   `publish_path` is the remote image reference; omit it and
+                   the local reference is reused verbatim.
+
+  Pull is the same artifact in the other direction. Rather than restate it,
+  name the push step it mirrors — `<workflow>:<step>`, or a bare `<step>` in
+  the same workflow:
+
+    - name: fetch
+      kind: pull
+      from: release:publish     # same registry and path, opposite direction
+
+  `from` is a default, not an override: anything the pull step sets for itself
+  wins over what it inherits, so a pull that differs in one field says only
+  that field.
+
+    - name: vendor
+      kind: pull
+      from: release:publish
+      artifact: vendor/api      # same source, different destination
+
+  A transfer step may also just run a command. Give it `run:` or `script:` and
+  that runs instead of the built-in move — which is how a project keeps its own
+  publishing script while still being a node on the graph.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-Runs — a DAG of dependent script steps (`ciabatta run`)
+Steps — the DAG every workflow is
 
-  A recipe IS a script. A run is a third recipe direction (alongside push/pull)
-  that executes a graph of dependent script "steps" instead of a registry
-  transfer. It moves through the same four phases: login → pre-run → run →
-  post-run. The `run` phase executes the step DAG; login/pre/post are optional
-  command hooks.
+  Each step runs a `script` (a bash file), an inline `run` command, or a
+  built-in transfer (above). It may declare `needs` (steps that must succeed
+  first) and `on_error` (jump to a recovery node on failure). Steps with
+  satisfied `needs` are eligible to run; the graph must be acyclic.
 
   Already have a script? `ciabatta convert --script scripts/build.sh` reads it,
   works out the tools it calls, the variables it reads, the files it writes and
-  the description in its header comment, and writes the recipe for you.
-
-  recipies:
-    web:
-      run:
-        flowchart: .ciabatta/runs.yaml   # separate file holding the steps
-        entry: web                       # entry to use (default: recipe name)
-        env_file: .env                   # .env file(s) sourced before running
-        login: "..."
-        pre: "..."
-        post: "..."
-
-  `env_file` sources one or more `.env` files (a string or a list, relative to
-  the project root) before anything runs, so the run's phases and steps see
-  their `KEY=VALUE` lines. Values already resolved (CI, git, or `-e`) win, and a
-  sourced value can satisfy a `REQUIRED_ENV` entry. It may also be set on the
-  flowchart entry. A path may contain `{VAR}` placeholders to pick the file at
-  run time — `env_file: ".env.{RUN_ENV}"` sources `.env.dev` or `.env.prod`
-  (pass `-e RUN_ENV=dev`, or set it in the environment).
-
-  The flowchart file lists steps. Each step runs a `script` (a bash file) or an
-  inline `run` command, and may declare `needs` (steps that must succeed first)
-  and `on_error` (jump to a recovery node on failure). Steps with satisfied
-  `needs` are eligible to run; the graph must be acyclic.
+  the description in its header comment, and writes the workflow for you.
 
   A step may be skipped by condition (evaluated against the run's env):
     when: env.RUN_ENV == prod        # run ONLY if all conditions hold
@@ -4052,32 +3771,31 @@ Runs — a DAG of dependent script steps (`ciabatta run`)
   prefix is optional. A skipped step counts as satisfied, so its dependents
   still run.
 
-    # .ciabatta/runs.yaml
-    web:
-      steps:
-        - name: build
-          script: scripts/build.sh
+    # packages/api/.ciabatta/workflows/deploy.yaml
+    steps:
+      - name: build
+        script: scripts/build.sh
 
-        - name: migrate
-          script: scripts/migrate.sh
-          needs: [build]
-          on_error: fix_migrate       # on failure, go to the recovery node
+      - name: migrate
+        script: scripts/migrate.sh
+        needs: [build]
+        on_error: fix_migrate       # on failure, go to the recovery node
 
-        - name: fix_migrate           # a recovery node: offers fix choices
-          recover: true
-          message: "Migration failed — choose how to recover:"
-          retry: migrate              # re-run this step after a successful fix
-          options:
-            - label: Roll back
-              script: scripts/rollback.sh
-            - label: Force unlock
-              run: make unlock
-              default: true
+      - name: fix_migrate           # a recovery node: offers fix choices
+        recover: true
+        message: "Migration failed — choose how to recover:"
+        retry: migrate              # re-run this step after a successful fix
+        options:
+          - label: Roll back
+            script: scripts/rollback.sh
+          - label: Force unlock
+            run: make unlock
+            default: true
 
-        - name: release
-          script: scripts/release.sh
-          needs: [migrate]
-          when: env.RUN_ENV == prod   # only release in prod
+      - name: release
+        script: scripts/release.sh
+        needs: [migrate]
+        when: env.RUN_ENV == prod   # only release in prod
 
   Recovery: when a step with `on_error` fails, its recovery node offers a choice
   of fix `options`. With `--gui` you pick one in the browser; otherwise (plain /
@@ -4085,57 +3803,703 @@ Runs — a DAG of dependent script steps (`ciabatta run`)
   if none is. After a fix succeeds, `retry` re-runs the named step. Retry loops
   are bounded so a persistently failing step can't spin forever.
 
-    ciabatta run [RECIPE…]           run recipes (all run-capable if none named)
-    ciabatta run web --gui           live web view: flowchart, logs, fix-it buttons
-    ciabatta run --build             open the visual builder
-    ciabatta dry-run web             what would be reused, and why not
+    ciabatta deploy                  run it across every package that defines it
+    ciabatta deploy --gui            live web view: graph, logs, fix-it buttons
+    ciabatta deploy --filter kind:push    just the publishing steps
+    ciabatta dry-run deploy          what would be reused, and why not
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-menus:                     ← group recipes so you can run a subset
+Selecting part of a graph — `--filter`
 
-  A menu names a list of recipes. `ciabatta push --cookbook <menu>` (or
-  `--menu <menu>`) runs only the recipes on that menu, instead of naming each
-  recipe by hand or pushing everything.
+  `--filter` prunes a compiled graph instead of expanding a selection, so what
+  survives is a real subgraph rather than a list of names to run.
 
-    menus:
-      frontend: [release_frontend, release_assets]
-      backend:  [release_backend]
-      release:  [release_frontend, release_assets, release_backend]
+    ciabatta release --filter kind:push        # only the transfer steps
+    ciabatta release --filter workspace:api    # only one package's steps
+    ciabatta release --filter tag:fast
+    ciabatta release --filter tag:fast --filter '!tag:flaky'
 
-  Usage:
-    ciabatta push --cookbook frontend            # just the frontend menu
-    ciabatta push --cookbook frontend --cookbook backend   # both menus
-    ciabatta push --cookbook release extra_recipe          # menu + a recipe
-
-  --cookbook is repeatable and combines with any recipe names given on the
-  command line; the union runs once (duplicates are de-duplicated). The same
-  flag works for `ciabatta pull`. Referencing an undefined menu, or a menu that
-  lists a recipe that doesn't exist, is an error.
+  Terms are tag:, workspace:, kind:, owner:, step:, or a bare word searching
+  all of them; prefix with ! to exclude. Repeatable. The surviving steps assume
+  their pruned dependencies already ran — it's the fast debug loop, not a first
+  build.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-Stages (state machine)
+Ordering — there are no stages, only edges
 
-  Each push runs:  login → pre-push → push → post-push
-  Each pull runs:  login → pre-pull → pull → post-pull
+  Publishing used to run through a fixed `login → pre → main → post` pipeline
+  with per-direction overrides. It doesn't any more: what those stages were for
+  is what a graph already does better.
 
-  Override any stage with an arbitrary command (bash, python, a compiled
-  binary, …). Unset stages fall back to their defaults.
+    a `pre` command    → a step, and a `needs` edge to it
+    a `post` command   → a step that `needs` the transfer
+    a `login` override → the registry's own `login_script`
+    a `main` override  → a `run:` on the transfer step itself
 
-    login: "..."   # default: registry login_script, or CIABATTA_<REG>_USER/PASS
-    pre:   "..."   # default: nothing
-    main:  "..."   # default: the built-in registry push/pull (or bash_script)
-    post:  "..."   # default: nothing
+  The difference is that each of those is now a node you can see on the graph,
+  filter, cache, and fail independently — rather than an opaque hook attached
+  to one artifact.
 
-  Stage commands run via `sh -c` from the project root, with every CIABATTA_*
-  and CI variable available in their environment (use $CIABATTA_COMMIT, etc.).
+    steps:
+      - name: bundle
+        run: python scripts/bundle.py
 
-    recipies:
-      frontend:
-        push:                     # overrides only apply to the push direction
-          pre: python scripts/bundle.py
-          post: ./scripts/notify.sh deployed
+      - name: publish
+        kind: push
+        needs: [bundle]
+        registry: nexus
+        artifact: dist/
+
+      - name: notify
+        run: ./scripts/notify.sh deployed
+        needs: [publish]
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+THE MONOREPO SCHEMA
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+A monorepo accumulates scripts nobody owns, publishing to places nobody
+remembers, quietly depending on each other in ways nobody wrote down.
+Ciabatta's answer: every package opts in with `ciabatta init --lib`, and
+declares three things — who owns it, what its workflows do, and which other
+packages they need.
+
+Any workflow name then becomes a command:
+
+  ciabatta build              # every `build` workflow in the repo, in order
+  ciabatta build --graph      # show the graph, run nothing
+  ciabatta build --dry-run    # walk every step, execute nothing
+  ciabatta build --only api   # start from one package (deps still come along)
+  ciabatta dry-run build      # what would be reused from the cache, and why not
+  ciabatta list               # every workflow, its owner, and what it does
+  ciabatta list -s proto      # ...filtered
+
+The monorepo root is your git root; every directory beneath it with a
+.ciabatta/ciabatta.yaml is a sub-workspace.
+
+workspace:                   # this package's identity (ciabatta init --lib)
+  name: api                    # what other packages refer to it by
+                               # (defaults to the directory name)
+  description: REST API        # shown by `ciabatta list`
+  owner: Ada                   # who to ask about it
+  depends_on: [proto:generate, common]
+                               # other sub-workspaces this one needs, applied
+                               # to EVERY workflow here. "common" means their
+                               # workflow of the same name (skipped if they
+                               # have none); "proto:generate" names one exactly.
+  tags: [backend]              # free-form labels, searchable with `list -s`
+  requires: [cargo]            # tools every workflow here needs on PATH
+  env_file: .env               # sourced before any workflow here runs.
+                               # Unset means `.env`; setting it REPLACES that
+                               # default rather than adding to it.
+  env_default: .env.default    # the checked-in template `.env` is generated
+                               # from. REQUIRED of any package whose workflows
+                               # declare REQUIRED_ENV — see ENVIRONMENT below.
+  umbrella: true               # on the ROOT config only: "I'm not a package,
+                               # just shared toolchain and settings"
+
+  env:                         # standard variables for every step defined here
+    RUST_LOG: info
+
+toolchain:                   # how to install what workflows `require`
+  protoc:
+    hint: brew install protobuf     # printed when the tool is missing
+    check: protoc --version         # optional: a smarter test than PATH
+    description: Protocol buffer compiler
+
+  Usually written once at the monorepo root and inherited by every package.
+  Missing tools are reported together, BEFORE the first step runs, with these
+  hints attached — not as "command not found" ten minutes into a build.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+WORKFLOWS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+One file per workflow: .ciabatta/workflows/<name>.yaml — the filename IS the
+workflow name. Small packages can write them inline under `workflows:` instead
+(but not both: a name defined twice is an error).
+
+  description: Compile the service binary   # what running this achieves
+  owner: Ada                                # falls back to the package's
+  needs: [proto:generate]                   # cross-package deps, on top of
+                                            # workspace.depends_on
+  requires: [cargo]                         # tools all its steps need
+  env_file: .env.build                      # relative to this package
+  REQUIRED_ENV: [API_TOKEN]                 # refuse to start unless set
+  tags: [rust]
+
+  env:                                      # vars for all its steps
+    PROFILE: release
+
+  steps:
+    - name: compile
+      description: Build the release binary # what it does...
+      owner: Ada                            # ...and who to ask
+      run: cargo build --release            # an inline shell command
+      script: scripts/build.sh              # ...or a script, run from THIS
+                                            # package's directory
+      needs: [fetch]                        # ordering WITHIN this workflow
+                                            # (cross-package deps go on the
+                                            #  workflow, not the step)
+      requires: [cargo, protoc]             # tools this step needs
+      timeout: 10m                          # "30s" "10m" "1h30m", or seconds.
+                                            # Past it the step is killed (with
+                                            # everything it spawned) and marked
+                                            # failed — and the graph keeps going.
+      retries: 2                            # extra attempts, for flaky steps
+      persistent: true                      # a dev server that never exits:
+                                            # started, dependents released
+                                            # immediately, and handed to the
+                                            # daemon as a watch session, so it
+                                            # OUTLIVES the run. The run prints
+                                            # its id:
+                                            #   ciabatta watch --attach <ID>
+                                            #   ciabatta watch --stop   <ID>
+                                            #   ciabatta watch --list
+      continue_on_error: true               # its failure skips dependents but
+                                            # doesn't stop the run
+      kind: push                            # push | pull select the built-in
+                                            # registry transfer; setup | build |
+                                            # test | deploy | anything else is
+                                            # a free-form label on the node
+      registry: nexus                       # with kind: push/pull — see
+      artifact: dist/app                    # "Publishing" below for the whole
+      publish_path: "app/{CIABATTA_COMMIT}" # set of transfer fields
+      from: release:publish                 # a pull mirroring a push step
+      when: RUN_ENV == prod                 # conditions (see Runs, below)
+      skip_if: IN_CI
+      on_error: fix                         # route failures to a recovery node,
+                                            # same as a run flowchart
+
+      env:
+        CARGO_TERM_COLOR: always
+
+      cache:                                # per-step cache override; most
+        inputs: ["proto/**/*"]              # steps inherit the workspace's
+
+Cross-package wiring, in full:
+
+  Every step of workflow A with no `needs` of its own waits for every terminal
+  step of each workflow A depends on. So `api`'s build declaring
+  depends_on: [proto:generate] means api's first step doesn't start until
+  proto's last one has finished — and `ciabatta build --graph` shows you exactly
+  that, node by node, labelled with the package each came from.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+CACHING
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Off until a workspace opts in. A cache that turns itself on is a cache that
+will one day serve somebody a stale artifact they never asked to be kept.
+
+  ciabatta cache init          look at the directory, propose inputs and outputs
+  ciabatta dry-run <target>    what would be reused, and why not — runs nothing
+  ciabatta dry-run <t> --diff  ...with the lines that changed
+  ciabatta cache status        what the local store is holding
+  ciabatta cache prune --max-age 30d
+  ciabatta cache clean
+
+cache:
+  enabled: true
+  inputs:  ["src/**/*", "Cargo.toml"]   # what the build READS
+  outputs: ["target/release/app"]       # what the build WRITES
+  exclude: [target]                     # never counted as an input, so a build
+                                        # can't invalidate itself with its own
+                                        # output. Does NOT filter `outputs`.
+  env: [PROFILE]                        # variables the RESULT depends on
+
+  remote:                               # the shared cache (project-level: put
+    url: http://cache.example.com:8380  # this in the MONOREPO ROOT's config)
+    project: 7f3a-…                     # assigned by the server on first
+                                        # contact and written back here. COMMIT
+                                        # IT: it's what makes every checkout and
+                                        # every CI runner resolve to the same
+                                        # project rather than registering a new
+                                        # one under the same name.
+    read_only: true                     # read the cache, never write to it —
+                                        # what a fork's CI should get
+    tls_verify: true                    # verify the server's certificate.
+                                        # Turn it off for a self-signed or
+                                        # internal CA cert this machine doesn't
+                                        # have — but with it off, HTTPS is an
+                                        # encrypted channel to whoever answered,
+                                        # so the artifacts are only as
+                                        # trustworthy as the network.
+    enabled: true                       # turn it off without deleting settings
+
+A stage has exactly THREE dependencies, and any of them changing is a rebuild:
+
+  1. its input files,
+  2. the environment variables it declared in `cache.env`,
+  3. the outputs of the stages it `needs`.
+
+The third is what makes a graph cacheable rather than just a directory: change
+a .proto file and `proto:generate` misses, its outputs change, and every stage
+downstream of it misses too — each for a reason it can name.
+
+Two things worth knowing:
+
+  * An undeclared input is a WRONG ANSWER, not a slow one. If a build reads a
+    file that isn't in `inputs`, changing that file won't change the key and the
+    cache will confidently hand back the wrong artifact. That's why `cache init`
+    scaffolds `inputs` from the directory's real contents, and why `dry-run`
+    exists.
+
+  * Outputs are verified, not assumed. A key match says the inputs didn't
+    change; it says nothing about whether somebody deleted `dist/` or edited a
+    generated file by hand. So the outputs are hashed too, and a mismatch is a
+    restore or a rebuild.
+
+Cache settings live WITH THE WORKFLOW that reads those files —
+`.ciabatta/workflows/<name>.yaml`, next to the steps — because what a build
+reads is a property of that build. A `build` and a `test` in one package read
+different files, and one section per config gave them no way to say so.
+
+  # packages/api/.ciabatta/workflows/build.yaml
+  cache:
+    enabled: true
+    inputs:  ["src/**/*"]
+    outputs: ["target/release/app"]
+
+  steps:
+    - name: compile
+      run: cargo build --release
+
+A step may narrow it further with its own `cache:`, layered over the workflow's
+FIELD BY FIELD, so it declares only what differs:
+
+  steps:
+    - name: build
+      cache:
+        env: [PROFILE]     # keeps the workflow's inputs, outputs and exclude
+
+`ciabatta cache init [WORKFLOW]` writes that section for you, from what is
+actually in the directory. With one workflow in the package the name is
+optional; with several you name the one you mean.
+
+The shared cache SERVER is the exception and stays in `ciabatta.yaml`: it is one
+endpoint per checkout, not a property of any one build.
+
+  # .ciabatta/ciabatta.yaml
+  cache:
+    remote:
+      url: http://cache.example.com:8380
+
+A list a target does declare replaces the inherited one whole — half-merged
+input globs would be very hard to reason about. `enabled` is only ever decided
+by a level that says it explicitly, so declaring a dependency can neither turn
+caching off nor turn it on; a single target opts out with `enabled: false`.
+
+An `inputs`/`outputs` entry naming a DIRECTORY means everything under it, at any
+depth: `inputs: [src]`, `inputs: ["src/"]` and `inputs: ["src/**/*"]` are the
+same declaration, and `inputs: [.]` is the whole workspace.
+
+Sub-workspaces are excluded from a super-workspace's inputs automatically: any
+directory below it with its own `.ciabatta/` owns its files, and its own cache
+entry covers them. Without that, a root whose inputs are `packages/**/*` would
+never hit — every package's change would be its change too.
+
+  ciabatta why <target>        where a target is declared, what it depends on,
+                               and what the cache would do with it
+  ciabatta why <target> --all  ...naming every input and output file, in the
+                               order they are hashed into the key
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+THE REMOTE CACHE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+A small server anyone can stand up, so a team's builds stop repeating each
+other's work. It stores artifacts on its own filesystem, in the same layout the
+local cache uses.
+
+  ciabatta remote-cache init                 write a server config
+  ciabatta remote-cache start                run it
+  ciabatta remote-cache login <URL>          connect this machine
+  ciabatta remote-cache status               hits, misses, storage, retention
+  ciabatta remote-cache add-user <name>      mint a token
+  ciabatta cache init --remote <URL>         point a workspace at it
+
+Its config (remote-cache.yaml, read by `remote-cache start`):
+
+server:
+  bind: 0.0.0.0            # a shared cache only loopback can reach is useless
+  port: 8380
+  storage: storage         # artifact store + project registry, relative to
+                           # this file
+  sweep_every: 1h          # how often retention runs, and binaries are rescanned
+
+retention:                 # age is measured from LAST USE, not from when an
+  max_age: 30d             # artifact was built — the thing everyone still
+  max_size: 10GB           # depends on shouldn't be evicted for being old
+  max_entries: 50000       # remove all three to keep everything forever
+
+auth:
+  mode: open               # open | token | ldap
+  session_ttl: 30d
+
+  users:                   # token mode
+    - name: ci
+      token_sha256: "…"    # from `remote-cache add-user`; the token itself is
+      read_only: true      # shown once and never stored
+    - name: root
+      token_sha256: "…"
+      admin: true          # may manage users. Only ever granted here, or by
+                           # another admin — never by a request to the server.
+
+  ldap:                    # ldap mode — bind against your directory over LDAPS
+    url: ldaps://ldap.example.com:636
+    bind_dn: "uid={username},ou=people,dc=example,dc=com"   # a DN template…
+    base_dn: "dc=example,dc=com"                            # …or search for it
+    user_filter: "(uid={username})"
+    search_dn: "cn=ciabatta,ou=services,dc=example,dc=com"  # service account
+    search_password_env: CIABATTA_LDAP_PASSWORD
+    required_group: "cn=engineering,ou=groups,dc=example,dc=com"
+    group_attribute: memberOf
+    write_groups: ["cn=ci,ou=groups,dc=example,dc=com"]     # others read-only
+    tls_verify: true       # leave this on. LDAPS without verification is an
+                           # encrypted channel to whoever answered.
+
+releases:                  # the ciabatta builds this cache hands out
+  version: "0.2.0"
+  notes: "What changed"
+  binaries:
+    linux:   /srv/ciabatta/ciabatta-linux-x86_64
+    windows: /srv/ciabatta/ciabatta-windows-x86_64.exe
+    macos:   /srv/ciabatta/ciabatta-macos-aarch64
+
+log:                       # one line as a request arrives, one as it leaves
+  requests: true
+  headers: true            # credential-bearing headers are logged <redacted>
+
+`remote-cache start` logs at info by default — the request log is the reason to
+run it in a terminal. Raise it with CIABATTA_LOG=ciabatta=debug.
+
+Sessions live in `storage/sessions.json` and survive a restart, so a config edit
+or a new binary doesn't sign the whole team out. Only the SHA-256 of each bearer
+token is stored, exactly as for `users.json`: the file says who is signed in and
+when their session lapses, never how to be them.
+
+  The server hashes these and mentions the version in every reply, so a client
+  on something older is told. `ciabatta self update` fetches the new build from
+  the same server it already trusts for artifacts, checks it against the
+  advertised SHA-256, and only then replaces the binary.
+
+    ciabatta self update --check     is there one?
+    ciabatta self update             install it
+
+  The HASH decides, not the version string: rebuild and copy a new binary over
+  the same path and your team still gets updated, because what's advertised is
+  the content — which is also what the client verifies.
+
+  Read access is a convenience; WRITE access is trust. Whoever can write to a
+  cache decides what everyone else's build produces, which is why `read_only`
+  exists on both a token user and an LDAP group.
+
+  The server serves an admin page at its root — open http://<host>:8380/ in a
+  browser. It shows the hit rate and what's stored, and it mints credentials:
+  the token is displayed once, and only its SHA-256 is kept, so a lost one is
+  reissued rather than recovered. Server-managed users live in
+  <storage>/users.json alongside the artifacts; the `auth.users` in this file
+  stay yours, and the page will neither shadow nor delete them.
+
+  Who may mint one:
+    token / ldap  an admin — a user with `admin: true`, granted in this config
+                  or by an existing admin
+    open          anyone who can reach it, because open mode already means "I
+                  trust this network" and refusing would leave no way to mint
+                  the first credential. But a user created on an OPEN server is
+                  never an admin, or somebody could grant themselves lasting
+                  control while the door was open and keep it after it was shut.
+
+  So the migration from open to authenticated is: create the users you want on
+  the page, add one `admin: true` user to `auth.users` below, set
+  `auth.mode: token`, and restart.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ENVIRONMENT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Three rules, in the order they apply:
+
+  1. `.env` is the default. A workspace that says nothing gets `.env` from its
+     own directory. Nobody should have to configure the conventional thing.
+
+  2. `workspace.env_file` overrides it — and REPLACES it rather than adding to
+     it, which is what "use this file instead" has to mean to be useful for
+     keeping dev and prod settings apart. It accepts a list, applied in order.
+
+  3. `workspace.env_default` is where a missing `.env` comes from. `.env` is
+     gitignored, so a fresh checkout doesn't have one; the checked-in template
+     does. Naming it means ciabatta GENERATES the `.env` rather than failing on
+     a variable the developer has never heard of. It's only ever created when
+     absent, so your edits survive.
+
+And one requirement that follows from the third: a workspace whose workflows
+declare REQUIRED_ENV must declare `env_default`. Not bureaucracy — it's what
+makes rule 3 possible. A repo where the required variables are written down
+somewhere reviewable is a repo a new person can build.
+
+`ciabatta watch` sources the same files a run would and prints exactly what it
+resolved before the command starts, so a watched dev server and a `dev` workflow
+step can't quietly see different environments.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+system:
+  ci: gitlab               # CI/CD system for auto-resolving build variables.
+                           # Options: gitlab, github, jenkins, circleci,
+                           #          travis, azure, bitbucket
+  containers: docker       # Container runtime. Options: docker, podman.
+                           # When unset, ciabatta auto-detects what's installed:
+                           # it prefers podman, falls back to docker, and asks
+                           # you to choose if BOTH are present.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+analyze:                   # Optional inputs for `ciabatta analyze`
+  requirements: reqs.txt   # File of requirements: `id` or `id, description`
+  trace: trace.csv         # CSV of `requirement,file` connections
+                           # (paths are relative to the project root;
+                           #  --requirements / --trace override these)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+ai:                        # Settings for `ciabatta ai` (run `ciabatta ai setup`)
+  provider: claude         # claude | openai | vllm (openai & vllm both speak
+                           # the OpenAI format; vllm defaults to localhost:8000)
+  endpoint: https://api.anthropic.com     # or e.g. http://localhost:8000
+  model: claude-opus-4-8
+  api_key_env: ANTHROPIC_API_KEY   # env var holding the API key
+  tls_verify: true         # false to skip cert checks for a self-signed
+                           # vLLM/OpenAI dev endpoint
+  images: ["python:3.12", "node:22"]      # sandbox base images the AI may spin
+                           # up via podman/docker (system.containers)
+
+  The assistant's learned state (architecture tags, the file→architecture
+  mind map, and its 1-100 confidence score) lives in .ciabatta/ai/brain.json.
+  Chat sessions are saved under .ciabatta/ai/conversations/ — resume the most
+  recent with `ciabatta ai -c`, or list/pick one with `ciabatta ai resume`.
+  Hand off background work with `ciabatta ai ship "<task>"` (or `--todo <id>`);
+  track it with `ciabatta ai jobs`, saved in .ciabatta/ai/jobs.json. The AI may
+  only read and write the project workspace and /tmp — nothing else.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+registries:
+  <name>:
+    url: https://...              # Base URL of the registry (required)
+    tls_verify: true              # Verify TLS certificate (default: true)
+    needs_auth: true              # Whether auth is needed (informational)
+    login_script: ./login.sh      # Optional: run this before push/pull
+    type: nexus                   # Override type detection. Options:
+                                  # nexus, s3, artifactory, docker, ecr
+
+    # Nexus-only fields (select the target repository and format):
+    repository: raw-hosted        # Nexus repo name. When set, `url` is the bare
+                                  # Nexus host and /repository/<repository> is
+                                  # appended automatically. When unset, `url` is
+                                  # used as the full repository URL.
+    base_path: builds             # raw only: prefix prepended to every step's
+                                  # publish_path (where raw files land)
+    format: raw                   # Nexus repository format. Options:
+                                  #   raw  → HTTP PUT/GET      (default)
+                                  #   npm  → `npm publish`
+                                  #   pypi → `twine upload`
+
+  Example — publish an npm package to a Nexus npm repo:
+
+    registries:
+      npm:
+        type: nexus
+        url: http://localhost:8527
+        repository: npm-hosted
+        format: npm
+
+  Auth for all formats uses CIABATTA_<NAME>_USER / _PASS (npm also accepts a
+  CIABATTA_<NAME>_TOKEN bearer token). npm requires `npm` on PATH; pypi requires
+  `twine`. For npm/pypi, a push step's `artifact` is the package tarball or the
+  `dist/` directory to publish; `publish_path` is not used.
+
+  The `url` and `login_script` fields expand environment variables, with
+  bash-style defaults, so one config can target different environments:
+
+    url: "https://${NEXUS_HOST:-nexus.example.com}/repository/releases/"
+
+    ${VAR}            value of VAR (empty if unset)
+    ${VAR:-default}   VAR if set & non-empty, otherwise `default`
+    ${VAR-default}    VAR if set (even if empty), otherwise `default`
+    {VAR:-default}    the leading `$` is optional
+
+  Supported registry types:
+    nexus       — Sonatype Nexus (raw HTTP PUT/GET, or npm/pypi via `format`)
+    s3          — AWS S3 via `aws s3 cp`
+    artifactory — HTTP PUT/GET to JFrog Artifactory
+    docker      — `docker push` / `docker pull`
+    ecr         — AWS ECR (auto-fetches ECR login token if no login_script)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Publishing — a step that moves an artifact (`kind: push` / `kind: pull`)
+
+  Publishing is not a separate schema or a separate command. A step declares
+  `kind: push`, says what moves and where, and sits on the graph like any other
+  node: it declares what it `needs`, it appears in the dependency report, and it
+  is cached on the same terms as everything else.
+
+    # packages/api/.ciabatta/workflows/release.yaml
+    description: Build and publish the API binary
+
+    steps:
+      - name: build
+        run: cargo build --release
+        requires: [cargo]
+
+      - name: publish
+        kind: push
+        needs: [build]
+        registry: nexus                 # a name from `registries:`
+        artifact: target/release/api    # the local file or directory to send
+        publish_path: "api/{CIABATTA_BRANCH}/{CIABATTA_COMMIT}/api"
+
+  Fields on a transfer step:
+
+    registry       which `registries:` entry to move through
+    artifact       the local file or directory (a directory uploads file by
+                   file, recreating its structure under the publish path)
+    publish_path   the destination, with {CIABATTA_*} substitution — or a list
+                   of local globs, each uploaded under {CIABATTA_PATH}
+    strip_prefix   for the glob-list form: a leading fragment to remove from
+                   each matched file before joining it under {CIABATTA_PATH}
+    local_image    docker/ecr only: a locally-built image to retag and push,
+                   so the registry URL is never baked into your build. Then
+                   `publish_path` is the remote image reference; omit it and
+                   the local reference is reused verbatim.
+
+  Pull is the same artifact in the other direction. Rather than restate it,
+  name the push step it mirrors — `<workflow>:<step>`, or a bare `<step>` in
+  the same workflow:
+
+    - name: fetch
+      kind: pull
+      from: release:publish     # same registry and path, opposite direction
+
+  `from` is a default, not an override: anything the pull step sets for itself
+  wins over what it inherits, so a pull that differs in one field says only
+  that field.
+
+    - name: vendor
+      kind: pull
+      from: release:publish
+      artifact: vendor/api      # same source, different destination
+
+  A transfer step may also just run a command. Give it `run:` or `script:` and
+  that runs instead of the built-in move — which is how a project keeps its own
+  publishing script while still being a node on the graph.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Steps — the DAG every workflow is
+
+  Each step runs a `script` (a bash file), an inline `run` command, or a
+  built-in transfer (above). It may declare `needs` (steps that must succeed
+  first) and `on_error` (jump to a recovery node on failure). Steps with
+  satisfied `needs` are eligible to run; the graph must be acyclic.
+
+  Already have a script? `ciabatta convert --script scripts/build.sh` reads it,
+  works out the tools it calls, the variables it reads, the files it writes and
+  the description in its header comment, and writes the workflow for you.
+
+  A step may be skipped by condition (evaluated against the run's env):
+    when: env.RUN_ENV == prod        # run ONLY if all conditions hold
+    skip_if: env.IN_CI == true       # skip if ANY condition holds
+  Each takes one condition or a list (multiple criteria). Conditions are
+  `VAR == value`, `VAR != value`, bare `VAR` (truthy), or `!VAR`; the `env.`
+  prefix is optional. A skipped step counts as satisfied, so its dependents
+  still run.
+
+    # packages/api/.ciabatta/workflows/deploy.yaml
+    steps:
+      - name: build
+        script: scripts/build.sh
+
+      - name: migrate
+        script: scripts/migrate.sh
+        needs: [build]
+        on_error: fix_migrate       # on failure, go to the recovery node
+
+      - name: fix_migrate           # a recovery node: offers fix choices
+        recover: true
+        message: "Migration failed — choose how to recover:"
+        retry: migrate              # re-run this step after a successful fix
+        options:
+          - label: Roll back
+            script: scripts/rollback.sh
+          - label: Force unlock
+            run: make unlock
+            default: true
+
+      - name: release
+        script: scripts/release.sh
+        needs: [migrate]
+        when: env.RUN_ENV == prod   # only release in prod
+
+  Recovery: when a step with `on_error` fails, its recovery node offers a choice
+  of fix `options`. With `--gui` you pick one in the browser; otherwise (plain /
+  CI) the option marked `default: true` runs automatically, or the run fails
+  if none is. After a fix succeeds, `retry` re-runs the named step. Retry loops
+  are bounded so a persistently failing step can't spin forever.
+
+    ciabatta deploy                  run it across every package that defines it
+    ciabatta deploy --gui            live web view: graph, logs, fix-it buttons
+    ciabatta deploy --filter kind:push    just the publishing steps
+    ciabatta dry-run deploy          what would be reused, and why not
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Selecting part of a graph — `--filter`
+
+  `--filter` prunes a compiled graph instead of expanding a selection, so what
+  survives is a real subgraph rather than a list of names to run.
+
+    ciabatta release --filter kind:push        # only the transfer steps
+    ciabatta release --filter workspace:api    # only one package's steps
+    ciabatta release --filter tag:fast
+    ciabatta release --filter tag:fast --filter '!tag:flaky'
+
+  Terms are tag:, workspace:, kind:, owner:, step:, or a bare word searching
+  all of them; prefix with ! to exclude. Repeatable. The surviving steps assume
+  their pruned dependencies already ran — it's the fast debug loop, not a first
+  build.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Ordering — there are no stages, only edges
+
+  Publishing used to run through a fixed `login → pre → main → post` pipeline.
+  It doesn't any more: what those stages were for is what a graph already does,
+  and each piece is now a node you can see, filter, cache and fail on its own.
+
+    a `pre` command    → a step, and a `needs` edge to it
+    a `post` command   → a step that `needs` the transfer
+    a `login` override → the registry's own `login_script`
+    a `main` override  → a `run:` on the transfer step itself
+
+  Step commands run via `sh -c` from the step's own directory, with every
+  CIABATTA_* and CI variable in their environment (use $CIABATTA_COMMIT, etc.).
+
+    steps:
+      - name: bundle
+        run: python scripts/bundle.py
+      - name: publish
+        kind: push
+        needs: [bundle]
+        registry: nexus
+        artifact: dist/
+      - name: notify
+        run: ./scripts/notify.sh deployed
+        needs: [publish]
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -4163,17 +4527,17 @@ Available substitution variables in publish_path:
                              /{CIABATTA_BRANCH}/{CIABATTA_COMMIT}  (otherwise)
 
 These are populated automatically from the CI system defined in `system`.
-You can override any of them with: ciabatta push -e CIABATTA_BRANCH=my-branch
+You can override any of them with: ciabatta <workflow> -e CIABATTA_BRANCH=my-branch
 
 Note that a `{VAR}` placeholder must be QUOTED in YAML — a bare `{` starts a
 flow mapping. `publish_path: "app/{CIABATTA_COMMIT}"`, not `publish_path:
 app/{CIABATTA_COMMIT}`.
 
-Working locally? `ciabatta push --local` (or `export CIABATTA_ENV=local`) derives
-CIABATTA_BRANCH / _COMMIT / _TAG / _BUILD_NUMBER from your local git history
-instead of CI. On any `ciabatta pull` (local or CI), when the exact commit has no
-published artifact ciabatta falls back to the newest commit on the branch that
-does. Run `ciabatta source` to print the variables as shell `export` lines:
+Working locally? `ciabatta <workflow> --local` (or `export CIABATTA_ENV=local`)
+derives CIABATTA_BRANCH / _COMMIT / _TAG / _BUILD_NUMBER from your local git
+history instead of CI. On any `kind: pull` step (local or CI), when the exact
+commit has no published artifact ciabatta falls back to the newest commit on
+the branch that does. Run `ciabatta source` to print the variables as shell `export` lines:
 
     eval "$(ciabatta source)"
 
@@ -4205,17 +4569,19 @@ Example:
       needs_auth: true
       login_script: .ciabatta/nexus_login.sh
 
-  recipies:
-    frontend:
-      registry: nexus
-      local_artifact_path: frontend/dist
-      publish_path: "frontend/{CIABATTA_BRANCH}/{CIABATTA_COMMIT}/dist.tar.gz"
+  workflows:
+    release:
+      description: Build and publish the frontend bundle
+      steps:
+        - name: build
+          run: npm run build
 
-    backend:
-      push:
-        bash_script: scripts/build_and_push.sh
-      pull:
-        bash_script: scripts/pull_backend.sh
+        - name: publish
+          kind: push
+          needs: [build]
+          registry: nexus
+          artifact: frontend/dist
+          publish_path: "frontend/{CIABATTA_BRANCH}/{CIABATTA_COMMIT}/dist.tar.gz"
 
   cache:
     enabled: true
@@ -4361,7 +4727,7 @@ mod tests {
             crate::format::Format::Yaml,
         )
         .expect("the un-pinned starter config parses");
-        assert!(bare.registries.is_empty() && bare.recipes.is_empty());
+        assert!(bare.registries.is_empty() && bare.workflows.is_empty());
 
         let lib = build_lib_config(
             "api",
@@ -4451,7 +4817,7 @@ mod tests {
     #[test]
     fn root_from_arbitrary_file_is_its_parent() {
         // A config that isn't inside a `.ciabatta/` dir roots at its own folder,
-        // so relative recipe paths resolve alongside it.
+        // so relative workflow paths resolve alongside it.
         assert_eq!(
             root_from_config_path(Path::new("/proj/ciabatta.toml")),
             Some(PathBuf::from("/proj"))

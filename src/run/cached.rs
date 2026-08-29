@@ -34,7 +34,6 @@ pub struct Session {
     workspace: Option<Workspace>,
     config: CiabattaConfig,
     root: PathBuf,
-    recipe_cache: Option<CacheConfig>,
     /// Step name → fingerprint of what it produced. The third dependency.
     fingerprints: BTreeMap<String, String>,
     /// Steps that ran without being able to say what they produced: they
@@ -140,11 +139,7 @@ impl Session {
     /// Never fails: a cache that can't be opened is a cache that isn't used.
     /// Refusing to run a build because its optional cache directory wasn't
     /// writable would be exactly the wrong trade.
-    pub fn open(
-        root: &Path,
-        config: &CiabattaConfig,
-        recipe_cache: Option<CacheConfig>,
-    ) -> Option<Session> {
+    pub fn open(root: &Path, config: &CiabattaConfig) -> Option<Session> {
         let store = match Store::for_project(root) {
             Ok(store) => store,
             Err(e) => {
@@ -160,7 +155,6 @@ impl Session {
             workspace: Workspace::discover(root).ok(),
             config: config.clone(),
             root: root.to_path_buf(),
-            recipe_cache,
             fingerprints: BTreeMap::new(),
             unaccounted: BTreeSet::new(),
             remote: None,
@@ -569,7 +563,6 @@ impl Session {
             workspace: self.workspace.as_ref(),
             root: self.root.clone(),
             config: &self.config,
-            recipe_cache: self.recipe_cache.clone(),
         }
     }
 }
@@ -750,7 +743,7 @@ mod tests {
         ];
 
         // First run: nothing is cached, so both run and `build` is stored.
-        let mut session = Session::open(&root, &CiabattaConfig::default(), None).unwrap();
+        let mut session = Session::open(&root, &CiabattaConfig::default()).unwrap();
         assert_eq!(
             run_all(&mut session, &steps)
                 .await
@@ -763,7 +756,7 @@ mod tests {
 
         // Second run, with not one file touched. `build`'s key is unchanged —
         // but `generate` ran again and nothing recorded what it did.
-        let mut session = Session::open(&root, &CiabattaConfig::default(), None).unwrap();
+        let mut session = Session::open(&root, &CiabattaConfig::default()).unwrap();
         let notes = run_all(&mut session, &steps).await;
         let build = notes[1]
             .as_ref()
@@ -795,10 +788,10 @@ mod tests {
             step("build", &["generate"], cached),
         ];
 
-        let mut session = Session::open(&root, &CiabattaConfig::default(), None).unwrap();
+        let mut session = Session::open(&root, &CiabattaConfig::default()).unwrap();
         run_all(&mut session, &steps).await;
 
-        let mut session = Session::open(&root, &CiabattaConfig::default(), None).unwrap();
+        let mut session = Session::open(&root, &CiabattaConfig::default()).unwrap();
         let notes = run_all(&mut session, &steps).await;
         assert!(
             notes.iter().all(|n| n.is_none()),
@@ -828,12 +821,12 @@ mod tests {
             step("build", &["generate"], cached),
         ];
 
-        let mut session = Session::open(&root, &CiabattaConfig::default(), None).unwrap();
+        let mut session = Session::open(&root, &CiabattaConfig::default()).unwrap();
         run_all(&mut session, &steps).await;
 
         // This time `generate` fails — the engine says so — and the run carries
         // on to `build`, whose key hasn't moved.
-        let mut session = Session::open(&root, &CiabattaConfig::default(), None).unwrap();
+        let mut session = Session::open(&root, &CiabattaConfig::default()).unwrap();
         session.mark_unaccounted("generate");
         match session.before(&steps[1], &HashMap::new()).await.unwrap() {
             Action::Run { .. } => {}
@@ -848,7 +841,7 @@ mod tests {
     #[test]
     fn a_session_opens_even_where_there_is_nothing_cached_yet() {
         let root = scratch("open");
-        let session = Session::open(&root, &CiabattaConfig::default(), None);
+        let session = Session::open(&root, &CiabattaConfig::default());
         assert!(session.is_some(), "an empty project still gets a session");
         let _ = std::fs::remove_dir_all(&root);
     }

@@ -75,13 +75,6 @@ pub fn migrate(root: &Path, dry_run: bool) -> Result<Report> {
         }
 
         // Flowchart files live loose in `.ciabatta/`, named by whoever wrote
-        // them, so they're found by extension rather than by name.
-        for path in toml_files_in(&dir) {
-            if path == toml {
-                continue;
-            }
-            convert::<crate::run::FlowchartFile>(&path, dry_run, &mut report)?;
-        }
     }
 
     Ok(report)
@@ -253,7 +246,7 @@ mod tests {
         std::fs::write(
             pkg.join(CIABATTA_DIR).join("ciabatta.toml"),
             "[workspace]\nname = \"api\"\nowner = \"Ada\"\ndepends_on = [\"proto\"]\n\
-             [recipies.binary]\nregistry = \"nexus\"\npublish_path = \"a/b\"\n",
+             [registries.nexus]\nurl = \"https://nexus\"\n",
         )
         .unwrap();
         std::fs::write(
@@ -278,7 +271,7 @@ mod tests {
         let member = ws.member("api").expect("api still loads");
         assert_eq!(member.owner(), "Ada");
         assert_eq!(member.meta.depends_on, vec!["proto".to_string()]);
-        assert_eq!(member.config.recipes.len(), 1);
+        assert_eq!(member.config.registries.len(), 1);
         let build = member.workflows.get("build").expect("build loads");
         assert_eq!(build.steps[0].run.as_deref(), Some("cargo build"));
 
@@ -316,13 +309,20 @@ tls_verify = false
 needs_auth = true
 repository = "raw-hosted"
 
-[recipies.binary]
-registry = "nexus"
-local_artifact_path = "target/release/app"
-publish_path = "app/{CIABATTA_COMMIT}/app"
+[workflows.release]
+description = "Build and publish the binary"
 
-[recipies.binary.push]
-pre = "cargo build --release"
+[[workflows.release.steps]]
+name = "build"
+run = "cargo build --release"
+
+[[workflows.release.steps]]
+name = "publish"
+kind = "push"
+needs = ["build"]
+registry = "nexus"
+artifact = "target/release/app"
+publish_path = "app/{CIABATTA_COMMIT}/app"
 
 [ai]
 provider = "openai"
@@ -366,10 +366,13 @@ enabled = false
              would silently start trusting any certificate"
         );
 
-        let (b, a) = (&before.recipes["binary"], &after.recipes["binary"]);
-        assert_eq!(a.push_recipe().registry, b.push_recipe().registry);
-        assert_eq!(a.push_recipe().publish_path, b.push_recipe().publish_path);
-        assert_eq!(a.push_recipe().pre, b.push_recipe().pre);
+        let (b, a) = (&before.workflows["release"], &after.workflows["release"]);
+        assert_eq!(a.steps.len(), b.steps.len());
+        let (bp, ap) = (&b.steps[1], &a.steps[1]);
+        assert_eq!(ap.registry, bp.registry);
+        assert_eq!(ap.publish_path, bp.publish_path);
+        assert_eq!(ap.artifact, bp.artifact);
+        assert_eq!(a.steps[0].run, b.steps[0].run);
 
         assert!(
             !after.ai.unwrap().tls_verify,

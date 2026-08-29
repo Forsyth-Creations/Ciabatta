@@ -1,20 +1,20 @@
-use crate::runner::{ProgressUpdate, RunMode, StageKind};
+use crate::runner::{ProgressUpdate, StageKind};
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum RecipeStatus {
+pub enum WorkflowStatus {
     Pending,
     Running,
     Success,
     Failed(String),
 }
 
-impl RecipeStatus {
+impl WorkflowStatus {
     pub fn is_terminal(&self) -> bool {
-        matches!(self, RecipeStatus::Success | RecipeStatus::Failed(_))
+        matches!(self, WorkflowStatus::Success | WorkflowStatus::Failed(_))
     }
 }
 
-/// Per-stage status within a recipe's pipeline.
+/// Per-stage status within a workflow's pipeline.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StageStatus {
     Pending,
@@ -26,21 +26,21 @@ pub enum StageStatus {
     Failed,
 }
 
-pub struct RecipeState {
+pub struct WorkflowState {
     pub name: String,
-    pub status: RecipeStatus,
+    pub status: WorkflowStatus,
     pub stages: [StageStatus; 4],
     pub logs: Vec<String>,
-    /// For multi-file recipes: (files done, total files) reported during the
-    /// main push/pull stage. `None` for single-file recipes.
+    /// For multi-file workflows: (files done, total files) reported during the
+    /// main push/pull stage. `None` for single-file workflows.
     pub transfer: Option<(usize, usize)>,
 }
 
-impl RecipeState {
+impl WorkflowState {
     /// Fraction of the pipeline completed (0.0..=1.0), for the progress gauge.
     ///
     /// Each of the four stages is worth an equal slice. When the main stage is
-    /// mid-flight on a multi-file recipe, its slice fills proportionally with the
+    /// mid-flight on a multi-file workflow, its slice fills proportionally with the
     /// files transferred so far, so the bar advances within the push/pull step
     /// rather than jumping from 50% to 75% in one go.
     pub fn progress(&self) -> f64 {
@@ -67,7 +67,7 @@ impl RecipeState {
     }
 
     /// A short "3/10 files" label while a multi-file transfer is in progress,
-    /// for display over the progress gauge. `None` for single-file recipes.
+    /// for display over the progress gauge. `None` for single-file workflows.
     pub fn transfer_label(&self) -> Option<String> {
         match self.transfer {
             Some((done, total)) if total > 1 => Some(format!("{done}/{total} files")),
@@ -77,32 +77,25 @@ impl RecipeState {
 }
 
 pub struct App {
-    pub recipes: Vec<RecipeState>,
+    pub workflows: Vec<WorkflowState>,
     pub selected: usize,
     pub all_done: bool,
     pub dry_run: bool,
-    pub mode: RunMode,
 }
 
 impl App {
-    pub fn new(names: &[String], dry_run: bool, mode: RunMode) -> Self {
-        let recipes = names
-            .iter()
-            .map(|n| RecipeState {
-                name: n.clone(),
-                status: RecipeStatus::Pending,
+    pub fn new(name: &str, dry_run: bool) -> Self {
+        App {
+            workflows: vec![WorkflowState {
+                name: name.to_string(),
+                status: WorkflowStatus::Pending,
                 stages: [StageStatus::Pending; 4],
                 logs: Vec::new(),
                 transfer: None,
-            })
-            .collect();
-
-        App {
-            recipes,
+            }],
             selected: 0,
             all_done: false,
             dry_run,
-            mode,
         }
     }
 
@@ -110,16 +103,20 @@ impl App {
         match update {
             ProgressUpdate::Started(name) => {
                 if let Some(r) = self.find_mut(&name) {
-                    r.status = RecipeStatus::Running;
+                    r.status = WorkflowStatus::Running;
                 }
             }
-            ProgressUpdate::StageStarted { recipe, stage } => {
-                if let Some(r) = self.find_mut(&recipe) {
+            ProgressUpdate::StageStarted { workflow, stage } => {
+                if let Some(r) = self.find_mut(&workflow) {
                     r.stages[stage.index()] = StageStatus::Running;
                 }
             }
-            ProgressUpdate::StageFinished { recipe, stage, ran } => {
-                if let Some(r) = self.find_mut(&recipe) {
+            ProgressUpdate::StageFinished {
+                workflow,
+                stage,
+                ran,
+            } => {
+                if let Some(r) = self.find_mut(&workflow) {
                     r.stages[stage.index()] = if ran {
                         StageStatus::Done
                     } else {
@@ -128,11 +125,11 @@ impl App {
                 }
             }
             ProgressUpdate::TransferProgress {
-                recipe,
+                workflow,
                 done,
                 total,
             } => {
-                if let Some(r) = self.find_mut(&recipe) {
+                if let Some(r) = self.find_mut(&workflow) {
                     r.transfer = Some((done, total));
                 }
             }
@@ -141,38 +138,42 @@ impl App {
                     r.logs.push(line);
                 }
             }
-            ProgressUpdate::StepStarted { recipe, step } => {
-                if let Some(r) = self.find_mut(&recipe) {
+            ProgressUpdate::StepStarted { workflow, step } => {
+                if let Some(r) = self.find_mut(&workflow) {
                     r.logs.push(format!("▶ {step}"));
                 }
             }
-            ProgressUpdate::StepFinished { recipe, step, ok } => {
-                if let Some(r) = self.find_mut(&recipe) {
+            ProgressUpdate::StepFinished { workflow, step, ok } => {
+                if let Some(r) = self.find_mut(&workflow) {
                     r.logs
                         .push(format!("{} {step}", if ok { "✓" } else { "✗" }));
                 }
             }
             ProgressUpdate::StepSkipped {
-                recipe,
+                workflow,
                 step,
                 reason,
             } => {
-                if let Some(r) = self.find_mut(&recipe) {
+                if let Some(r) = self.find_mut(&workflow) {
                     r.logs.push(format!("⊘ {step} (skipped: {reason})"));
                 }
             }
-            ProgressUpdate::StepLog { recipe, step, line } => {
-                if let Some(r) = self.find_mut(&recipe) {
+            ProgressUpdate::StepLog {
+                workflow,
+                step,
+                line,
+            } => {
+                if let Some(r) = self.find_mut(&workflow) {
                     r.logs.push(format!("  [{step}] {line}"));
                 }
             }
             ProgressUpdate::StepNeedsChoice {
-                recipe,
+                workflow,
                 step,
                 message,
                 options,
             } => {
-                if let Some(r) = self.find_mut(&recipe) {
+                if let Some(r) = self.find_mut(&workflow) {
                     r.logs.push(format!("⚠ {step}: {message}"));
                     for (i, opt) in options.iter().enumerate() {
                         r.logs.push(format!("    [{i}] {opt}"));
@@ -182,7 +183,7 @@ impl App {
             }
             ProgressUpdate::Completed(name) => {
                 if let Some(r) = self.find_mut(&name) {
-                    r.status = RecipeStatus::Success;
+                    r.status = WorkflowStatus::Success;
                 }
                 self.check_all_done();
             }
@@ -193,53 +194,53 @@ impl App {
                         r.stages[idx] = StageStatus::Failed;
                     }
                     r.logs.push(format!("✗ failed: {err}"));
-                    r.status = RecipeStatus::Failed(err);
+                    r.status = WorkflowStatus::Failed(err);
                 }
                 self.check_all_done();
             }
         }
     }
 
-    fn find_mut(&mut self, name: &str) -> Option<&mut RecipeState> {
-        self.recipes.iter_mut().find(|r| r.name == name)
+    fn find_mut(&mut self, name: &str) -> Option<&mut WorkflowState> {
+        self.workflows.iter_mut().find(|r| r.name == name)
     }
 
     fn check_all_done(&mut self) {
-        self.all_done = self.recipes.iter().all(|r| r.status.is_terminal());
+        self.all_done = self.workflows.iter().all(|r| r.status.is_terminal());
     }
 
-    /// True if any recipe ended in a failed state.
+    /// True if any workflow ended in a failed state.
     pub fn any_failed(&self) -> bool {
-        self.recipes
+        self.workflows
             .iter()
-            .any(|r| matches!(r.status, RecipeStatus::Failed(_)))
+            .any(|r| matches!(r.status, WorkflowStatus::Failed(_)))
     }
 
     pub fn selected_logs(&self) -> &[String] {
-        self.recipes
+        self.workflows
             .get(self.selected)
             .map(|r| r.logs.as_slice())
             .unwrap_or(&[])
     }
 
-    /// Stage labels in order, for the currently active mode.
+    /// Stage labels in order.
     pub fn stage_labels(&self) -> [&'static str; 4] {
         [
-            StageKind::Login.short(self.mode),
-            StageKind::Pre.short(self.mode),
-            StageKind::Main.short(self.mode),
-            StageKind::Post.short(self.mode),
+            StageKind::Login.short(),
+            StageKind::Pre.short(),
+            StageKind::Main.short(),
+            StageKind::Post.short(),
         ]
     }
 
     pub fn select_next(&mut self) {
-        if !self.recipes.is_empty() {
-            self.selected = (self.selected + 1) % self.recipes.len();
+        if !self.workflows.is_empty() {
+            self.selected = (self.selected + 1) % self.workflows.len();
         }
     }
 
     pub fn select_prev(&mut self) {
-        if !self.recipes.is_empty() {
+        if !self.workflows.is_empty() {
             self.selected = self.selected.saturating_sub(1);
         }
     }
@@ -249,10 +250,10 @@ impl App {
 mod tests {
     use super::*;
 
-    fn recipe() -> RecipeState {
-        RecipeState {
+    fn workflow() -> WorkflowState {
+        WorkflowState {
             name: "r".into(),
-            status: RecipeStatus::Running,
+            status: WorkflowStatus::Running,
             stages: [StageStatus::Pending; 4],
             logs: Vec::new(),
             transfer: None,
@@ -261,7 +262,7 @@ mod tests {
 
     #[test]
     fn progress_blends_file_transfer_into_running_main_stage() {
-        let mut r = recipe();
+        let mut r = workflow();
         // login + pre done, push (main) running → 2 of 4 stages = 0.5.
         r.stages[StageKind::Login.index()] = StageStatus::Done;
         r.stages[StageKind::Pre.index()] = StageStatus::Skipped;
@@ -279,9 +280,9 @@ mod tests {
 
     #[test]
     fn transfer_label_only_for_multi_file() {
-        let mut r = recipe();
+        let mut r = workflow();
         assert_eq!(r.transfer_label(), None);
-        r.transfer = Some((0, 1)); // single-file recipe: no counter
+        r.transfer = Some((0, 1)); // single-file workflow: no counter
         assert_eq!(r.transfer_label(), None);
         r.transfer = Some((3, 10));
         assert_eq!(r.transfer_label().as_deref(), Some("3/10 files"));

@@ -133,31 +133,101 @@ pub fn prepare_many(
     Ok((workspace, graph))
 }
 
-/// Fold a compiled graph into a config as one run-capable recipe named after
-/// the workflow, and return that name.
+/// Turn a compiled graph into the run the engine executes.
 ///
 /// This is what lets a monorepo workflow reuse everything a run already has:
 /// the same validation, the same terminal UI, the same live web view, the same
-/// daemon-owned execution. Downstream, a workflow *is* a run — one whose steps
-/// happened to come from six different packages.
-pub fn install_as_recipe(
-    config: &mut crate::config::CiabattaConfig,
-    graph: WorkflowGraph,
-) -> String {
-    let name = graph.workflows.join("+");
-    config.recipes.insert(
-        name.clone(),
-        crate::config::RecipeEntry {
-            run: Some(crate::run::RunRecipe {
-                env_file: graph.env_files,
-                required_env: graph.required_env,
-                steps: graph.steps,
-                ..Default::default()
-            }),
-            ..Default::default()
-        },
-    );
-    name
+/// daemon-owned execution. A workflow *is* a run — one whose steps happened to
+/// come from six different packages.
+pub fn into_run(graph: WorkflowGraph) -> Result<crate::run::ResolvedRun> {
+    let label = graph.label();
+    let mut steps = graph.steps;
+    resolve_transfer_refs(&mut steps)?;
+    crate::run::validate_flowchart(&steps, &label)?;
+    Ok(crate::run::ResolvedRun {
+        login: None,
+        pre: None,
+        post: None,
+        required_env: graph.required_env,
+        env_files: graph.env_files,
+        steps: crate::run::topo_order(&steps),
+    })
+}
+
+/// Resolve every `from:` back-reference, so a transfer step is self-contained
+/// by the time anything executes it.
+///
+/// Push and pull are the same artifact in opposite directions, and a pull that
+/// restates the registry and path is a pull that will eventually disagree with
+/// the push. `from` says "the other end of this one" once.
+fn resolve_transfer_refs(steps: &mut [RunStep]) -> Result<()> {
+    // Collected up front: a step may reference one declared after it, and the
+    // graph's order is dependency order, not declaration order.
+    let sources: HashMap<String, RunStep> = steps
+        .iter()
+        .map(|step| (step.name.clone(), step.clone()))
+        .collect();
+
+    for step in steps.iter_mut() {
+        let Some(reference) = step.from.clone() else {
+            continue;
+        };
+        if step.direction().is_none() {
+            bail!(
+                "Step '{}' sets `from: {reference}` but has no transfer `kind`.                  Add `kind: pull` (or `kind: push`), or drop `from`.",
+                step.name
+            );
+        }
+        // A compiled graph names steps `<member>:<workflow>:<step>`, but a
+        // workflow writes `from:` in its own terms — a sibling step, or
+        // `<workflow>:<step>` for one next door. Match on the suffix so both
+        // spellings land on the same node.
+        let source = sources
+            .get(&reference)
+            .or_else(|| {
+                let suffix = format!(":{reference}");
+                let mut hits = sources
+                    .iter()
+                    .filter(|(name, _)| name.ends_with(&suffix))
+                    .map(|(_, step)| step);
+                let first = hits.next();
+                // Ambiguous suffix → no guess. Better to ask for the full name
+                // than to publish to the wrong place.
+                match hits.next() {
+                    Some(_) => None,
+                    None => first,
+                }
+            })
+            .ok_or_else(|| {
+                let mut available: Vec<&String> = sources
+                    .keys()
+                    .filter(|name| {
+                        sources[*name].direction() == Some(crate::run::Direction::Push)
+                    })
+                    .collect();
+                available.sort();
+                anyhow::anyhow!(
+                    "Step '{}' sets `from: {reference}`, which names no step in this graph.                      Push steps available: {}.",
+                    step.name,
+                    if available.is_empty() {
+                        "(none)".to_string()
+                    } else {
+                        available
+                            .iter()
+                            .map(|s| s.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    }
+                )
+            })?
+            .clone();
+
+        if source.name == step.name {
+            bail!("Step '{}' sets `from` to itself.", step.name);
+        }
+        step.inherit_transfer(&source);
+    }
+    Ok(())
 }
 
 /// Which sub-workspaces to start from.
@@ -648,6 +718,19 @@ fn compile(
             // whoever owns the package doesn't have to repeat their name.
             if compiled.owner.is_none() {
                 compiled.owner = workflow.owner.clone().or_else(|| member.meta.owner.clone());
+            }
+
+            // The workflow's cache settings fold into each of its steps, under
+            // whatever the step declared for itself. Doing it here means that
+            // by the time anything plans or executes a step, the step carries
+            // the whole answer — nothing downstream has to know which workflow
+            // it came from to work out what it reads.
+            if let Some(from_workflow) = workflow.cache.as_ref() {
+                let mut merged = from_workflow.clone();
+                if let Some(own) = compiled.cache.as_ref() {
+                    crate::cache::graph::layer_over(&mut merged, own);
+                }
+                compiled.cache = Some(merged);
             }
 
             if !depended_on.contains(step.name.as_str()) && !compiled.recover {
@@ -1312,19 +1395,117 @@ mod tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
+    /// What a build reads is a property of that build, so it is declared on the
+    /// workflow — and has to reach every step of it without each step repeating
+    /// the list.
+    #[test]
+    fn a_workflows_cache_settings_reach_its_steps() {
+        let root = scratch("wfcache");
+        let a = member(&root, "a", "[workspace]\nname = \"a\"\n");
+        workflow(
+            &a,
+            "build",
+            "[cache]\nenabled = true\ninputs = [\"src/**/*\"]\noutputs = [\"dist/**/*\"]\n\
+             [[steps]]\nname = \"compile\"\nrun = \"make\"\n\
+             [[steps]]\nname = \"docs\"\nrun = \"make docs\"\n\
+             [steps.cache]\ninputs = [\"docs/**/*\"]\n",
+        );
+        let ws = Workspace::load(&root).unwrap();
+        let graph = build(&ws, "build", &Selection::default()).unwrap();
+
+        let compile = graph.steps.iter().find(|s| s.name == "a:compile").unwrap();
+        let cache = compile.cache.as_ref().expect("inherited from the workflow");
+        assert_eq!(cache.enabled, Some(true));
+        assert_eq!(cache.inputs, vec!["src/**/*".to_string()]);
+        assert_eq!(cache.outputs, vec!["dist/**/*".to_string()]);
+
+        // A step that narrows one field keeps the rest, and does not silently
+        // turn caching off by failing to mention `enabled`.
+        let docs = graph.steps.iter().find(|s| s.name == "a:docs").unwrap();
+        let cache = docs.cache.as_ref().expect("its own, over the workflow's");
+        assert_eq!(cache.inputs, vec!["docs/**/*".to_string()], "stated wins");
+        assert_eq!(
+            cache.outputs,
+            vec!["dist/**/*".to_string()],
+            "and the rest is inherited"
+        );
+        assert_eq!(cache.enabled, Some(true));
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Push and pull are the same artifact in opposite directions. `from:` says
+    /// so once, rather than leaving two copies to drift apart.
+    #[test]
+    fn a_pull_step_inherits_the_push_step_it_mirrors() {
+        let root = scratch("from");
+        let a = member(&root, "a", "[workspace]\nname = \"a\"\n");
+        workflow(
+            &a,
+            "release",
+            "[[steps]]\nname = \"publish\"\nkind = \"push\"\n\
+             registry = \"nexus\"\nartifact = \"dist/app\"\n\
+             publish_path = \"app/{CIABATTA_COMMIT}/app\"\n\
+             [[steps]]\nname = \"fetch\"\nkind = \"pull\"\nfrom = \"publish\"\n\
+             [[steps]]\nname = \"fetch-elsewhere\"\nkind = \"pull\"\nfrom = \"publish\"\n\
+             artifact = \"vendor/app\"\n",
+        );
+        let ws = Workspace::load(&root).unwrap();
+        let graph = build(&ws, "release", &Selection::default()).unwrap();
+        let run = into_run(graph).unwrap();
+
+        let fetch = run.steps.iter().find(|s| s.name == "a:fetch").unwrap();
+        let transfer = fetch.transfer().expect("a pull step has a transfer");
+        assert_eq!(transfer.direction, crate::run::Direction::Pull);
+        assert_eq!(transfer.registry, Some("nexus"));
+        assert_eq!(transfer.artifact, Some("dist/app"));
+
+        // What the step states for itself wins over what it inherits.
+        let elsewhere = run
+            .steps
+            .iter()
+            .find(|s| s.name == "a:fetch-elsewhere")
+            .unwrap();
+        let transfer = elsewhere.transfer().unwrap();
+        assert_eq!(transfer.registry, Some("nexus"), "inherited");
+        assert_eq!(transfer.artifact, Some("vendor/app"), "stated wins");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_from_that_names_nothing_is_refused_with_the_options_listed() {
+        let root = scratch("from_missing");
+        let a = member(&root, "a", "[workspace]\nname = \"a\"\n");
+        workflow(
+            &a,
+            "release",
+            "[[steps]]\nname = \"publish\"\nkind = \"push\"\nregistry = \"nexus\"\n\
+             [[steps]]\nname = \"fetch\"\nkind = \"pull\"\nfrom = \"nope\"\n",
+        );
+        let ws = Workspace::load(&root).unwrap();
+        let graph = build(&ws, "release", &Selection::default()).unwrap();
+        let err = into_run(graph).unwrap_err().to_string();
+        assert!(err.contains("names no step"), "{err}");
+        assert!(
+            err.contains("a:publish"),
+            "the error must list what is available: {err}"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
     #[test]
     fn push_steps_and_recovery_nodes_survive_compilation() {
         let root = scratch("push");
-        let a = member(
-            &root,
-            "a",
-            "[workspace]\nname = \"a\"\n\n[recipies.bin]\nregistry = \"nexus\"\n",
-        );
+        let a = member(&root, "a", "[workspace]\nname = \"a\"\n");
         workflow(
             &a,
             "release",
             "[[steps]]\nname = \"build\"\nrun = \"cargo build\"\non_error = \"fix\"\n\
-             [[steps]]\nname = \"publish\"\nkind = \"push\"\nrecipe = \"bin\"\nneeds = [\"build\"]\n\
+             [[steps]]\nname = \"publish\"\nkind = \"push\"\nneeds = [\"build\"]\n\
+             registry = \"nexus\"\nartifact = \"target/release/app\"\n\
+             publish_path = \"app/bin\"\n\
              [[steps]]\nname = \"fix\"\nrecover = true\nretry = \"build\"\n\
              options = [ { label = \"clean\", run = \"cargo clean\", default = true } ]\n",
         );
@@ -1333,10 +1514,12 @@ mod tests {
 
         let publish = graph.steps.iter().find(|s| s.name == "a:publish").unwrap();
         assert!(publish.is_push());
+        // A transfer step counts as having an action: the engine performs the
+        // built-in move rather than running a command.
         assert!(publish.has_action());
-        // The push step's action is a real `ciabatta push` invocation.
-        let (_, run) = publish.action();
-        assert!(run.unwrap().contains("push bin"));
+        let transfer = publish.transfer().expect("a push step has a transfer");
+        assert_eq!(transfer.registry, Some("nexus"));
+        assert_eq!(transfer.artifact, Some("target/release/app"));
 
         // Recovery edges were renamed alongside everything else.
         let build_step = graph.steps.iter().find(|s| s.name == "a:build").unwrap();

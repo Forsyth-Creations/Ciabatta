@@ -1,19 +1,19 @@
-//! `ciabatta convert --script <path>` — turn a script into a recipe.
+//! `ciabatta convert --script <path>` — turn a script into a workflow.
 //!
-//! A recipe *is* a script. The only thing ciabatta adds is the declarations
+//! A workflow *is* a script. The only thing ciabatta adds is the declarations
 //! around it: what it needs, what it reads, what it writes, who owns it. That's
 //! also exactly the part nobody wants to write by hand, and the reason so many
 //! monorepos are a directory of shell scripts nobody has documented.
 //!
 //! So this reads the script and does the tedious part: it works out the tools
 //! it calls, the environment variables it reads, the files it writes, and the
-//! description sitting in its own header comment — and writes a recipe with all
+//! description sitting in its own header comment — and writes a workflow with all
 //! of it filled in. What it can't infer, it leaves marked rather than guessing,
 //! because a `requires` list that's quietly wrong is worse than one that says
 //! it's incomplete.
 //!
 //! The inference is honest about being inference. Everything it finds is
-//! printed for review before it's written, and the generated recipe is a
+//! printed for review before it's written, and the generated workflow is a
 //! starting point somebody edits — not an oracle.
 
 use std::collections::BTreeSet;
@@ -21,7 +21,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 
-use crate::config::{CIABATTA_DIR, CiabattaConfig};
+use crate::config::CIABATTA_DIR;
 
 /// What reading a script turned up.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -256,7 +256,7 @@ fn looks_persistent(source: &str) -> bool {
     SIGNALS.iter().any(|signal| lowered.contains(signal))
 }
 
-/// A recipe name derived from a script's filename.
+/// A workflow name derived from a script's filename.
 pub fn name_for(script: &Path) -> String {
     let stem = script
         .file_stem()
@@ -274,66 +274,7 @@ pub fn name_for(script: &Path) -> String {
     }
 }
 
-/// Render the recipe as the YAML block to splice under `recipies:`.
-pub fn to_yaml(name: &str, script_rel: &str, analysis: &Analysis) -> String {
-    let mut out = String::new();
-
-    out.push_str(&format!("  # Converted from {script_rel}.\n"));
-    out.push_str("  # Run it with `ciabatta run ");
-    out.push_str(name);
-    out.push_str("`.\n");
-    out.push_str(&format!("  {name}:\n"));
-    out.push_str("    run:\n");
-
-    if !analysis.required_env.is_empty() {
-        out.push_str("      # The script reads these with no fallback, so the run refuses to\n");
-        out.push_str("      # start without them rather than failing partway through.\n");
-        out.push_str(&format!(
-            "      REQUIRED_ENV: [{}]\n",
-            analysis.required_env.join(", ")
-        ));
-    }
-
-    out.push_str("      steps:\n");
-    out.push_str(&format!("        - name: {name}\n"));
-    match &analysis.description {
-        Some(text) => out.push_str(&format!("          description: {}\n", yaml_scalar(text))),
-        None => out.push_str("          description: \"\"   # TODO: one line on what this does\n"),
-    }
-    out.push_str(&format!("          script: {}\n", yaml_scalar(script_rel)));
-
-    if !analysis.requires.is_empty() {
-        out.push_str(&format!(
-            "          requires: [{}]\n",
-            analysis.requires.join(", ")
-        ));
-    }
-    if analysis.persistent {
-        out.push_str("          # This looks like it never exits, so the graph starts it and\n");
-        out.push_str("          # moves on. Follow it with `ciabatta watch --list`.\n");
-        out.push_str("          persistent: true\n");
-    }
-
-    if !analysis.outputs.is_empty() {
-        out.push_str("          cache:\n");
-        out.push_str("            # Off until you've filled in `inputs`. Caching on an\n");
-        out.push_str("            # incomplete inputs list serves stale artifacts, and a\n");
-        out.push_str("            # script can't be read to find out what it reads.\n");
-        out.push_str("            enabled: false\n");
-        out.push_str("            inputs: []   # TODO: what does this read?\n");
-        out.push_str("            outputs:\n");
-        for output in &analysis.outputs {
-            out.push_str(&format!("              - {}\n", yaml_scalar(output)));
-        }
-        if !analysis.env.is_empty() {
-            out.push_str(&format!("            env: [{}]\n", analysis.env.join(", ")));
-        }
-    }
-
-    out
-}
-
-/// Render the same recipe as a standalone workflow file.
+/// Render the same workflow as a standalone workflow file.
 pub fn to_workflow_yaml(name: &str, script_rel: &str, analysis: &Analysis) -> String {
     let mut out = String::new();
     out.push_str(&format!(
@@ -370,6 +311,21 @@ pub fn to_workflow_yaml(name: &str, script_rel: &str, analysis: &Analysis) -> St
     if analysis.persistent {
         out.push_str("    persistent: true\n");
     }
+
+    // Written but off. The outputs are a decent guess from reading the script;
+    // the inputs are not knowable from it, and caching on wrong inputs serves
+    // stale artifacts. `ciabatta cache init` fills the rest in and turns it on.
+    out.push_str("    cache:\n");
+    out.push_str("      enabled: false   # `ciabatta cache init` fills this in\n");
+    out.push_str("      inputs: []       # TODO: what this step reads\n");
+    if analysis.outputs.is_empty() {
+        out.push_str("      outputs: []\n");
+    } else {
+        out.push_str("      outputs:\n");
+        for output in &analysis.outputs {
+            out.push_str(&format!("        - {}\n", yaml_scalar(output)));
+        }
+    }
     out
 }
 
@@ -383,21 +339,15 @@ fn yaml_scalar(value: &str) -> String {
 // ─── The command ────────────────────────────────────────────────────────────
 
 /// Dispatch `ciabatta convert --script <path>`.
-pub fn run(
-    script: &Path,
-    name: Option<&str>,
-    as_workflow: bool,
-    dry_run: bool,
-    force: bool,
-) -> Result<()> {
+pub fn run(script: &Path, name: Option<&str>, dry_run: bool, force: bool) -> Result<()> {
     let cwd = std::env::current_dir().context("Failed to get current directory")?;
     let root = crate::config::find_root(&cwd).unwrap_or_else(|| cwd.clone());
 
     let source = std::fs::read_to_string(script)
         .with_context(|| format!("Failed to read {}", script.display()))?;
 
-    // Paths in a recipe are relative to the project root, so a recipe written
-    // from any directory in the repo resolves the same way.
+    // Paths in a workflow are relative to the project root, so one written from
+    // any directory in the repo resolves the same way.
     let absolute = script.canonicalize().unwrap_or_else(|_| cwd.join(script));
     let script_rel = absolute
         .strip_prefix(&root)
@@ -411,81 +361,31 @@ pub fn run(
     report(&name, &script_rel, &analysis);
 
     if dry_run {
-        println!("\n─── recipe ───\n");
-        print!("recipies:\n{}", to_yaml(&name, &script_rel, &analysis));
-        if as_workflow {
-            println!("\n─── workflow ───\n");
-            print!("{}", to_workflow_yaml(&name, &script_rel, &analysis));
-        }
+        println!("\n─── workflow ───\n");
+        print!("{}", to_workflow_yaml(&name, &script_rel, &analysis));
         println!("\nNothing was written (--dry-run).");
         return Ok(());
     }
 
-    let config_path = crate::config::config_path(&root).ok_or_else(|| {
-        anyhow::anyhow!(
-            "No ciabatta config in {}. Run `ciabatta init` first.",
-            root.display()
-        )
-    })?;
-
-    let existing = std::fs::read_to_string(&config_path)
-        .with_context(|| format!("Failed to read {}", config_path.display()))?;
-
-    let current: CiabattaConfig = crate::format::load(&config_path)?;
-    if current.recipes.contains_key(&name) && !force {
+    let dir = root
+        .join(CIABATTA_DIR)
+        .join(crate::workspace::WORKFLOWS_DIR);
+    std::fs::create_dir_all(&dir).with_context(|| format!("Failed to create {}", dir.display()))?;
+    let path = dir.join(format!("{name}.{}", crate::format::YAML_EXT));
+    if path.exists() && !force {
         bail!(
-            "{} already defines a recipe called '{name}'. Pass --name to use a \
-             different one, or --force to replace it.",
-            config_path.display()
+            "{} already exists. Pass --name to use a different one, or --force to \
+             replace it.",
+            path.display()
         );
     }
-
-    let rendered = crate::format::insert_under(
-        &existing,
-        "recipies",
-        &to_yaml(&name, &script_rel, &analysis),
-    )?;
-
-    // This edits a file the user owns; hand it back only if it still loads.
-    let parsed: CiabattaConfig =
-        crate::format::from_str(&rendered, crate::format::Format::of_path(&config_path))
-            .with_context(|| {
-                format!(
-                    "The generated recipe wouldn't parse, so {} was left untouched",
-                    config_path.display()
-                )
-            })?;
-    anyhow::ensure!(
-        parsed.recipes.contains_key(&name),
-        "The generated recipe didn't survive a round trip; {} was left alone",
-        config_path.display()
-    );
-
-    std::fs::write(&config_path, rendered)
-        .with_context(|| format!("Failed to write {}", config_path.display()))?;
-    println!("\nAdded recipe '{name}' to {}", config_path.display());
-
-    if as_workflow {
-        let dir = root
-            .join(CIABATTA_DIR)
-            .join(crate::workspace::WORKFLOWS_DIR);
-        std::fs::create_dir_all(&dir)
-            .with_context(|| format!("Failed to create {}", dir.display()))?;
-        let path = dir.join(format!("{name}.{}", crate::format::YAML_EXT));
-        if path.exists() && !force {
-            bail!(
-                "{} already exists. Pass --force to replace it.",
-                path.display()
-            );
-        }
-        std::fs::write(&path, to_workflow_yaml(&name, &script_rel, &analysis))
-            .with_context(|| format!("Failed to write {}", path.display()))?;
-        println!("Added workflow {}", path.display());
-    }
+    std::fs::write(&path, to_workflow_yaml(&name, &script_rel, &analysis))
+        .with_context(|| format!("Failed to write {}", path.display()))?;
+    println!("\nAdded workflow {}", path.display());
 
     println!();
     println!("Try it:");
-    println!("  ciabatta run {name}");
+    println!("  ciabatta {name}");
     if !analysis.outputs.is_empty() {
         println!("  ciabatta cache init      to fill in what it reads, and turn caching on");
     }
@@ -495,7 +395,7 @@ pub fn run(
 /// Print what reading the script turned up, so the user can judge it before it
 /// becomes a file.
 fn report(name: &str, script_rel: &str, analysis: &Analysis) {
-    println!("Reading {script_rel} → recipe '{name}'\n");
+    println!("Reading {script_rel} → workflow '{name}'\n");
 
     match &analysis.description {
         Some(text) => println!("  description   {text}"),
@@ -639,18 +539,13 @@ echo "api: built with LOG_LEVEL=${LOG_LEVEL:-info}"
     }
 
     #[test]
-    fn the_generated_recipe_parses_as_the_recipe_it_claims_to_be() {
+    fn the_generated_workflow_parses_as_the_workflow_it_claims_to_be() {
         let analysis = analyze(BUILD_SCRIPT);
-        let block = format!(
-            "recipies:\n{}",
-            to_yaml("build", "scripts/build.sh", &analysis)
-        );
+        let block = to_workflow_yaml("build", "scripts/build.sh", &analysis);
 
-        let config: CiabattaConfig = crate::format::from_str(&block, crate::format::Format::Yaml)
-            .unwrap_or_else(|e| panic!("generated recipe didn't parse: {e}\n\n{block}"));
-
-        let entry = config.recipes.get("build").expect("recipe written");
-        let definition = entry.run_recipe().expect("run section written");
+        let definition: crate::workspace::Workflow =
+            crate::format::from_str(&block, crate::format::Format::Yaml)
+                .unwrap_or_else(|e| panic!("generated workflow didn't parse: {e}\n\n{block}"));
         assert_eq!(definition.required_env, vec!["TARGET_TRIPLE".to_string()]);
         assert_eq!(definition.steps.len(), 1);
 
@@ -660,7 +555,8 @@ echo "api: built with LOG_LEVEL=${LOG_LEVEL:-info}"
             step.description.as_deref(),
             Some("Compile the service binary and package it for release")
         );
-        assert!(step.requires.contains(&"cargo".to_string()));
+        // Tools are declared once for the whole workflow rather than per step.
+        assert!(definition.requires.contains(&"cargo".to_string()));
 
         // The cache section is written but off: outputs are a decent guess,
         // inputs can't be inferred, and caching on wrong inputs serves stale
@@ -702,16 +598,11 @@ echo "api: built with LOG_LEVEL=${LOG_LEVEL:-info}"
                 description: Some(text.to_string()),
                 ..Default::default()
             };
-            let block = format!("recipies:\n{}", to_yaml("build", "s.sh", &analysis));
-            let config: CiabattaConfig =
+            let block = to_workflow_yaml("build", "s.sh", &analysis);
+            let workflow: crate::workspace::Workflow =
                 crate::format::from_str(&block, crate::format::Format::Yaml)
-                    .unwrap_or_else(|e| panic!("{text:?} broke the recipe: {e}\n\n{block}"));
-            assert_eq!(
-                config.recipes["build"].run_recipe().unwrap().steps[0]
-                    .description
-                    .as_deref(),
-                Some(text)
-            );
+                    .unwrap_or_else(|e| panic!("{text:?} broke the workflow: {e}\n\n{block}"));
+            assert_eq!(workflow.steps[0].description.as_deref(), Some(text));
         }
     }
 }

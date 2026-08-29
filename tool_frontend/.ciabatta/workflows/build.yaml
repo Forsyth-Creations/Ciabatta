@@ -1,0 +1,29 @@
+# The "build" workflow for frontend.
+#
+# Run it across the whole monorepo with `ciabatta build`, or just this
+# package with `ciabatta build --only frontend`. See the graph first with
+# `ciabatta build --graph`.
+
+description: "Build the frontend"
+owner: Henry Forsyth
+
+# Workflows in other sub-workspaces that must finish first. "other" means their
+# workflow of this same name; "other:generate" names a specific one.
+needs: []
+
+# Tools every step here needs on PATH. Missing ones are reported before anything
+# runs, with the install command from the root's `toolchain:` section.
+requires: []
+
+# REQUIRED_ENV: [API_TOKEN]   # refuse to start unless these are set
+# env_file: .env              # sourced before the run
+
+cache:
+  enabled: true
+  inputs:  ["src/**/*", "package.json"]
+  outputs: ["dist/**/*"]
+
+steps:
+  - name: build
+    description: "Build the frontend"
+    run: yarn build

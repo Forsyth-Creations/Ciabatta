@@ -24,11 +24,6 @@ pub struct LogSink<'a> {
 }
 
 impl<'a> LogSink<'a> {
-    /// A sink that only accumulates — no live forwarding.
-    pub fn buffered(lines: &'a mut Vec<String>) -> Self {
-        Self { lines, live: None }
-    }
-
     /// A sink that accumulates and forwards each line to `live` as it arrives.
     pub fn streaming(lines: &'a mut Vec<String>, live: UnboundedSender<String>) -> Self {
         Self {
@@ -308,7 +303,7 @@ pub fn registry_credentials(
     Some((user, pass))
 }
 
-/// The default `login` stage: used when a recipe defines neither a `login`
+/// The default `login` stage: used when a workflow defines neither a `login`
 /// override nor a registry `login_script`.
 ///
 /// Credentials come from `CIABATTA_<REGISTRY>_USER` / `_PASS`:
@@ -411,7 +406,7 @@ async fn docker_login(opts: &RegistryOpOptions<'_>, log: &mut Vec<String>) -> Re
 ///
 /// Used by the Docker/ECR push (retag a locally-built image to its remote
 /// repository reference before pushing) and pull (retag the pulled remote image
-/// back to the recipe's local name).
+/// back to the workflow's local name).
 pub(super) async fn tag_image(
     opts: &RegistryOpOptions<'_>,
     from: &str,
@@ -427,38 +422,6 @@ pub(super) async fn tag_image(
         return Ok(());
     }
     run_command(opts.container_cmd, &["tag", from, to], opts.env_vars, log).await
-}
-
-pub async fn run_script(
-    script: &str,
-    env_vars: &HashMap<String, String>,
-    sink: &mut LogSink<'_>,
-) -> Result<()> {
-    use std::process::Stdio;
-    use tokio::process::Command;
-
-    let mut command = Command::new("bash");
-    // Colour first, the caller's environment second: a script that sets
-    // `FORCE_COLOR=0` still means it.
-    color::request(&mut command);
-    let child = command
-        .arg(script)
-        .envs(env_vars)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .with_context(|| format!("Failed to spawn script '{script}'"))?;
-
-    let status = stream_child_output(child, sink).await?;
-
-    if !status.success() {
-        anyhow::bail!(
-            "Script '{}' failed with exit code {:?}",
-            script,
-            status.code()
-        );
-    }
-    Ok(())
 }
 
 /// Run an arbitrary shell command (`sh -c <cmd>`) from `cwd`, with the given

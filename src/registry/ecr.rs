@@ -45,7 +45,7 @@ pub async fn pull(opts: &RegistryOpOptions<'_>, log: &mut Vec<String>) -> Result
 }
 
 /// ECR auto-login via `aws ecr get-login-password`. Used as the default `login`
-/// stage when the recipe has no `login` override and the registry has no
+/// stage when the workflow has no `login` override and the registry has no
 /// `login_script`.
 pub(super) async fn ecr_login(opts: &RegistryOpOptions<'_>, log: &mut Vec<String>) -> Result<()> {
     if opts.dry_run {

@@ -1,6 +1,6 @@
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 pub const CIABATTA_DIR: &str = ".ciabatta";
@@ -60,14 +60,6 @@ pub struct CiabattaConfig {
     #[serde(default)]
     #[serde(skip_serializing_if = "HashMap::is_empty")]
     pub registries: HashMap<String, RegistryConfig>,
-    #[serde(rename = "recipies", default)]
-    #[serde(skip_serializing_if = "HashMap::is_empty")]
-    pub recipes: HashMap<String, RecipeEntry>,
-    /// Named menus. A menu groups recipes so they can be pushed/pulled together
-    /// with `--cookbook <menu>`; each value lists the recipe names it contains.
-    #[serde(default)]
-    #[serde(skip_serializing_if = "HashMap::is_empty")]
-    pub menus: HashMap<String, Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub analyze: Option<AnalyzeConfig>,
     /// Settings for the `ciabatta ai` assistant.
@@ -196,7 +188,7 @@ pub struct RegistryConfig {
     /// `url` is used as the full repository URL (backwards compatible).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub repository: Option<String>,
-    /// Nexus raw only: an optional path prefix prepended to every recipe's
+    /// Nexus raw only: an optional path prefix prepended to every workflow's
     /// `publish_path`, so raw artifacts land under a common folder.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub base_path: Option<String>,
@@ -269,40 +261,7 @@ impl RegistryConfig {
     }
 }
 
-/// A recipe: shared fields at the top level, with optional `push` / `pull`
-/// sub-tables that override those fields for one direction.
-///
-/// ```toml
-/// [recipies.frontend]
-/// registry = "nexus"            # shared by push and pull
-/// publish_path = "front/{CIABATTA_COMMIT}/dist"
-///
-///   [recipies.frontend.push]    # push-only stage overrides
-///   pre  = "python bundle.py"
-///   post = "./notify.sh"
-/// ```
-#[derive(Debug, Deserialize, Serialize, Clone, Default)]
-pub struct RecipeEntry {
-    /// Fields shared across both directions.
-    #[serde(flatten)]
-    pub base: SimpleRecipe,
-    /// Push-direction overrides (any field set here wins over `base`).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub push: Option<SimpleRecipe>,
-    /// Pull-direction overrides (any field set here wins over `base`).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub pull: Option<SimpleRecipe>,
-    /// Run-direction definition: a DAG of dependent script steps (usually in
-    /// a separate flowchart file). Unlike push/pull this is not a `SimpleRecipe`.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub run: Option<crate::run::RunRecipe>,
-    /// Cache settings for this recipe, overriding the workspace's. Most
-    /// projects set `cache:` once at the top level and never write this.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub cache: Option<crate::cache::CacheConfig>,
-}
-
-/// Where a recipe publishes to. Either a single remote path (the classic form,
+/// Where a workflow publishes to. Either a single remote path (the classic form,
 /// supporting `{CIABATTA_*}` substitution) or a list of local file globs whose
 /// matched files are uploaded under `{CIABATTA_PATH}` preserving their relative
 /// path (with `strip_prefix` removed from the front).
@@ -328,200 +287,6 @@ impl PublishPath {
             PublishPath::Many(v) => v.join(", "),
         }
     }
-}
-
-#[derive(Debug, Deserialize, Serialize, Clone, Default)]
-pub struct SimpleRecipe {
-    /// Named registry from [registries] section.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub registry: Option<String>,
-    /// Local filesystem path for the artifact.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub local_artifact_path: Option<String>,
-    /// Docker/ECR only: a local image reference (`name` or `name:tag`) to push.
-    /// ciabatta retags it to the registry's target reference before pushing
-    /// (`docker tag <local_image> <url>/<publish_path>`), and on pull retags the
-    /// pulled image back to this name. When set, `publish_path` is the remote
-    /// image reference; if omitted, the local reference is reused verbatim.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub local_image: Option<String>,
-    /// Destination path in the registry; supports {CIABATTA_*} variable
-    /// substitution, or a list of local file globs (see [`PublishPath`]).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub publish_path: Option<PublishPath>,
-    /// For list-form `publish_path`: a leading path fragment stripped from each
-    /// matched file's relative path before it's joined under `{CIABATTA_PATH}`.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub strip_prefix: Option<String>,
-    /// Path to a bash script to run instead of the built-in registry action.
-    /// Legacy alias for the `main` stage (kept for backwards compatibility).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub bash_script: Option<String>,
-
-    // ─── Stage overrides ────────────────────────────────────────────────────
-    // Each is an arbitrary shell command (bash, python, a compiled binary, …)
-    // run via `sh -c` with all CIABATTA_* / CI variables in its environment.
-    // When unset, the stage falls back to its built-in default.
-    /// Override the `login` stage (default: registry login_script or credentials).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub login: Option<String>,
-    /// Override the `pre-push` / `pre-pull` stage (default: no-op).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub pre: Option<String>,
-    /// Override the `push` / `pull` stage (default: the built-in registry action).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub main: Option<String>,
-    /// Override the `post-push` / `post-pull` stage (default: no-op).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub post: Option<String>,
-}
-
-impl SimpleRecipe {
-    /// Layer `over` on top of `self`: any field set in `over` wins, otherwise
-    /// the value from `self` (the shared base) is kept.
-    fn overlaid_with(&self, over: &SimpleRecipe) -> SimpleRecipe {
-        SimpleRecipe {
-            registry: over.registry.clone().or_else(|| self.registry.clone()),
-            local_artifact_path: over
-                .local_artifact_path
-                .clone()
-                .or_else(|| self.local_artifact_path.clone()),
-            local_image: over
-                .local_image
-                .clone()
-                .or_else(|| self.local_image.clone()),
-            publish_path: over
-                .publish_path
-                .clone()
-                .or_else(|| self.publish_path.clone()),
-            strip_prefix: over
-                .strip_prefix
-                .clone()
-                .or_else(|| self.strip_prefix.clone()),
-            bash_script: over
-                .bash_script
-                .clone()
-                .or_else(|| self.bash_script.clone()),
-            login: over.login.clone().or_else(|| self.login.clone()),
-            pre: over.pre.clone().or_else(|| self.pre.clone()),
-            main: over.main.clone().or_else(|| self.main.clone()),
-            post: over.post.clone().or_else(|| self.post.clone()),
-        }
-    }
-}
-
-impl RecipeEntry {
-    /// The effective recipe for the push direction (base + push overrides).
-    pub fn push_recipe(&self) -> SimpleRecipe {
-        match &self.push {
-            Some(over) => self.base.overlaid_with(over),
-            None => self.base.clone(),
-        }
-    }
-
-    /// The effective recipe for the pull direction, if pulling is supported.
-    ///
-    /// - An explicit `[recipe.pull]` table → base + pull overrides.
-    /// - A plain recipe with no push/pull tables → pulls using the shared base.
-    /// - A recipe with only a `push` table → no pull action.
-    pub fn pull_recipe(&self) -> Option<SimpleRecipe> {
-        match (&self.pull, &self.push) {
-            (Some(over), _) => Some(self.base.overlaid_with(over)),
-            (None, None) => Some(self.base.clone()),
-            (None, Some(_)) => None,
-        }
-    }
-
-    /// The run definition for this recipe, if it declares a `[run]`
-    /// sub-table. Runs are opt-in per recipe (no implicit default).
-    pub fn run_recipe(&self) -> Option<&crate::run::RunRecipe> {
-        self.run.as_ref()
-    }
-
-    /// Whether the push/pull direction has something to transfer or run. A recipe
-    /// needs a registry, a path/image to move, or a `main`/`bash_script` command;
-    /// with none of these the push runner has nothing to do and errors with
-    /// "no push/pull action".
-    pub fn has_transfer_action(&self) -> bool {
-        let push = self.push_recipe();
-        push.registry.is_some()
-            || push.publish_path.is_some()
-            || push.local_image.is_some()
-            || push.local_artifact_path.is_some()
-            || push.main.is_some()
-            || push.bash_script.is_some()
-    }
-
-    /// A recipe that declares a `[run]` section but has no push/pull transfer
-    /// action is run-only: it exists solely as a runnable task, so `ciabatta
-    /// push`/`pull` skips it rather than failing on "no push/pull action".
-    pub fn is_run_only(&self) -> bool {
-        self.run.is_some() && !self.has_transfer_action()
-    }
-}
-
-/// Resolve which recipes to run from `--cookbook` menu selections and explicitly
-/// named recipes.
-///
-/// - Neither given → every recipe (the "push all" default).
-/// - Each cookbook expands to the recipe names its menu lists.
-/// - Explicit recipe names are appended.
-///
-/// Results are de-duplicated in first-seen order, so a recipe shared by two
-/// selected menus (or named alongside a menu) runs once. Errors when a named
-/// menu is undefined or lists a recipe that doesn't exist.
-pub fn select_recipe_names(
-    config: &CiabattaConfig,
-    cookbooks: &[String],
-    recipes: &[String],
-) -> Result<Vec<String>> {
-    if cookbooks.is_empty() && recipes.is_empty() {
-        return Ok(config.recipes.keys().cloned().collect());
-    }
-
-    let mut names: Vec<String> = Vec::new();
-    let mut seen: HashSet<String> = HashSet::new();
-
-    for menu in cookbooks {
-        let members = config.menus.get(menu).ok_or_else(|| {
-            let mut available: Vec<&String> = config.menus.keys().collect();
-            available.sort();
-            let hint = if available.is_empty() {
-                "No menus are defined; add a [menus] section to ciabatta.toml.".to_string()
-            } else {
-                format!(
-                    "Available menus: {}.",
-                    available
-                        .iter()
-                        .map(|s| s.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                )
-            };
-            anyhow::anyhow!("Menu '{}' is not defined. {}", menu, hint)
-        })?;
-
-        for recipe in members {
-            if !config.recipes.contains_key(recipe) {
-                bail!(
-                    "Menu '{}' references recipe '{}', which is not defined in [recipies].",
-                    menu,
-                    recipe
-                );
-            }
-            if seen.insert(recipe.clone()) {
-                names.push(recipe.clone());
-            }
-        }
-    }
-
-    for recipe in recipes {
-        if seen.insert(recipe.clone()) {
-            names.push(recipe.clone());
-        }
-    }
-
-    Ok(names)
 }
 
 /// Walk up from `start` until a `.ciabatta` directory is found.
@@ -859,112 +624,20 @@ format = "maven"
     }
 
     #[test]
-    fn parses_stage_overrides_on_simple_recipe() {
-        let cfg = parse(
-            r#"
-[recipies.frontend]
-registry = "nexus"
-publish_path = "a/{CIABATTA_COMMIT}/b"
-pre = "python prep.py"
-post = "./notify.sh"
-"#,
-        );
-        let entry = &cfg.recipes["frontend"];
-        assert!(entry.push.is_none() && entry.pull.is_none());
-        let r = entry.push_recipe();
-        assert_eq!(r.pre.as_deref(), Some("python prep.py"));
-        assert_eq!(r.post.as_deref(), Some("./notify.sh"));
-        assert!(r.login.is_none() && r.main.is_none());
-    }
-
-    #[test]
-    fn shared_base_is_merged_with_push_overrides() {
-        // The schema users actually write: shared registry/publish_path at the
-        // top level, with a push-only stage override sub-table.
-        let cfg = parse(
-            r#"
-[recipies.frontend]
-registry = "nexus"
-publish_path = "front/{CIABATTA_COMMIT}/dist"
-
-[recipies.frontend.push]
-pre  = "python bundle.py"
-post = "./notify.sh"
-"#,
-        );
-        let entry = &cfg.recipes["frontend"];
-        let push = entry.push_recipe();
-        // Shared base survives into the push direction.
-        assert_eq!(push.registry.as_deref(), Some("nexus"));
-        assert_eq!(
-            push.publish_path,
-            Some(PublishPath::Single(
-                "front/{CIABATTA_COMMIT}/dist".to_string()
-            ))
-        );
-        // Push-only overrides are applied.
-        assert_eq!(push.pre.as_deref(), Some("python bundle.py"));
-        assert_eq!(push.post.as_deref(), Some("./notify.sh"));
-        // A push-only recipe has no pull action.
-        assert!(entry.pull_recipe().is_none());
-    }
-
-    #[test]
-    fn parses_local_image_and_overlays_it() {
-        let cfg = parse(
-            r#"
-[recipies.app]
-registry = "ecr"
-local_image = "app:latest"
-publish_path = "app:{CIABATTA_COMMIT}"
-
-[recipies.app.push]
-local_image = "app:release"
-"#,
-        );
-        let entry = &cfg.recipes["app"];
-        // Base value is visible on a plain read.
-        assert_eq!(entry.base.local_image.as_deref(), Some("app:latest"));
-        // Push override wins over the shared base.
-        assert_eq!(
-            entry.push_recipe().local_image.as_deref(),
-            Some("app:release")
-        );
-    }
-
-    #[test]
-    fn parses_pushpull_with_per_direction_stages() {
-        let cfg = parse(
-            r#"
-[recipies.app.push]
-main = "make push"
-post = "echo done"
-
-[recipies.app.pull]
-main = "make pull"
-"#,
-        );
-        let entry = &cfg.recipes["app"];
-        assert!(entry.push.is_some() && entry.pull.is_some());
-        assert_eq!(entry.push_recipe().main.as_deref(), Some("make push"));
-        assert_eq!(entry.push_recipe().post.as_deref(), Some("echo done"));
-        assert_eq!(
-            entry.pull_recipe().unwrap().main.as_deref(),
-            Some("make pull")
-        );
-    }
-
-    #[test]
     fn publish_path_parses_single_and_list_forms() {
         let single = parse(
             r#"
-[recipies.a]
+[workflows.release]
+[[workflows.release.steps]]
+name = "publish"
+kind = "push"
 registry = "nexus"
 publish_path = "team/app/{CIABATTA_COMMIT}/app.tar.gz"
 "#,
         );
+        let step = &single.workflows["release"].steps[0];
         assert_eq!(
-            single.recipes["a"].push_recipe().publish_path,
+            step.publish_path,
             Some(PublishPath::Single(
                 "team/app/{CIABATTA_COMMIT}/app.tar.gz".to_string()
             ))
@@ -972,21 +645,24 @@ publish_path = "team/app/{CIABATTA_COMMIT}/app.tar.gz"
 
         let list = parse(
             r#"
-[recipies.b]
+[workflows.release]
+[[workflows.release.steps]]
+name = "publish"
+kind = "push"
 registry = "nexus"
 publish_path = ["dist/*.tar.gz", "build/app.bin"]
 strip_prefix = "dist/"
 "#,
         );
-        let r = list.recipes["b"].push_recipe();
+        let step = &list.workflows["release"].steps[0];
         assert_eq!(
-            r.publish_path,
+            step.publish_path,
             Some(PublishPath::Many(vec![
                 "dist/*.tar.gz".to_string(),
                 "build/app.bin".to_string()
             ]))
         );
-        assert_eq!(r.strip_prefix.as_deref(), Some("dist/"));
+        assert_eq!(step.strip_prefix.as_deref(), Some("dist/"));
     }
 
     #[test]
@@ -1038,174 +714,6 @@ strip_prefix = "dist/"
     }
 
     #[test]
-    fn select_recipe_names_expands_menus_and_dedupes() {
-        let cfg = parse(
-            r#"
-[recipies.a]
-registry = "nexus"
-[recipies.b]
-registry = "nexus"
-[recipies.c]
-registry = "nexus"
-
-[menus]
-frontend = ["a", "b"]
-backend  = ["b", "c"]
-"#,
-        );
-
-        // No selection → all recipes (order-independent).
-        let mut all = select_recipe_names(&cfg, &[], &[]).unwrap();
-        all.sort();
-        assert_eq!(all, vec!["a", "b", "c"]);
-
-        // Single menu expands to its members, in order.
-        assert_eq!(
-            select_recipe_names(&cfg, &["frontend".into()], &[]).unwrap(),
-            vec!["a", "b"]
-        );
-
-        // Two menus sharing "b" run it once, first-seen order preserved.
-        assert_eq!(
-            select_recipe_names(&cfg, &["frontend".into(), "backend".into()], &[]).unwrap(),
-            vec!["a", "b", "c"]
-        );
-
-        // Menu + an explicit recipe already on the menu → no duplicate.
-        assert_eq!(
-            select_recipe_names(&cfg, &["frontend".into()], &["a".into()]).unwrap(),
-            vec!["a", "b"]
-        );
-
-        // Menu + a distinct explicit recipe → appended after the menu members.
-        assert_eq!(
-            select_recipe_names(&cfg, &["frontend".into()], &["c".into()]).unwrap(),
-            vec!["a", "b", "c"]
-        );
-    }
-
-    #[test]
-    fn select_recipe_names_rejects_bad_menus() {
-        let cfg = parse(
-            r#"
-[recipies.a]
-registry = "nexus"
-
-[menus]
-good = ["a"]
-broken = ["a", "missing"]
-"#,
-        );
-
-        // Undefined menu.
-        let err = select_recipe_names(&cfg, &["nope".into()], &[]).unwrap_err();
-        assert!(err.to_string().contains("is not defined"));
-        assert!(err.to_string().contains("Available menus: broken, good"));
-
-        // Menu that references a missing recipe.
-        let err = select_recipe_names(&cfg, &["broken".into()], &[]).unwrap_err();
-        assert!(err.to_string().contains("references recipe 'missing'"));
-    }
-
-    #[test]
-    fn parses_run_sub_table() {
-        let cfg = parse(
-            r#"
-[recipies.web]
-registry = "nexus"
-
-[recipies.web.run]
-flowchart = ".ciabatta/runs.toml"
-pre  = "scripts/notify.sh"
-
-[recipies.web.push]
-bash_script = "scripts/push.sh"
-"#,
-        );
-        let entry = &cfg.recipes["web"];
-        let run = entry.run_recipe().expect("run present");
-        assert_eq!(run.flowchart.as_deref(), Some(".ciabatta/runs.toml"));
-        assert_eq!(run.pre.as_deref(), Some("scripts/notify.sh"));
-        // Run coexists with a push action on the same recipe.
-        assert_eq!(
-            entry.push_recipe().bash_script.as_deref(),
-            Some("scripts/push.sh")
-        );
-    }
-
-    #[test]
-    fn is_run_only_distinguishes_pure_run_recipes() {
-        let cfg = parse(
-            r#"
-# Run-only: a [run] section and nothing to push/pull.
-[recipies.migrate.run]
-flowchart = ".ciabatta/runs.toml"
-
-# Run alongside a real push action → still pushable.
-[recipies.web]
-registry = "nexus"
-publish_path = "web/{CIABATTA_COMMIT}/dist"
-[recipies.web.run]
-flowchart = ".ciabatta/runs.toml"
-
-# A plain transfer recipe with no run → never run-only.
-[recipies.assets]
-registry = "nexus"
-
-# A command recipe (no registry/path) is a push action, not run-only.
-[recipies.script.run]
-flowchart = ".ciabatta/runs.toml"
-[recipies.script.push]
-main = "make ship"
-"#,
-        );
-
-        assert!(cfg.recipes["migrate"].is_run_only());
-        assert!(!cfg.recipes["web"].is_run_only());
-        assert!(!cfg.recipes["assets"].is_run_only());
-        assert!(!cfg.recipes["script"].is_run_only());
-    }
-
-    #[test]
-    fn parses_inline_run_steps() {
-        let cfg = parse(
-            r#"
-[recipies.svc.run]
-[[recipies.svc.run.steps]]
-name = "build"
-script = "b.sh"
-[[recipies.svc.run.steps]]
-name = "ship"
-run = "make ship"
-needs = ["build"]
-on_error = "fix"
-[[recipies.svc.run.steps]]
-name = "fix"
-recover = true
-options = [ { label = "retry", run = "true", default = true } ]
-"#,
-        );
-        let run = cfg.recipes["svc"].run_recipe().unwrap();
-        assert_eq!(run.steps.len(), 3);
-        assert_eq!(run.steps[1].on_error.as_deref(), Some("fix"));
-        assert!(run.steps[2].recover);
-        assert_eq!(run.steps[2].options[0].label, "retry");
-        assert!(run.steps[2].options[0].default);
-    }
-
-    #[test]
-    fn recipe_without_run_has_none() {
-        let cfg = parse(
-            r#"
-[recipies.a]
-registry = "nexus"
-publish_path = "x/y"
-"#,
-        );
-        assert!(cfg.recipes["a"].run_recipe().is_none());
-    }
-
-    #[test]
     fn infer_kind_respects_type_override() {
         let cfg = parse(
             r#"
@@ -1230,86 +738,90 @@ mod yaml_tests {
         crate::format::from_str(s, crate::format::Format::Yaml).expect("yaml config should parse")
     }
 
-    /// The schema leans on `#[serde(flatten)]` (a recipe's shared base) wrapped
+    /// The schema leans on `#[serde(flatten)]` (a workflow's shared base) wrapped
     /// around an untagged enum (`publish_path`, one path or a list of globs).
     /// That pairing is the one thing most likely to behave differently between
     /// the two parsers, so it gets a test of its own.
     #[test]
-    fn yaml_handles_flattened_bases_and_untagged_publish_paths() {
+    fn yaml_handles_transfer_steps_and_untagged_publish_paths() {
         let cfg = yaml(
             r#"
 registries:
   nexus:
     url: http://localhost:8527
     repository: raw-hosted
-recipies:
-  single:
-    registry: nexus
-    publish_path: team/app/{CIABATTA_COMMIT}/app.tar.gz
-    push:
-      pre: python bundle.py
-  many:
-    registry: nexus
-    publish_path:
-      - dist/*.tar.gz
-      - build/app.bin
-    strip_prefix: dist/
+workflows:
+  release:
+    steps:
+      - name: publish
+        kind: push
+        registry: nexus
+        artifact: dist/app.tar.gz
+        publish_path: team/app/{CIABATTA_COMMIT}/app.tar.gz
+      - name: publish-many
+        kind: push
+        registry: nexus
+        publish_path:
+          - dist/*.tar.gz
+          - build/app.bin
+        strip_prefix: dist/
+      - name: fetch
+        kind: pull
+        from: publish
 "#,
         );
 
-        let single = cfg.recipes["single"].push_recipe();
-        assert_eq!(single.registry.as_deref(), Some("nexus"));
+        let steps = &cfg.workflows["release"].steps;
+        assert_eq!(steps[0].registry.as_deref(), Some("nexus"));
+        assert_eq!(steps[0].artifact.as_deref(), Some("dist/app.tar.gz"));
         assert_eq!(
-            single.publish_path,
+            steps[0].publish_path,
             Some(PublishPath::Single(
                 "team/app/{CIABATTA_COMMIT}/app.tar.gz".to_string()
             ))
         );
-        assert_eq!(single.pre.as_deref(), Some("python bundle.py"));
-
-        let many = cfg.recipes["many"].push_recipe();
         assert_eq!(
-            many.publish_path,
+            steps[1].publish_path,
             Some(PublishPath::Many(vec![
                 "dist/*.tar.gz".to_string(),
                 "build/app.bin".to_string()
             ]))
         );
-        assert_eq!(many.strip_prefix.as_deref(), Some("dist/"));
+        assert_eq!(steps[1].strip_prefix.as_deref(), Some("dist/"));
+        assert_eq!(steps[2].from.as_deref(), Some("publish"));
     }
 
     /// `env_file`/`when`/`skip_if` accept one-or-many through a custom
     /// deserializer, and steps carry bools and ints with `#[serde(default)]`.
     #[test]
-    fn yaml_handles_run_steps_and_one_or_many_fields() {
+    fn yaml_handles_workflow_steps_and_one_or_many_fields() {
         let cfg = yaml(
             r#"
-recipies:
+workflows:
   svc:
-    run:
-      env_file: .env
-      REQUIRED_ENV: [API_URL]
-      steps:
-        - name: build
-          run: cargo build
-          retries: 2
-          tags: [fast]
-        - name: ship
-          run: make ship
-          needs: [build]
-          when:
-            - env.RUN_ENV == prod
-          persistent: false
+    env_file: .env
+    REQUIRED_ENV: [API_URL]
+    steps:
+      - name: build
+        run: cargo build
+        retries: 2
+        tags: [fast]
+      - name: ship
+        run: make ship
+        needs: [build]
+        when:
+          - env.RUN_ENV == prod
+        persistent: false
 "#,
         );
 
-        let run = cfg.recipes["svc"].run_recipe().expect("run present");
-        assert_eq!(run.env_file, vec![".env".to_string()]);
-        assert_eq!(run.required_env, vec!["API_URL".to_string()]);
-        assert_eq!(run.steps.len(), 2);
-        assert_eq!(run.steps[0].retries, 2);
-        assert_eq!(run.steps[1].when, vec!["env.RUN_ENV == prod".to_string()]);
-        assert_eq!(run.steps[1].needs, vec!["build".to_string()]);
+        let wf = &cfg.workflows["svc"];
+        assert_eq!(wf.env_file, vec![".env".to_string()]);
+        assert_eq!(wf.required_env, vec!["API_URL".to_string()]);
+        assert_eq!(wf.steps.len(), 2);
+        assert_eq!(wf.steps[0].retries, 2);
+        assert_eq!(wf.steps[1].when, vec!["env.RUN_ENV == prod".to_string()]);
+        assert_eq!(wf.steps[1].needs, vec!["build".to_string()]);
     }
 
     /// A config written in either format must produce the same value, or the
@@ -1322,7 +834,10 @@ recipies:
 name = "api"
 depends_on = ["proto:generate"]
 
-[recipies.app]
+[workflows.release]
+[[workflows.release.steps]]
+name = "publish"
+kind = "push"
 registry = "ecr"
 local_image = "app:latest"
 publish_path = "app:{CIABATTA_COMMIT}"
@@ -1336,11 +851,14 @@ publish_path = "app:{CIABATTA_COMMIT}"
 workspace:
   name: api
   depends_on: [proto:generate]
-recipies:
-  app:
-    registry: ecr
-    local_image: app:latest
-    publish_path: app:{CIABATTA_COMMIT}
+workflows:
+  release:
+    steps:
+      - name: publish
+        kind: push
+        registry: ecr
+        local_image: app:latest
+        publish_path: app:{CIABATTA_COMMIT}
 "#,
         );
 
@@ -1352,13 +870,9 @@ recipies:
             from_toml.workspace.as_ref().unwrap().depends_on,
             from_yaml.workspace.as_ref().unwrap().depends_on
         );
-        assert_eq!(
-            from_toml.recipes["app"].push_recipe().publish_path,
-            from_yaml.recipes["app"].push_recipe().publish_path
-        );
-        assert_eq!(
-            from_toml.recipes["app"].base.local_image,
-            from_yaml.recipes["app"].base.local_image
-        );
+        let toml_step = &from_toml.workflows["release"].steps[0];
+        let yaml_step = &from_yaml.workflows["release"].steps[0];
+        assert_eq!(toml_step.publish_path, yaml_step.publish_path);
+        assert_eq!(toml_step.local_image, yaml_step.local_image);
     }
 }

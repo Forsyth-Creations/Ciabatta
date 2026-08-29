@@ -1,4 +1,4 @@
-//! Run routes: execute a recipe DAG live, with fix-it branches.
+//! Run routes: execute a workflow DAG live, with fix-it branches.
 //!
 //! The daemon owns the run, so it survives the terminal that started it —
 //! the same change `watch` got, and it matters more here: a half-finished
@@ -29,13 +29,13 @@ use tokio::sync::{broadcast, mpsc};
 
 use crate::daemon::app::AppState;
 use crate::run::view::{GuiState, initial_state};
-use crate::runner::{self, RunCtl, RunMode, StepChoice};
+use crate::runner::{self, RunCtl, StepChoice};
 
 use super::{RouteError, RouteResult};
 
 pub fn router() -> Router<AppState> {
     Router::new()
-        .route("/api/run/recipes", get(recipes))
+        .route("/api/run/workflows", get(workflows))
         .route("/api/run/preflight", post(preflight))
         .route("/api/run/runs", get(list).post(create))
         .route("/api/run/runs/{id}", get(detail))
@@ -67,7 +67,7 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 pub struct Run {
     pub id: u64,
     pub project: String,
-    pub recipes: Vec<String>,
+    pub workflows: Vec<String>,
     pub created_at: String,
     pub state: Arc<Mutex<GuiState>>,
     /// Carries a browser's answer back to a waiting recovery step.
@@ -85,7 +85,7 @@ impl Run {
         json!({
             "id": self.id,
             "project": self.project,
-            "recipes": self.recipes,
+            "workflows": self.workflows,
             "created_at": self.created_at,
             "done": serde_json::to_value(&*state).ok().and_then(|v| v["done"].as_bool()).unwrap_or(false),
         })
@@ -138,10 +138,7 @@ pub struct ProjectQuery {
 #[derive(Deserialize)]
 pub struct CreatePayload {
     project: String,
-    /// Recipe names. Empty means every run-capable recipe.
-    #[serde(default)]
-    recipes: Vec<String>,
-    /// A monorepo workflow name to run instead of recipes. The daemon compiles
+    /// A monorepo workflow name to run instead of workflows. The daemon compiles
     /// the cross-workspace graph itself from the same declarations the CLI
     /// reads, so a browser-launched workflow can't drift from a terminal one.
     #[serde(default)]
@@ -168,7 +165,7 @@ pub struct CreatePayload {
 
 #[derive(Deserialize)]
 pub struct ChoosePayload {
-    recipe: String,
+    workflow: String,
     step: String,
     /// Index into the pending choice's `options`.
     option: usize,
@@ -176,31 +173,17 @@ pub struct ChoosePayload {
 
 // ─── Handlers ───────────────────────────────────────────────────────────────
 
-/// Which recipes a request targets: the ones it named, or every run-capable
-/// recipe when it named none — matching `select_run_names` on the CLI side.
-fn run_capable_names(config: &crate::config::CiabattaConfig, requested: &[String]) -> Vec<String> {
-    if !requested.is_empty() {
-        return requested.to_vec();
-    }
-    let mut all: Vec<String> = config
-        .recipes
-        .iter()
-        .filter(|(_, entry)| entry.run_recipe().is_some())
-        .map(|(name, _)| name.clone())
-        .collect();
-    all.sort();
-    all
-}
-
-/// The run-capable recipes in a project, for the launcher.
-async fn recipes(
+/// The workflows a project can run, for the launcher.
+async fn workflows(
     State(state): State<AppState>,
     axum::extract::Query(query): axum::extract::Query<ProjectQuery>,
 ) -> RouteResult<Json<Value>> {
     let root = state.project_root(&query.project)?;
-    let config = crate::config::load_config(&root)?;
+    let names = crate::workspace::Workspace::discover(&root)
+        .map(|ws| ws.workflow_names())
+        .unwrap_or_default();
 
-    Ok(Json(json!({ "recipes": run_capable_names(&config, &[]) })))
+    Ok(Json(json!({ "workflows": names })))
 }
 
 async fn list(State(state): State<AppState>) -> Json<Vec<Value>> {
@@ -213,10 +196,9 @@ async fn create(
     Json(payload): Json<CreatePayload>,
 ) -> RouteResult<Json<Value>> {
     let project_root = state.project_root(&payload.project)?;
-    let mut config = crate::config::load_config(&project_root)?;
+    let config = crate::config::load_config(&project_root)?;
 
-    // A workflow request compiles the monorepo graph and installs it as a
-    // single run-capable recipe; from there it's an ordinary run. It also runs
+    // A workflow request compiles the monorepo graph and runs it. It also runs
     // from the *monorepo* root rather than the registered project directory,
     // since every step's `cwd` is expressed relative to that.
     let workflows: Vec<String> = payload
@@ -226,9 +208,13 @@ async fn create(
         .chain(payload.workflows.iter().cloned())
         .collect();
 
-    let (root, names) = if workflows.is_empty() {
-        (project_root, run_capable_names(&config, &payload.recipes))
-    } else {
+    let (root, runs) = {
+        if workflows.is_empty() {
+            return Err(RouteError::bad_request(
+                "No workflow named. Pass `workflow` (or `workflows`) — \
+                 everything ciabatta runs is a workflow.",
+            ));
+        }
         let selection = crate::workspace::graph::Selection {
             only: payload.only.clone(),
             isolated: payload.isolated,
@@ -246,9 +232,11 @@ async fn create(
             crate::run::filter::apply(&graph.steps, &filters).map_err(RouteError::bad_request)?;
         graph.steps = steps;
 
-        let name = crate::workspace::graph::install_as_recipe(&mut config, graph);
-        (workspace.root, vec![name])
+        let name = graph.label();
+        let resolved = crate::workspace::graph::into_run(graph).map_err(RouteError::bad_request)?;
+        (workspace.root, vec![(name, resolved)])
     };
+    let names: Vec<String> = runs.iter().map(|(name, _)| name.clone()).collect();
 
     // Seed from the daemon's own environment, so a run started from the browser
     // sees what one started from a terminal would (`build_env_vars` does the
@@ -260,14 +248,14 @@ async fn create(
     // environment goes in with it, so the view can show each step's variables
     // alongside the step itself.
     let gui_state = Arc::new(Mutex::new(
-        initial_state(&config, &root, &names, payload.dry_run, &env)
+        initial_state(&config, &root, &runs, payload.dry_run, &env)
             .map_err(RouteError::bad_request)?,
     ));
 
     // Pre-flight the environment rather than spawning a run that would only
     // abort at the engine's `REQUIRED_ENV` gate. 422 carries the variable names
     // so the launcher can prompt for them and post again.
-    let missing = missing_env(&config, &root, &names, &env)?;
+    let missing = missing_env(&root, &runs, &env)?;
     if !missing.is_empty() {
         return Err(RouteError::missing_env(&missing));
     }
@@ -278,7 +266,7 @@ async fn create(
     let run = state.runs.insert(Run {
         id: state.runs.next_id(),
         project: payload.project,
-        recipes: names.clone(),
+        workflows: names.clone(),
         created_at: chrono::Local::now().to_rfc3339(),
         state: gui_state.clone(),
         choices: choice_tx.clone(),
@@ -290,7 +278,7 @@ async fn create(
     tracing::info!(
         run = id,
         root = %root.display(),
-        recipes = ?names,
+        workflows = ?names,
         dry_run = payload.dry_run,
         "starting run"
     );
@@ -316,8 +304,10 @@ async fn create(
                 // step it died in.
                 trace(id, &update);
                 match &update {
-                    runner::ProgressUpdate::Completed(recipe)
-                    | runner::ProgressUpdate::Failed(recipe, _) => reported.push(recipe.clone()),
+                    runner::ProgressUpdate::Completed(workflow)
+                    | runner::ProgressUpdate::Failed(workflow, _) => {
+                        reported.push(workflow.clone())
+                    }
                     _ => {}
                 }
                 lock(&gui_state).apply(update);
@@ -325,7 +315,7 @@ async fn create(
                 changed.notify_waiters();
             }
 
-            // The senders are gone: nothing further can arrive. A recipe with no
+            // The senders are gone: nothing further can arrive. A workflow with no
             // verdict by now will never get one — its task died without
             // reporting, which is what a panic inside the engine looks like from
             // out here. Saying so is the difference between a run that shows an
@@ -341,7 +331,7 @@ async fn create(
                     .unwrap_or_else(|| "the run stopped without reporting why".to_string());
                 tracing::error!(
                     run = id,
-                    recipes = ?orphaned,
+                    workflows = ?orphaned,
                     "the run ended without a verdict: {reason}"
                 );
                 for name in orphaned {
@@ -369,13 +359,13 @@ async fn create(
         // `catch_unwind` for a panic in the engine's own frame; tokio turns a
         // panic in a task the engine spawned into an `Err` instead, so both
         // shapes have to be handled to end up with one explanation.
-        let outcome = std::panic::AssertUnwindSafe(runner::run_all_ctl(
+        let outcome = std::panic::AssertUnwindSafe(runner::run_workflow_ctl(
+            &runs[0].0,
+            &runs[0].1,
             &config,
             &root,
-            &names,
             &env,
             payload.dry_run,
-            RunMode::Run,
             ctl,
             progress_tx,
         ))
@@ -406,7 +396,7 @@ async fn create(
             }
         };
 
-        // For the fold task to hand to any recipe the engine never reported on.
+        // For the fold task to hand to any workflow the engine never reported on.
         // Set before this task ends, because ending is what closes the channel
         // and sends the fold task looking for it.
         *lock(&stopped) = Some(reason);
@@ -424,69 +414,67 @@ async fn create(
 fn trace(run: u64, update: &runner::ProgressUpdate) {
     use runner::ProgressUpdate as P;
     match update {
-        P::Started(recipe) => tracing::info!(run, %recipe, "recipe started"),
-        P::StageStarted { recipe, stage } => {
-            tracing::info!(run, %recipe, stage = ?stage, "stage started")
+        P::Started(workflow) => tracing::info!(run, %workflow, "workflow started"),
+        P::StageStarted { workflow, stage } => {
+            tracing::info!(run, %workflow, stage = ?stage, "stage started")
         }
-        P::StageFinished { recipe, stage, ran } => {
-            tracing::debug!(run, %recipe, stage = ?stage, ran, "stage finished")
+        P::StageFinished {
+            workflow,
+            stage,
+            ran,
+        } => {
+            tracing::debug!(run, %workflow, stage = ?stage, ran, "stage finished")
         }
         P::TransferProgress {
-            recipe,
+            workflow,
             done,
             total,
-        } => tracing::debug!(run, %recipe, done, total, "transfer progress"),
-        P::Log(recipe, line) => tracing::debug!(run, %recipe, "{line}"),
-        P::StepStarted { recipe, step } => tracing::info!(run, %recipe, %step, "step started"),
-        P::StepFinished { recipe, step, ok } => {
+        } => tracing::debug!(run, %workflow, done, total, "transfer progress"),
+        P::Log(workflow, line) => tracing::debug!(run, %workflow, "{line}"),
+        P::StepStarted { workflow, step } => tracing::info!(run, %workflow, %step, "step started"),
+        P::StepFinished { workflow, step, ok } => {
             if *ok {
-                tracing::info!(run, %recipe, %step, "step finished")
+                tracing::info!(run, %workflow, %step, "step finished")
             } else {
-                tracing::warn!(run, %recipe, %step, "step failed")
+                tracing::warn!(run, %workflow, %step, "step failed")
             }
         }
         P::StepSkipped {
-            recipe,
+            workflow,
             step,
             reason,
-        } => tracing::info!(run, %recipe, %step, %reason, "step skipped"),
-        P::StepLog { recipe, step, line } => tracing::debug!(run, %recipe, %step, "{line}"),
+        } => tracing::info!(run, %workflow, %step, %reason, "step skipped"),
+        P::StepLog {
+            workflow,
+            step,
+            line,
+        } => tracing::debug!(run, %workflow, %step, "{line}"),
         P::StepNeedsChoice {
-            recipe,
+            workflow,
             step,
             message,
             ..
-        } => tracing::info!(run, %recipe, %step, %message, "step is waiting for a choice"),
-        P::Completed(recipe) => tracing::info!(run, %recipe, "recipe completed"),
-        P::Failed(recipe, err) => tracing::error!(run, %recipe, "recipe failed: {err}"),
+        } => tracing::info!(run, %workflow, %step, %message, "step is waiting for a choice"),
+        P::Completed(workflow) => tracing::info!(run, %workflow, "workflow completed"),
+        P::Failed(workflow, err) => tracing::error!(run, %workflow, "workflow failed: {err}"),
     }
 }
 
-/// Every variable the named recipes need before they can start, given `env`.
+/// Every variable the named workflows need before they can start, given `env`.
 ///
-/// The union across recipes, de-duplicated and in the order the launcher should
+/// The union across workflows, de-duplicated and in the order the launcher should
 /// ask for them. Empty means the run is ready to go. Runs the same
 /// [`crate::run::prepare_env`] the engine does, so the two can't disagree about
 /// what's missing.
 fn missing_env(
-    config: &crate::config::CiabattaConfig,
     root: &std::path::Path,
-    names: &[String],
+    runs: &[(String, crate::run::ResolvedRun)],
     env: &HashMap<String, String>,
 ) -> RouteResult<Vec<String>> {
     let mut missing: Vec<String> = Vec::new();
-    for name in names {
-        let entry = config
-            .recipes
-            .get(name)
-            .ok_or_else(|| RouteError::bad_request(format!("Recipe '{name}' not found")))?;
-        let recipe = entry.run_recipe().ok_or_else(|| {
-            RouteError::bad_request(format!("Recipe '{name}' has no [run] definition"))
-        })?;
-        let resolved =
-            crate::run::resolve_run(recipe, name, root).map_err(RouteError::bad_request)?;
+    for (_, resolved) in runs {
         let prepared =
-            crate::run::prepare_env(&resolved, root, env).map_err(RouteError::bad_request)?;
+            crate::run::prepare_env(resolved, root, env).map_err(RouteError::bad_request)?;
         for var in prepared.missing() {
             if !missing.contains(&var) {
                 missing.push(var);
@@ -502,15 +490,36 @@ async fn preflight(
     State(state): State<AppState>,
     Json(payload): Json<CreatePayload>,
 ) -> RouteResult<Json<Value>> {
-    let root = state.project_root(&payload.project)?;
-    let config = crate::config::load_config(&root)?;
-    let names = run_capable_names(&config, &payload.recipes);
+    let project_root = state.project_root(&payload.project)?;
+
+    let workflows: Vec<String> = payload
+        .workflow
+        .iter()
+        .cloned()
+        .chain(payload.workflows.iter().cloned())
+        .collect();
+    if workflows.is_empty() {
+        return Err(RouteError::bad_request(
+            "No workflow named. Pass `workflow` (or `workflows`).",
+        ));
+    }
+
+    let selection = crate::workspace::graph::Selection {
+        only: payload.only.clone(),
+        isolated: payload.isolated,
+    };
+    let (workspace, graph) =
+        crate::workspace::graph::prepare_many(&project_root, &workflows, &selection)
+            .map_err(RouteError::bad_request)?;
+    let name = graph.label();
+    let resolved = crate::workspace::graph::into_run(graph).map_err(RouteError::bad_request)?;
+    let runs = vec![(name, resolved)];
 
     let mut env: HashMap<String, String> = std::env::vars().collect();
     env.extend(payload.env.clone());
 
     Ok(Json(
-        json!({ "missing_env": missing_env(&config, &root, &names, &env)? }),
+        json!({ "missing_env": missing_env(&workspace.root, &runs, &env)? }),
     ))
 }
 
@@ -559,7 +568,7 @@ async fn choose(
     // run finished. That's a stale click, not a server fault.
     run.choices
         .send(StepChoice {
-            recipe: payload.recipe,
+            workflow: payload.workflow,
             step: payload.step,
             option: payload.option,
         })
@@ -623,41 +632,39 @@ mod tests {
             .collect()
     }
 
-    #[test]
-    fn missing_env_reports_the_union_across_recipes_once() {
-        let config: crate::config::CiabattaConfig = toml::from_str(
-            r#"
-[recipies.web.run]
-REQUIRED_ENV = ["API_TOKEN", "REGION"]
-[[recipies.web.run.steps]]
-name = "build"
-run = "true"
+    /// A run built straight from a required-variable list, for the gate below.
+    fn run_needing(vars: &[&str]) -> crate::run::ResolvedRun {
+        crate::run::ResolvedRun {
+            required_env: vars.iter().map(|v| v.to_string()).collect(),
+            steps: vec![crate::run::RunStep {
+                name: "build".into(),
+                run: Some("true".into()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
 
-[recipies.api.run]
-REQUIRED_ENV = ["REGION", "STAGE"]
-[[recipies.api.run.steps]]
-name = "ship"
-run = "true"
-"#,
-        )
-        .expect("config parses");
+    #[test]
+    fn missing_env_reports_the_union_across_runs_once() {
         let root = std::path::Path::new("/proj");
-        let names = vec!["web".to_string(), "api".to_string()];
+        let runs = vec![
+            ("web".to_string(), run_needing(&["API_TOKEN", "REGION"])),
+            ("api".to_string(), run_needing(&["REGION", "STAGE"])),
+        ];
 
         // REGION is required by both but asked for once, in first-seen order.
-        let missing = missing_env(&config, root, &names, &env_map(&[])).unwrap();
+        let missing = missing_env(root, &runs, &env_map(&[])).unwrap();
         assert_eq!(missing, vec!["API_TOKEN", "REGION", "STAGE"]);
 
         // Values already in the environment aren't asked for.
-        let missing =
-            missing_env(&config, root, &names, &env_map(&[("REGION", "us-east-1")])).unwrap();
+        let missing = missing_env(root, &runs, &env_map(&[("REGION", "us-east-1")])).unwrap();
         assert_eq!(missing, vec!["API_TOKEN", "STAGE"]);
 
         // Everything supplied → nothing to prompt for, so the run may start.
         let missing = missing_env(
-            &config,
             root,
-            &names,
+            &runs,
             &env_map(&[("API_TOKEN", "t"), ("REGION", "r"), ("STAGE", "s")]),
         )
         .unwrap();
@@ -714,12 +721,12 @@ run = "true"
     }
 
     #[tokio::test]
-    async fn listing_recipes_rejects_an_unknown_project() {
+    async fn listing_workflows_rejects_an_unknown_project() {
         let app = router(test_state());
         let response = app
             .oneshot(
                 Request::builder()
-                    .uri("/api/run/recipes?project=nope")
+                    .uri("/api/run/workflows?project=nope")
                     .header(header::AUTHORIZATION, "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),

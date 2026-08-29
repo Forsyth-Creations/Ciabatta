@@ -99,7 +99,7 @@ function PlanTab({ projectId }: { projectId: string }) {
           onChange={(event) => setTarget(event.target.value)}
           sx={{ minWidth: 220 }}
         >
-          <MenuItem value="">Every runnable recipe</MenuItem>
+          <MenuItem value="">Every runnable workflow</MenuItem>
           {workflows.map((name) => (
             <MenuItem key={name} value={name}>
               {name}

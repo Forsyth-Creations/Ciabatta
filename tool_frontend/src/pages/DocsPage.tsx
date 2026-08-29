@@ -186,10 +186,10 @@ const ENDPOINTS: EndpointGroup[] = [
     name: "Run",
     scoped: true,
     endpoints: [
-      { method: "GET", path: "/api/run/recipes", note: "Recipe names declared in this project." },
+      { method: "GET", path: "/api/run/workflows", note: "Workflow names this project can run." },
       { method: "POST", path: "/api/run/preflight", note: "What a start would need, without starting it." },
       { method: "GET", path: "/api/run/runs", note: "Runs the daemon owns." },
-      { method: "POST", path: "/api/run/runs", note: "Start recipes, or workflows (workflows: [], plus filter: []). 422 lists missing_env." },
+      { method: "POST", path: "/api/run/runs", note: "Start a workflow (workflow, or workflows: [], plus filter: []). 422 lists missing_env." },
       { method: "GET", path: "/api/run/runs/{id}", note: "Current state of every step." },
       { method: "GET", path: "/api/run/runs/{id}/stream", note: "SSE. Step transitions and log lines as they happen." },
       { method: "POST", path: "/api/run/runs/{id}/choose", note: "Answer a step that is waiting on a decision." },
@@ -307,11 +307,11 @@ const COMMANDS: CommandGroup[] = [
   {
     name: "Running things",
     blurb:
-      "One command runs everything. A target is a workflow (declared in a package) or a recipe (declared in a config) — they compile to the same graph and run through the same engine, so which one you have is a matter of where it was written down.",
+      "One command runs everything, because there is only one thing to run. A workflow is a named DAG of steps; every package that declares that name joins in, and the whole thing compiles to a single graph.",
     commands: [
       {
-        usage: "ciabatta run [TARGET…]",
-        note: "Run workflows and/or recipes as one graph, in dependency order. With no target, runs every run-capable recipe in the project.",
+        usage: "ciabatta <WORKFLOW> [ALSO…]",
+        note: "Compile every package's workflow of that name into one graph and run it in dependency order. Naming several folds them into the same graph, so shared dependencies run once.",
         flags: [
           ["--filter TERM", "Run only the steps this selects. Repeatable. See below."],
           ["--graph", "Explore the resolved graph interactively and run nothing."],
@@ -344,7 +344,7 @@ const COMMANDS: CommandGroup[] = [
     commands: [
       {
         usage: "ciabatta list",
-        note: "Every sub-workspace, its workflows, their owners and what they need — plus this project's recipes.",
+        note: "Every sub-workspace, its workflows, their owners and what they need.",
         flags: [
           ["-s TERM", "Search names, descriptions, owners, tags, and the commands steps run."],
           ["-v", "Also list every step inside each workflow."],
@@ -384,26 +384,32 @@ const COMMANDS: CommandGroup[] = [
       },
       {
         usage: "ciabatta init",
-        note: "A publishing-only config in the current directory — registries and recipes, no workspace identity.",
+        note: "A publishing-only config in the current directory — registries, no workspace identity.",
       },
       { usage: "ciabatta configure", note: "Set up registries interactively." },
+      {
+        usage: "ciabatta register",
+        note: "Tell the daemon this checkout exists, so it appears in the project switcher. Every web-facing command does this for the directory it ran in, and `init` does it for a new one — this is for a checkout nothing has been run in yet.",
+        flags: [
+          ["--path DIR", "Register that directory instead of the current one."],
+          ["--quiet", "Print just the project id, for a script."],
+        ],
+      },
     ],
   },
   {
     name: "Publishing",
     blurb:
-      "Push and pull are also available as graph steps (`kind = \"push\"`), which is the better way — a publish step can't run before the artifact exists.",
+      "Publishing is a step, not a command. A step with kind: push moves an artifact to a registry; it sits on the graph, declares what it needs, and so cannot run before the artifact exists.",
     commands: [
       {
-        usage: "ciabatta push [RECIPE…]",
-        note: "Publish recipes in parallel; all of them if none are named.",
+        usage: "ciabatta <WORKFLOW> --filter kind:push",
+        note: "Run only the transfer steps of a workflow, skipping the builds that feed them.",
         flags: [
-          ["--cookbook MENU", "Push the recipes grouped under a menu."],
-          ["--dry-run", "Show what would happen."],
+          ["--dry-run", "Show what would move, and where, without moving it."],
           ["--local", "Resolve CIABATTA_* from local git rather than CI."],
         ],
       },
-      { usage: "ciabatta pull [RECIPE…]", note: "Download the artifacts instead." },
       {
         usage: "ciabatta source",
         note: 'Print the resolved CIABATTA_* variables as shell exports: eval "$(ciabatta source)".',
@@ -599,10 +605,11 @@ ciabatta daemon stop             # ask it to exit`}</Pre>
           remains the exhaustive list for any one command.
         </P>
         <Alert severity="success" sx={{ mb: 2, maxWidth: "78ch" }}>
-          <strong>There is no difference between a workflow and a run.</strong> A workflow is
-          declared in a package&apos;s <C>.ciabatta/workflows/</C>, a recipe in a{" "}
-          <C>ciabatta.yaml</C>; both are targets for <C>ciabatta run</C>, and both take the same
-          flags. Name several and they compile into one graph rather than running in sequence.
+          <strong>Everything is a workflow.</strong> A workflow is a named DAG of steps, declared
+          in a package&apos;s <C>.ciabatta/workflows/&lt;name&gt;.yaml</C> — the filename is the
+          name. Running it collects every package that declares that name, follows the
+          dependencies between them, and runs the result as one graph. Publishing an artifact is a
+          step on that graph (<C>kind: push</C>), not a separate command.
         </Alert>
         <CommandReference />
 
@@ -844,13 +851,13 @@ ciabatta run test --filter tag:fast --filter tag:smoke   # either one`}</Pre>
     body: (
       <>
         <P>
-          Executes a step DAG live. Pick recipes (or arrive from Workspace with a compiled
-          workflow), optionally tick <strong>dry run</strong>, and start. The daemon owns the run,
+          Executes a step DAG live. Pick a workflow (or arrive from Workspace with one already
+          compiled), optionally tick <strong>dry run</strong>, and start. The daemon owns the run,
           so it keeps going with the tab closed.
         </P>
         <SubHeading>Missing environment</SubHeading>
         <P>
-          If a recipe declares variables the daemon&apos;s environment lacks, the start is rejected
+          If a workflow declares variables the daemon&apos;s environment lacks, the start is rejected
           with the list rather than begun and aborted halfway. The launcher prompts for those values
           and retries — nothing half-executes because a variable was unset.
         </P>
@@ -892,9 +899,17 @@ ciabatta run test --filter tag:fast --filter tag:smoke   # either one`}</Pre>
           is one line — and it is the same line where you say what your inputs are, which is the
           part that actually has to be right.
         </P>
-        <Pre>{`ciabatta cache init            # propose inputs and outputs from the directory
+        <Pre>{`ciabatta cache init build      # propose inputs and outputs for the \`build\` workflow
 ciabatta dry-run build         # what would be reused, and why not
 ciabatta dry-run build --diff  # ...with the lines that changed`}</Pre>
+        <P>
+          The section lands in <C>.ciabatta/workflows/&lt;name&gt;.yaml</C>, next to the steps it
+          describes — what a build reads is a property of that build, and a <C>build</C> and a{" "}
+          <C>test</C> in one package read different files. A step can narrow it further with its
+          own <C>cache:</C>, layered over the workflow&apos;s field by field. The shared cache
+          server stays in <C>ciabatta.yaml</C>: that&apos;s one endpoint per checkout, not a
+          property of any one build.
+        </P>
 
         <SubHeading>Three dependencies</SubHeading>
         <P>
@@ -928,6 +943,183 @@ ciabatta dry-run build --diff  # ...with the lines that changed`}</Pre>
           generated file. So the outputs are hashed too, and a mismatch is a restore or a rebuild —
           the difference between &ldquo;we think this is current&rdquo; and &ldquo;this is
           current&rdquo;.
+        </P>
+      </>
+    ),
+  },
+  {
+    id: "cache-config",
+    title: "Configuring the cache",
+    body: (
+      <>
+        <P>
+          Cache settings live <strong>with the workflow they describe</strong>, in{" "}
+          <C>.ciabatta/workflows/&lt;name&gt;.yaml</C>, next to the steps. What a build reads is a
+          property of that build: a <C>build</C> and a <C>test</C> in the same package read
+          different files and produce different things, and they need to be able to say so
+          separately.
+        </P>
+        <Pre>{`# packages/api/.ciabatta/workflows/build.yaml
+description: Build the api binary
+
+cache:
+  enabled: true
+  inputs:  ["src/**/*", "Cargo.toml"]   # what the build READS
+  outputs: ["target/release/api"]       # what the build WRITES
+  exclude: [target]                     # never counted as an input
+  env:     [PROFILE]                    # variables the RESULT depends on
+
+steps:
+  - name: compile
+    run: cargo build --release`}</Pre>
+
+        <SubHeading>The five fields</SubHeading>
+        <Box sx={{ overflowX: "auto", mb: 2 }}>
+          <Table size="small" sx={{ minWidth: 620 }}>
+            <TableHead>
+              <TableRow>
+                <TableCell sx={{ width: 110 }}>Field</TableCell>
+                <TableCell>What it means</TableCell>
+              </TableRow>
+            </TableHead>
+            <TableBody>
+              <TableRow hover>
+                <TableCell>
+                  <C>enabled</C>
+                </TableCell>
+                <TableCell>
+                  Whether to cache at all. Off unless something says otherwise — see the layering
+                  rule below, which is why this is three-state rather than a plain boolean.
+                </TableCell>
+              </TableRow>
+              <TableRow hover>
+                <TableCell>
+                  <C>inputs</C>
+                </TableCell>
+                <TableCell>
+                  Globs for the files the build reads, relative to the package directory. Changing
+                  any of them changes the key, and so rebuilds. This is the field that has to be
+                  right.
+                </TableCell>
+              </TableRow>
+              <TableRow hover>
+                <TableCell>
+                  <C>outputs</C>
+                </TableCell>
+                <TableCell>
+                  Globs for what the build writes. These are what gets stored, restored on a hit,
+                  and verified before a hit is granted. Declare none and nothing can be restored,
+                  so every build runs.
+                </TableCell>
+              </TableRow>
+              <TableRow hover>
+                <TableCell>
+                  <C>env</C>
+                </TableCell>
+                <TableCell>
+                  Variables the <em>result</em> depends on. A build that produces something
+                  different under a different <C>PROFILE</C> must list it, or switching profiles
+                  will silently reuse the other one&apos;s artifacts.
+                </TableCell>
+              </TableRow>
+              <TableRow hover>
+                <TableCell>
+                  <C>exclude</C>
+                </TableCell>
+                <TableCell>
+                  Patterns never treated as inputs even when <C>inputs</C> would match them. The
+                  usual case is build output living under a source tree — without it, a build
+                  invalidates itself with its own results and never hits twice. A bare directory
+                  name is enough: <C>exclude: [target]</C> covers everything under it, no{" "}
+                  <C>/**/*</C> required.
+                </TableCell>
+              </TableRow>
+            </TableBody>
+          </Table>
+        </Box>
+
+        <SubHeading>Narrowing it for one step</SubHeading>
+        <P>
+          A step can declare its own <C>cache:</C>, layered over the workflow&apos;s{" "}
+          <strong>field by field</strong> — so it states only what differs and inherits the rest:
+        </P>
+        <Pre>{`cache:
+  enabled: true
+  inputs:  ["src/**/*"]
+  outputs: ["dist/**/*"]
+
+steps:
+  - name: compile
+    run: make
+
+  - name: docs
+    run: make docs
+    cache:
+      inputs: ["docs/**/*"]   # its own sources…
+      # …and it still inherits outputs, env and exclude from above`}</Pre>
+        <P>
+          A list that a step <em>does</em> declare replaces the inherited one whole. Half-merged
+          input globs would be very hard to reason about, and reasoning about exactly which files a
+          build is judged on is the entire point.
+        </P>
+        <P>
+          Two asymmetries worth knowing, because both are easy to assume the other way around:{" "}
+          <C>exclude</C> filters <strong>inputs only</strong> — applying it to outputs would erase
+          the very files a hit is supposed to restore. And in a monorepo, a nested sub-workspace is
+          dropped from its parent&apos;s inputs automatically, so a package does not rebuild every
+          time one of its children changes.
+        </P>
+        <Alert severity="info" sx={{ mb: 2, maxWidth: "78ch" }}>
+          <strong>
+            Declaring a dependency never turns caching on or off — only an explicit{" "}
+            <C>enabled:</C> does.
+          </strong>{" "}
+          A step that writes <C>cache: {"{ env: [PROFILE] }"}</C> means &ldquo;I also depend on
+          PROFILE&rdquo;, not &ldquo;stop caching me&rdquo;. The most specific explicit{" "}
+          <C>enabled:</C> wins, so one step still opts out with <C>enabled: false</C>.
+        </Alert>
+        <P>
+          There is a third, outermost level: a <C>cache:</C> in the package&apos;s{" "}
+          <C>ciabatta.yaml</C> applies underneath every workflow in it. It is the right home for
+          something genuinely repo-wide — a shared <C>exclude</C>, say — and the wrong home for
+          inputs and outputs, which differ per build.
+        </P>
+
+        <SubHeading>Letting ciabatta write it</SubHeading>
+        <P>
+          The proposal comes from the directory&apos;s real contents rather than a template,
+          because an empty <C>inputs</C> is the one failure mode that produces wrong answers rather
+          than slow ones:
+        </P>
+        <Pre>{`ciabatta cache init build          # scaffold it for the \`build\` workflow
+ciabatta cache init build --enable   # …and turn it on straight away`}</Pre>
+        <P>
+          With one workflow in the package the name is optional. With several you name the one you
+          mean — guessing would write one build&apos;s file list into another&apos;s.{" "}
+          <C>cache init</C> refuses to enable a proposal whose inputs or outputs are still{" "}
+          <C>TODO</C>, because caching that can never hit reads as the feature being broken.
+        </P>
+
+        <SubHeading>What does not go here</SubHeading>
+        <P>
+          The shared cache <em>server</em> stays in <C>ciabatta.yaml</C>. It is one endpoint per
+          checkout, not a property of any one build, and repeating it in four workflow files would
+          be four places to change when the server moves.
+        </P>
+        <Pre>{`# .ciabatta/ciabatta.yaml
+cache:
+  remote:
+    url: http://cache.example.com:8380
+    project: 7f3a-…        # assigned on first contact — commit this`}</Pre>
+
+        <SubHeading>Checking you got it right</SubHeading>
+        <P>
+          Do not take the config&apos;s word for it. The <Link to="/cache">Cache page</Link> shows,
+          per step, the decision it reached and the exact input files it was judged on — so an{" "}
+          <C>inputs</C> glob that quietly matches nothing is visible rather than inferred. The same
+          view hangs off each node of the <Link to="/workspace">workflow graph</Link>. From a
+          terminal, <C>ciabatta dry-run &lt;workflow&gt;</C> prints the same answer and{" "}
+          <C>--diff</C> adds the lines that changed.
         </P>
       </>
     ),

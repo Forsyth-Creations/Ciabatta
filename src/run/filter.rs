@@ -343,7 +343,7 @@ mod tests {
             RunStep {
                 name: "web:publish".into(),
                 kind: Some("push".into()),
-                recipe: Some("bundle".into()),
+                registry: Some("nexus".into()),
                 workspace: Some("web".into()),
                 needs: vec!["api:compile".into()],
                 tags: vec!["frontend".into()],

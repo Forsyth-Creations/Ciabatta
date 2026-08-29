@@ -65,7 +65,7 @@ pub fn scan_manifests(root: &Path, builder: &mut GraphBuilder, cache: &mut Cache
     Ok(())
 }
 
-/// Scan shell scripts referenced by the ciabatta config (recipe `bash_script`,
+/// Scan shell scripts referenced by the ciabatta config (workflow `bash_script`,
 /// stage commands ending in `.sh`, and registry `login_script`) that weren't
 /// already picked up by the directory sweep.
 pub fn scan_config_scripts(
@@ -194,20 +194,13 @@ fn config_script_paths(cfg: &CiabattaConfig) -> Vec<String> {
             push(script);
         }
     }
-    for entry in cfg.recipes.values() {
-        let mut recipes = vec![entry.push_recipe()];
-        if let Some(pull) = entry.pull_recipe() {
-            recipes.push(pull);
-        }
-        for recipe in recipes {
-            if let Some(s) = &recipe.bash_script {
+    for workflow in cfg.workflows.values() {
+        for step in &workflow.steps {
+            if let Some(s) = &step.script {
                 push(s);
             }
-            // Stage commands may invoke a script, e.g. `./scripts/push.sh`.
-            for cmd in [&recipe.login, &recipe.pre, &recipe.main, &recipe.post]
-                .into_iter()
-                .flatten()
-            {
+            // An inline command may invoke a script, e.g. `./scripts/push.sh`.
+            if let Some(cmd) = &step.run {
                 for token in cmd.split_whitespace() {
                     push(token);
                 }
@@ -913,13 +906,13 @@ fn url_host(line: &str, scheme: &str) -> Option<String> {
 
 // ─── Publish points from ciabatta config ────────────────────────────────────
 
-/// Turn the ciabatta config's registries and recipes into publish nodes.
+/// Turn the ciabatta config's registries and workflows into publish nodes.
 ///
 /// Every configured registry becomes a publish node in its own right — so a
-/// registry you've set up shows up in the graph even before any recipe targets
-/// it. Each recipe that publishes to a registry then links the internal package
+/// registry you've set up shows up in the graph even before any workflow targets
+/// it. Each workflow that publishes to a registry then links the internal package
 /// owning its artifact to that registry's node (and tags the node with the
-/// recipe it came from).
+/// workflow it came from).
 pub fn scan_publish_points(cfg: &CiabattaConfig, builder: &mut GraphBuilder) {
     // 1. Every configured registry is a publish target, referenced or not.
     for (reg_name, reg_cfg) in &cfg.registries {
@@ -927,41 +920,43 @@ pub fn scan_publish_points(cfg: &CiabattaConfig, builder: &mut GraphBuilder) {
         builder.add_node(registry_publish_node(reg_name, kind, None));
     }
 
-    // 2. Each recipe wires its artifact's owning package to its registry.
-    for (recipe_name, entry) in &cfg.recipes {
-        let recipe = entry.push_recipe();
-        let Some(reg_name) = recipe.registry.as_deref() else {
-            continue;
-        };
-        // Infer the kind from the registry config when it exists, otherwise from
-        // the name alone (a recipe may name a registry that isn't declared yet).
-        let kind = cfg
-            .registries
-            .get(reg_name)
-            .map(|c| infer_registry_kind(reg_name, c))
-            .unwrap_or_else(|| RegistryKind::from(reg_name));
-        let node = registry_publish_node(reg_name, kind, Some(recipe_name));
-        let pub_id = node.id.clone();
-        builder.add_node(node);
+    // 2. Each push step wires its artifact's owning package to its registry.
+    for (workflow_name, workflow) in &cfg.workflows {
+        for step in workflow.steps.iter().filter(|s| s.is_push()) {
+            let Some(reg_name) = step.registry.as_deref() else {
+                continue;
+            };
+            let workflow_name = &format!("{workflow_name}:{}", step.name);
+            // Infer the kind from the registry config when it exists, otherwise from
+            // the name alone (a step may name a registry that isn't declared yet).
+            let kind = cfg
+                .registries
+                .get(reg_name)
+                .map(|c| infer_registry_kind(reg_name, c))
+                .unwrap_or_else(|| RegistryKind::from(reg_name));
+            let node = registry_publish_node(reg_name, kind, Some(workflow_name));
+            let pub_id = node.id.clone();
+            builder.add_node(node);
 
-        let owner = recipe
-            .local_artifact_path
-            .as_deref()
-            .and_then(|p| builder.owner_for_file(p))
-            .unwrap_or_else(|| ROOT_NODE_ID.to_string());
-        builder.add_edge(owner, pub_id);
+            let owner = step
+                .artifact
+                .as_deref()
+                .and_then(|p| builder.owner_for_file(p))
+                .unwrap_or_else(|| ROOT_NODE_ID.to_string());
+            builder.add_edge(owner, pub_id);
+        }
     }
 }
 
-/// Build a publish node for a ciabatta-managed registry. `recipe` names the
-/// recipe that targets it, when this node is contributed by one.
-fn registry_publish_node(reg_name: &str, kind: RegistryKind, recipe: Option<&str>) -> Node {
+/// Build a publish node for a ciabatta-managed registry. `step` names the
+/// `<workflow>:<step>` that targets it, when this node is contributed by one.
+fn registry_publish_node(reg_name: &str, kind: RegistryKind, workflow: Option<&str>) -> Node {
     Node {
         id: format!("pub:registry:{reg_name}"),
         label: reg_name.to_string(),
         category: Category::Publish,
         ecosystem: Some(format!("{kind:?}").to_lowercase()),
-        source: recipe.map(|r| format!("recipe:{r}")),
+        source: workflow.map(|r| format!("step:{r}")),
         // Publish points from the ciabatta config are managed by ciabatta.
         ciabatta_managed: true,
         ..Default::default()
@@ -1060,9 +1055,9 @@ clap = { version = "4.5", features = ["derive"] }
     }
 
     #[test]
-    fn publish_points_include_registries_and_recipes() {
-        // A registry with no recipe still appears; a recipe links its owner to
-        // the registry it targets and tags the node with the recipe name.
+    fn publish_points_include_registries_and_push_steps() {
+        // A registry with no workflow still appears; a workflow links its owner to
+        // the registry it targets and tags the node with the step name.
         let cfg: CiabattaConfig = toml::from_str(
             r#"
 [registries.nexus]
@@ -1071,9 +1066,12 @@ url = "https://nexus.example.com/repository/raw/"
 [registries.unused_s3]
 url = "s3://my-bucket/"
 
-[recipies.publish_bin]
+[workflows.release]
+[[workflows.release.steps]]
+name = "publish_bin"
+kind = "push"
 registry = "nexus"
-local_artifact_path = "target/release/app"
+artifact = "target/release/app"
 publish_path = "app/{CIABATTA_COMMIT}/app"
 "#,
         )
@@ -1092,7 +1090,7 @@ publish_path = "app/{CIABATTA_COMMIT}/app"
         assert_eq!(nexus.category, Category::Publish);
         assert!(nexus.ciabatta_managed);
         assert_eq!(nexus.ecosystem.as_deref(), Some("nexus"));
-        assert_eq!(nexus.source.as_deref(), Some("recipe:publish_bin"));
+        assert_eq!(nexus.source.as_deref(), Some("step:release:publish_bin"));
 
         let s3 = g
             .nodes
@@ -1102,7 +1100,7 @@ publish_path = "app/{CIABATTA_COMMIT}/app"
         assert_eq!(s3.ecosystem.as_deref(), Some("s3"));
         assert!(s3.ciabatta_managed);
 
-        // The recipe links the repo (no matching package here) to nexus.
+        // The workflow links the repo (no matching package here) to nexus.
         assert!(
             g.edges
                 .iter()

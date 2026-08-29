@@ -12,8 +12,8 @@
 //! fourth.
 //!
 //! A target here is a **node of a run graph**: one step of a workflow
-//! (`api:build`) or of a recipe (`release.compile`). Naming a whole workflow or
-//! recipe reports every node in it, because "why is `build` slow?" is a fair
+//! (`api:build`) or of a workflow (`release.compile`). Naming a whole workflow or
+//! workflow reports every node in it, because "why is `build` slow?" is a fair
 //! question too.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -30,11 +30,11 @@ use crate::run::RunStep;
 use crate::run::deps::TargetDeps;
 use crate::workspace::Workspace;
 
-/// One graph a target could live in: a monorepo workflow or a project recipe.
+/// One graph a target could live in: a monorepo workflow or a project workflow.
 struct Source {
     /// What to type to run it (`ciabatta run <label>`).
     label: String,
-    /// `workflow` or `recipe`.
+    /// `workflow` or `workflow`.
     kind: &'static str,
     /// The root its steps' paths are relative to.
     root: PathBuf,
@@ -136,27 +136,6 @@ fn sources(cwd: &Path) -> Result<Vec<Source>> {
         }
     }
 
-    // The project's own recipes, from wherever `ciabatta run` would load them.
-    if let Some(root) = crate::config::find_root(cwd)
-        && let Ok(config) = crate::config::load_config(&root)
-    {
-        for (name, entry) in &config.recipes {
-            let Some(recipe) = entry.run_recipe() else {
-                continue;
-            };
-            let Ok(resolved) = crate::run::resolve_run(recipe, name, &root) else {
-                continue;
-            };
-            sources.push(Source {
-                label: name.clone(),
-                kind: "recipe",
-                root: root.clone(),
-                config: config.clone(),
-                steps: resolved.steps,
-            });
-        }
-    }
-
     Ok(sources)
 }
 
@@ -240,7 +219,6 @@ fn plan_of(source: &Source, vars: &HashMap<String, String>) -> Option<Plan> {
         workspace: workspace.as_ref(),
         root: source.root.clone(),
         config: &source.config,
-        recipe_cache: source.config.cache.clone(),
     };
     let env: BTreeMap<String, String> = vars.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
     crate::cache::graph::plan_graph(&source.steps, &context, &env, &store).ok()
@@ -248,15 +226,14 @@ fn plan_of(source: &Source, vars: &HashMap<String, String>) -> Option<Plan> {
 
 /// The file the target was written in, relative to the project root.
 ///
-/// A workflow step lives either in `<member>/.ciabatta/workflows/<name>.yaml` or
-/// inline in the member's own config; a recipe step lives in its flowchart file
-/// or inline in the project config. Resolved by looking, rather than assumed,
+/// A step lives either in `<member>/.ciabatta/workflows/<name>.yaml` or inline
+/// in the member's own config. Resolved by looking, rather than assumed,
 /// because "it's in one of these two places" is precisely the answer somebody
 /// asking this question already has.
 fn declared_in(source: &Source, step: &RunStep) -> Option<String> {
     let root = &source.root;
 
-    if source.kind == "workflow" {
+    {
         let workspace = Workspace::discover(root).ok()?;
         let member = workspace.member(step.workspace.as_deref()?)?;
         let bare = step
@@ -277,17 +254,7 @@ fn declared_in(source: &Source, step: &RunStep) -> Option<String> {
         let dir = member.dir.join(crate::config::CIABATTA_DIR);
         let path = crate::format::find(&dir.join(crate::workspace::WORKFLOWS_DIR), &owning)
             .or_else(|| crate::config::config_path(&member.dir))?;
-        return Some(relative(root, &path));
-    }
-
-    let recipe = source
-        .config
-        .recipes
-        .get(&source.label)
-        .and_then(|entry| entry.run_recipe())?;
-    match &recipe.flowchart {
-        Some(rel) => Some(rel.replace('\\', "/")),
-        None => crate::config::config_path(root).map(|path| relative(root, &path)),
+        Some(relative(root, &path))
     }
 }
 

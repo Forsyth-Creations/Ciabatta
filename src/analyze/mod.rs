@@ -58,13 +58,13 @@ pub struct Node {
     pub req: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub license: Option<String>,
-    /// Where this node came from (a manifest path, a recipe name, …).
+    /// Where this node came from (a manifest path, a workflow name, …).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
     /// Free-text description (used for requirement nodes).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    /// True for a publish point that ciabatta itself manages (a recipe's
+    /// True for a publish point that ciabatta itself manages (a workflow's
     /// registry), as opposed to one merely inferred (e.g. crates.io).
     #[serde(default, skip_serializing_if = "is_false")]
     pub ciabatta_managed: bool,

@@ -18,16 +18,16 @@ use ratatui::{Terminal, backend::CrosstermBackend};
 use tokio::sync::mpsc;
 
 use crate::config::CiabattaConfig;
-use crate::runner::{self, ProgressUpdate, RunMode};
+use crate::runner::{self, ProgressUpdate};
 use app::App;
 
 pub async fn run(
+    name: &str,
+    resolved: &crate::run::ResolvedRun,
     config: &CiabattaConfig,
     root: &std::path::Path,
-    recipe_names: &[String],
     env_vars: &HashMap<String, String>,
     dry_run: bool,
-    mode: RunMode,
 ) -> Result<bool> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -37,12 +37,12 @@ pub async fn run(
 
     let result = tui_loop(
         &mut terminal,
+        name,
+        resolved,
         config,
         root,
-        recipe_names,
         env_vars,
         dry_run,
-        mode,
     )
     .await;
 
@@ -53,33 +53,34 @@ pub async fn run(
     result
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn tui_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    name: &str,
+    resolved: &crate::run::ResolvedRun,
     config: &CiabattaConfig,
     root: &std::path::Path,
-    recipe_names: &[String],
     env_vars: &HashMap<String, String>,
     dry_run: bool,
-    mode: RunMode,
 ) -> Result<bool> {
-    let mut app = App::new(recipe_names, dry_run, mode);
+    let mut app = App::new(name, dry_run);
     let (tx, mut rx) = mpsc::channel::<ProgressUpdate>(256);
 
-    // Spawn all recipe runners.
+    let name_clone = name.to_string();
+    let resolved_clone = resolved.clone();
     let config_clone = config.clone();
     let root_clone = root.to_path_buf();
-    let names_clone = recipe_names.to_vec();
     let vars_clone = env_vars.clone();
     let tx_clone = tx.clone();
 
     tokio::spawn(async move {
-        let _ = runner::run_all(
+        let _ = runner::run_workflow(
+            &name_clone,
+            &resolved_clone,
             &config_clone,
             &root_clone,
-            &names_clone,
             &vars_clone,
             dry_run,
-            mode,
             tx_clone,
         )
         .await;
@@ -94,9 +95,9 @@ async fn tui_loop(
     loop {
         terminal.draw(|f| ui::render(f, &app))?;
 
-        // When all recipes finish successfully, keep the results on screen for
+        // When all workflows finish successfully, keep the results on screen for
         // `done_linger` so they can be read, then exit automatically (a keypress
-        // quits sooner). If any recipe failed, stay open so the errors remain
+        // quits sooner). If any workflow failed, stay open so the errors remain
         // visible until the user quits with a keypress.
         if app.all_done && !app.any_failed() && done_at.is_none() {
             done_at = Some(tokio::time::Instant::now());
@@ -136,7 +137,7 @@ async fn tui_loop(
                     Some(update) => app.apply_update(update),
                     None => {
                         // All senders dropped; give UI a final render cycle.
-                        app.all_done = app.recipes.iter().all(|r| r.status.is_terminal());
+                        app.all_done = app.workflows.iter().all(|r| r.status.is_terminal());
                         terminal.draw(|f| ui::render(f, &app))?;
                         // Only auto-close on success; on failure wait for a keypress.
                         if done_at.is_none() && !app.any_failed() {
@@ -150,8 +151,8 @@ async fn tui_loop(
     }
 
     let success = app
-        .recipes
+        .workflows
         .iter()
-        .all(|r| matches!(r.status, crate::tui::app::RecipeStatus::Success));
+        .all(|r| matches!(r.status, crate::tui::app::WorkflowStatus::Success));
     Ok(success)
 }

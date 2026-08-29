@@ -43,24 +43,63 @@ also just a step on the graph, so a build that ends in a push is one command.
 - **Nothing hangs the graph.** Long-running steps get a `timeout`; genuinely
   persistent ones (dev servers, watchers) are handed to the daemon and stepped
   over, so they keep running after the build that started them is done.
-- **One config, many registries.** Describe your registries and publish
-  "recipes" once in `.ciabatta/ciabatta.yaml`; run any combination of them with
-  a single command.
+- **One config, many registries.** Describe your registries once in
+  `.ciabatta/ciabatta.yaml`; a workflow step publishes to any of them.
 - **CI-aware.** Automatically resolves `CIABATTA_BRANCH`, `CIABATTA_COMMIT`,
   `CIABATTA_TAG`, and `CIABATTA_BUILD_NUMBER` from GitLab, GitHub Actions,
   Jenkins, CircleCI, Azure DevOps, or Bitbucket — and lets you template them
   into publish paths.
-- **Parallel with live progress.** Run several recipes at once. Runs print plain
-  text (add `--tui` for the `ratatui` live view); `push`/`pull` open the TUI
-  unless you pass `--no-tui`.
+- **Parallel with live progress.** Independent branches of a graph run at once,
+  scheduled against their real dependencies. Runs print plain text; add `--tui`
+  for the `ratatui` live view, or `--gui` for the browser.
 - **Push *and* pull.** Because Ciabatta knows where things live, it can fetch
-  artifacts back down, not just upload them.
+  artifacts back down, not just upload them — and a pull step names the push it
+  mirrors rather than repeating it.
 - **Bring your own auth.** Login is handled by your own scripts — Ciabatta just
   makes the resolved variables available to them as environment variables.
 - **Truly drop-in.** Linux builds are statically linked (musl), so there is no
   glibc version requirement: download, extract, run, on any distro.
 
 ## Installation
+
+### One line
+
+**Linux / macOS**
+```bash
+curl -fsSL https://forsyth-creations.github.io/Ciabatta/install.sh | sh
+```
+
+**Windows** (PowerShell)
+```powershell
+irm https://forsyth-creations.github.io/Ciabatta/install.ps1 | iex
+```
+
+To pin a version, `sh` needs `-s --` before the options — everything after that
+goes to the installer rather than to `sh`:
+
+```bash
+curl -fsSL https://forsyth-creations.github.io/Ciabatta/install.sh | sh -s -- --version 0.3.0
+curl -fsSL https://forsyth-creations.github.io/Ciabatta/install.sh | sh -s -- --list
+curl -fsSL https://forsyth-creations.github.io/Ciabatta/install.sh | sh -s -- --dir ~/bin
+```
+
+`iex` has the same problem and the same shape of fix — turn the script into a
+block so you can call it with arguments:
+
+```powershell
+& ([scriptblock]::Create((irm https://forsyth-creations.github.io/Ciabatta/install.ps1))) -Version 0.3.0
+& ([scriptblock]::Create((irm https://forsyth-creations.github.io/Ciabatta/install.ps1))) -List
+```
+
+| Option | What it does |
+| --- | --- |
+| `--version VERSION` / `-Version` | Install that release (`0.3.0`, `v0.3.0`, or `latest`). |
+| `--dir DIR` / `-Dir` | Install there instead of the default. |
+| `--list` / `-List` | Print the available versions and exit. |
+| `--help` | Usage. |
+
+`CIABATTA_VERSION` and `CIABATTA_INSTALL_DIR` do the same thing for callers that
+find environment variables easier to set; an explicit flag wins over them.
 
 ### From crates.io
 
@@ -122,17 +161,17 @@ ciabatta build
 # 1. Scaffold a .ciabatta/ directory with a starter config
 ciabatta init --ci github
 
-# 2. See what recipes are available
+# 2. See what there is to run
 ciabatta list
 
-# 3. Dry-run to see exactly what would happen
-ciabatta push release_frontend --dry-run
+# 3. Walk every step without side effects
+ciabatta release --dry-run
 
-# 4. Publish for real (pushes multiple recipes in parallel)
-ciabatta push release_frontend release_backend
+# 4. Publish for real
+ciabatta release
 
-# 5. Pull an artifact back down
-ciabatta pull release_frontend
+# 5. Just the publishing steps, skipping the builds
+ciabatta release --filter kind:push
 ```
 
 Ciabatta discovers your project by walking up to find the `.ciabatta/`
@@ -147,21 +186,19 @@ artifacts are published from. For workflows it goes one level further out: the
 | --- | --- |
 | `ciabatta <WORKFLOW>` | Run that workflow across every sub-workspace that defines one, in dependency order. `ciabatta build`, `ciabatta test`, … |
 | `ciabatta workflow <NAME>` | The same thing, spelled out — for a workflow whose name collides with a command below. |
-| `ciabatta push [RECIPE...]` | Push one or more recipes in parallel (all if none named). |
-| `ciabatta pull [RECIPE...]` | Download artifacts for one or more recipes. |
-| `ciabatta run [RECIPE...]` | Execute a single project's run: a DAG of dependent script steps with error-recovery branches. `--gui` for a live browser view, `--build` for a visual flowchart editor. |
 | `ciabatta dry-run [TARGET...]` | What a run would reuse from the cache and what it would rebuild — and for a rebuild, exactly what changed. Runs nothing. `--diff` for the lines. |
-| `ciabatta cache <init\|status\|prune\|clean>` | Set up and inspect this workspace's build cache. `init` proposes inputs and outputs from what's actually in the directory. |
+| `ciabatta cache <init\|status\|prune\|clean>` | Set up and inspect the build cache. `init [WORKFLOW]` proposes inputs and outputs from what's actually in the directory and writes them into that workflow's file. |
 | `ciabatta remote-cache <init\|start\|login\|logout\|status\|add-user>` | Run or connect to a shared cache the whole team reads from. |
 | `ciabatta self update` | Update this binary from the remote cache that serves it, verified against the SHA-256 it advertises. |
-| `ciabatta convert --script PATH` | Turn an existing script into a recipe: its tools, its variables, its outputs, and the description in its header. |
+| `ciabatta convert --script PATH` | Turn an existing script into a workflow: its tools, its variables, its outputs, and the description in its header. |
+| `ciabatta register` | Tell the daemon this checkout exists, so it shows up in the web app's project switcher. `init` does this for you. |
 | `ciabatta config migrate` | Convert this checkout's TOML config files to YAML. |
-| `ciabatta list` | Every workflow in the monorepo — with descriptions, owners and dependencies — then this project's recipes. `-s TERM` to search, `-v` for steps. |
+| `ciabatta list` | Every workflow in the monorepo — with descriptions, owners and dependencies. `-s TERM` to search, `-v` for steps. |
 | `ciabatta init --lib` | Opt this package in as a sub-workspace: a `workspace:` identity plus a starter workflow. |
 | `ciabatta init [--ci SYSTEM]` | Create a `.ciabatta/` directory with a starter publishing `ciabatta.yaml`. |
-| `ciabatta configure` | Interactively add a registry (and optionally a recipe) — no hand-editing YAML. |
-| `ciabatta configure auto` | Analyze the project and pick recipes from an interactive checklist (Docker → ECR/Nexus, Rust binaries → crates.io / S3 / Nexus). |
-| `ciabatta tui` (alias `browse`) | Interactive browser — inspect registries, check paths, push on demand. |
+| `ciabatta configure` | Interactively add a registry — no hand-editing YAML. |
+| `ciabatta configure auto` | Analyze the project and pick publishing workflows from an interactive checklist (Docker → ECR/Nexus, Rust binaries → crates.io / S3 / Nexus). |
+| `ciabatta tui` (alias `browse`) | Interactive registry browser — inspect registries and walk what has been published. |
 | `ciabatta analyze` | Build the project's dependency graph and open an interactive view. |
 | `ciabatta watch <command>` | Run a command and stream its logs into a live, searchable web view with bookmarks and notification triggers. `--list` to see running sessions, `--attach <ID>` to tail one, `--stop <ID>` to end it. |
 | `ciabatta todo [TASK] [--global]` | Task list, scoped to the project you're in — or to the global list with `--global`. With a TASK, adds it and exits; without, opens the todo page. |
@@ -178,7 +215,7 @@ Useful flags on `push` / `pull`:
 - `--no-tui` — disable the TUI and stream plain progress to stdout (ideal for CI).
 - `-c, --config PATH` — use a specific config file instead of discovery.
 
-Useful flags on a run or a workflow (`ciabatta run …`, `ciabatta build`, …):
+Useful flags on any workflow (`ciabatta build`, `ciabatta release`, …):
 
 - `--graph` — print the graph and stop. Nothing runs.
 - `--dry-run` — walk every step, executing none of them.
@@ -197,10 +234,10 @@ Global flags (any command):
 - `--debug` — enable debug logging to stderr. You can also set `CIABATTA_DEBUG=1`,
   or `CIABATTA_LOG=ciabatta=trace` for finer control.
 
-When a recipe's `local_artifact_path` is a **directory**, Ciabatta uploads each
-file in it individually, recreating the folder structure under the recipe's
+When a push step's `artifact` is a **directory**, Ciabatta uploads each file in
+it individually, recreating the folder structure under the step's
 `publish_path` (creating sub-folders in the registry as needed) — so
-`local_artifact_path = "frontend/dist"` publishes the whole `dist` tree.
+`artifact: frontend/dist` publishes the whole `dist` tree.
 
 In the `ciabatta tui` browser, press `e` on a registry to **explore** its remote
 contents — navigate folders and see which artifacts already exist, which is handy
@@ -263,9 +300,11 @@ steps:
 
   - name: publish
     description: Publish the binary to Nexus
-    kind: push                 # a special, identifiable phase
-    recipe: binary             # a `recipies` entry in this package
+    kind: push                 # the built-in registry transfer
     needs: [compile]
+    registry: nexus            # a name from `registries:`
+    artifact: target/release/api
+    publish_path: "api/{CIABATTA_BRANCH}/{CIABATTA_COMMIT}/api"
 ```
 
 Steps run **from their own package's directory**, with that package's
@@ -396,11 +435,11 @@ web app.
 ## Configuration
 
 Ciabatta reads `.ciabatta/ciabatta.yaml`. Registries describe *where* things go;
-recipes describe *what* to publish and *how*.
+a workflow step with `kind: push` says *what* to publish and *how*.
 
 The fastest way to start is `ciabatta configure` (add a registry interactively)
-or `ciabatta configure auto` (let Ciabatta inspect the repo and suggest recipes).
-You can also edit the file by hand:
+or `ciabatta configure auto` (let Ciabatta inspect the repo and suggest
+publishing workflows). You can also edit the file by hand:
 
 ```yaml
 system:
@@ -424,28 +463,41 @@ registries:
     type: s3
     url: s3://my-artifacts-bucket    # the bucket, with the s3:// scheme
 
-recipies:
-  # A simple recipe: copy a local artifact to a templated publish path.
-  release_frontend:
-    registry: nexus
-    local_artifact_path: frontend/dist
-    publish_path: "frontend/{CIABATTA_BRANCH}/{CIABATTA_COMMIT}/frontend"
+workflows:
+  release:
+    description: Build the frontend and publish it
+    steps:
+      - name: build
+        run: npm run build
 
-  # A scripted recipe: run your own push/pull scripts with the variables
-  # injected.
-  release_backend:
-    push:
-      bash_script: scripts/release_backend.sh
-    pull:
-      bash_script: scripts/pull_backend.sh
+      # Copy a local artifact to a templated publish path.
+      - name: publish
+        kind: push
+        needs: [build]
+        registry: nexus
+        artifact: frontend/dist
+        publish_path: "frontend/{CIABATTA_BRANCH}/{CIABATTA_COMMIT}/frontend"
+
+  fetch:
+    description: Pull the published bundle back down
+    steps:
+      # The same artifact, the other way. `from` names the push it mirrors, so
+      # the registry and path are stated once.
+      - name: fetch
+        kind: pull
+        from: release:publish
 ```
+
+Workflows usually live one-file-each in `.ciabatta/workflows/<name>.yaml` — the
+filename is the workflow name. Writing them inline under `workflows:` as above
+suits a small project; a monorepo package gets a file.
 
 A few rules worth knowing:
 
 - If a `publish_path` references a variable that isn't set, Ciabatta **errors
   immediately** rather than publishing to a half-resolved path.
-- Stage commands, login scripts, and bash recipes all receive every resolved
-  `CIABATTA_*` variable (plus anything you pass with `-e`) in their environment.
+- Step commands and login scripts all receive every resolved `CIABATTA_*`
+  variable (plus anything you pass with `-e`) in their environment.
 
 Run `ciabatta config reference` for the full, always-up-to-date field listing.
 
@@ -458,7 +510,7 @@ fields:
   `url` is the bare Nexus host and `/repository/<repository>` is appended for you.
   When omitted, `url` is used as the full repository URL (backwards compatible).
 - `format` — `raw` (default), `npm`, or `pypi`, selecting how the push happens.
-- `base_path` — *raw only*: an optional prefix prepended to every recipe's
+- `base_path` — *raw only*: an optional prefix prepended to every step's
   `publish_path`, so raw artifacts land under a common folder.
 
 | `format` | How a push works | Requirements |
@@ -467,12 +519,12 @@ fields:
 | `npm` | `npm publish <artifact> --registry <repo>` | `npm` on `PATH` |
 | `pypi` | `twine upload --repository-url <repo> <files>` | `twine` on `PATH` |
 
-For `npm` / `pypi` recipes, `local_artifact_path` is the package tarball or the
+For `npm` / `pypi`, a push step's `artifact` is the package tarball or the
 `dist/` directory to publish, and `publish_path` is not used (the package name and
 version determine where it lands). Both read credentials from
 `CIABATTA_<NAME>_USER` / `_PASS`; npm also accepts a `CIABATTA_<NAME>_TOKEN`
-bearer token. `ciabatta pull` supports only `raw` repositories — pull npm/PyPI
-packages with their native clients.
+bearer token. A `kind: pull` step supports only `raw` repositories — fetch
+npm/PyPI packages with their native clients.
 
 ```yaml
 # Publish an npm package straight to a Nexus npm repository.
@@ -483,16 +535,19 @@ registries:
     repository: npm-hosted
     format: npm
 
-recipies:
-  sdk:
-    registry: sdk
-    local_artifact_path: packages/sdk   # tarball or package directory
+workflows:
+  release:
+    steps:
+      - name: publish
+        kind: push
+        registry: sdk
+        artifact: packages/sdk   # tarball or package directory
 ```
 
 ### S3
 
 An S3 registry drives the AWS CLI, so it's just a bucket URL: set `url` to
-`s3://<bucket>` and each recipe's `publish_path` becomes the object key.
+`s3://<bucket>` and a push step's `publish_path` becomes the object key.
 
 ```yaml
 registries:
@@ -500,12 +555,15 @@ registries:
     type: s3                       # inferred when the name contains "s3"
     url: s3://my-artifacts-bucket
 
-recipies:
+workflows:
   release:
-    registry: s3
-    local_artifact_path: target/release/app
-    publish_path: "app/{CIABATTA_BRANCH}/{CIABATTA_COMMIT}/app"
-    # uploads to s3://my-artifacts-bucket/app/<branch>/<commit>/app
+    steps:
+      - name: publish
+        kind: push
+        registry: s3
+        artifact: target/release/app
+        publish_path: "app/{CIABATTA_BRANCH}/{CIABATTA_COMMIT}/app"
+        # uploads to s3://my-artifacts-bucket/app/<branch>/<commit>/app
 ```
 
 - **Auth** uses the standard AWS credential chain — `AWS_ACCESS_KEY_ID` /
@@ -517,7 +575,7 @@ recipies:
 
 ### Docker / ECR images
 
-For `docker`- and `ecr`-type registries, point a recipe at a **locally-built
+For `docker`- and `ecr`-type registries, point a push step at a **locally-built
 image** with `local_image`. Ciabatta retags it to the registry's target
 reference and pushes it — so you don't have to bake the registry URL into your
 `docker build`:
@@ -528,15 +586,19 @@ registries:
     type: ecr                      # inferred when the name contains "ecr"
     url: 123456789.dkr.ecr.us-east-1.amazonaws.com
 
-recipies:
-  app:
-    registry: myecr
-    local_image: app:latest              # a local image (name or name:tag)
-    publish_path: "app:{CIABATTA_COMMIT}"   # remote image ref (repo[:tag])
+workflows:
+  release:
+    steps:
+      # Build the image locally; ciabatta handles the tag + push.
+      - name: image
+        run: docker build -t app:latest .
 
-    # Build the image locally; ciabatta handles the tag + push.
-    push:
-      pre: docker build -t app:latest .
+      - name: publish
+        kind: push
+        needs: [image]
+        registry: myecr
+        local_image: app:latest                 # a local image (name or name:tag)
+        publish_path: "app:{CIABATTA_COMMIT}"   # remote image ref (repo[:tag])
 ```
 
 On push this runs `docker tag app:latest <url>/app:<commit>` then
@@ -546,119 +608,93 @@ verbatim as the remote reference. ECR auto-logs in via
 `aws ecr get-login-password`; plain Docker registries use
 `CIABATTA_<REGISTRY>_USER` / `_PASS`.
 
-## Stages
+## Ordering: edges, not stages
 
-Every direction runs as a four-stage state machine, and the TUI shows progress
-through each stage live:
+Publishing used to run through a fixed `login → pre → main → post` pipeline with
+per-direction overrides. It doesn't any more — what those stages were for is
+what a graph already does, and each piece is now a node you can see on the
+graph, filter, cache and fail independently.
 
-```
-Push:    login → pre-push   → push   → post-push
-Pull:    login → pre-pull   → pull   → post-pull
-Run:     login → pre-run    → run    → post-run
-```
-
-Override any stage with an arbitrary command — bash, python, a compiled binary,
-anything runnable. Unset stages fall back to their defaults (login authenticates,
-`pre`/`post` do nothing, `main` runs the built-in registry action). Each command
-runs via `sh -c` from the project root with all `CIABATTA_*` vars in its
-environment.
+| Was | Is now |
+| --- | --- |
+| a `pre` command | a step, and a `needs` edge to it |
+| a `post` command | a step that `needs` the transfer |
+| a `login` override | the registry's own `login_script` |
+| a `main` override | a `run:` on the transfer step itself |
 
 ```yaml
-recipies:
-  frontend:
+steps:
+  - name: bundle
+    run: python scripts/bundle.py
+
+  - name: publish
+    kind: push
+    needs: [bundle]
     registry: nexus
-    local_artifact_path: frontend/dist
+    artifact: frontend/dist
     publish_path: "front/{CIABATTA_COMMIT}/dist"
 
-    # Overrides for the push direction only:
-    push:
-      pre: python scripts/bundle.py         # pre-push
-      post: ./scripts/notify.sh deployed    # post-push
-      # login + push (main) use their defaults
-
-    pull:
-      post: echo pulled $CIABATTA_COMMIT
+  - name: notify
+    run: ./scripts/notify.sh deployed
+    needs: [publish]
 ```
-
-| Stage | Override key | Default |
-| --- | --- | --- |
-| login | `login` | registry `login_script`, or `CIABATTA_<REGISTRY>_USER`/`_PASS` credentials |
-| pre-push / pre-pull | `pre` | nothing |
-| push / pull | `main` | built-in registry action (or legacy `bash_script`) |
-| post-push / post-pull | `post` | nothing |
 
 ## Runs
 
-A **run** is a third recipe direction, executed with `ciabatta run`. Instead of
-a single registry transfer, its `run` phase executes a **DAG of dependent script
-steps** — build → migrate → release, and so on. Runs are "just another
-recipe": they live in `[recipies.<name>.run]`, show up in `ciabatta list`,
-and work with menus (`--cookbook`).
-
-The **step graph lives in its own flowchart file**, referenced from your config,
+Everything ciabatta runs is a workflow: a **DAG of dependent steps** — build →
+migrate → release, and so on. A workflow lives in its own file, one per name,
 so a complex pipeline doesn't clutter `ciabatta.yaml`:
 
 ```yaml
-# .ciabatta/ciabatta.yaml
-recipies:
-  web:
-    run:
-      flowchart: .ciabatta/runs.yaml    # the step DAG (a separate file)
-      pre: scripts/notify_start.sh      # optional login/pre/post phase hooks
-```
+# packages/web/.ciabatta/workflows/deploy.yaml — the filename is the name.
+description: Migrate and release the web app
+REQUIRED_ENV: [RUN_TOKEN, AWS_REGION]     # gate the whole graph
 
-```yaml
-# .ciabatta/runs.yaml — each top-level entry is a series of dependent steps.
-web:
-  REQUIRED_ENV: [RUN_TOKEN, AWS_REGION]     # gate the whole flowchart
+steps:
+  - name: build
+    script: scripts/build.sh        # a bash file… (or use `run:` inline)
 
-  steps:
-    - name: build
-      script: scripts/build.sh        # a bash file… (or use `run:` inline)
+  - name: migrate
+    script: scripts/migrate.sh
+    needs: [build]                  # runs once "build" succeeds (a DAG edge)
+    on_error: fix_migrate           # on failure, jump to a recovery node
 
-    - name: migrate
-      script: scripts/migrate.sh
-      needs: [build]                  # runs once "build" succeeds (a DAG edge)
-      on_error: fix_migrate           # on failure, jump to a recovery node
+  - name: fix_migrate               # a recovery node: a choice of fixes
+    recover: true
+    message: "Migration failed — choose how to recover:"
+    retry: migrate                  # re-run this step after a fix succeeds
+    options:
+      - label: Roll back
+        script: scripts/rollback.sh
+      - label: Force unlock
+        run: make unlock
+        default: true
 
-    - name: fix_migrate               # a recovery node: a choice of fixes
-      recover: true
-      message: "Migration failed — choose how to recover:"
-      retry: migrate                  # re-run this step after a fix succeeds
-      options:
-        - label: Roll back
-          script: scripts/rollback.sh
-        - label: Force unlock
-          run: make unlock
-          default: true
-
-    - name: release
-      script: scripts/release.sh
-      needs: [migrate]
+  - name: release
+    script: scripts/release.sh
+    needs: [migrate]
 ```
 
 Steps whose `needs` are all satisfied become eligible to run; the graph is
 validated up front (missing edges, non-recovery `on_error` targets, and cycles
 are rejected before anything runs).
 
-**`REQUIRED_ENV`** lists variables the flowchart needs. Before any phase runs,
+**`REQUIRED_ENV`** lists variables the workflow needs. Before anything runs,
 each is checked; if one is empty or unset the run is aborted — the missing
 names are printed to the console and shown in the `--gui` view, and no step runs.
-(You can also set `REQUIRED_ENV` on the `[recipies.<name>.run]` table; the two
-lists are merged.)
 
 Started from the **web app**, a missing variable isn't a failure — the launcher
 refuses to start the run and asks you for the values instead, then starts it with
 what you typed. Ciabatta checks the daemon's own environment and any `env_file`
-the recipe sources first, so it only prompts for what genuinely has nowhere else
-to come from.
+the workflow sources first, so it only prompts for what genuinely has nowhere
+else to come from.
 
 ### The environment is printed before anything runs
 
-A run's steps are shell scripts, and the difference between "works here" and
-"fails there" is far more often a variable than the graph. So every
-`ciabatta run` (and every workflow) prints the variables it depends on first —
-the same way it prints the graph before executing it:
+A workflow's steps are shell scripts, and the difference between "works here"
+and "fails there" is far more often a variable than the graph. So every run
+prints the variables it depends on first — the same way it prints the graph
+before executing it:
 
 ```
 Environment for 'web' — 5 variable(s) this run depends on
@@ -720,24 +756,13 @@ presents a list of fix `options`:
 ### Watching and building runs in the browser
 
 ```bash
-ciabatta run web --gui        # live view: flowchart + streaming logs + fix buttons
-ciabatta run --build          # visual flowchart editor → copy the generated config
+ciabatta deploy --gui         # live view: graph + streaming logs + fix buttons
 ```
 
 `--gui` hands the run to the daemon and opens a page at
 `http://127.0.0.1:8099/run/<id>` showing each step lighting up as it runs,
 per-step logs, and interactive recovery. The daemon owns the run, so it keeps
-going if you close the terminal. `--build` opens a visual
-builder that needs no project: lay out steps, edges, and recovery options, then
-copy the emitted config into your flowchart file. Already have a pipeline?
-Paste it into the builder's import box to keep editing it visually.
-
-| Phase | Override key | Default |
-| --- | --- | --- |
-| login | `login` | nothing (runs usually authenticate inside a step) |
-| pre-run | `pre` | nothing |
-| run | the `steps` DAG | executes the flowchart |
-| post-run | `post` | nothing |
+going if you close the terminal.
 
 ## Caching
 
@@ -745,13 +770,20 @@ Off until a workspace opts in. A cache that turns itself on is a cache that will
 one day serve somebody a stale artifact they never asked it to keep.
 
 ```bash
-ciabatta cache init            # propose inputs and outputs from the directory
+ciabatta cache init build      # propose inputs and outputs for the `build` workflow
 ciabatta dry-run build         # what would be reused, and why not
 ciabatta dry-run build --diff  # ...with the lines that changed
 ciabatta cache status          # what the local store is holding
 ```
 
+**Cache settings live with the workflow they describe** — in
+`.ciabatta/workflows/<name>.yaml`, next to the steps — because what a build
+reads is a property of that build. A `build` and a `test` in the same package
+read different files and produce different things, and one section per config
+gave them no way to say so.
+
 ```yaml
+# packages/api/.ciabatta/workflows/build.yaml
 cache:
   enabled: true
   inputs:  ["src/**/*", "Cargo.toml"]   # what the build READS
@@ -760,7 +792,20 @@ cache:
                                         # can't invalidate itself with its own
                                         # output
   env: [PROFILE]                        # variables the RESULT depends on
+
+steps:
+  - name: compile
+    run: cargo build --release
 ```
+
+A step can narrow it further with its own `cache:`, layered over the workflow's
+field by field — so a step that declares only `env:` keeps the workflow's inputs
+and outputs, and does not silently turn caching off by failing to mention
+`enabled`.
+
+`ciabatta cache init` writes into the workflow file. With one workflow in the
+package the name is optional; with several you name the one you mean, because
+guessing would write the wrong answer into the wrong file.
 
 A stage has exactly **three** dependencies, and any of them changing is a
 rebuild:
@@ -827,9 +872,14 @@ ciabatta cache init --remote http://cache.example.com:8380
 ```
 
 A project is known to the server by its **name and an id the server assigns**.
-The id is written back into the workspace config and committed:
+The id is written back into the workspace config and committed.
+
+The remote is the one piece of cache config that stays in `ciabatta.yaml`: it's
+a single server per checkout, and repeating it in every workflow file would be
+four places to change when the server moves.
 
 ```yaml
+# .ciabatta/ciabatta.yaml
 cache:
   remote:
     url: http://cache.example.com:8380
@@ -957,10 +1007,10 @@ cd ~/code/my-project
 ciabatta remote-cache login http://127.0.0.1:8380
 ciabatta cache init --enable --remote http://127.0.0.1:8380
 
-ciabatta run build                   # first build: uploads
+ciabatta build                       # first build: uploads
 
 rm -rf .ciabatta/cache dist          # pretend to be a colleague's machine
-ciabatta run build                   # "restored from the remote cache"
+ciabatta build                       # "restored from the remote cache"
 
 ciabatta remote-cache status         # hit rate, storage, retention
 ```
@@ -1071,7 +1121,7 @@ step can't quietly see different environments.
 
 ## Converting a script
 
-A recipe *is* a script. The only thing ciabatta adds is the declarations around
+A workflow step *is* a script. The only thing ciabatta adds is the declarations around
 it — and that's the part nobody wants to write by hand.
 
 ```bash
@@ -1119,7 +1169,7 @@ interactive dependency graph laid out in columns:
 It scans `Cargo.toml`, `package.json`, `requirements.txt` / `pyproject.toml`,
 `Dockerfile`s, and `.gitlab-ci.yml` (its `image:` / `services:` container
 images) for external dependencies, identifies the internal packages in the repo,
-and derives publish points from your ciabatta recipes (and a publishable crate →
+and derives publish points from your `kind: push` steps (and a publishable crate →
 crates.io). The result is written as JSON and shown at
 `http://127.0.0.1:8099/analyze`, where you can sort, filter and click through the
 graph. You can also rescan from that page.
@@ -1145,7 +1195,7 @@ referenced by your config) and turns registry-push commands into publish points:
 `docker`/`podman push`, `aws s3 cp`/`sync`, `cargo publish`, `npm`/`yarn
 publish`, `twine upload`, `helm push`, and `curl` uploads (`-T` / `--upload-file`
 / `PUT`). Each is wired to the package that owns the script, and — unlike a
-ciabatta recipe — is **not** flagged as ciabatta-managed.
+ciabatta push step — is **not** flagged as ciabatta-managed.
 
 ```bash
 ciabatta analyze                 # write JSON + open the view at :8099/analyze
@@ -1172,7 +1222,7 @@ column by name / connections / version, pick **curved**, **straight**, or
 (nodes with no visible edge), **size nodes by their number of connections**, and
 zoom in / out / fit.
 
-**Managed publish points.** Publish points that come from a ciabatta recipe are
+**Managed publish points.** Publish points that come from a ciabatta push step are
 flagged **🍞 managed by ciabatta**, distinguishing them from inferred ones like
 crates.io.
 
@@ -1275,7 +1325,7 @@ having to pass `-e` on every invocation:
 
 ```bash
 export CIABATTA_ENV=local
-ciabatta push ciabatta_binary
+ciabatta release
 ```
 
 **`ciabatta pull` finds the best commit for your branch** (in both local and CI
@@ -1304,7 +1354,7 @@ ciabatta watch make    # reuses the same daemon, opens /watch/<id>
 | `/` | Dashboard — daemon status and every tool in one place. |
 | `/todo` | Your personal task list (global, not per-project). |
 | `/watch` | Watch sessions; `/watch/<id>` is one session's live log. |
-| `/run` | Runs; `/run/<id>` is a live flowchart, `/run/builder` the editor. |
+| `/run` | Runs; `/run/<id>` is a live graph of one. |
 | `/analyze` | The dependency graph. |
 | `/ai` | The architecture mind map and background assistant jobs. |
 
@@ -1331,13 +1381,13 @@ lives in `~/.ciabatta/todos.json` and follows you between repos.
 
 ### The daemon owns your work
 
-`ciabatta watch` and `ciabatta run --gui` hand the work to the daemon rather
+`ciabatta watch` and `ciabatta <workflow> --gui` hand the work to the daemon rather
 than running it in your terminal. That means:
 
 - **Ctrl-C on `ciabatta watch` detaches, it doesn't kill.** The command keeps
   running and stays live in the browser. Stop it for real with
   `ciabatta watch --stop <ID>` or the Stop button.
-- `ciabatta run --gui` returns as soon as the run starts. Closing the
+- `ciabatta <workflow> --gui` returns as soon as the run starts. Closing the
   terminal — or the laptop — doesn't abandon a run mid-flight.
 - Stopping the daemon stops everything it owns.
 

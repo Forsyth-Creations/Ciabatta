@@ -316,7 +316,7 @@ function StepBadges({ step }: { step: WorkflowStep }) {
   return (
     <>
       {step.push && (
-        <Tooltip title={step.recipe ? `Publishes the "${step.recipe}" recipe` : "Publishes"}>
+        <Tooltip title={step.workflow ? `Publishes the "${step.workflow}" workflow` : "Publishes"}>
           <Chip size="small" color="primary" icon={<PublishIcon />} label="push" />
         </Tooltip>
       )}
@@ -362,7 +362,7 @@ function GraphPanel({ project, workflow }: { project: string; workflow: string }
 
   const launch = () => {
     start.mutate(
-      { project, recipes: [], workflow, dry_run: dryRun },
+      { project, workflows: [], workflow, dry_run: dryRun },
       { onSuccess: (run) => navigate({ to: "/run/$runId", params: { runId: String(run.id) } }) },
     );
   };

@@ -256,14 +256,26 @@ pub fn commands_of(step: &RunStep) -> Vec<String> {
     if let Some(script) = &step.script {
         commands.push(format!("script:{script}"));
     }
-    if let Some(recipe) = &step.recipe {
-        commands.push(format!("recipe:{recipe}"));
+    // A transfer step runs no command, so what identifies it is what it moves
+    // and where: two pushes of the same artifact to different paths are not
+    // interchangeable, and the cache must not treat them as such.
+    if let Some(transfer) = step.transfer() {
+        commands.push(format!(
+            "{}:{}:{}",
+            transfer.direction.label(),
+            transfer.registry.unwrap_or("-"),
+            match transfer.publish_path {
+                Some(crate::config::PublishPath::Single(p)) => p.clone(),
+                Some(crate::config::PublishPath::Many(globs)) => globs.join(","),
+                None => transfer.artifact.unwrap_or("-").to_string(),
+            }
+        ));
     }
     commands
 }
 
 /// Merge cache settings from the three levels that can declare them —
-/// workspace, recipe, target — with the most specific level winning each field
+/// workspace, workflow, target — with the most specific level winning each field
 /// it actually mentions.
 ///
 /// A monorepo wants `cache.inputs` written once per workspace, not once per
@@ -287,20 +299,16 @@ pub fn commands_of(step: &RunStep) -> Vec<String> {
 /// *on* for a workspace that never asked. Only an explicit `enabled:` at some
 /// level decides, and the most specific explicit one wins, so a single target
 /// can still opt out with `enabled: false`.
-pub fn effective(
-    workspace: Option<&CacheConfig>,
-    recipe: Option<&CacheConfig>,
-    step: Option<&CacheConfig>,
-) -> CacheConfig {
+pub fn effective(workspace: Option<&CacheConfig>, step: Option<&CacheConfig>) -> CacheConfig {
     let mut merged = workspace.cloned().unwrap_or_default();
-    for over in [recipe, step].into_iter().flatten() {
-        layer(&mut merged, over);
+    if let Some(over) = step {
+        layer_over(&mut merged, over);
     }
     merged
 }
 
 /// Apply one level's declarations over what it inherited.
-fn layer(base: &mut CacheConfig, over: &CacheConfig) {
+pub fn layer_over(base: &mut CacheConfig, over: &CacheConfig) {
     if let Some(enabled) = over.enabled {
         base.enabled = Some(enabled);
     }
@@ -742,8 +750,8 @@ mod tests {
             ..Default::default()
         };
 
-        assert_eq!(effective(Some(&workspace), None, None), workspace);
-        assert_eq!(effective(None, None, None), CacheConfig::default());
+        assert_eq!(effective(Some(&workspace), None), workspace);
+        assert_eq!(effective(None, None), CacheConfig::default());
 
         // The whole point of per-target dependencies: naming one extra variable
         // must not cost the target its inputs, its outputs, or its caching.
@@ -751,7 +759,7 @@ mod tests {
             env: vec!["PROFILE".into()],
             ..Default::default()
         };
-        let merged = effective(Some(&workspace), None, Some(&declares_env));
+        let merged = effective(Some(&workspace), Some(&declares_env));
         assert_eq!(merged.env, vec!["PROFILE".to_string()]);
         assert_eq!(merged.inputs, workspace.inputs);
         assert_eq!(merged.outputs, workspace.outputs);
@@ -766,7 +774,7 @@ mod tests {
             inputs: vec!["proto/**/*".into()],
             ..Default::default()
         };
-        let merged = effective(Some(&workspace), None, Some(&declares_inputs));
+        let merged = effective(Some(&workspace), Some(&declares_inputs));
         assert_eq!(merged.inputs, vec!["proto/**/*".to_string()]);
         assert_eq!(merged.outputs, workspace.outputs);
 
@@ -775,14 +783,14 @@ mod tests {
             enabled: Some(false),
             ..Default::default()
         };
-        assert!(!effective(Some(&workspace), None, Some(&opts_out)).is_on());
+        assert!(!effective(Some(&workspace), Some(&opts_out)).is_on());
 
         // A target can't switch caching on for a workspace that never asked.
         let no_workspace_opinion = CacheConfig {
             inputs: vec!["proto/**/*".into()],
             ..Default::default()
         };
-        assert!(!effective(None, None, Some(&no_workspace_opinion)).is_on());
+        assert!(!effective(None, Some(&no_workspace_opinion)).is_on());
     }
 
     #[test]
@@ -802,11 +810,17 @@ mod tests {
             vec!["script:scripts/build.sh".to_string()]
         );
 
+        // A transfer step runs no command, so what it moves and where stands in.
         let publish = RunStep {
             name: "publish".into(),
-            recipe: Some("binary".into()),
+            kind: Some("push".into()),
+            registry: Some("nexus".into()),
+            publish_path: Some(crate::config::PublishPath::Single("app/bin".into())),
             ..Default::default()
         };
-        assert_eq!(commands_of(&publish), vec!["recipe:binary".to_string()]);
+        assert_eq!(
+            commands_of(&publish),
+            vec!["push:nexus:app/bin".to_string()]
+        );
     }
 }

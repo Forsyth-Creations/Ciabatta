@@ -1,9 +1,9 @@
-//! The `run` paradigm: a recipe direction whose main stage runs a DAG of
+//! The `run` paradigm: a workflow direction whose main stage runs a DAG of
 //! dependent script "steps", with `on_error` branches to recovery nodes that
 //! offer a choice of fix scripts.
 //!
 //! This module owns the run config types (referenced from [`crate::config`]),
-//! the loader that resolves a recipe's step DAG from a separate flowchart file,
+//! the loader that resolves a workflow's step DAG from a separate flowchart file,
 //! the validation of that DAG, and the async engine that executes it. The live
 //! web view and the visual builder are served by the daemon, in
 //! [`crate::daemon::routes::run`].
@@ -13,6 +13,7 @@ pub mod deps;
 pub mod engine;
 pub mod envdeps;
 pub mod filter;
+pub mod transfer;
 pub mod view;
 pub mod why;
 
@@ -22,64 +23,6 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 
 pub use engine::execute;
-
-/// The `[recipies.<name>.run]` sub-table: the run direction of a recipe.
-///
-/// The step DAG itself normally lives in a separate flowchart file (via the
-/// `flowchart` path and optional `entry`); the `login`/`pre`/`post` phase hooks
-/// stay in the main config, mirroring the push/pull stage overrides. Inline
-/// `steps` are also accepted, so a small pipeline needs no second file.
-#[derive(Debug, Deserialize, Serialize, Clone, Default)]
-pub struct RunRecipe {
-    /// Path (relative to the project root) to a flowchart file holding the
-    /// step DAG. When set, its `entry` mapping supplies the steps.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub flowchart: Option<String>,
-    /// Which top-level entry of the flowchart file to use. Defaults to the
-    /// recipe's own name.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub entry: Option<String>,
-
-    /// Override the `login` phase (default: no-op for runs).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub login: Option<String>,
-    /// Override the `pre-run` phase (default: no-op).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub pre: Option<String>,
-    /// Override the `post-run` phase (default: no-op).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub post: Option<String>,
-
-    /// Path(s) (relative to the project root) to `.env` file(s) sourced before
-    /// the run starts. Each `KEY=VALUE` line is loaded into the run's
-    /// environment so its phases and steps can see it; values already resolved
-    /// (from the ambient environment, CI, git, or `-e` flags) take precedence,
-    /// and later files override earlier ones. Missing files are an error.
-    /// Accepts a single path (`env_file = ".env"`) or a list
-    /// (`env_file = [".env", ".env.run"]`). Merged with the flowchart file's
-    /// own `env_file` when a `flowchart` file is used.
-    ///
-    /// Each path may contain `{VAR}` placeholders resolved from the current
-    /// environment, so which file is sourced can be selected at run time:
-    /// `env_file = ".env.{RUN_ENV}"` sources `.env.dev` or `.env.prod`
-    /// depending on `RUN_ENV`.
-    #[serde(default, deserialize_with = "string_or_vec")]
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub env_file: Vec<String>,
-
-    /// Environment variables that must be set (and non-empty) for the run to
-    /// start. Checked before any phase executes; if any are empty/unset the run
-    /// is aborted with an error. Merged with the flowchart file's own
-    /// `REQUIRED_ENV` when a `flowchart` file is used.
-    #[serde(default, rename = "REQUIRED_ENV")]
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub required_env: Vec<String>,
-
-    /// Steps written inline, when not using a separate `flowchart` file.
-    #[serde(default)]
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub steps: Vec<RunStep>,
-}
 
 /// Deserialize a field that TOML may express as either a bare string
 /// (`env_file = ".env"`) or an array (`env_file = [".env", ".env.run"]`) into
@@ -173,17 +116,51 @@ pub struct RunStep {
     pub continue_on_error: bool,
 
     // ─── Phase & placement ──────────────────────────────────────────────────
-    /// The special, identifiable phase this step belongs to: `push`, `setup`,
-    /// `build`, `test`, `deploy`, … Free-form and cosmetic (the graph labels
-    /// the node with it) except for `push`, which gets a built-in action —
-    /// see `recipe`.
+    /// The special, identifiable phase this step belongs to: `setup`, `build`,
+    /// `test`, `deploy`, … Free-form and cosmetic (the graph labels the node
+    /// with it) except for `push` and `pull`, which select the built-in
+    /// registry action — see the transfer fields below.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
-    /// For `kind = "push"` steps: the `[recipies]` recipe to publish. With no
-    /// `script`/`run` of its own such a step runs `ciabatta push <recipe>` in
-    /// its own sub-workspace, so publishing is just another node on the graph.
+
+    // ─── Transfer (kind = "push" / "pull") ──────────────────────────────────
+    // Publishing an artifact is a step like any other: it sits on the graph,
+    // declares what it needs, and is reported and cached the same way. These
+    // fields describe *what* moves and *where*; `kind` decides which direction.
+    /// The `registries:` entry this step transfers through.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub recipe: Option<String>,
+    pub registry: Option<String>,
+    /// The local file or directory to publish (or the destination a pull writes
+    /// to), relative to the step's working directory. A directory is uploaded
+    /// file by file, preserving its structure under the publish path.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub artifact: Option<String>,
+    /// Docker/ECR only: a local image reference (`name` or `name:tag`) to push.
+    /// It is retagged to the registry's target reference before pushing, and a
+    /// pull retags what it fetched back to this name. With this set,
+    /// `publish_path` is the remote image reference; without it the local
+    /// reference is reused verbatim.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub local_image: Option<String>,
+    /// Destination path in the registry, supporting `{CIABATTA_*}` variable
+    /// substitution — or a list of local globs, each uploaded under
+    /// `{CIABATTA_PATH}` keeping its relative path (see [`PublishPath`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub publish_path: Option<crate::config::PublishPath>,
+    /// For the glob-list form of `publish_path`: a leading path fragment
+    /// stripped from each matched file before it is joined under
+    /// `{CIABATTA_PATH}`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub strip_prefix: Option<String>,
+    /// For a `kind = "pull"` step: the push step it mirrors, as
+    /// `<workflow>:<step>` or a bare `<step>` in the same workflow.
+    ///
+    /// Push and pull are the same artifact in opposite directions, and stating
+    /// it twice is how the two drift apart. The named step's transfer fields
+    /// are copied in when the graph is compiled; anything this step sets for
+    /// itself wins over what it inherits.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub from: Option<String>,
     /// Working directory for this step's action, relative to the project root.
     /// Workflow graphs set it to the owning sub-workspace's directory, so its
     /// scripts run where they were written to run. Defaults to the root.
@@ -207,7 +184,7 @@ pub struct RunStep {
     /// workspace above it, so a package's `.env` answers first and anything it
     /// doesn't set falls back outward — see [`crate::environment::files::chain`].
     /// Empty means the step just sees the run's environment, which is every
-    /// step of a plain single-project recipe.
+    /// step of a plain single-project workflow.
     #[serde(default)]
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub env_files: Vec<String>,
@@ -251,7 +228,7 @@ pub struct RunStep {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub options: Vec<FixOption>,
 
-    /// Cache settings for this step alone, overriding the recipe's and the
+    /// Cache settings for this step alone, overriding the workflow's and the
     /// workspace's. For the step that reads something none of its neighbours
     /// do — most steps inherit and never write this.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -276,21 +253,100 @@ pub struct FixOption {
     pub default: bool,
 }
 
+/// Which direction a `kind = "push"` / `kind = "pull"` step moves an artifact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Direction {
+    /// Publish the local artifact to the registry.
+    Push,
+    /// Fetch the artifact from the registry into the working tree.
+    Pull,
+}
+
+impl Direction {
+    /// The word this direction is spelled with, in config and in output.
+    pub fn label(self) -> &'static str {
+        match self {
+            Direction::Push => "push",
+            Direction::Pull => "pull",
+        }
+    }
+}
+
+/// A step's resolved registry transfer: what moves, where, and which way.
+///
+/// Produced once the graph is compiled, so nothing downstream has to re-read a
+/// `from:` back-reference or wonder whether a step is a transfer.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Transfer<'a> {
+    pub direction: Direction,
+    pub registry: Option<&'a str>,
+    pub artifact: Option<&'a str>,
+    pub local_image: Option<&'a str>,
+    pub publish_path: Option<&'a crate::config::PublishPath>,
+    pub strip_prefix: Option<&'a str>,
+}
+
 impl RunStep {
-    /// Whether this node runs an action of its own (as opposed to a pure
-    /// recovery node that only presents options). A `kind = "push"` step that
-    /// names a `recipe` counts: its action is the built-in `ciabatta push`.
+    /// Whether this node runs an action of its own, as opposed to a pure
+    /// recovery node that only presents options. A transfer step counts: its
+    /// action is the built-in registry move.
     pub fn has_action(&self) -> bool {
-        self.script.is_some() || self.run.is_some() || self.recipe.is_some()
+        self.script.is_some() || self.run.is_some() || self.direction().is_some()
     }
 
-    /// Whether this step publishes — the special, identifiable "push" phase of
-    /// a workflow, however its action is spelled.
+    /// The transfer direction this step's `kind` selects, or `None` for an
+    /// ordinary step.
+    ///
+    /// Only `kind` decides. A step carrying `registry:` but no transfer `kind`
+    /// is a plain step that happens to name a registry — silently promoting it
+    /// would make `kind` untrustworthy as the thing that says what a node does.
+    pub fn direction(&self) -> Option<Direction> {
+        match self.kind.as_deref()? {
+            k if k.eq_ignore_ascii_case("push") => Some(Direction::Push),
+            k if k.eq_ignore_ascii_case("pull") => Some(Direction::Pull),
+            _ => None,
+        }
+    }
+
+    /// This step's transfer, when it has one.
+    pub fn transfer(&self) -> Option<Transfer<'_>> {
+        Some(Transfer {
+            direction: self.direction()?,
+            registry: self.registry.as_deref(),
+            artifact: self.artifact.as_deref(),
+            local_image: self.local_image.as_deref(),
+            publish_path: self.publish_path.as_ref(),
+            strip_prefix: self.strip_prefix.as_deref(),
+        })
+    }
+
+    /// Whether this step publishes — the identifiable "push" phase of a
+    /// workflow.
     pub fn is_push(&self) -> bool {
-        self.kind
-            .as_deref()
-            .is_some_and(|k| k.eq_ignore_ascii_case("push"))
-            || self.recipe.is_some()
+        self.direction() == Some(Direction::Push)
+    }
+
+    /// Copy the transfer fields of the step this one mirrors (`from:`) into any
+    /// it hasn't set for itself.
+    ///
+    /// What the step states directly always wins: `from` is a default, not an
+    /// override, so a pull that differs in one field says only that field.
+    pub fn inherit_transfer(&mut self, source: &RunStep) {
+        if self.registry.is_none() {
+            self.registry = source.registry.clone();
+        }
+        if self.artifact.is_none() {
+            self.artifact = source.artifact.clone();
+        }
+        if self.local_image.is_none() {
+            self.local_image = source.local_image.clone();
+        }
+        if self.publish_path.is_none() {
+            self.publish_path = source.publish_path.clone();
+        }
+        if self.strip_prefix.is_none() {
+            self.strip_prefix = source.strip_prefix.clone();
+        }
     }
 
     /// This step's configured wall-clock limit, if any.
@@ -306,25 +362,14 @@ impl RunStep {
         }
     }
 
-    /// The action this step runs, resolving the `kind = "push"` shorthand into
-    /// the `ciabatta push` invocation it stands for. Returns `(script, run)`,
-    /// mirroring the `script` / `run` pair the executor takes.
+    /// The shell action this step runs, or `None` when it has none of its own —
+    /// which for a transfer step means the engine performs the built-in move.
+    /// Returns `(script, run)`, mirroring the pair the executor takes.
     pub fn action(&self) -> (Option<&str>, Option<String>) {
-        match (self.script.as_deref(), self.run.as_deref()) {
-            (None, None) => (
-                None,
-                self.recipe.as_deref().map(|recipe| {
-                    // Re-invoke this very binary, so a graph run and a manual
-                    // `ciabatta push` do exactly the same thing.
-                    let exe = std::env::current_exe()
-                        .ok()
-                        .map(|p| p.to_string_lossy().into_owned())
-                        .unwrap_or_else(|| "ciabatta".to_string());
-                    format!("{exe} push {recipe} --no-tui")
-                }),
-            ),
-            (script, run) => (script, run.map(str::to_string)),
-        }
+        (
+            self.script.as_deref(),
+            self.run.as_deref().map(str::to_string),
+        )
     }
 }
 
@@ -395,39 +440,6 @@ pub fn parse_duration(raw: &str) -> Result<std::time::Duration> {
         bail!("could not parse duration '{raw}' (try \"30s\", \"10m\", or \"1h30m\")");
     }
     Ok(total)
-}
-
-/// A flowchart file: a map of entry name → its step list.
-///
-/// ```yaml
-/// web:
-///   steps:
-///     - name: build
-///       script: scripts/build.sh
-/// ```
-#[derive(Debug, Deserialize, Serialize, Default)]
-pub struct FlowchartFile {
-    #[serde(flatten)]
-    pub entries: HashMap<String, Flowchart>,
-}
-
-/// One named flowchart within a [`FlowchartFile`].
-#[derive(Debug, Deserialize, Serialize, Clone, Default)]
-pub struct Flowchart {
-    /// Environment variables that must be set (and non-empty) for this
-    /// flowchart's steps to run. Empty/unset variables abort the run before
-    /// any phase executes.
-    #[serde(default, rename = "REQUIRED_ENV")]
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub required_env: Vec<String>,
-    /// `.env` file path(s) sourced before this flowchart's run starts. Merged
-    /// with any declared on the recipe's `run:` mapping.
-    #[serde(default, deserialize_with = "string_or_vec")]
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub env_file: Vec<String>,
-    #[serde(default)]
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub steps: Vec<RunStep>,
 }
 
 /// A fully resolved run, ready to execute: the phase hooks plus the validated
@@ -543,7 +555,7 @@ pub struct PreparedEnv {
     /// own, by step name — its workspace's, then everything above it.
     ///
     /// Absent for a step whose chain is empty, which is every step of a plain
-    /// single-project recipe: those see [`Self::env`] and nothing else.
+    /// single-project workflow: those see [`Self::env`] and nothing else.
     pub steps: HashMap<String, StepEnv>,
     /// The `env_file` paths that were resolved and sourced, in order.
     pub sourced: Vec<String>,
@@ -797,91 +809,6 @@ pub fn step_skip_reason(step: &RunStep, env: &HashMap<String, String>) -> Result
     Ok(None)
 }
 
-/// Resolve a recipe's run definition into runnable steps: load the separate
-/// flowchart file when one is referenced, otherwise use the inline steps, then
-/// validate the resulting DAG.
-///
-/// `recipe_name` is used as the default flowchart entry when `entry` is unset.
-pub fn resolve_run(run: &RunRecipe, recipe_name: &str, root: &Path) -> Result<ResolvedRun> {
-    // Variables required by the flowchart entry (if a file is used); merged with
-    // any declared on the recipe's `[run]` table below.
-    let mut required_env: Vec<String> = Vec::new();
-    // `.env` files to source, in application order: flowchart-entry files first,
-    // then recipe-level files (so a recipe can layer overrides on top).
-    let mut env_files: Vec<String> = Vec::new();
-
-    let steps = match run.flowchart.as_deref() {
-        Some(rel) => {
-            let path = root.join(rel);
-            let file: FlowchartFile = crate::format::load(&path).with_context(|| {
-                format!(
-                    "Failed to load flowchart file '{}' for recipe '{}'",
-                    path.display(),
-                    recipe_name
-                )
-            })?;
-            let entry = run.entry.as_deref().unwrap_or(recipe_name);
-            let chart = file.entries.get(entry).ok_or_else(|| {
-                let mut names: Vec<&String> = file.entries.keys().collect();
-                names.sort();
-                anyhow::anyhow!(
-                    "Flowchart file '{}' has no entry '{}'. Available entries: {}.",
-                    path.display(),
-                    entry,
-                    if names.is_empty() {
-                        "(none)".to_string()
-                    } else {
-                        names
-                            .iter()
-                            .map(|s| s.as_str())
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    }
-                )
-            })?;
-            if !run.steps.is_empty() {
-                bail!(
-                    "Recipe '{}' run defines both a `flowchart` file and inline `steps`; use one or the other.",
-                    recipe_name
-                );
-            }
-            required_env.extend(chart.required_env.iter().cloned());
-            env_files.extend(chart.env_file.iter().cloned());
-            chart.steps.clone()
-        }
-        None => run.steps.clone(),
-    };
-
-    // Recipe-level `REQUIRED_ENV` applies to both inline and file flowcharts;
-    // fold it in, de-duplicating so a var listed in both places is checked once.
-    for var in &run.required_env {
-        if !required_env.contains(var) {
-            required_env.push(var.clone());
-        }
-    }
-
-    // Recipe-level `env_file`(s) are applied after the flowchart's, de-duplicated
-    // so the same path listed in both places is sourced once.
-    for file in run.env_file.iter() {
-        if !env_files.contains(file) {
-            env_files.push(file.clone());
-        }
-    }
-
-    let resolved = ResolvedRun {
-        login: run.login.clone(),
-        pre: run.pre.clone(),
-        post: run.post.clone(),
-        required_env,
-        env_files,
-        steps,
-    };
-    validate_flowchart(&resolved.steps, recipe_name)?;
-    let mut resolved = resolved;
-    resolved.steps = topo_order(&resolved.steps);
-    Ok(resolved)
-}
-
 /// Reorder steps so that dependencies always precede their dependents, giving
 /// both the executor and the live view (`--gui`) a logical top-to-bottom order
 /// regardless of how the flowchart file happened to list them.
@@ -894,7 +821,7 @@ pub fn resolve_run(run: &RunRecipe, recipe_name: &str, root: &Path) -> Result<Re
 ///
 /// Assumes the DAG has already passed [`validate_flowchart`] (acyclic, every
 /// edge resolves), so a total order always exists.
-fn topo_order(steps: &[RunStep]) -> Vec<RunStep> {
+pub fn topo_order(steps: &[RunStep]) -> Vec<RunStep> {
     use std::collections::VecDeque;
 
     let idx_of: HashMap<&str, usize> = steps
@@ -974,23 +901,20 @@ fn topo_order(steps: &[RunStep]) -> Vec<RunStep> {
 ///   - `needs` / `on_error` / `retry` reference existing nodes
 ///   - `on_error` targets are recovery nodes
 ///   - the success DAG (`needs` edges) is acyclic
-pub fn validate_flowchart(steps: &[RunStep], recipe_name: &str) -> Result<()> {
+pub fn validate_flowchart(steps: &[RunStep], run_name: &str) -> Result<()> {
     if steps.is_empty() {
-        bail!("Run recipe '{}' has no steps.", recipe_name);
+        bail!("Workflow '{}' has no steps.", run_name);
     }
 
     let mut names: HashSet<&str> = HashSet::new();
     for step in steps {
         if step.name.trim().is_empty() {
-            bail!(
-                "Run recipe '{}' has a step with an empty name.",
-                recipe_name
-            );
+            bail!("Workflow '{}' has a step with an empty name.", run_name);
         }
         if !names.insert(step.name.as_str()) {
             bail!(
-                "Run recipe '{}' has a duplicate step name '{}'.",
-                recipe_name,
+                "Workflow '{}' has a duplicate step name '{}'.",
+                run_name,
                 step.name
             );
         }
@@ -1005,7 +929,7 @@ pub fn validate_flowchart(steps: &[RunStep], recipe_name: &str) -> Result<()> {
                 bail!(
                     "Recovery node '{}' in run '{}' has no options.",
                     step.name,
-                    recipe_name
+                    run_name
                 );
             }
             for opt in &step.options {
@@ -1013,22 +937,22 @@ pub fn validate_flowchart(steps: &[RunStep], recipe_name: &str) -> Result<()> {
                     bail!(
                         "Recovery node '{}' in run '{}' has an option with no label.",
                         step.name,
-                        recipe_name
+                        run_name
                     );
                 }
             }
         } else if !step.has_action() {
             bail!(
-                "Step '{}' in run '{}' has no `script`, `run`, or `recipe` to execute.",
+                "Step '{}' in run '{}' has no `script`, `run`, or `workflow` to execute.",
                 step.name,
-                recipe_name
+                run_name
             );
         }
 
         // A timeout that doesn't parse would silently become "no limit" — the
         // opposite of what an operator guarding a hanging step intended.
         if let Err(err) = step.timeout_duration() {
-            bail!("{err} (in run '{recipe_name}')");
+            bail!("{err} (in run '{run_name}')");
         }
 
         // Conditions must be non-blank so a typo can't silently read as "run".
@@ -1037,7 +961,7 @@ pub fn validate_flowchart(steps: &[RunStep], recipe_name: &str) -> Result<()> {
                 bail!(
                     "Step '{}' in run '{}' has an empty `when`/`skip_if` condition.",
                     step.name,
-                    recipe_name
+                    run_name
                 );
             }
         }
@@ -1048,7 +972,7 @@ pub fn validate_flowchart(steps: &[RunStep], recipe_name: &str) -> Result<()> {
                 bail!(
                     "Step '{}' in run '{}' needs '{}', which is not a defined step.",
                     step.name,
-                    recipe_name,
+                    run_name,
                     dep
                 );
             }
@@ -1058,7 +982,7 @@ pub fn validate_flowchart(steps: &[RunStep], recipe_name: &str) -> Result<()> {
                 bail!(
                     "Step '{}' in run '{}' has on_error = '{}', which is not a defined step.",
                     step.name,
-                    recipe_name,
+                    run_name,
                     target
                 );
             }
@@ -1066,7 +990,7 @@ pub fn validate_flowchart(steps: &[RunStep], recipe_name: &str) -> Result<()> {
                 bail!(
                     "Step '{}' in run '{}' routes on_error to '{}', which is not a recovery node (set `recover = true`).",
                     step.name,
-                    recipe_name,
+                    run_name,
                     target
                 );
             }
@@ -1077,18 +1001,18 @@ pub fn validate_flowchart(steps: &[RunStep], recipe_name: &str) -> Result<()> {
             bail!(
                 "Recovery node '{}' in run '{}' has retry = '{}', which is not a defined step.",
                 step.name,
-                recipe_name,
+                run_name,
                 target
             );
         }
     }
 
-    detect_cycle(steps, recipe_name)?;
+    detect_cycle(steps, run_name)?;
     Ok(())
 }
 
 /// Depth-first cycle detection over the success DAG (`needs` edges only).
-fn detect_cycle(steps: &[RunStep], recipe_name: &str) -> Result<()> {
+fn detect_cycle(steps: &[RunStep], run_name: &str) -> Result<()> {
     #[derive(Clone, Copy, PartialEq)]
     enum Mark {
         Unvisited,
@@ -1119,7 +1043,7 @@ fn detect_cycle(steps: &[RunStep], recipe_name: &str) -> Result<()> {
                     match marks[next] {
                         Mark::InProgress => bail!(
                             "Run '{}' has a dependency cycle involving step '{}'.",
-                            recipe_name,
+                            run_name,
                             steps[next].name
                         ),
                         Mark::Unvisited => {
@@ -1142,9 +1066,16 @@ fn detect_cycle(steps: &[RunStep], recipe_name: &str) -> Result<()> {
 mod tests {
     use super::*;
 
+    /// A step list on its own, the way a workflow file spells one.
+    #[derive(Deserialize)]
+    struct StepList {
+        #[serde(default)]
+        steps: Vec<RunStep>,
+    }
+
     fn steps_from(toml_str: &str) -> Vec<RunStep> {
-        let chart: Flowchart = toml::from_str(toml_str).expect("flowchart parses");
-        chart.steps
+        let list: StepList = toml::from_str(toml_str).expect("steps parse");
+        list.steps
     }
 
     #[test]
@@ -1279,178 +1210,8 @@ name = "a"
             validate_flowchart(&steps, "web")
                 .unwrap_err()
                 .to_string()
-                .contains("no `script`, `run`, or `recipe`")
+                .contains("no `script`, `run`, or `workflow`")
         );
-    }
-
-    #[test]
-    fn resolve_orders_steps_by_dependencies() {
-        // Declared out of dependency order, with a recovery node listed last.
-        let run = RunRecipe {
-            steps: steps_from(
-                r#"
-[[steps]]
-name = "release"
-script = "r.sh"
-needs = ["migrate"]
-[[steps]]
-name = "migrate"
-script = "m.sh"
-needs = ["build"]
-on_error = "fix"
-[[steps]]
-name = "build"
-script = "b.sh"
-[[steps]]
-name = "fix"
-recover = true
-retry = "migrate"
-options = [ { label = "unlock", run = "make unlock", default = true } ]
-"#,
-            ),
-            ..Default::default()
-        };
-        let resolved = resolve_run(&run, "web", Path::new("/proj")).unwrap();
-        let order: Vec<&str> = resolved.steps.iter().map(|s| s.name.as_str()).collect();
-        // build → migrate (with its recovery node folded in right after) → release.
-        assert_eq!(order, vec!["build", "migrate", "fix", "release"]);
-    }
-
-    #[test]
-    fn resolve_inline_steps_ok() {
-        let run = RunRecipe {
-            steps: steps_from(
-                r#"
-[[steps]]
-name = "a"
-script = "a.sh"
-[[steps]]
-name = "b"
-run = "echo b"
-needs = ["a"]
-"#,
-            ),
-            ..Default::default()
-        };
-        let resolved = resolve_run(&run, "web", Path::new("/proj")).unwrap();
-        assert_eq!(resolved.steps.len(), 2);
-        assert_eq!(resolved.step("b").unwrap().needs, vec!["a".to_string()]);
-    }
-
-    #[test]
-    fn resolve_from_flowchart_file_by_entry_and_default() {
-        let dir = std::env::temp_dir().join(format!("ciab_flow_{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let file = dir.join("runs.toml");
-        std::fs::write(
-            &file,
-            r#"
-[web]
-  [[web.steps]]
-  name = "build"
-  script = "b.sh"
-
-[api]
-  [[api.steps]]
-  name = "ship"
-  run = "make ship"
-"#,
-        )
-        .unwrap();
-
-        // Entry defaults to the recipe name.
-        let run = RunRecipe {
-            flowchart: Some("runs.toml".to_string()),
-            ..Default::default()
-        };
-        let web = resolve_run(&run, "web", &dir).unwrap();
-        assert_eq!(web.step("build").unwrap().script.as_deref(), Some("b.sh"));
-
-        // An explicit `entry` overrides the recipe name.
-        let run = RunRecipe {
-            flowchart: Some("runs.toml".to_string()),
-            entry: Some("api".to_string()),
-            ..Default::default()
-        };
-        let api = resolve_run(&run, "web", &dir).unwrap();
-        assert!(api.step("ship").is_some());
-
-        // A missing entry is a clear error.
-        let run = RunRecipe {
-            flowchart: Some("runs.toml".to_string()),
-            entry: Some("ghost".to_string()),
-            ..Default::default()
-        };
-        let err = resolve_run(&run, "web", &dir).unwrap_err().to_string();
-        assert!(err.contains("no entry 'ghost'"));
-        assert!(err.contains("api") && err.contains("web"));
-
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn resolve_merges_required_env_from_file_and_recipe() {
-        let dir = std::env::temp_dir().join(format!("ciab_flow_env_{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(
-            dir.join("runs.toml"),
-            r#"
-[web]
-REQUIRED_ENV = ["API_TOKEN", "REGION"]
-  [[web.steps]]
-  name = "build"
-  script = "b.sh"
-"#,
-        )
-        .unwrap();
-
-        // Flowchart file's REQUIRED_ENV plus a recipe-level one, de-duped.
-        let run = RunRecipe {
-            flowchart: Some("runs.toml".to_string()),
-            required_env: vec!["REGION".to_string(), "STAGE".to_string()],
-            ..Default::default()
-        };
-        let resolved = resolve_run(&run, "web", &dir).unwrap();
-        assert_eq!(
-            resolved.required_env,
-            vec![
-                "API_TOKEN".to_string(),
-                "REGION".to_string(),
-                "STAGE".to_string()
-            ]
-        );
-
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn resolve_required_env_for_inline_steps() {
-        let run = RunRecipe {
-            required_env: vec!["RUN_KEY".to_string()],
-            steps: steps_from("[[steps]]\nname=\"a\"\nscript=\"a.sh\"\n"),
-            ..Default::default()
-        };
-        let resolved = resolve_run(&run, "web", Path::new("/proj")).unwrap();
-        assert_eq!(resolved.required_env, vec!["RUN_KEY".to_string()]);
-    }
-
-    #[test]
-    fn resolve_rejects_both_file_and_inline_steps() {
-        let dir = std::env::temp_dir().join(format!("ciab_flow_both_{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(
-            dir.join("d.toml"),
-            "[web]\n[[web.steps]]\nname=\"a\"\nscript=\"a.sh\"\n",
-        )
-        .unwrap();
-        let run = RunRecipe {
-            flowchart: Some("d.toml".to_string()),
-            steps: steps_from("[[steps]]\nname=\"x\"\nrun=\"true\"\n"),
-            ..Default::default()
-        };
-        let err = resolve_run(&run, "web", &dir).unwrap_err().to_string();
-        assert!(err.contains("both") && err.contains("inline"));
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -1507,57 +1268,6 @@ REQUIRED_ENV = ["API_TOKEN", "REGION"]
         .unwrap_err()
         .to_string();
         assert!(err.contains("nope.env"));
-    }
-
-    #[test]
-    fn resolve_collects_env_files_from_file_and_recipe() {
-        let dir = std::env::temp_dir().join(format!("ciab_flow_envf_{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(
-            dir.join("runs.toml"),
-            r#"
-[web]
-env_file = ".env.flow"
-  [[web.steps]]
-  name = "build"
-  script = "b.sh"
-"#,
-        )
-        .unwrap();
-
-        // Flowchart-entry file first, then the recipe's own (a list), de-duped.
-        let run = RunRecipe {
-            flowchart: Some("runs.toml".to_string()),
-            env_file: vec![".env.flow".to_string(), ".env.run".to_string()],
-            ..Default::default()
-        };
-        let resolved = resolve_run(&run, "web", &dir).unwrap();
-        assert_eq!(
-            resolved.env_files,
-            vec![".env.flow".to_string(), ".env.run".to_string()]
-        );
-
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn env_file_path_supports_var_substitution() {
-        // The engine substitutes `{VAR}` in each path before loading; here we
-        // exercise the same substitution + load pipeline directly.
-        let dir = std::env::temp_dir().join(format!("ciab_envf_sel_{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join(".env.dev"), "TARGET=dev-host\n").unwrap();
-        std::fs::write(dir.join(".env.prod"), "TARGET=prod-host\n").unwrap();
-
-        let env: HashMap<String, String> = [("RUN_ENV".to_string(), "prod".to_string())]
-            .into_iter()
-            .collect();
-        let path = crate::config::substitute_vars(".env.{RUN_ENV}", &env).unwrap();
-        assert_eq!(path, ".env.prod");
-        let merged = load_env_files(&[path], &dir, &env).unwrap();
-        assert_eq!(merged.get("TARGET").unwrap(), "prod-host");
-
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     fn env(pairs: &[(&str, &str)]) -> HashMap<String, String> {
@@ -1837,9 +1547,10 @@ env_file = ".env.flow"
 
     #[test]
     fn env_file_accepts_string_or_list() {
-        let one: RunRecipe = toml::from_str("env_file = \".env\"\n").unwrap();
+        let one: crate::workspace::Workflow = toml::from_str("env_file = \".env\"\n").unwrap();
         assert_eq!(one.env_file, vec![".env".to_string()]);
-        let many: RunRecipe = toml::from_str("env_file = [\".env\", \".env.run\"]\n").unwrap();
+        let many: crate::workspace::Workflow =
+            toml::from_str("env_file = [\".env\", \".env.run\"]\n").unwrap();
         assert_eq!(
             many.env_file,
             vec![".env".to_string(), ".env.run".to_string()]
@@ -1877,29 +1588,6 @@ env_file = ".env.flow"
         let steps = steps_from("[[steps]]\nname=\"a\"\nrun=\"true\"\ntimeout=\"whenever\"\n");
         let err = validate_flowchart(&steps, "web").unwrap_err().to_string();
         assert!(err.contains("invalid timeout"), "{err}");
-    }
-
-    #[test]
-    fn a_push_step_gets_its_action_from_the_recipe_it_names() {
-        let step: RunStep =
-            toml::from_str("name = \"publish\"\nkind = \"push\"\nrecipe = \"binary\"\n").unwrap();
-        assert!(step.is_push());
-        // No script or run of its own, yet it has something to do.
-        assert!(step.has_action());
-        let (script, run) = step.action();
-        assert!(script.is_none());
-        assert!(run.unwrap().contains("push binary --no-tui"));
-
-        // A push step that spells out its own command keeps it.
-        let explicit: RunStep =
-            toml::from_str("name = \"publish\"\nkind = \"push\"\nrun = \"make release\"\n")
-                .unwrap();
-        assert!(explicit.is_push());
-        assert_eq!(explicit.action().1.as_deref(), Some("make release"));
-
-        // An ordinary step is not a push step.
-        let plain: RunStep = toml::from_str("name = \"build\"\nrun = \"true\"\n").unwrap();
-        assert!(!plain.is_push());
     }
 
     #[test]

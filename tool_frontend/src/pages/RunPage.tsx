@@ -49,7 +49,7 @@ export function RunPage() {
     <>
       <PageHeader
         title="Run"
-        description="Execute a recipe's step DAG live, with fix-it branches when a step fails. The daemon owns the run, so it survives closing the terminal."
+        description="Execute a workflow's step DAG live, with fix-it branches when a step fails. The daemon owns the run, so it survives closing the terminal."
         actions={
           <Button component={Link} to="/run/builder" startIcon={<AccountTreeIcon />}>
             Flowchart builder
@@ -80,7 +80,7 @@ function Launcher({ project }: { project: string }) {
 
   const launch = (withEnv: Record<string, string>) => {
     setEnv(withEnv);
-    // A workflow compiles a cross-package graph on the daemon; a recipe runs
+    // A workflow compiles a cross-package graph on the daemon; a workflow runs
     // this project's own steps. Same endpoint, same flags — the launcher just
     // has to say which kind of name it picked.
     const terms = filter
@@ -89,10 +89,10 @@ function Launcher({ project }: { project: string }) {
       .filter(Boolean);
     const body =
       target?.kind === "workflow"
-        ? { project, recipes: [], workflow: selected, filter: terms, dry_run: dryRun, env: withEnv }
+        ? { project, workflows: [], workflow: selected, filter: terms, dry_run: dryRun, env: withEnv }
         : {
             project,
-            recipes: selected ? [selected] : [],
+            workflows: selected ? [selected] : [],
             filter: terms,
             dry_run: dryRun,
             env: withEnv,
@@ -129,19 +129,19 @@ function Launcher({ project }: { project: string }) {
       ) : (
         <Stack spacing={1.5} sx={{ mb: 3 }}>
           <Stack direction="row" spacing={2} alignItems="center" flexWrap="wrap" useFlexGap>
-            {/* Workflows and recipes in one list: they are the same kind of
+            {/* Workflows and workflows in one list: they are the same kind of
                 thing, and making someone know which they have before they can
                 start it is the distinction this tool exists to remove. */}
             <TextField
               select
               size="small"
-              label="Workflow or recipe"
+              label="Workflow or workflow"
               value={selected}
               onChange={(e) => setSelected(e.target.value)}
               sx={{ minWidth: 260 }}
             >
               <MenuItem value="">
-                <em>All run-capable recipes</em>
+                <em>All run-capable workflows</em>
               </MenuItem>
               {targets.map((t) => (
                 <MenuItem key={`${t.kind}:${t.name}`} value={t.name}>
@@ -156,7 +156,7 @@ function Launcher({ project }: { project: string }) {
                       label={
                         t.kind === "workflow"
                           ? `${t.members.length} package${t.members.length === 1 ? "" : "s"}`
-                          : "recipe"
+                          : "workflow"
                       }
                     />
                   </Stack>
@@ -242,7 +242,7 @@ function Launcher({ project }: { project: string }) {
                     label={run.done ? "finished" : "running"}
                   />
                   <Box sx={{ flexGrow: 1, minWidth: 0 }}>
-                    <RunLink to={`/run/${run.id}`}>{run.recipes.join(", ") || "—"}</RunLink>
+                    <RunLink to={`/run/${run.id}`}>{run.workflows.join(", ") || "—"}</RunLink>
                     <Typography variant="caption" color="text.secondary" sx={{ display: "block" }}>
                       #{run.id} · started {new Date(run.created_at).toLocaleTimeString()}
                     </Typography>
@@ -261,7 +261,7 @@ function Launcher({ project }: { project: string }) {
  * Ask for the variables a run can't start without.
  *
  * The daemon already looked in its own environment and in whatever `.env` files
- * the recipe sources, so anything listed here genuinely has nowhere else to come
+ * the workflow sources, so anything listed here genuinely has nowhere else to come
  * from. Values are used for this launch only — nothing is written to disk.
  */
 function EnvPrompt({

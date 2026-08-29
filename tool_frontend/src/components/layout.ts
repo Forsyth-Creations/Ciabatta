@@ -164,7 +164,7 @@ export function executionOrder(
  * Longest-path depth for each node.
  *
  * Iterative relaxation rather than a topological sort, because these graphs
- * aren't guaranteed acyclic — a malformed recipe or a dependency cycle should
+ * aren't guaranteed acyclic — a malformed workflow or a dependency cycle should
  * still render something rather than throw. The pass count bounds the work if a
  * cycle is present.
  */

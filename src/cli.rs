@@ -28,80 +28,27 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub enum Commands {
-    /// Push one or more recipes in parallel (all if none named).
-    Push {
-        /// Recipe names to execute. Pushes all if omitted.
-        #[arg(name = "RECIPE")]
-        recipes: Vec<String>,
+    /// Tell the daemon about this workspace, so the web app can see it.
+    ///
+    /// Every web-facing command registers the directory it was run in, so you
+    /// rarely need this — but a checkout nobody has run anything in yet won't
+    /// appear in the project switcher until something says it exists. `init`
+    /// registers for you; this is how you do it for a checkout that already
+    /// had a config, or from a script.
+    Register {
+        /// Register this directory instead of the current one.
+        #[arg(long, value_name = "DIR")]
+        path: Option<std::path::PathBuf>,
 
-        /// Push only the recipes grouped by the named menu (repeatable). Combines
-        /// with any RECIPE arguments. See the [menus] config section.
-        #[arg(long = "cookbook", visible_alias = "menu", value_name = "MENU")]
-        cookbooks: Vec<String>,
-
-        /// Set an environment variable (KEY=VALUE). Overrides CI-derived vars.
-        #[arg(short = 'e', long = "env", value_name = "KEY=VALUE")]
-        env: Vec<String>,
-
-        /// Show what would happen without actually running anything.
+        /// Print the project id and exit without opening a browser.
         #[arg(long)]
-        dry_run: bool,
+        quiet: bool,
 
-        /// Disable the TUI and print progress to stdout.
-        #[arg(long)]
-        no_tui: bool,
-
-        /// Derive CIABATTA_BRANCH/_COMMIT/_TAG/_BUILD_NUMBER from local git
-        /// history instead of the configured CI system.
-        #[arg(long)]
-        local: bool,
-
-        /// Path to ciabatta.toml (overrides .ciabatta/ciabatta.toml discovery).
-        #[arg(short = 'c', long)]
-        config: Option<std::path::PathBuf>,
+        /// Port the ciabatta daemon listens on (default 8099, or
+        /// CIABATTA_DAEMON_PORT).
+        #[arg(short = 'p', long)]
+        port: Option<u16>,
     },
-
-    /// Pull (download) artifacts for one or more recipes.
-    Pull {
-        #[arg(name = "RECIPE")]
-        recipes: Vec<String>,
-
-        /// Pull only the recipes grouped by the named menu (repeatable). Combines
-        /// with any RECIPE arguments. See the [menus] config section.
-        #[arg(long = "cookbook", visible_alias = "menu", value_name = "MENU")]
-        cookbooks: Vec<String>,
-
-        #[arg(short = 'e', long = "env", value_name = "KEY=VALUE")]
-        env: Vec<String>,
-
-        #[arg(long)]
-        dry_run: bool,
-
-        #[arg(long)]
-        no_tui: bool,
-
-        /// Derive CIABATTA_BRANCH/_COMMIT/_TAG/_BUILD_NUMBER from local git
-        /// history instead of the configured CI system.
-        #[arg(long)]
-        local: bool,
-
-        #[arg(short = 'c', long)]
-        config: Option<std::path::PathBuf>,
-    },
-
-    /// Run a collection of scripts as one graph.
-    ///
-    /// A TARGET is a monorepo workflow (`build`, `test`, …) or a recipe from
-    /// this project's ciabatta.toml — there is no difference in how they run.
-    /// Naming several compiles them into a single graph, so shared
-    /// dependencies run once and everything else runs in dependency order.
-    ///
-    ///   ciabatta run build              the whole monorepo's build
-    ///   ciabatta run build test         both, as one graph
-    ///   ciabatta run test --filter tag:fast     just the fast slice of it
-    ///
-    /// Add --gui for a live web view, or --build to design a flowchart.
-    Run(RunArgs),
 
     /// Print CIABATTA_* variables (resolved from local git) as shell `export`
     /// lines, so you can load them into your shell: eval "$(ciabatta source)"
@@ -120,7 +67,7 @@ pub enum Commands {
     Workflow(WorkflowArgs),
 
     /// List what this workspace can do: every sub-workspace, its workflows,
-    /// who owns them, and what they need — plus the recipes in the local config.
+    /// who owns them, and what they need — plus the workflows in the local config.
     ///
     /// This is the answer to "what scripts exist in this monorepo?" without
     /// opening a single package.
@@ -134,9 +81,9 @@ pub enum Commands {
         #[arg(short = 'v', long)]
         verbose: bool,
 
-        /// Skip the workspace catalogue and list only this project's recipes.
+        /// Skip the workspace catalogue and list only this project's workflows.
         #[arg(long)]
-        recipes: bool,
+        workflows: bool,
     },
 
     /// Create a .ciabatta/ directory with a starter ciabatta.toml in the current directory.
@@ -210,12 +157,27 @@ pub enum Commands {
         #[arg(long, value_name = "RUNTIME")]
         containers: Option<String>,
 
-        /// Overwrite an existing .ciabatta/ciabatta.toml if one exists.
+        /// Overwrite an existing .ciabatta/ciabatta.yaml if one exists.
         #[arg(long)]
         force: bool,
+
+        /// Don't tell the daemon about the new workspace.
+        ///
+        /// `init` registers by default so the checkout shows up in the web app
+        /// without you having to run anything else. Registration starts the
+        /// daemon if it isn't up, which is rarely what you want inside a
+        /// container build or a CI job — pass this there.
+        #[arg(long)]
+        no_register: bool,
+
+        /// Port the ciabatta daemon listens on (default 8099, or
+        /// CIABATTA_DAEMON_PORT).
+        #[arg(short = 'p', long)]
+        port: Option<u16>,
     },
 
-    /// Interactive TUI browser — view registries, check artifact paths, push on demand.
+    /// Interactive registry browser — inspect registries and walk what has been
+    /// published to them.
     #[command(alias = "browse")]
     Tui,
 
@@ -386,7 +348,7 @@ pub enum Commands {
         subcommand: ConfigCommand,
     },
 
-    /// Interactively set up your project: add registries, or auto-suggest recipes.
+    /// Interactively set up your project: add registries, or auto-suggest workflows.
     Configure {
         #[command(subcommand)]
         subcommand: Option<ConfigureCommand>,
@@ -406,7 +368,7 @@ pub enum Commands {
     ///   ciabatta why api:build --json
     Why {
         /// The target: a graph node (`api:build`), a bare step name, or a whole
-        /// workflow or recipe.
+        /// workflow or workflow.
         #[arg(name = "TARGET")]
         target: String,
 
@@ -443,8 +405,8 @@ pub enum Commands {
     ///   ciabatta dry-run build --diff    …and show me the lines
     #[command(name = "dry-run", visible_alias = "dryrun")]
     DryRun {
-        /// Recipes and/or workflows to plan. With none, plans every
-        /// run-capable recipe in this project.
+        /// Workflows and/or workflows to plan. With none, plans every
+        /// run-capable workflow in this project.
         #[arg(name = "TARGET")]
         targets: Vec<String>,
 
@@ -500,10 +462,10 @@ pub enum Commands {
         subcommand: SelfCommand,
     },
 
-    /// Turn an existing script into a ciabatta recipe.
+    /// Turn an existing script into a ciabatta workflow.
     ///
-    /// A recipe *is* a script — this reads one, works out what it needs and
-    /// what it produces, and writes the recipe into this workspace's
+    /// A workflow *is* a script — this reads one, works out what it needs and
+    /// what it produces, and writes the workflow into this workspace's
     /// `.ciabatta/` so it can join the graph like everything else.
     ///
     ///   ciabatta convert --script scripts/build.sh
@@ -512,20 +474,15 @@ pub enum Commands {
         #[arg(long, short, value_name = "PATH")]
         script: std::path::PathBuf,
 
-        /// Name for the generated recipe. Defaults to the script's filename.
+        /// Name for the generated workflow. Defaults to the script's filename.
         #[arg(long, short, value_name = "NAME")]
         name: Option<String>,
 
-        /// Also write it as a workflow under `.ciabatta/workflows/`, so
-        /// `ciabatta <name>` runs it across the monorepo.
-        #[arg(long)]
-        workflow: bool,
-
-        /// Print the generated recipe instead of writing it.
+        /// Print the generated workflow instead of writing it.
         #[arg(long)]
         dry_run: bool,
 
-        /// Overwrite an existing recipe of the same name.
+        /// Overwrite an existing workflow of the same name.
         #[arg(long)]
         force: bool,
     },
@@ -540,19 +497,30 @@ pub enum Commands {
 
 #[derive(Subcommand, Debug)]
 pub enum CacheCommand {
-    /// Work out what this workspace reads and writes, and write a `cache:`
-    /// section proposing it.
+    /// Work out what a workflow reads and writes, and write a `cache:` section
+    /// into its file proposing it.
     ///
     /// The proposal comes from the directory's real contents rather than from a
     /// template, because the one thing that has to be right is `inputs` — a
     /// build that reads a file nobody declared will be served a stale artifact.
+    ///
+    /// What a build reads is a property of that build, so the section lands in
+    /// `.ciabatta/workflows/<name>.yaml` next to the steps it describes: a
+    /// `build` and a `test` in the same package read different files and should
+    /// be able to say so.
     Init {
+        /// Which workflow to describe. With one workflow here it's optional;
+        /// with several, name the one you mean.
+        #[arg(name = "WORKFLOW")]
+        workflow: Option<String>,
+
         /// Turn caching on straight away. Without this the section is written
         /// with `enabled: false` for you to review first.
         #[arg(long)]
         enable: bool,
 
-        /// Also point this workspace at a remote cache.
+        /// Point this checkout at a remote cache. This one goes in
+        /// `ciabatta.yaml` — it's one server per checkout, not per workflow.
         #[arg(long, value_name = "URL")]
         remote: Option<String>,
 
@@ -700,106 +668,6 @@ pub enum SelfCommand {
     },
 }
 
-/// Arguments for `ciabatta run`.
-///
-/// A target is a monorepo workflow or a recipe from this project's config. The
-/// distinction is only about where the steps were written down, not about how
-/// they execute — both compile to the same graph and run through the same
-/// engine, which is why one command takes either.
-#[derive(Args, Debug, Clone)]
-pub struct RunArgs {
-    /// Workflows and/or recipes to run. With none, runs every run-capable
-    /// recipe in this project.
-    #[arg(name = "TARGET")]
-    pub targets: Vec<String>,
-
-    /// Run only the recipes grouped by the named menu (repeatable).
-    #[arg(long = "cookbook", visible_alias = "menu", value_name = "MENU")]
-    pub cookbooks: Vec<String>,
-
-    /// Run only the steps matching this term (repeatable), instead of the whole
-    /// graph. Accepts tag:<name>, workspace:<name>, kind:<name>, owner:<name>,
-    /// step:<name>, or a bare word searching all of them. Prefix with ! to
-    /// exclude: --filter tag:fast --filter '!tag:flaky'.
-    ///
-    /// Filtering prunes the graph rather than expanding a selection, so the
-    /// steps that survive assume their pruned dependencies already ran — it's
-    /// the fast debug loop, not a first build.
-    #[arg(short = 'f', long = "filter", value_name = "TERM")]
-    pub filter: Vec<String>,
-
-    /// Start only from these sub-workspaces (repeatable). Their dependencies
-    /// still come along unless --isolated is given.
-    #[arg(long, value_name = "MEMBER")]
-    pub only: Vec<String>,
-
-    /// Don't follow dependencies into other sub-workspaces.
-    #[arg(long)]
-    pub isolated: bool,
-
-    /// Show the resolved graph without running it: every step, in wave order,
-    /// with what it does and where it came from. Reflects --filter, so it
-    /// answers "what would this actually run?". With --tui it opens the
-    /// interactive explorer instead, one node at a time.
-    #[arg(long)]
-    pub graph: bool,
-
-    /// Set an environment variable (KEY=VALUE). Overrides CI-derived vars.
-    #[arg(short = 'e', long = "env", value_name = "KEY=VALUE")]
-    pub env: Vec<String>,
-
-    /// Show what would happen without actually running anything.
-    #[arg(long)]
-    pub dry_run: bool,
-
-    /// Run inside the live TUI instead of printing plain progress.
-    ///
-    /// A run prints ordinary text by default: it's what CI wants, it's what
-    /// survives in a scrollback, and it's what you can pipe. The TUI is the
-    /// richer view when you're watching a run happen.
-    #[arg(long)]
-    pub tui: bool,
-
-    /// Accepted and ignored — plain output is the default. Kept so existing
-    /// scripts and CI jobs that pass it keep working.
-    #[arg(long, hide = true)]
-    pub no_tui: bool,
-
-    /// Derive CIABATTA_BRANCH/_COMMIT/_TAG/_BUILD_NUMBER from local git history
-    /// instead of the configured CI system.
-    #[arg(long)]
-    pub local: bool,
-
-    /// Path to ciabatta.toml (overrides .ciabatta/ciabatta.toml discovery).
-    #[arg(short = 'c', long)]
-    pub config: Option<std::path::PathBuf>,
-
-    /// Show the run live in a web browser (flowchart + logs + fix-it buttons
-    /// for recovery nodes) instead of the terminal TUI.
-    #[arg(long)]
-    pub gui: bool,
-
-    /// Open a visual builder in the browser to design a flowchart TOML file.
-    /// Runs nothing; you copy the generated TOML into your own file.
-    #[arg(long, conflicts_with = "gui")]
-    pub build: bool,
-
-    /// Port the ciabatta daemon listens on (default 8099, or
-    /// CIABATTA_DAEMON_PORT).
-    #[arg(short = 'p', long)]
-    pub port: Option<u16>,
-}
-
-impl RunArgs {
-    /// Whether this invocation takes over the terminal with the TUI.
-    ///
-    /// Opt-in, and `--no-tui` still wins if both are given — a script that
-    /// already asks for plain output must keep getting it.
-    pub fn use_tui(&self) -> bool {
-        self.tui && !self.no_tui
-    }
-}
-
 /// Parses a bare `ciabatta <workflow> [flags]` invocation.
 ///
 /// An external subcommand arrives as raw argv, which this re-parses through the
@@ -883,8 +751,10 @@ pub struct WorkflowArgs {
 }
 
 impl WorkflowArgs {
-    /// Whether this invocation takes over the terminal with the TUI. See
-    /// [`RunArgs::use_tui`] — the two spellings must agree.
+    /// Whether this invocation takes over the terminal with the TUI.
+    ///
+    /// Opt-in, and `--no-tui` still wins if both are given — a script that
+    /// already asks for plain output must keep getting it.
     pub fn use_tui(&self) -> bool {
         self.tui && !self.no_tui
     }
@@ -1052,7 +922,7 @@ pub enum ConfigCommand {
 
 #[derive(Subcommand, Debug)]
 pub enum ConfigureCommand {
-    /// Analyze the project and suggest recipes for pushing to registries.
+    /// Analyze the project and suggest workflows for pushing to registries.
     Auto {
         /// Apply every suggestion without prompting.
         #[arg(long)]
@@ -1078,13 +948,6 @@ pub fn parse_env_flags(
 mod tests {
     use super::*;
 
-    fn run_args(argv: &[&str]) -> RunArgs {
-        match Cli::try_parse_from(argv).expect("parses").command {
-            Commands::Run(args) => args,
-            other => panic!("expected a run, got {other:?}"),
-        }
-    }
-
     fn workflow_args(argv: &[&str]) -> WorkflowArgs {
         match Cli::try_parse_from(argv).expect("parses").command {
             Commands::Workflow(args) => args,
@@ -1094,12 +957,6 @@ mod tests {
 
     #[test]
     fn a_run_prints_plain_text_unless_the_tui_is_asked_for() {
-        assert!(!run_args(&["ciabatta", "run", "build"]).use_tui());
-        assert!(run_args(&["ciabatta", "run", "build", "--tui"]).use_tui());
-
-        // A workflow is an ordinary run, so the two spellings must agree —
-        // `ciabatta build` and `ciabatta run build` can't differ in whether
-        // they take over the terminal.
         assert!(!workflow_args(&["ciabatta", "workflow", "build"]).use_tui());
         assert!(workflow_args(&["ciabatta", "workflow", "build", "--tui"]).use_tui());
     }
@@ -1108,7 +965,7 @@ mod tests {
     fn no_tui_is_still_accepted_and_still_means_plain() {
         // Scripts and CI jobs that already pass it must keep working, and must
         // keep getting plain output even alongside --tui.
-        assert!(!run_args(&["ciabatta", "run", "build", "--no-tui"]).use_tui());
-        assert!(!run_args(&["ciabatta", "run", "build", "--no-tui", "--tui"]).use_tui());
+        assert!(!workflow_args(&["ciabatta", "workflow", "build", "--no-tui"]).use_tui());
+        assert!(!workflow_args(&["ciabatta", "workflow", "build", "--no-tui", "--tui"]).use_tui());
     }
 }

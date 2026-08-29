@@ -36,7 +36,7 @@ async fn env_drift(
     let root = state.project_root(&query.project)?;
 
     // Every `.env` any run in this project sources — the same set the CLI
-    // snapshots, gathered from the workspace's workflows and the local recipes.
+    // snapshots, gathered from the workspace's workflows and the local workflows.
     let mut files: Vec<String> = Vec::new();
     if let Ok(workspace) = Workspace::discover(&root) {
         for member in &workspace.members {
@@ -58,11 +58,8 @@ async fn env_drift(
         }
     }
     if let Ok(config) = crate::config::load_config(&root) {
-        for entry in config.recipes.values() {
-            let Some(recipe) = entry.run_recipe() else {
-                continue;
-            };
-            for file in &recipe.env_file {
+        for workflow in config.workflows.values() {
+            for file in &workflow.env_file {
                 if !files.contains(file) {
                     files.push(file.clone());
                 }
@@ -284,7 +281,9 @@ fn step_json(step: &crate::run::RunStep) -> Value {
         "owner": step.owner,
         "command": step.run.clone().or_else(|| step.script.clone()),
         "kind": step.kind,
-        "recipe": step.recipe,
+        "registry": step.registry,
+        "artifact": step.artifact,
+        "publish_path": step.publish_path,
         "push": step.is_push(),
         "needs": step.needs,
         "requires": step.requires,

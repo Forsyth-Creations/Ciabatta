@@ -31,7 +31,7 @@ import { streamUrl } from "../api/client";
 import {
   useChoose,
   undeclaredEnv,
-  type RecipeView,
+  type WorkflowView,
   type RunState,
   type StepStatus,
   type StepView,
@@ -108,13 +108,13 @@ export function RunDetailPage() {
   const id = Number(runId);
 
   const { state, error } = useRunStream(id);
-  const [recipeIndex, setRecipeIndex] = useState(0);
+  const [workflowIndex, setWorkflowIndex] = useState(0);
   const [selectedStep, setSelectedStep] = useState<string | null>(null);
 
   if (error) return <ErrorNote error={new Error(error)} />;
   if (!state) return <Loading label="Connecting to the run…" />;
 
-  const recipe = state.recipes[recipeIndex];
+  const workflow = state.workflows[workflowIndex];
 
   return (
     <>
@@ -125,7 +125,7 @@ export function RunDetailPage() {
         <Box sx={{ flexGrow: 1, minWidth: 0 }}>
           <Typography variant="h1">Run #{id}</Typography>
           <Typography variant="caption" color="text.secondary">
-            {state.run.recipes.join(", ")}
+            {state.run.workflows.join(", ")}
             {state.dry_run && " · dry run"}
           </Typography>
         </Box>
@@ -137,25 +137,25 @@ export function RunDetailPage() {
         />
       </Stack>
 
-      {state.recipes.length > 1 && (
+      {state.workflows.length > 1 && (
         <Tabs
-          value={recipeIndex}
+          value={workflowIndex}
           onChange={(_, next) => {
-            setRecipeIndex(next);
+            setWorkflowIndex(next);
             setSelectedStep(null);
           }}
           sx={{ mb: 2 }}
         >
-          {state.recipes.map((r) => (
+          {state.workflows.map((r) => (
             <Tab key={r.name} label={r.name} />
           ))}
         </Tabs>
       )}
 
-      {recipe && (
-        <RecipePanel
+      {workflow && (
+        <WorkflowPanel
           runId={id}
-          recipe={recipe}
+          workflow={workflow}
           selectedStep={selectedStep}
           onSelectStep={setSelectedStep}
         />
@@ -164,14 +164,14 @@ export function RunDetailPage() {
   );
 }
 
-function RecipePanel({
+function WorkflowPanel({
   runId,
-  recipe,
+  workflow,
   selectedStep,
   onSelectStep,
 }: {
   runId: number;
-  recipe: RecipeView;
+  workflow: WorkflowView;
   selectedStep: string | null;
   onSelectStep: (name: string | null) => void;
 }) {
@@ -190,10 +190,10 @@ function RecipePanel({
   const [focused, setFocused] = useState<string | null>(null);
 
   const { nodes, edges } = useMemo(
-    () => buildFlow(recipe, theme, showOrder, showEnv, showFiles, focused),
-    [recipe, theme, showOrder, showEnv, showFiles, focused],
+    () => buildFlow(workflow, theme, showOrder, showEnv, showFiles, focused),
+    [workflow, theme, showOrder, showEnv, showFiles, focused],
   );
-  const step = recipe.steps.find((s) => s.name === selectedStep);
+  const step = workflow.steps.find((s) => s.name === selectedStep);
 
   return (
     <>
@@ -205,7 +205,7 @@ function RecipePanel({
         useFlexGap
         alignItems="center"
       >
-        {recipe.stages.map((stage) => (
+        {workflow.stages.map((stage) => (
           <Chip
             key={stage.name}
             size="small"
@@ -280,17 +280,17 @@ function RecipePanel({
         </Tooltip>
       </Stack>
 
-      {recipe.error && (
+      {workflow.error && (
         <Alert severity="error" sx={{ mb: 2 }}>
-          {recipe.error}
+          {workflow.error}
         </Alert>
       )}
 
-      {recipe.pending && (
+      {workflow.pending && (
         <Alert severity="warning" sx={{ mb: 2 }}>
-          <Typography sx={{ mb: 1 }}>{recipe.pending.message}</Typography>
+          <Typography sx={{ mb: 1 }}>{workflow.pending.message}</Typography>
           <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
-            {recipe.pending.options.map((option, index) => (
+            {workflow.pending.options.map((option, index) => (
               <Button
                 key={option}
                 size="small"
@@ -298,8 +298,8 @@ function RecipePanel({
                 disabled={choose.isPending}
                 onClick={() =>
                   choose.mutate({
-                    recipe: recipe.name,
-                    step: recipe.pending!.step,
+                    workflow: workflow.name,
+                    step: workflow.pending!.step,
                     option: index,
                   })
                 }
@@ -337,21 +337,21 @@ function RecipePanel({
       />
 
       {focused !== null && (
-        <FocusNote recipe={recipe} focused={focused} onClear={() => setFocused(null)} />
+        <FocusNote workflow={workflow} focused={focused} onClear={() => setFocused(null)} />
       )}
 
       <Box sx={{ mt: 2 }}>
-        <EnvPanel report={recipe.env} title="Environment this run started with" />
+        <EnvPanel report={workflow.env} title="Environment this run started with" />
       </Box>
 
       <Box sx={{ mt: 2 }}>
         <Typography variant="h3" sx={{ mb: 1 }}>
-          {step ? `${step.name} logs` : "Recipe logs"}
+          {step ? `${step.name} logs` : "Workflow logs"}
         </Typography>
         {step && (
           <StepDetails
             step={step}
-            env={recipe.env.vars.filter((variable) => variable.steps.includes(step.name))}
+            env={workflow.env.vars.filter((variable) => variable.steps.includes(step.name))}
           />
         )}
         {step?.action && (
@@ -363,10 +363,10 @@ function RecipePanel({
             {step.action}
           </Typography>
         )}
-        <LogBox lines={step ? step.logs : recipe.logs} />
+        <LogBox lines={step ? step.logs : workflow.logs} />
         {step && (
           <Button size="small" sx={{ mt: 1 }} onClick={() => onSelectStep(null)}>
-            Show all recipe logs
+            Show all workflow logs
           </Button>
         )}
       </Box>
@@ -413,7 +413,7 @@ function LogBox({ lines }: { lines: string[] }) {
   );
 }
 
-/** Build the react-flow graph for one recipe's step DAG. */
+/** Build the react-flow graph for one workflow's step DAG. */
 /**
  * A workflow-graph node's label: its sub-workspace above, its step name below.
  * Plain runs keep the bare name, since there's only one package involved.
@@ -612,20 +612,20 @@ function TargetDependencies({ deps }: { deps: TargetDeps }) {
  * depend on remembering which node was clicked.
  */
 function FocusNote({
-  recipe,
+  workflow,
   focused,
   onClear,
 }: {
-  recipe: RecipeView;
+  workflow: WorkflowView;
   focused: string;
   onClear: () => void;
 }) {
-  const groups = useMemo(() => inputGroups(recipe), [recipe]);
+  const groups = useMemo(() => inputGroups(workflow), [workflow]);
 
   const key = envKeyOf(focused);
-  const variable = key === null ? null : (recipe.env.vars.find((v) => v.key === key) ?? null);
+  const variable = key === null ? null : (workflow.env.vars.find((v) => v.key === key) ?? null);
   const writer = outputStepOf(focused);
-  const producer = writer === null ? null : (recipe.steps.find((s) => s.name === writer) ?? null);
+  const producer = writer === null ? null : (workflow.steps.find((s) => s.name === writer) ?? null);
   const group = groups.get(focused) ?? null;
 
   // The run's shape can change under a focus — a workflow recompiles, a step
@@ -727,13 +727,13 @@ function DepRow({
  * drawn a line to would be inventing a relationship.
  */
 function litSteps(
-  recipe: RecipeView,
+  workflow: WorkflowView,
   id: string,
   groups: Map<string, { deps: TargetDeps; steps: string[] }>,
 ): Set<string> {
   const key = envKeyOf(id);
   if (key !== null) {
-    return new Set(recipe.env.vars.find((variable) => variable.key === key)?.steps ?? []);
+    return new Set(workflow.env.vars.find((variable) => variable.key === key)?.steps ?? []);
   }
   const writer = outputStepOf(id);
   if (writer !== null) return new Set([writer]);
@@ -741,31 +741,31 @@ function litSteps(
 }
 
 function buildFlow(
-  recipe: RecipeView,
+  workflow: WorkflowView,
   theme: Theme,
   showOrder: boolean,
   showEnv: boolean,
   showFiles: boolean,
   focused: string | null,
 ): { nodes: Node[]; edges: Edge[] } {
-  const ids = recipe.steps.map((s) => s.name);
-  const byName = new Map(recipe.steps.map((s) => [s.name, s]));
+  const ids = workflow.steps.map((s) => s.name);
+  const byName = new Map(workflow.steps.map((s) => [s.name, s]));
 
   // Input sets are grouped once, here, so the focus and the drawing agree
   // about which steps share a node.
-  const groups = inputGroups(recipe);
+  const groups = inputGroups(workflow);
 
   const focus: Focus =
     focused === null
       ? NO_FOCUS
       : (() => {
-          const reached = litSteps(recipe, focused, groups);
+          const reached = litSteps(workflow, focused, groups);
           return { id: focused, lit: (id: string) => id === focused || reached.has(id) };
         })();
 
   // Only `needs` edges define run order; error/retry branches are annotations
   // on top and would distort the layout if they drove depth.
-  const orderEdges = recipe.edges
+  const orderEdges = workflow.edges
     .filter((e) => e.kind === "needs")
     .map((e) => ({ source: e.from, target: e.to }));
 
@@ -774,7 +774,7 @@ function buildFlow(
   // the run takes when everything works.
   const sequence = showOrder
     ? executionOrder(
-        recipe.steps.filter((s) => !s.recover).map((s) => s.name),
+        workflow.steps.filter((s) => !s.recover).map((s) => s.name),
         orderEdges,
       )
     : new Map<string, number>();
@@ -821,7 +821,7 @@ function buildFlow(
     };
   });
 
-  const edges: Edge[] = recipe.edges.map((edge, index) => ({
+  const edges: Edge[] = workflow.edges.map((edge, index) => ({
     ...ORTHOGONAL_EDGE,
     id: `${edge.from}->${edge.to}-${index}`,
     source: edge.from,
@@ -843,7 +843,7 @@ function buildFlow(
   }));
 
   if (showFiles) {
-    const files = fileFlow(recipe, theme, positioned, groups, focus);
+    const files = fileFlow(workflow, theme, positioned, groups, focus);
     nodes.push(...files.nodes);
     edges.push(...files.edges);
   }
@@ -851,7 +851,7 @@ function buildFlow(
   if (showEnv) {
     // Variables sit outside the file column when both are drawn, so the two
     // kinds of dependency read as two columns rather than one pile.
-    const env = envFlow(recipe, theme, positioned, focus, showFiles ? 620 : 300);
+    const env = envFlow(workflow, theme, positioned, focus, showFiles ? 620 : 300);
     nodes.push(...env.nodes);
     edges.push(...env.edges);
   }
@@ -878,13 +878,13 @@ function buildFlow(
  * would be a bug, not a shared dependency.
  */
 function fileFlow(
-  recipe: RecipeView,
+  workflow: WorkflowView,
   theme: Theme,
   steps: Node[],
   groups: Map<string, { deps: TargetDeps; steps: string[] }>,
   focus: Focus,
 ): { nodes: Node[]; edges: Edge[] } {
-  const withDeps = recipe.steps.filter((step) => step.deps?.name);
+  const withDeps = workflow.steps.filter((step) => step.deps?.name);
   if (withDeps.length === 0) return { nodes: [], edges: [] };
 
   const xs = steps.map((node) => node.position.x);
@@ -1015,9 +1015,9 @@ function fileFlow(
  * real information: those steps rebuild together. Keyed by the node id the
  * group takes, so focusing one can find its members without regrouping.
  */
-function inputGroups(recipe: RecipeView): Map<string, { deps: TargetDeps; steps: string[] }> {
+function inputGroups(workflow: WorkflowView): Map<string, { deps: TargetDeps; steps: string[] }> {
   const byDeclaration = new Map<string, { deps: TargetDeps; steps: string[] }>();
-  for (const step of recipe.steps) {
+  for (const step of workflow.steps) {
     const deps = step.deps;
     if (!deps?.name || deps.inputs.length === 0) continue;
     const key = `${deps.dir}\u0000${deps.inputs.join("\u0000")}`;
@@ -1074,13 +1074,13 @@ function FileNodeLabel({ deps, kind }: { deps: TargetDeps; kind: "reads" | "writ
  * edge to justify a node. The panel below the graph still lists it.
  */
 function envFlow(
-  recipe: RecipeView,
+  workflow: WorkflowView,
   theme: Theme,
   steps: Node[],
   focus: Focus,
   offset: number,
 ): { nodes: Node[]; edges: Edge[] } {
-  const drawn = recipe.env.vars.filter((variable) => variable.steps.length > 0);
+  const drawn = workflow.env.vars.filter((variable) => variable.steps.length > 0);
   if (drawn.length === 0) return { nodes: [], edges: [] };
 
   // One column left of the leftmost step, vertically centred on the graph.
@@ -1133,7 +1133,7 @@ function envFlow(
   // A variable's step list comes from the resolved run, so guard against an
   // edge into a node this view isn't drawing rather than handing react-flow a
   // dangling target.
-  const present = new Set(recipe.steps.map((step) => step.name));
+  const present = new Set(workflow.steps.map((step) => step.name));
   const edges: Edge[] = drawn.flatMap((variable) => {
     const id = envNodeId(variable.key);
     const picked = focus.id === id;

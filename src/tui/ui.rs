@@ -6,7 +6,7 @@ use ratatui::{
     widgets::{Block, Borders, Gauge, List, ListItem, ListState, Paragraph},
 };
 
-use super::app::{App, RecipeStatus, StageStatus};
+use super::app::{App, StageStatus, WorkflowStatus};
 
 const LOGO: &str = r#"
   ██████╗██╗ █████╗ ██████╗  █████╗ ████████╗████████╗ █████╗
@@ -27,7 +27,7 @@ pub fn render(f: &mut Frame, app: &App) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(logo_lines), // logo
-            Constraint::Min(8),             // recipe list + logs
+            Constraint::Min(8),             // workflow list + logs
             Constraint::Length(1),          // help bar
         ])
         .split(area);
@@ -58,26 +58,26 @@ fn render_body(f: &mut Frame, area: Rect, app: &App) {
 
 fn render_recipe_list(f: &mut Frame, area: Rect, app: &App) {
     let block = Block::default()
-        .title(" Recipes ")
+        .title(" Workflows ")
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Cyan));
 
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    // Each recipe takes 3 rows: name + status, progress bar, blank
+    // Each workflow takes 3 rows: name + status, progress bar, blank
     let items_height = 3u16;
     let visible = (inner.height / items_height) as usize;
     let start = app.selected.saturating_sub(visible.saturating_sub(1));
 
     let mut y = inner.y;
-    for (i, recipe) in app.recipes.iter().enumerate().skip(start) {
+    for (i, workflow) in app.workflows.iter().enumerate().skip(start) {
         if y + items_height > inner.y + inner.height {
             break;
         }
 
         let selected = i == app.selected;
-        let (status_symbol, status_color) = status_style(&recipe.status);
+        let (status_symbol, status_color) = status_style(&workflow.status);
 
         let name_style = if selected {
             Style::default()
@@ -92,7 +92,7 @@ fn render_recipe_list(f: &mut Frame, area: Rect, app: &App) {
                 format!(" {} ", status_symbol),
                 Style::default().fg(status_color),
             ),
-            Span::styled(&recipe.name, name_style),
+            Span::styled(&workflow.name, name_style),
         ]);
         let title = Paragraph::new(title_line);
         f.render_widget(
@@ -109,7 +109,7 @@ fn render_recipe_list(f: &mut Frame, area: Rect, app: &App) {
         let labels = app.stage_labels();
         let mut spans: Vec<Span> = Vec::new();
         for (idx, label) in labels.iter().enumerate() {
-            let (sym, color) = stage_style(recipe.stages[idx]);
+            let (sym, color) = stage_style(workflow.stages[idx]);
             if idx > 0 {
                 spans.push(Span::raw(" "));
             }
@@ -129,11 +129,11 @@ fn render_recipe_list(f: &mut Frame, area: Rect, app: &App) {
             },
         );
 
-        let gauge_color = gauge_color_for(&recipe.status);
-        let ratio = recipe.progress();
-        // For multi-file recipes, label the bar with the file counter; otherwise
+        let gauge_color = gauge_color_for(&workflow.status);
+        let ratio = workflow.progress();
+        // For multi-file workflows, label the bar with the file counter; otherwise
         // fall back to the plain percentage.
-        let label = recipe
+        let label = workflow
             .transfer_label()
             .unwrap_or_else(|| format!("{:.0}%", ratio * 100.0));
         let gauge = Gauge::default()
@@ -154,8 +154,8 @@ fn render_recipe_list(f: &mut Frame, area: Rect, app: &App) {
     }
 
     // Scrollbar indicator
-    if app.recipes.len() > visible {
-        let indicator = format!(" {}/{} ", app.selected + 1, app.recipes.len());
+    if app.workflows.len() > visible {
+        let indicator = format!(" {}/{} ", app.selected + 1, app.workflows.len());
         let x = inner.x + inner.width.saturating_sub(indicator.len() as u16);
         let p = Paragraph::new(indicator).style(Style::default().fg(Color::DarkGray));
         f.render_widget(
@@ -171,7 +171,7 @@ fn render_recipe_list(f: &mut Frame, area: Rect, app: &App) {
 }
 
 fn render_logs(f: &mut Frame, area: Rect, app: &App) {
-    let title = if let Some(r) = app.recipes.get(app.selected) {
+    let title = if let Some(r) = app.workflows.get(app.selected) {
         format!(" Logs: {} ", r.name)
     } else {
         " Logs ".to_string()
@@ -258,12 +258,12 @@ fn render_help(f: &mut Frame, area: Rect, app: &App) {
     f.render_widget(p, area);
 }
 
-fn status_style(status: &RecipeStatus) -> (&'static str, Color) {
+fn status_style(status: &WorkflowStatus) -> (&'static str, Color) {
     match status {
-        RecipeStatus::Pending => ("○", Color::DarkGray),
-        RecipeStatus::Running => ("◑", Color::Yellow),
-        RecipeStatus::Success => ("✓", Color::Green),
-        RecipeStatus::Failed(_) => ("✗", Color::Red),
+        WorkflowStatus::Pending => ("○", Color::DarkGray),
+        WorkflowStatus::Running => ("◑", Color::Yellow),
+        WorkflowStatus::Success => ("✓", Color::Green),
+        WorkflowStatus::Failed(_) => ("✗", Color::Red),
     }
 }
 
@@ -277,11 +277,11 @@ fn stage_style(status: StageStatus) -> (&'static str, Color) {
     }
 }
 
-fn gauge_color_for(status: &RecipeStatus) -> Color {
+fn gauge_color_for(status: &WorkflowStatus) -> Color {
     match status {
-        RecipeStatus::Pending => Color::DarkGray,
-        RecipeStatus::Running => Color::Yellow,
-        RecipeStatus::Success => Color::Green,
-        RecipeStatus::Failed(_) => Color::Red,
+        WorkflowStatus::Pending => Color::DarkGray,
+        WorkflowStatus::Running => Color::Yellow,
+        WorkflowStatus::Success => Color::Green,
+        WorkflowStatus::Failed(_) => Color::Red,
     }
 }

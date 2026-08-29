@@ -1,18 +1,22 @@
-/// Interactive registry/recipe browser TUI.
+/// Interactive registry browser TUI.
+///
+/// Shows the registries this project can reach and lets you walk what has been
+/// published to them. Publishing itself is a workflow step (`kind: push`), so
+/// it is run the way every other step is — `ciabatta <workflow>` — rather than
+/// from here.
 ///
 /// Layout:
 ///   ┌─ Logo ───────────────────────────────────────────┐
-///   ├─ Registries ──────────┬─ Recipes ────────────────┤
-///   │  ○ nexus              │  ○ release_frontend  ✓   │
-///   │  ○ docker             │  ○ release_backend   -   │
-///   │  ○ ecr                │                          │
-///   ├───────────────────────┴──────────────────────────┤
-///   │  Detail / Log panel                               │
+///   ├─ Registries ─────────────────────────────────────┤
+///   │  ○ nexus                                         │
+///   │  ○ docker                                        │
+///   │  ○ ecr                                           │
 ///   ├──────────────────────────────────────────────────┤
-///   │  [Tab] switch pane  [p] push  [d] dry-run  [q] quit│
+///   │  Detail panel                                     │
+///   ├──────────────────────────────────────────────────┤
+///   │  [e] explore  [↑/↓] select  [q] quit              │
 ///   └──────────────────────────────────────────────────┘
 use std::collections::HashMap;
-use std::path::Path;
 use std::time::Duration;
 
 use anyhow::Result;
@@ -30,36 +34,8 @@ use tokio::sync::mpsc;
 
 use crate::config::CiabattaConfig;
 use crate::registry::browse::{self, Entry};
-use crate::runner::{self, ProgressUpdate, RunMode};
 
 // ─── State ───────────────────────────────────────────────────────────────────
-
-#[derive(Clone, PartialEq)]
-enum Pane {
-    Registries,
-    Recipes,
-}
-
-#[derive(Clone, PartialEq)]
-pub enum RecipeRunStatus {
-    Idle,
-    Running,
-    Success,
-    Failed(String),
-}
-
-pub struct RecipeRow {
-    pub name: String,
-    /// Registry this recipe targets (if any).
-    pub registry: Option<String>,
-    /// Resolved local artifact path exists on disk.
-    pub local_exists: Option<bool>,
-    /// Publish path template (unresolved).
-    pub publish_path: Option<String>,
-    pub kind: &'static str,
-    pub run_status: RecipeRunStatus,
-    pub logs: Vec<String>,
-}
 
 pub struct RegistryRow {
     pub name: String,
@@ -123,69 +99,41 @@ struct ExploreResult {
 
 pub struct BrowserApp {
     pub registries: Vec<RegistryRow>,
-    pub recipes: Vec<RecipeRow>,
     pub reg_state: ListState,
-    pub rec_state: ListState,
-    active_pane: Pane,
     pub log_scroll: usize,
     pub status_msg: Option<String>,
     pub explorer: Option<Explorer>,
 }
 
 impl BrowserApp {
-    pub fn new(config: &CiabattaConfig, root: &Path, env_vars: &HashMap<String, String>) -> Self {
+    pub fn new(config: &CiabattaConfig) -> Self {
         let registries = build_registry_rows(config);
-        let recipes = build_recipe_rows(config, root, env_vars);
 
         let mut reg_state = ListState::default();
         if !registries.is_empty() {
             reg_state.select(Some(0));
         }
-        let mut rec_state = ListState::default();
-        if !recipes.is_empty() {
-            rec_state.select(Some(0));
-        }
 
         BrowserApp {
             registries,
-            recipes,
             reg_state,
-            rec_state,
-            active_pane: Pane::Registries,
             log_scroll: 0,
             status_msg: None,
             explorer: None,
         }
     }
 
-    pub fn selected_recipe_idx(&self) -> Option<usize> {
-        self.rec_state.selected()
-    }
-
     pub fn selected_registry_idx(&self) -> Option<usize> {
         self.reg_state.selected()
     }
 
-    pub fn toggle_pane(&mut self) {
-        self.active_pane = match self.active_pane {
-            Pane::Registries => Pane::Recipes,
-            Pane::Recipes => Pane::Registries,
-        };
-    }
-
     pub fn move_down(&mut self) {
-        match self.active_pane {
-            Pane::Registries => list_next(&mut self.reg_state, self.registries.len()),
-            Pane::Recipes => list_next(&mut self.rec_state, self.recipes.len()),
-        }
+        list_next(&mut self.reg_state, self.registries.len());
         self.log_scroll = 0;
     }
 
     pub fn move_up(&mut self) {
-        match self.active_pane {
-            Pane::Registries => list_prev(&mut self.reg_state),
-            Pane::Recipes => list_prev(&mut self.rec_state),
-        }
+        list_prev(&mut self.reg_state);
         self.log_scroll = 0;
     }
 
@@ -194,52 +142,6 @@ impl BrowserApp {
     }
     pub fn scroll_log_up(&mut self) {
         self.log_scroll = self.log_scroll.saturating_sub(1);
-    }
-
-    pub fn apply_update(&mut self, update: ProgressUpdate) {
-        match update {
-            ProgressUpdate::Started(ref name) => {
-                if let Some(r) = self.recipes.iter_mut().find(|r| &r.name == name) {
-                    r.run_status = RecipeRunStatus::Running;
-                    r.logs.clear();
-                }
-            }
-            ProgressUpdate::StageStarted { ref recipe, stage } => {
-                self.status_msg = Some(format!("{} → {}", recipe, stage.label(RunMode::Push)));
-            }
-            ProgressUpdate::StageFinished { .. } => {}
-            ProgressUpdate::TransferProgress {
-                ref recipe,
-                done,
-                total,
-            } => {
-                self.status_msg = Some(format!("{recipe} → {done}/{total} files"));
-            }
-            ProgressUpdate::Log(ref name, ref line) => {
-                if let Some(r) = self.recipes.iter_mut().find(|r| &r.name == name) {
-                    r.logs.push(line.clone());
-                }
-            }
-            ProgressUpdate::Completed(ref name) => {
-                if let Some(r) = self.recipes.iter_mut().find(|r| &r.name == name) {
-                    r.run_status = RecipeRunStatus::Success;
-                    r.local_exists = Some(true); // optimistic after push
-                }
-                self.status_msg = Some(format!("✓ {} completed", name));
-            }
-            ProgressUpdate::Failed(ref name, ref err) => {
-                if let Some(r) = self.recipes.iter_mut().find(|r| &r.name == name) {
-                    r.run_status = RecipeRunStatus::Failed(err.clone());
-                }
-                self.status_msg = Some(format!("✗ {} failed: {}", name, err));
-            }
-            // Run step updates don't occur in the push-on-demand browser.
-            ProgressUpdate::StepStarted { .. }
-            | ProgressUpdate::StepFinished { .. }
-            | ProgressUpdate::StepSkipped { .. }
-            | ProgressUpdate::StepLog { .. }
-            | ProgressUpdate::StepNeedsChoice { .. } => {}
-        }
     }
 }
 
@@ -277,43 +179,6 @@ fn build_registry_rows(config: &CiabattaConfig) -> Vec<RegistryRow> {
                 kind: format!("{:?}", kind).to_lowercase(),
                 tls_verify: cfg.tls_verify,
                 browsable,
-            }
-        })
-        .collect();
-    rows.sort_by(|a, b| a.name.cmp(&b.name));
-    rows
-}
-
-fn build_recipe_rows(
-    config: &CiabattaConfig,
-    root: &Path,
-    _env: &HashMap<String, String>,
-) -> Vec<RecipeRow> {
-    let mut rows: Vec<_> = config
-        .recipes
-        .iter()
-        // Run-only recipes have no push/pull action; the browser drives
-        // push/pull, so leave them out (they go through `ciabatta run`).
-        .filter(|(_, entry)| !entry.is_run_only())
-        .map(|(name, entry)| {
-            let push = entry.push_recipe();
-            let kind: &'static str = if entry.push.is_some() || entry.pull.is_some() {
-                "push/pull"
-            } else if push.main.is_some() || push.bash_script.is_some() {
-                "command"
-            } else {
-                "registry"
-            };
-            let local_path = push.local_artifact_path.as_deref();
-            let local_exists = local_path.map(|p| root.join(p).exists());
-            RecipeRow {
-                name: name.clone(),
-                registry: push.registry.clone(),
-                local_exists,
-                publish_path: push.publish_path.as_ref().map(|p| p.display()),
-                kind,
-                run_status: RecipeRunStatus::Idle,
-                logs: Vec::new(),
             }
         })
         .collect();
@@ -478,15 +343,11 @@ fn render_logo(f: &mut Frame, area: Rect) {
 }
 
 fn render_middle(f: &mut Frame, area: Rect, app: &BrowserApp) {
-    let cols =
-        Layout::horizontal([Constraint::Percentage(30), Constraint::Percentage(70)]).split(area);
-
-    render_registries(f, cols[0], app);
-    render_recipes(f, cols[1], app);
+    render_registries(f, area, app);
 }
 
 fn render_registries(f: &mut Frame, area: Rect, app: &BrowserApp) {
-    let focused = matches!(app.active_pane, Pane::Registries);
+    let focused = true;
     let border_style = pane_border_style(focused);
 
     let block = Block::default()
@@ -535,74 +396,8 @@ fn render_registries(f: &mut Frame, area: Rect, app: &BrowserApp) {
     f.render_stateful_widget(list, area, &mut state);
 }
 
-fn render_recipes(f: &mut Frame, area: Rect, app: &BrowserApp) {
-    let focused = matches!(app.active_pane, Pane::Recipes);
-    let border_style = pane_border_style(focused);
-
-    let block = Block::default()
-        .title(Span::styled(
-            " Recipes ",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        ))
-        .borders(Borders::ALL)
-        .border_style(border_style);
-
-    let items: Vec<ListItem> = app
-        .recipes
-        .iter()
-        .map(|r| {
-            let (status_sym, status_color) = run_status_style(&r.run_status);
-            let local_sym = match r.local_exists {
-                Some(true) => Span::styled("✓ ", Style::default().fg(Color::Green)),
-                Some(false) => Span::styled("✗ ", Style::default().fg(Color::Red)),
-                None => Span::styled("? ", Style::default().fg(Color::DarkGray)),
-            };
-            let reg_label = r.registry.as_deref().unwrap_or("-");
-
-            let line = Line::from(vec![
-                Span::styled(
-                    format!(" {:28} ", r.name),
-                    Style::default()
-                        .fg(Color::White)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    format!("[{:10}] ", reg_label),
-                    Style::default().fg(Color::Blue),
-                ),
-                Span::styled(
-                    format!("[{:9}] ", r.kind),
-                    Style::default().fg(Color::DarkGray),
-                ),
-                Span::raw("local:"),
-                local_sym,
-                Span::styled(status_sym, Style::default().fg(status_color)),
-            ]);
-            ListItem::new(line)
-        })
-        .collect();
-
-    let list = List::new(items)
-        .block(block)
-        .highlight_style(
-            Style::default()
-                .bg(Color::DarkGray)
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        )
-        .highlight_symbol("▶ ");
-
-    let mut state = app.rec_state.clone();
-    f.render_stateful_widget(list, area, &mut state);
-}
-
 fn render_detail(f: &mut Frame, area: Rect, app: &BrowserApp) {
-    match app.active_pane {
-        Pane::Registries => render_registry_detail(f, area, app),
-        Pane::Recipes => render_recipe_detail(f, area, app),
-    }
+    render_registry_detail(f, area, app);
 }
 
 fn render_registry_detail(f: &mut Frame, area: Rect, app: &BrowserApp) {
@@ -639,101 +434,9 @@ fn render_registry_detail(f: &mut Frame, area: Rect, app: &BrowserApp) {
     f.render_widget(p, area);
 }
 
-fn render_recipe_detail(f: &mut Frame, area: Rect, app: &BrowserApp) {
-    let idx = match app.selected_recipe_idx() {
-        Some(i) => i,
-        None => {
-            let p = Paragraph::new("  No recipe selected.").block(
-                Block::default()
-                    .title(" Recipe Detail ")
-                    .borders(Borders::ALL),
-            );
-            f.render_widget(p, area);
-            return;
-        }
-    };
-
-    let recipe = match app.recipes.get(idx) {
-        Some(r) => r,
-        None => return,
-    };
-
-    let inner_area = area;
-    let chunks = Layout::horizontal([Constraint::Percentage(40), Constraint::Percentage(60)])
-        .split(inner_area);
-
-    // Left: metadata
-    let meta_block = Block::default()
-        .title(format!(" {} ", recipe.name))
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::DarkGray));
-
-    let local_status = match recipe.local_exists {
-        Some(true) => "✓ exists".to_string(),
-        Some(false) => "✗ missing".to_string(),
-        None => "(bash script)".to_string(),
-    };
-    let publish = recipe.publish_path.as_deref().unwrap_or("(none)");
-    let (status_sym, _) = run_status_style(&recipe.run_status);
-    let meta_text = format!(
-        "  Kind:         {}\n  Registry:     {}\n  Local path:   {}\n  Publish path: {}\n  Status:       {}",
-        recipe.kind,
-        recipe.registry.as_deref().unwrap_or("-"),
-        local_status,
-        publish,
-        status_sym.trim(),
-    );
-    let meta = Paragraph::new(meta_text)
-        .block(meta_block)
-        .style(Style::default().fg(Color::Gray));
-    f.render_widget(meta, chunks[0]);
-
-    // Right: logs
-    let log_block = Block::default()
-        .title(" Logs ")
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::DarkGray));
-
-    let log_inner_h = chunks[1].height.saturating_sub(2) as usize;
-    let logs = &recipe.logs;
-    let skip = if logs.len() > log_inner_h {
-        logs.len() - log_inner_h
-    } else {
-        0
-    };
-    let skip = skip
-        .saturating_add(app.log_scroll)
-        .min(logs.len().saturating_sub(1));
-
-    let log_items: Vec<ListItem> = logs
-        .iter()
-        .skip(skip)
-        .map(|line| {
-            let style = if line.starts_with("[stderr]") || line.to_lowercase().contains("error") {
-                Style::default().fg(Color::Red)
-            } else if line.starts_with("[dry-run]") || line.starts_with('+') {
-                Style::default().fg(Color::Yellow)
-            } else {
-                Style::default().fg(Color::Gray)
-            };
-            ListItem::new(Line::from(Span::styled(line.as_str(), style)))
-        })
-        .collect();
-
-    let log_list = List::new(log_items).block(log_block);
-    f.render_widget(log_list, chunks[1]);
-}
-
 fn render_help(f: &mut Frame, area: Rect, app: &BrowserApp) {
     let status = app.status_msg.as_deref().unwrap_or("");
-    let focused_pane = match app.active_pane {
-        Pane::Registries => "Registries",
-        Pane::Recipes => "Recipes",
-    };
-    let text = format!(
-        " [Tab] switch pane ({})  [↑↓/jk] nav  [e] explore  [p] push  [P] dry-run  [r] refresh  [q] quit   {}",
-        focused_pane, status
-    );
+    let text = format!(" [↑↓/jk] nav  [e] explore  [q] quit   {status}");
     let style = if status.starts_with('✗') {
         Style::default().fg(Color::Red)
     } else if status.starts_with('✓') {
@@ -752,20 +455,11 @@ fn pane_border_style(focused: bool) -> Style {
     }
 }
 
-fn run_status_style(status: &RecipeRunStatus) -> (&'static str, Color) {
-    match status {
-        RecipeRunStatus::Idle => ("idle", Color::DarkGray),
-        RecipeRunStatus::Running => ("running…", Color::Yellow),
-        RecipeRunStatus::Success => ("✓ done", Color::Green),
-        RecipeRunStatus::Failed(_) => ("✗ failed", Color::Red),
-    }
-}
-
 // ─── Event loop ──────────────────────────────────────────────────────────────
 
 pub async fn run_browser(
     config: CiabattaConfig,
-    root: std::path::PathBuf,
+    _root: std::path::PathBuf,
     env_vars: HashMap<String, String>,
 ) -> Result<()> {
     use crossterm::{
@@ -780,7 +474,7 @@ pub async fn run_browser(
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let result = browser_loop(&mut terminal, config, root, env_vars).await;
+    let result = browser_loop(&mut terminal, config, env_vars).await;
 
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
@@ -792,14 +486,11 @@ pub async fn run_browser(
 async fn browser_loop(
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
     config: CiabattaConfig,
-    root: std::path::PathBuf,
     env_vars: HashMap<String, String>,
 ) -> Result<()> {
-    let mut app = BrowserApp::new(&config, &root, &env_vars);
+    let mut app = BrowserApp::new(&config);
     let mut event_stream = EventStream::new();
 
-    // Channel for progress updates from background push tasks.
-    let (prog_tx, mut prog_rx) = mpsc::channel::<ProgressUpdate>(256);
     // Channel for directory listings from background browse tasks.
     let (explore_tx, mut explore_rx) = mpsc::channel::<ExploreResult>(16);
 
@@ -823,7 +514,6 @@ async fn browser_loop(
                 match key.code {
                     KeyCode::Char('q') | KeyCode::Esc => break,
                     KeyCode::Char('c') if ctrl => break,
-                    KeyCode::Tab => app.toggle_pane(),
                     KeyCode::Down | KeyCode::Char('j') => app.move_down(),
                     KeyCode::Up   | KeyCode::Char('k') => app.move_up(),
                     KeyCode::PageDown | KeyCode::Char('J') => app.scroll_log_down(),
@@ -833,37 +523,7 @@ async fn browser_loop(
                         open_explorer(&mut app, &env_vars, &explore_tx);
                     }
 
-                    KeyCode::Char('p') => {
-                        if let Some(name) = selected_recipe_name(&app) {
-                            push_recipe(name, &config, &root, &env_vars, false, prog_tx.clone());
-                            app.status_msg = Some("Pushing…".to_string());
-                        }
-                    }
-                    KeyCode::Char('P') => {
-                        if let Some(name) = selected_recipe_name(&app) {
-                            push_recipe(name, &config, &root, &env_vars, true, prog_tx.clone());
-                            app.status_msg = Some("[dry-run] Pushing…".to_string());
-                        }
-                    }
-                    KeyCode::Char('r') => {
-                        // Refresh local-path existence checks.
-                        for recipe in &mut app.recipes {
-                            if let Some(ref local) = {
-                                let cfg_recipe = config.recipes.get(&recipe.name);
-                                cfg_recipe.and_then(|e| e.push_recipe().local_artifact_path.clone())
-                            } {
-                                recipe.local_exists = Some(root.join(local).exists());
-                            }
-                        }
-                        app.status_msg = Some("Refreshed.".to_string());
-                    }
                     _ => {}
-                }
-            }
-
-            maybe_update = prog_rx.recv() => {
-                if let Some(update) = maybe_update {
-                    app.apply_update(update);
                 }
             }
 
@@ -1006,38 +666,4 @@ fn apply_listing(app: &mut BrowserApp, listing: ExploreResult) {
             explorer.state.select(None);
         }
     }
-}
-
-fn selected_recipe_name(app: &BrowserApp) -> Option<String> {
-    app.rec_state
-        .selected()
-        .and_then(|i| app.recipes.get(i))
-        .map(|r| r.name.clone())
-}
-
-fn push_recipe(
-    name: String,
-    config: &CiabattaConfig,
-    root: &std::path::Path,
-    env_vars: &HashMap<String, String>,
-    dry_run: bool,
-    tx: mpsc::Sender<ProgressUpdate>,
-) {
-    let config = config.clone();
-    let root = root.to_path_buf();
-    let env_vars = env_vars.clone();
-
-    tokio::spawn(async move {
-        let names = vec![name];
-        let _ = runner::run_all(
-            &config,
-            &root,
-            &names,
-            &env_vars,
-            dry_run,
-            RunMode::Push,
-            tx,
-        )
-        .await;
-    });
 }

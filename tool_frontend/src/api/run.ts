@@ -39,7 +39,7 @@ export interface StepView {
    * workspace's last, since the nearest file wins.
    *
    * Empty for a step that just sees the run's environment, which is every step
-   * of a plain single-project recipe.
+   * of a plain single-project workflow.
    */
   env_files: string[];
 
@@ -112,7 +112,7 @@ export interface PendingChoice {
   options: string[];
 }
 
-export interface RecipeView {
+export interface WorkflowView {
   name: string;
   status: string;
   error: string | null;
@@ -131,13 +131,13 @@ export interface RecipeView {
 export interface RunSummary {
   id: number;
   project: string;
-  recipes: string[];
+  workflows: string[];
   created_at: string;
   done: boolean;
 }
 
 export interface RunState {
-  recipes: RecipeView[];
+  workflows: WorkflowView[];
   done: boolean;
   dry_run: boolean;
   run: RunSummary;
@@ -147,7 +147,7 @@ export interface RunState {
 export const runKeys = {
   runs: ["run", "runs"] as const,
   run: (id: number) => ["run", "run", id] as const,
-  recipes: (project: string) => ["run", "recipes", project] as const,
+  workflows: (project: string) => ["run", "workflows", project] as const,
 };
 
 export function useRuns() {
@@ -158,26 +158,25 @@ export function useRuns() {
   });
 }
 
-export function useRunRecipes(project: string) {
+export function useRunWorkflows(project: string) {
   return useQuery({
-    queryKey: runKeys.recipes(project),
+    queryKey: runKeys.workflows(project),
     queryFn: () =>
-      api.get<{ recipes: string[] }>(
-        `/api/run/recipes?project=${encodeURIComponent(project)}`,
+      api.get<{ workflows: string[] }>(
+        `/api/run/workflows?project=${encodeURIComponent(project)}`,
       ),
-    select: (data) => data.recipes,
+    select: (data) => data.workflows,
   });
 }
 
 /**
- * Everything runnable in this project: the monorepo's workflows first, then the
- * project's own recipes.
+ * Everything runnable in this project: every workflow the monorepo declares.
  *
- * Workflows lead because in a monorepo they are what people actually run —
- * `build` across every package, rather than one config's publish recipe.
+ * A workflow is the only kind of thing ciabatta runs, so this is the whole
+ * list — `build` across every package that defines one.
  */
 export function useRunTargets(project: string) {
-  const recipes = useRunRecipes(project);
+  const declared = useRunWorkflows(project);
   const workspace = useWorkspace(project);
 
   const targets: RunTarget[] = [];
@@ -193,31 +192,34 @@ export function useRunTargets(project: string) {
         .find((w) => w.name === name && w.description)?.description ?? null;
     targets.push({ name, kind: "workflow", description, members });
   }
-  for (const name of recipes.data ?? []) {
-    targets.push({ name, kind: "recipe", description: null, members: [] });
+  // A project that isn't a monorepo still declares workflows inline; those come
+  // back from the run API rather than the workspace walk.
+  for (const name of declared.data ?? []) {
+    if (!targets.some((target) => target.name === name)) {
+      targets.push({ name, kind: "workflow", description: null, members: [] });
+    }
   }
 
   return {
     targets,
     // The workspace query fails on a project that isn't a monorepo, which is
-    // an ordinary state rather than an error — recipes alone are a fine answer.
-    isLoading: recipes.isLoading || workspace.isLoading,
+    // an ordinary state rather than an error.
+    isLoading: declared.isLoading || workspace.isLoading,
   };
 }
 
 export interface StartRunBody {
   project: string;
-  recipes: string[];
   dry_run: boolean;
   /** Values for variables the run needs but the daemon's environment lacks. */
   env?: Record<string, string>;
   /**
-   * A monorepo workflow to run instead of recipes. The daemon compiles the
-   * cross-workspace graph itself, so a run started here and one started by
-   * `ciabatta build` can't disagree about what runs.
+   * The workflow to run. The daemon compiles the cross-workspace graph itself,
+   * so a run started here and one started by `ciabatta build` can't disagree
+   * about what runs.
    */
   workflow?: string;
-  /** Further workflows folded into the same graph, as `ciabatta run build test`. */
+  /** Further workflows folded into the same graph, as `ciabatta build test`. */
   workflows?: string[];
   /** With `workflow`: start only from these sub-workspaces. */
   only?: string[];
@@ -227,18 +229,12 @@ export interface StartRunBody {
   filter?: string[];
 }
 
-/**
- * Everything this project can run, workflows and recipes together.
- *
- * The two are the same kind of thing — a named graph of steps — and differ only
- * in where they were written down, so the launcher offers them in one list
- * rather than making you know which kind you have before you can start it.
- */
+/** One thing this project can run. */
 export interface RunTarget {
   name: string;
-  kind: "workflow" | "recipe";
+  kind: "workflow";
   description: string | null;
-  /** Which sub-workspaces define this workflow. Empty for a recipe. */
+  /** Which sub-workspaces define this workflow. */
   members: string[];
 }
 
@@ -266,7 +262,7 @@ export function missingEnvFrom(error: unknown): string[] | null {
 
 export function useChoose(runId: number) {
   return useMutation({
-    mutationFn: (body: { recipe: string; step: string; option: number }) =>
+    mutationFn: (body: { workflow: string; step: string; option: number }) =>
       api.post(`/api/run/runs/${runId}/choose`, body),
   });
 }

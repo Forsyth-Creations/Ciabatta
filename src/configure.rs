@@ -2,8 +2,8 @@
 //!
 //! Two entry points:
 //!   * [`run_interactive`] walks you through adding a registry (and optionally a
-//!     recipe) without hand-editing TOML.
-//!   * [`run_auto`] analyzes the project, then suggests ready-to-paste recipes
+//!     workflow) without hand-editing TOML.
+//!   * [`run_auto`] analyzes the project, then suggests ready-to-paste workflows
 //!     for pushing to the registries you already have configured (plus crates.io
 //!     for publishable Rust crates) and offers to add the ones you pick.
 
@@ -129,10 +129,13 @@ pub fn run_interactive(root: &Path, cfg: &CiabattaConfig) -> Result<()> {
 
     let mut blocks = vec![Block::registry(snippet)];
 
-    // Offer to wire up a recipe that publishes to this registry.
-    if prompt_yes_no("\nAdd a recipe that publishes to this registry now?", false)? {
-        let recipe = loop {
-            let r = prompt("  Recipe name: ")?;
+    // Offer to wire up a workflow that publishes to this registry.
+    if prompt_yes_no(
+        "\nAdd a workflow that publishes to this registry now?",
+        false,
+    )? {
+        let workflow = loop {
+            let r = prompt("  Workflow name: ")?;
             if r.is_empty() {
                 println!("    A name is required.");
                 continue;
@@ -143,7 +146,7 @@ pub fn run_interactive(root: &Path, cfg: &CiabattaConfig) -> Result<()> {
         let publish = prompt("  Publish path (supports {CIABATTA_BRANCH}/{CIABATTA_COMMIT}/…): ")?;
 
         let mut r = String::new();
-        r.push_str(&format!("  {recipe}:\n"));
+        r.push_str(&format!("  {workflow}:\n"));
         r.push_str(&format!("    registry: {}\n", yaml_value(&name)));
         if !local.is_empty() {
             r.push_str(&format!(
@@ -154,12 +157,12 @@ pub fn run_interactive(root: &Path, cfg: &CiabattaConfig) -> Result<()> {
         if !publish.is_empty() {
             r.push_str(&format!("    publish_path: {}\n", yaml_value(&publish)));
         }
-        blocks.push(Block::recipe(r));
+        blocks.push(Block::workflow(r));
     }
 
     let path = apply_blocks(root, &blocks)?;
     println!("\nUpdated {}", path.display());
-    println!("Run `ciabatta config show` to review, or `ciabatta list` to see recipes.");
+    println!("Run `ciabatta config show` to review, or `ciabatta list` to see workflows.");
     Ok(())
 }
 
@@ -167,7 +170,7 @@ pub fn run_interactive(root: &Path, cfg: &CiabattaConfig) -> Result<()> {
 
 struct Suggestion {
     summary: String,
-    recipe: String,
+    workflow: String,
     snippet: String,
 }
 
@@ -212,18 +215,18 @@ pub fn run_auto(root: &Path, cfg: &CiabattaConfig, assume_yes: bool) -> Result<(
     let blocks: Vec<Block> = chosen
         .iter()
         .rev()
-        .map(|&i| Block::recipe(suggestions[i].snippet.clone()))
+        .map(|&i| Block::workflow(suggestions[i].snippet.clone()))
         .collect();
     let path = apply_blocks(root, &blocks)?;
-    println!("\nAdded {} recipe(s) to {}", chosen.len(), path.display());
+    println!("\nAdded {} workflow(s) to {}", chosen.len(), path.display());
     for &i in &chosen {
-        println!("  • {}", suggestions[i].recipe);
+        println!("  • {}", suggestions[i].workflow);
     }
     println!("Review with `ciabatta config show`, then `ciabatta push --dry-run`.");
     Ok(())
 }
 
-/// Build the list of suggested recipes for the project, returning the configured
+/// Build the list of suggested workflows for the project, returning the configured
 /// ECR and Nexus registry names alongside (used to flag gaps).
 fn build_suggestions(
     root: &Path,
@@ -257,8 +260,8 @@ fn build_suggestions(
         .map(|(n, _)| n.clone())
         .collect();
 
-    // Recipe names already taken (existing + everything we generate this run).
-    let mut used: BTreeSet<String> = cfg.recipes.keys().cloned().collect();
+    // Workflow names already taken (existing + everything generated this run).
+    let mut used: BTreeSet<String> = cfg.workflows.keys().cloned().collect();
     let mut suggestions: Vec<Suggestion> = Vec::new();
 
     // ── Dockerfiles → ECR / Nexus ──
@@ -266,24 +269,29 @@ fn build_suggestions(
         let image = image_name(df, root);
         let ctx = parent_or_dot(df);
         for reg in &ecr {
-            let recipe = uniquify(&format!("{image}_to_{reg}"), &mut used);
+            let workflow = uniquify(&format!("{image}_to_{reg}"), &mut used);
             let snippet = format!(
                 "  # Build the Docker image from {df} and push it to the \"{reg}\" ECR registry.\n\
                  \x20 # ciabatta retags {image}:$CIABATTA_COMMIT to the registry URL and pushes it.\n\
-                 \x20 {recipe}:\n\
-                 \x20   registry: {reg_q}\n\
-                 \x20   local_image: {tag}\n\
-                 \x20   publish_path: {tag}\n\
-                 \x20   pre: {pre}\n",
+                 \x20 {workflow}:\n\
+                 \x20   steps:\n\
+                 \x20     - name: build\n\
+                 \x20       run: {build}\n\
+                 \x20     - name: publish\n\
+                 \x20       kind: push\n\
+                 \x20       needs: [build]\n\
+                 \x20       registry: {reg_q}\n\
+                 \x20       local_image: {tag}\n\
+                 \x20       publish_path: {tag}\n",
                 reg_q = yaml_value(reg),
                 tag = yaml_value(&format!("{image}:{{CIABATTA_COMMIT}}")),
-                pre = yaml_value(&format!(
+                build = yaml_value(&format!(
                     "{container} build -t {image}:$CIABATTA_COMMIT -f {df} {ctx}"
                 )),
             );
             suggestions.push(Suggestion {
                 summary: format!("Push image from {df} to ECR registry \"{reg}\""),
-                recipe,
+                workflow,
                 snippet,
             });
         }
@@ -291,25 +299,30 @@ fn build_suggestions(
             // The nexus registry is an HTTP PUT endpoint, so save the image to a
             // tarball and upload it via the built-in nexus push (which handles
             // CIABATTA_<REG>_USER/PASS auth for us).
-            let recipe = uniquify(&format!("{image}_to_{reg}"), &mut used);
+            let workflow = uniquify(&format!("{image}_to_{reg}"), &mut used);
             let snippet = format!(
                 "  # Build the Docker image from {df}, save it as a tarball, and upload it to nexus (\"{reg}\").\n\
-                 \x20 {recipe}:\n\
-                 \x20   registry: {reg_q}\n\
-                 \x20   local_artifact_path: {local}\n\
-                 \x20   publish_path: {publish}\n\
-                 \x20   pre: {pre}\n",
+                 \x20 {workflow}:\n\
+                 \x20   steps:\n\
+                 \x20     - name: build\n\
+                 \x20       run: {build}\n\
+                 \x20     - name: publish\n\
+                 \x20       kind: push\n\
+                 \x20       needs: [build]\n\
+                 \x20       registry: {reg_q}\n\
+                 \x20       artifact: {local}\n\
+                 \x20       publish_path: {publish}\n",
                 reg_q = yaml_value(reg),
                 local = yaml_value(&format!("{image}.tar")),
                 publish = yaml_value(&format!("docker/{image}/{{CIABATTA_COMMIT}}/{image}.tar")),
-                pre = yaml_value(&format!(
+                build = yaml_value(&format!(
                     "{container} build -t {image}:$CIABATTA_COMMIT -f {df} {ctx} && \
                      {container} save -o {image}.tar {image}:$CIABATTA_COMMIT"
                 )),
             );
             suggestions.push(Suggestion {
                 summary: format!("Upload image tarball from {df} to nexus registry \"{reg}\""),
-                recipe,
+                workflow,
                 snippet,
             });
         }
@@ -319,17 +332,19 @@ fn build_suggestions(
     for pkg in &found.rust_pkgs {
         let mflag = manifest_flag(&pkg.manifest);
         if pkg.publishable {
-            let recipe = uniquify(&format!("{}_crate", pkg.name), &mut used);
+            let workflow = uniquify(&format!("{}_crate", pkg.name), &mut used);
             let snippet = format!(
                 "  # Publish the \"{name}\" crate to crates.io (needs `cargo login` / CARGO_REGISTRY_TOKEN).\n\
-                 \x20 {recipe}:\n\
-                 \x20   main: {main}\n",
+                 \x20 {workflow}:\n\
+                 \x20   steps:\n\
+                 \x20     - name: publish\n\
+                 \x20       run: {main}\n",
                 name = pkg.name,
                 main = yaml_value(&format!("cargo publish{mflag}")),
             );
             suggestions.push(Suggestion {
                 summary: format!("Publish crate \"{}\" to crates.io", pkg.name),
-                recipe,
+                workflow,
                 snippet,
             });
         }
@@ -337,25 +352,31 @@ fn build_suggestions(
             for reg in &blob_regs {
                 let kind =
                     format!("{:?}", infer_registry_kind(reg, &cfg.registries[reg])).to_lowercase();
-                let recipe = uniquify(&format!("{bin}_binary_to_{reg}"), &mut used);
+                let workflow = uniquify(&format!("{bin}_binary_to_{reg}"), &mut used);
                 let snippet = format!(
                     "  # Build the \"{bin}\" release binary and upload it to the \"{reg}\" {kind} registry.\n\
-                     \x20 {recipe}:\n\
-                     \x20   registry: {reg_q}\n\
-                     \x20   local_artifact_path: {local}\n\
-                     \x20   publish_path: {publish}\n\
-                     \x20   pre: {pre}\n",
+                     \x20 {workflow}:\n\
+                     \x20   steps:\n\
+                     \x20     - name: build\n\
+                     \x20       run: {build}\n\
+                     \x20       requires: [cargo]\n\
+                     \x20     - name: publish\n\
+                     \x20       kind: push\n\
+                     \x20       needs: [build]\n\
+                     \x20       registry: {reg_q}\n\
+                     \x20       artifact: {local}\n\
+                     \x20       publish_path: {publish}\n",
                     reg_q = yaml_value(reg),
                     local = yaml_value(&format!("target/release/{bin}")),
                     publish = yaml_value(&format!(
                         "{name}/{{CIABATTA_BRANCH}}/{{CIABATTA_COMMIT}}/{bin}",
                         name = pkg.name
                     )),
-                    pre = yaml_value(&format!("cargo build --release{mflag}")),
+                    build = yaml_value(&format!("cargo build --release{mflag}")),
                 );
                 suggestions.push(Suggestion {
                     summary: format!("Upload binary \"{bin}\" to {kind} registry \"{reg}\""),
-                    recipe,
+                    workflow,
                     snippet,
                 });
             }
@@ -410,7 +431,7 @@ fn selector_loop(
 
     let len = suggestions.len();
     let mut cursor = 0usize;
-    // Nothing is selected by default; the user opts recipes in.
+    // Nothing is selected by default; the user opts workflows in.
     let mut checked = vec![false; len];
 
     loop {
@@ -703,7 +724,7 @@ fn sanitize(s: &str) -> String {
         .collect()
 }
 
-/// Ensure a recipe name is unique against `used`, suffixing `_2`, `_3`, … if not.
+/// Ensure a workflow name is unique against `used`, suffixing `_2`, `_3`, … if not.
 fn uniquify(base: &str, used: &mut BTreeSet<String>) -> String {
     let base = sanitize(base);
     if used.insert(base.clone()) {
@@ -827,9 +848,9 @@ impl Block {
         }
     }
 
-    fn recipe(entry: String) -> Self {
+    fn workflow(entry: String) -> Self {
         Block {
-            key: "recipies",
+            key: "workflows",
             entry,
         }
     }
@@ -917,19 +938,19 @@ mod tests {
         let mut document = "# Ciabatta configuration\n\nsystem:\n  ci: github\n".to_string();
         for suggestion in &suggestions {
             document =
-                crate::format::insert_under(&document, "recipies", &suggestion.snippet).unwrap();
+                crate::format::insert_under(&document, "workflows", &suggestion.snippet).unwrap();
         }
 
         let parsed: CiabattaConfig =
             crate::format::from_str(&document, crate::format::Format::Yaml)
                 .unwrap_or_else(|e| panic!("generated config did not parse: {e}\n\n{document}"));
 
-        assert_eq!(parsed.recipes.len(), suggestions.len());
+        assert_eq!(parsed.workflows.len(), suggestions.len());
         for suggestion in &suggestions {
             assert!(
-                parsed.recipes.contains_key(&suggestion.recipe),
-                "recipe '{}' is missing from the parsed config",
-                suggestion.recipe
+                parsed.workflows.contains_key(&suggestion.workflow),
+                "workflow '{}' is missing from the parsed config",
+                suggestion.workflow
             );
         }
         // The comments ciabatta scaffolded above `system:` survive the splice.
@@ -943,27 +964,27 @@ mod tests {
         // Placeholders and shell commands must come back out intact rather than
         // having been eaten by YAML's flow syntax.
         let docker = parsed
-            .recipes
+            .workflows
             .values()
-            .find(|r| r.base.local_image.is_some())
-            .expect("a docker recipe was suggested");
+            .flat_map(|w| w.steps.iter())
+            .find(|s| s.local_image.is_some())
+            .expect("a docker push step was suggested");
         // The image is named after the directory holding the Dockerfile, so
         // assert on the placeholder rather than on the scratch dir's name.
-        let image = docker.base.local_image.as_deref().unwrap();
+        let image = docker.local_image.as_deref().unwrap();
         assert!(
             image.ends_with(":{CIABATTA_COMMIT}"),
             "the {{CIABATTA_COMMIT}} placeholder must survive YAML quoting, got {image:?}"
         );
-        assert!(
-            docker
-                .base
-                .pre
-                .as_deref()
-                .unwrap_or_default()
-                .contains("$CIABATTA_COMMIT -f"),
-            "the pre command should survive verbatim, got {:?}",
-            docker.base.pre
-        );
+        // The build step that feeds the push must survive verbatim too.
+        let build = parsed
+            .workflows
+            .values()
+            .flat_map(|w| w.steps.iter())
+            .filter_map(|s| s.run.as_deref())
+            .find(|cmd| cmd.contains("$CIABATTA_COMMIT -f"))
+            .expect("the build command should survive verbatim");
+        assert!(build.contains("build -t"));
 
         let _ = std::fs::remove_dir_all(&root);
     }

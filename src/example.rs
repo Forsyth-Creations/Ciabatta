@@ -10,7 +10,7 @@
 //! toolchain section, tagged steps to filter on, a recovery node, a persistent
 //! dev server, and a README explaining every decision. Every step runs `echo`
 //! or `sh`, so the generated repo works on a machine with no toolchain
-//! installed — `ciabatta run build` in it succeeds on the first try, which is
+//! installed — `ciabatta build` in it succeeds on the first try, which is
 //! the entire point of an example.
 //!
 //! Optional slices are opt-in because they need infrastructure the reader may
@@ -26,7 +26,7 @@ use anyhow::{Context, Result, bail};
 pub struct Options {
     /// Where to write it. Defaults to `./ciabatta-example`.
     pub into: Option<PathBuf>,
-    /// Add a Nexus registry, a publish recipe, and a `release` workflow whose
+    /// Add a Nexus registry and a `release` workflow whose
     /// last node is a `kind = "push"` step.
     pub nexus: bool,
     /// Add a Dockerfile, a container registry, and a `deploy` workflow.
@@ -68,7 +68,7 @@ fn script(path: &'static str, contents: impl Into<String>) -> File {
 }
 
 /// Generate the example repo and print what was written.
-pub fn generate(options: &Options) -> Result<()> {
+pub fn generate(options: &Options) -> Result<std::path::PathBuf> {
     let root = match &options.into {
         Some(path) => path.clone(),
         None => std::env::current_dir()
@@ -137,13 +137,13 @@ pub fn generate(options: &Options) -> Result<()> {
     println!("Try it:");
     println!("  cd {}", root.display());
     println!("  ciabatta list                  what exists, and who owns it");
-    println!("  ciabatta run build --graph     explore the resolved graph, run nothing");
-    println!("  ciabatta run build             run it — every step is an echo, so it works");
-    println!("  ciabatta run build test        both workflows as one graph");
-    println!("  ciabatta run test --filter tag:fast    just the fast steps");
+    println!("  ciabatta build --graph         explore the resolved graph, run nothing");
+    println!("  ciabatta build                 run it — every step is an echo, so it works");
+    println!("  ciabatta build test            both workflows as one graph");
+    println!("  ciabatta test --filter tag:fast    just the fast steps");
     println!();
     println!("README.md in there explains every file and why it's shaped that way.");
-    Ok(())
+    Ok(root)
 }
 
 #[cfg(unix)]
@@ -292,52 +292,22 @@ toolchain:
 
     out.push_str(
         r#"
-# ─── A run defined at the root ─────────────────────────────────────────────────
-# Workflows live in packages; a recipe like this one lives in a config. They run
-# through the same engine and the same `ciabatta run`, so this is a matter of
-# where it's convenient to write it down, not of what it can do.
+# ─── A workflow defined at the root ────────────────────────────────────────────
+# Workflows usually live in packages, one file each. A small one can be written
+# inline here instead — same engine, same command, just a matter of where it is
+# convenient to write it down.
 #
-#   ciabatta run smoke
+#   ciabatta smoke
 #
-recipies:
+workflows:
   smoke:
-    run:
-      steps:
-        - name: ping
-          description: Cheapest possible check that the repo is wired up
-          run: "echo 'ciabatta example: everything is where it should be'"
-          tags: [fast]
+    description: Cheapest possible check that the repo is wired up
+    steps:
+      - name: ping
+        run: "echo 'ciabatta example: everything is where it should be'"
+        tags: [fast]
 "#,
     );
-
-    // Both publishing recipes are entries under the one `recipies:` key opened
-    // above — YAML has no equivalent of repeating a `[recipies.x]` header, so a
-    // second top-level key here would make the file unparseable.
-    if options.nexus {
-        out.push_str(
-            r#"
-  # ─── Publishing ──────────────────────────────────────────────────────────────
-  # A workflow publishes by adding a step with `kind: push` naming one of these
-  # recipes — publishing is a node on the graph, not a separate command you have
-  # to remember to run afterwards.
-  api-binary:
-    registry: nexus
-    local_artifact_path: packages/api/dist/api
-    # The CIABATTA_* variables are resolved from git (or from CI) before the push.
-    publish_path: "example/api/{CIABATTA_BRANCH}/{CIABATTA_COMMIT}/api"
-"#,
-        );
-    }
-
-    if options.docker {
-        out.push_str(
-            r#"
-  api-image:
-    push:
-      bash_script: packages/api/scripts/docker_push.sh
-"#,
-        );
-    }
 
     // Same again for `registries:`: whichever option comes first opens the key.
     if options.nexus || options.docker {
@@ -391,7 +361,7 @@ workspace:
   requires: [sh]
 "#;
 
-const PROTO_GENERATE: &str = r#"# `ciabatta run generate` — or, more usefully, whatever pulls this in.
+const PROTO_GENERATE: &str = r#"# `ciabatta generate` — or, more usefully, whatever pulls this in.
 #
 # Note the name: this workflow is NOT called "build". Other packages depend on
 # it explicitly with `depends_on: [proto:generate]`, which is how a package says
@@ -501,7 +471,7 @@ fn api_config(options: &Options) -> String {
         r#"# The service. This is the package with the interesting dependencies.
 #
 # It needs proto's generated stubs and common's compiled library, and says so —
-# so `ciabatta run build` from anywhere in the repo runs proto, then common,
+# so `ciabatta build` from anywhere in the repo runs proto, then common,
 # then this, in that order, without anyone having to remember it.
 
 workspace:
@@ -523,7 +493,7 @@ workspace:
     if options.nexus || options.docker {
         out.push_str(
             r#"
-# The publish steps in this package's release/deploy workflows name recipes
+# The publish steps in this package's release/deploy workflows name a registry
 # defined at the monorepo root, so credentials and registry URLs live in one
 # place rather than being repeated per package.
 "#,
@@ -581,8 +551,8 @@ owner: API Team
 needs: [self:build]
 
 # Tagged steps are what `--filter` selects on:
-#   ciabatta run test --filter tag:fast      the quick loop
-#   ciabatta run test --filter '!tag:flaky'  everything but the unreliable ones
+#   ciabatta test --filter tag:fast      the quick loop
+#   ciabatta test --filter '!tag:flaky'  everything but the unreliable ones
 steps:
   - name: unit
     description: Unit tests — no I/O, milliseconds
@@ -629,7 +599,7 @@ echo "api: built dist/api (API_URL=${API_URL:-unset}, LOG_LEVEL=${LOG_LEVEL:-uns
 const API_ENV: &str = r#"# Sourced before any api workflow runs. Values already set in the environment,
 # in CI, or with -e win over these, so this file is defaults rather than truth.
 #
-# Change a value here and run `ciabatta run build` again: ciabatta notices and
+# Change a value here and run `ciabatta build` again: ciabatta notices and
 # says which variable moved, because a changed environment is one of the harder
 # build failures to diagnose from the error alone.
 API_URL=http://localhost:8080
@@ -638,12 +608,12 @@ API_TIMEOUT=30s
 
 const API_RELEASE: &str = r#"# Publishing is a node on the graph, not a separate command.
 #
-# `kind: push` with a `recipe` runs that recipe from the root config — the same
-# thing `ciabatta push api-binary` would do — but as a step, with `needs`, so it
-# cannot possibly run before the artifact it publishes exists.
+# A `kind: push` step names the registry and the path itself, and declares what
+# it `needs` — so it cannot possibly run before the artifact it publishes
+# exists. That ordering is the whole reason it belongs on the graph.
 #
-#   ciabatta run release
-#   ciabatta run release --filter kind:push    (just the publish, artifact in hand)
+#   ciabatta release
+#   ciabatta release --filter kind:push    (just the publish, artifact in hand)
 
 description: Build, package, and publish the api
 owner: API Team
@@ -661,9 +631,12 @@ steps:
   - name: publish
     description: Upload the packaged binary to Nexus
     kind: push
-    recipe: api-binary
     needs: [verify]
     tags: [release]
+    registry: nexus
+    artifact: dist/api.tgz
+    # The CIABATTA_* variables are resolved from git (or from CI) before the push.
+    publish_path: "example/api/{CIABATTA_BRANCH}/{CIABATTA_COMMIT}/api.tgz"
 "#;
 
 const DOCKERFILE: &str = r#"# Built by the `deploy` workflow. Deliberately tiny — this example is about
@@ -679,7 +652,7 @@ const API_DEPLOY: &str = r#"# Build an image and ship it.
 # This workflow shows conditions: `when` gates a step on the environment, so one
 # graph covers dev and prod instead of two nearly-identical files.
 #
-#   ciabatta run deploy -e DEPLOY_ENV=prod
+#   ciabatta deploy -e DEPLOY_ENV=prod
 
 description: Build the container image and deploy it
 owner: API Team
@@ -701,9 +674,10 @@ steps:
   - name: push-image
     description: Push the image to the registry
     kind: push
-    recipe: api-image
     needs: [image]
     tags: [deploy]
+    registry: ghcr
+    local_image: "ghcr.io/example/api:{CIABATTA_COMMIT}"
 
   - name: smoke
     description: Hit the deployed service once to prove it came up
@@ -726,7 +700,7 @@ steps:
 const WEB_CONFIG: &str = r#"# The frontend. Depends on the api — a bare package name (rather than
 # "api:build") means "whatever api calls this same workflow".
 #
-# So `ciabatta run build` waits for api's build, and `ciabatta run test` waits
+# So `ciabatta build` waits for api's build, and `ciabatta test` waits
 # for api's test, from this one declaration.
 
 workspace:
@@ -804,8 +778,8 @@ Start here:
 
 ```sh
 ciabatta list                    # everything this repo can do, and who owns it
-ciabatta run build --graph       # explore the resolved graph; runs nothing
-ciabatta run build               # actually run it
+ciabatta build --graph       # explore the resolved graph; runs nothing
+ciabatta build               # actually run it
 ```
 
 ## The problem this shape solves
@@ -837,7 +811,7 @@ proto:generate ──▶ common:build ──┐
 ```
 
 Nobody wrote that graph down. Each package declared what *it* needs, and
-`ciabatta run build` worked out the rest.
+`ciabatta build` worked out the rest.
 
 ## Where each idea lives
 
@@ -854,7 +828,7 @@ Nobody wrote that graph down. Each package declared what *it* needs, and
 | A step that never exits | `packages/web/.ciabatta/workflows/dev.yaml` → `persistent` |
 | Required variables | `packages/api/.ciabatta/workflows/build.yaml` → `REQUIRED_ENV` |
 | `.env` files | `packages/api/.env`, and `.env.example` at the root |
-| A run defined in a config rather than a workflow file | `.ciabatta/ciabatta.yaml` → `recipies.smoke.run` |
+| A workflow written inline rather than in its own file | `.ciabatta/ciabatta.yaml` → `workflows.smoke` |
 "#,
     );
 
@@ -875,18 +849,18 @@ Nobody wrote that graph down. Each package declared what *it* needs, and
         r#"
 ## Running things
 
-There is one command. A **target** is either a workflow (defined in a package)
-or a recipe (defined in a config) — they run the same way, so which one you're
-looking at is a matter of where it was convenient to write it down.
+There is one command, because there is one thing to run. A **workflow** is a
+named DAG of steps; every package that declares that name joins in, and the
+whole thing compiles to a single graph.
 
 ```sh
-ciabatta run build                  # every package's `build`, in dependency order
-ciabatta run build test             # both, compiled into ONE graph
-ciabatta run smoke                  # a recipe from the root config
-ciabatta run build --only api       # start from api (its dependencies still run)
-ciabatta run build --only api --isolated   # just api, nothing upstream
-ciabatta run build --dry-run        # walk every step, execute nothing
-ciabatta run build --gui            # watch it live in a browser
+ciabatta build                  # every package's `build`, in dependency order
+ciabatta build test             # both, compiled into ONE graph
+ciabatta smoke                  # a workflow written inline at the root
+ciabatta build --only api       # start from api (its dependencies still run)
+ciabatta build --only api --isolated   # just api, nothing upstream
+ciabatta build --dry-run        # walk every step, execute nothing
+ciabatta build --gui            # watch it live in a browser
 ```
 
 `ciabatta build` (no `run`) does the same thing — any name ciabatta doesn't
@@ -895,7 +869,7 @@ recognise as a command is treated as a workflow.
 ### Seeing the graph first
 
 ```sh
-ciabatta run build --graph
+ciabatta build --graph
 ```
 
 Prints exactly what would run: every step in wave order, and for each one what
@@ -908,10 +882,10 @@ time — arrow keys move, `q` quits.
 `--filter` prunes the graph to the steps you care about:
 
 ```sh
-ciabatta run test --filter tag:fast            # only steps tagged fast
-ciabatta run test --filter '!tag:flaky'        # everything except the flaky ones
-ciabatta run build --filter workspace:api      # only the api package's steps
-ciabatta run test --filter tag:fast --filter tag:frontend   # either one
+ciabatta test --filter tag:fast            # only steps tagged fast
+ciabatta test --filter '!tag:flaky'        # everything except the flaky ones
+ciabatta build --filter workspace:api      # only the api package's steps
+ciabatta test --filter tag:fast --filter tag:frontend   # either one
 ```
 
 Selectors are `tag:`, `workspace:` (or `member:`), `kind:`, `owner:`, `step:`,
@@ -932,7 +906,7 @@ Ciabatta snapshots the variables these files define (names and value *hashes* �
 never the values) into `.ciabatta/cache/`. When they change — someone pulls a
 branch that adds a required variable — the next run says so before it starts,
 rather than failing later with an error about something else. Try it: edit
-`packages/api/.env` and run `ciabatta run build` again.
+`packages/api/.env` and run `ciabatta build` again.
 
 ## Best practices this example is demonstrating
 
@@ -999,19 +973,14 @@ mod tests {
             docker: true,
             ..Default::default()
         };
-        // The optional slices add entries under `registries:` and `recipies:`,
-        // which in YAML means extending one key rather than repeating a header.
-        // Check each combination lands everything it should.
-        for (nexus, docker, registries, recipes) in [
+        // The optional slices add entries under `registries:`, which in YAML
+        // means extending one key rather than repeating a header. Check each
+        // combination lands everything it should.
+        for (nexus, docker, registries, workflows) in [
             (false, false, vec![], vec!["smoke"]),
-            (true, false, vec!["nexus"], vec!["smoke", "api-binary"]),
-            (false, true, vec!["ghcr"], vec!["smoke", "api-image"]),
-            (
-                true,
-                true,
-                vec!["nexus", "ghcr"],
-                vec!["smoke", "api-binary", "api-image"],
-            ),
+            (true, false, vec!["nexus"], vec!["smoke"]),
+            (false, true, vec!["ghcr"], vec!["smoke"]),
+            (true, true, vec!["nexus", "ghcr"], vec!["smoke"]),
         ] {
             let opts = Options {
                 nexus,
@@ -1033,11 +1002,11 @@ mod tests {
             want.sort_unstable();
             assert_eq!(got, want, "registries with nexus={nexus}, docker={docker}");
 
-            let mut got: Vec<&str> = cfg.recipes.keys().map(|s| s.as_str()).collect();
+            let mut got: Vec<&str> = cfg.workflows.keys().map(|s| s.as_str()).collect();
             got.sort_unstable();
-            let mut want = recipes.clone();
+            let mut want = workflows.clone();
             want.sort_unstable();
-            assert_eq!(got, want, "recipes with nexus={nexus}, docker={docker}");
+            assert_eq!(got, want, "workflows with nexus={nexus}, docker={docker}");
         }
 
         for entry in plan(&options) {

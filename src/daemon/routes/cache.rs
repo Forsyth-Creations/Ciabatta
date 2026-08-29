@@ -32,7 +32,7 @@ pub fn router() -> Router<AppState> {
 pub struct PlanQuery {
     /// The checkout to plan in.
     project: String,
-    /// The workflow or recipe to plan. Omitted means every runnable recipe.
+    /// The workflow or workflow to plan. Omitted means every runnable workflow.
     #[serde(default)]
     target: Option<String>,
 }
@@ -52,7 +52,7 @@ async fn plan(
     let targets: Vec<String> = query.target.clone().into_iter().collect();
     let workspace = crate::workspace::Workspace::discover(&root).ok();
 
-    let (steps, recipe_cache) = resolve_targets(&root, &config, &targets, &workspace)
+    let (steps, _) = resolve_targets(&root, &config, &targets, &workspace)
         .map_err(|e| RouteError::bad_request(format!("{e:#}")))?;
 
     // The environment a run would see, so the plan keys the same way one would:
@@ -71,7 +71,6 @@ async fn plan(
         workspace: workspace.as_ref(),
         root: root.clone(),
         config: &config,
-        recipe_cache,
     };
     let plan = crate::cache::graph::plan_graph(
         &steps,
@@ -89,7 +88,7 @@ async fn plan(
 /// Resolve the steps to plan — the same rules `ciabatta dry-run` follows.
 fn resolve_targets(
     root: &std::path::Path,
-    config: &crate::config::CiabattaConfig,
+    _config: &crate::config::CiabattaConfig,
     targets: &[String],
     workspace: &Option<crate::workspace::Workspace>,
 ) -> anyhow::Result<(Vec<crate::run::RunStep>, Option<crate::cache::CacheConfig>)> {
@@ -101,35 +100,13 @@ fn resolve_targets(
         return Ok((graph.steps, None));
     }
 
-    let names: Vec<String> = if targets.is_empty() {
-        let mut runnable: Vec<String> = config
-            .recipes
-            .iter()
-            .filter(|(_, entry)| entry.run.is_some())
-            .map(|(name, _)| name.clone())
-            .collect();
-        runnable.sort();
-        runnable
-    } else {
-        targets.to_vec()
-    };
-
-    let mut steps = Vec::new();
-    let mut recipe_cache = None;
-    for name in &names {
-        let entry = config
-            .recipes
-            .get(name)
-            .ok_or_else(|| anyhow::anyhow!("'{name}' is not a workflow or recipe here"))?;
-        let Some(definition) = entry.run_recipe() else {
-            continue;
-        };
-        if names.len() == 1 {
-            recipe_cache = entry.cache.clone();
-        }
-        steps.extend(crate::run::resolve_run(definition, name, root)?.steps);
-    }
-    Ok((steps, recipe_cache))
+    Err(anyhow::anyhow!(
+        "'{}' is not a workflow here. Run `ciabatta list` to see what is.",
+        targets
+            .first()
+            .map(String::as_str)
+            .unwrap_or("(nothing named)")
+    ))
 }
 
 #[derive(Deserialize)]

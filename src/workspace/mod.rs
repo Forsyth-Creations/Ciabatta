@@ -175,6 +175,19 @@ pub struct Workflow {
     #[serde(default)]
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<String>,
+    /// What this workflow's builds read and write, and whether to reuse the
+    /// result.
+    ///
+    /// This lives here rather than in `ciabatta.yaml` because it describes the
+    /// *build*, not the repository: the files a `build` reads are not the files
+    /// a `test` reads, and a package with both had no way to say so while there
+    /// was one section per config. A step may still narrow it further with its
+    /// own `cache:`.
+    ///
+    /// The shared cache *server* (`cache.remote`) stays in `ciabatta.yaml` —
+    /// that's one endpoint per checkout, not a property of any one build.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache: Option<crate::cache::CacheConfig>,
     /// The steps themselves — the same node type the run engine executes, so a
     /// workflow gets `needs`, `on_error` recovery, conditions, timeouts and
     /// persistence for free.
@@ -223,7 +236,7 @@ pub struct Member {
     pub rel: String,
     /// The `[workspace]` table, defaulted when the member didn't write one.
     pub meta: WorkspaceMeta,
-    /// Its full config, so registries and recipes stay available to `push`
+    /// Its full config, so registries and workflows stay available to `push`
     /// steps and `ciabatta list`.
     pub config: CiabattaConfig,
     /// Its workflows by name, from `.ciabatta/workflows/*.toml` and
@@ -533,6 +546,21 @@ fn load_workflows(
     }
 
     Ok(workflows)
+}
+
+/// The workflow names declared as files in `dir` (`<name>.yaml`).
+///
+/// Used where only the names matter and loading each file would be wasted work
+/// — `ciabatta cache init` deciding which workflow it is describing, say.
+pub fn workflow_names_in(dir: &Path) -> Vec<String> {
+    crate::format::config_files_in(dir)
+        .into_iter()
+        .filter_map(|path| {
+            path.file_stem()
+                .and_then(|s| s.to_str())
+                .map(str::to_string)
+        })
+        .collect()
 }
 
 // ─── Toolchain checks ───────────────────────────────────────────────────────

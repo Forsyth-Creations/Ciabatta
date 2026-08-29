@@ -31,8 +31,6 @@ pub struct WorkspaceContext<'a> {
     pub root: PathBuf,
     /// The root project's own config, used for those steps.
     pub config: &'a CiabattaConfig,
-    /// The recipe being planned, when one recipe's settings apply throughout.
-    pub recipe_cache: Option<CacheConfig>,
 }
 
 impl StepContext for WorkspaceContext<'_> {
@@ -48,11 +46,10 @@ impl StepContext for WorkspaceContext<'_> {
             .cache
             .clone();
 
-        super::graph::effective(
-            workspace_level.as_ref(),
-            self.recipe_cache.as_ref(),
-            step.cache.as_ref(),
-        )
+        // Two levels, not three: a workflow's own `cache:` was folded into
+        // each of its steps when the graph compiled, so `step.cache` already
+        // carries it.
+        super::graph::effective(workspace_level.as_ref(), step.cache.as_ref())
     }
 
     fn dir(&self, step: &RunStep) -> PathBuf {
@@ -336,9 +333,9 @@ impl Proposal {
     }
 
     /// Render the proposal as the YAML block to splice into a config.
-    pub fn to_yaml(&self, enabled: bool, remote: Option<&str>) -> String {
+    pub fn to_yaml(&self, enabled: bool) -> String {
         let mut out = String::new();
-        out.push_str("  # What this workspace's builds read and write. Getting `inputs` right\n");
+        out.push_str("  # What this workflow reads and writes. Getting `inputs` right\n");
         out.push_str("  # is the part that matters: a build that reads a file not listed here\n");
         out.push_str("  # will be handed a stale result when that file changes.\n");
         out.push_str(&format!("  enabled: {enabled}\n"));
@@ -384,68 +381,74 @@ impl Proposal {
         out.push_str("  # differently under a different PROFILE must list it here.\n");
         out.push_str("  env: []\n");
 
-        if let Some(url) = remote {
-            out.push_str("  remote:\n");
-            out.push_str(&format!("    url: {url}\n"));
-            out.push_str("    # `project` is filled in by the server the first time this\n");
-            out.push_str("    # workspace connects. Commit it: it's what makes every checkout\n");
-            out.push_str("    # and every CI runner resolve to the same project.\n");
-        }
-
         out
     }
 }
 
-/// Recipes and steps that declare their own `cache:`, which will win over the
-/// workspace section.
+/// Steps of `workflow` that declare their own `cache:`, which wins over the
+/// workflow's section.
 ///
 /// Worth reporting after `cache init`: the precedence is deliberate, but
 /// "caching is on" followed by nothing being cached — because a step written by
 /// `ciabatta convert` still says `enabled: false` — reads as the feature being
 /// broken rather than as two settings doing exactly what they say.
-pub fn overriding_steps(config: &CiabattaConfig) -> Vec<(String, bool)> {
-    let mut found = Vec::new();
+pub fn overriding_steps(root: &Path, workflow: &str) -> Vec<(String, bool)> {
+    let dir = root
+        .join(crate::config::CIABATTA_DIR)
+        .join(crate::workspace::WORKFLOWS_DIR);
+    let Some(path) = crate::format::find(&dir, workflow) else {
+        return Vec::new();
+    };
+    let Ok(loaded) = crate::format::load::<crate::workspace::Workflow>(&path) else {
+        return Vec::new();
+    };
 
-    for (name, entry) in &config.recipes {
-        if let Some(cache) = &entry.cache {
-            found.push((name.clone(), cache.is_on()));
-        }
-        let Some(run) = entry.run_recipe() else {
-            continue;
-        };
-        for step in &run.steps {
-            if let Some(cache) = &step.cache {
-                found.push((format!("{name}.{}", step.name), cache.is_on()));
-            }
-        }
-    }
-
-    found.sort();
-    found
+    loaded
+        .steps
+        .iter()
+        .filter_map(|step| {
+            step.cache
+                .as_ref()
+                .map(|cache| (step.name.clone(), cache.is_on()))
+        })
+        .collect()
 }
 
-/// Write a proposed `cache:` section into a project's config.
+/// Write a proposed `cache:` section into a workflow's file.
+///
+/// The file definition — what a build reads, writes and depends on — belongs
+/// with the build it describes, so it lands in
+/// `.ciabatta/workflows/<name>.yaml` next to the steps. A `remote:` URL is the
+/// exception: that is one cache server per checkout, not a property of any one
+/// workflow, so it goes into `ciabatta.yaml` instead.
+///
+/// Returns the paths written, workflow file first.
 pub fn write_cache_section(
     root: &Path,
+    workflow: &str,
     proposal: &Proposal,
     enabled: bool,
     remote: Option<&str>,
     force: bool,
-) -> Result<PathBuf> {
-    let path = crate::config::config_path(root).ok_or_else(|| {
+) -> Result<Vec<PathBuf>> {
+    let dir = root
+        .join(crate::config::CIABATTA_DIR)
+        .join(crate::workspace::WORKFLOWS_DIR);
+    let path = crate::format::find(&dir, workflow).ok_or_else(|| {
         anyhow::anyhow!(
-            "No ciabatta config in {}. Run `ciabatta init` first.",
-            root.display()
+            "No workflow called '{workflow}' in {}.\n\
+             Create it (or run `ciabatta init --lib` to scaffold one), then try again.",
+            dir.display()
         )
     })?;
 
     let existing = std::fs::read_to_string(&path)
         .with_context(|| format!("Failed to read {}", path.display()))?;
 
-    // Anchored at column 0: a recipe or a step may carry its own nested
-    // `cache:` (`ciabatta convert` writes one), and that is not the section
-    // this writes. Matching at any indentation would refuse `cache init` on
-    // every project that has ever converted a script.
+    // Anchored at column 0: a step may carry its own nested `cache:`
+    // (`ciabatta convert` writes one), and that is not the section this writes.
+    // Matching at any indentation would refuse `cache init` on every workflow
+    // that has ever been converted from a script.
     if existing.lines().any(|l| l.starts_with("cache:")) && !force {
         bail!(
             "{} already has a `cache:` section. Edit it directly, or pass --force \
@@ -454,11 +457,11 @@ pub fn write_cache_section(
         );
     }
 
-    let block = format!("cache:\n{}", proposal.to_yaml(enabled, remote));
+    let block = format!("cache:\n{}", proposal.to_yaml(enabled));
     let rendered = crate::format::set_top_level(&existing, "cache", &block);
 
     // This edits a file the user owns; hand it back only if it still loads.
-    let parsed: CiabattaConfig =
+    let parsed: crate::workspace::Workflow =
         crate::format::from_str(&rendered, crate::format::Format::of_path(&path)).with_context(
             || {
                 format!(
@@ -470,6 +473,62 @@ pub fn write_cache_section(
     anyhow::ensure!(
         parsed.cache.is_some(),
         "The generated cache section didn't survive a round trip; {} was left alone",
+        path.display()
+    );
+
+    std::fs::write(&path, rendered)
+        .with_context(|| format!("Failed to write {}", path.display()))?;
+
+    let mut written = vec![path];
+    if let Some(url) = remote {
+        written.push(write_remote_section(root, url, force)?);
+    }
+    Ok(written)
+}
+
+/// Point this checkout at a shared cache server, in `ciabatta.yaml`.
+///
+/// Separate from the file definition on purpose: one endpoint serves every
+/// workflow here, and repeating it per workflow would be four places to change
+/// when the server moves.
+fn write_remote_section(root: &Path, url: &str, force: bool) -> Result<PathBuf> {
+    let path = crate::config::config_path(root).ok_or_else(|| {
+        anyhow::anyhow!(
+            "No ciabatta config in {}. Run `ciabatta init` first.",
+            root.display()
+        )
+    })?;
+
+    let existing = std::fs::read_to_string(&path)
+        .with_context(|| format!("Failed to read {}", path.display()))?;
+
+    if existing.lines().any(|l| l.starts_with("cache:")) && !force {
+        bail!(
+            "{} already has a `cache:` section. Edit it directly, or pass --force \
+             to replace it.",
+            path.display()
+        );
+    }
+
+    let mut block = String::from("cache:\n  remote:\n");
+    block.push_str(&format!("    url: {url}\n"));
+    block.push_str("    # `project` is filled in by the server the first time this\n");
+    block.push_str("    # checkout connects. Commit it: it's what makes every checkout\n");
+    block.push_str("    # and every CI runner resolve to the same project.\n");
+    let rendered = crate::format::set_top_level(&existing, "cache", &block);
+
+    let parsed: CiabattaConfig =
+        crate::format::from_str(&rendered, crate::format::Format::of_path(&path)).with_context(
+            || {
+                format!(
+                    "Writing the remote cache section would have broken {}, so it was left alone",
+                    path.display()
+                )
+            },
+        )?;
+    anyhow::ensure!(
+        parsed.cache.as_ref().and_then(|c| c.remote()).is_some(),
+        "The generated remote section didn't survive a round trip; {} was left alone",
         path.display()
     );
 
@@ -683,7 +742,7 @@ mod tests {
         let proposal = propose(&dir);
         assert!(!proposal.is_usable());
 
-        let yaml = proposal.to_yaml(false, None);
+        let yaml = proposal.to_yaml(false);
         assert!(yaml.contains("enabled: false"));
         assert!(
             yaml.contains("TODO"),
@@ -691,11 +750,11 @@ mod tests {
         );
 
         // It still has to parse, so `cache init` on a bare directory leaves a
-        // config that loads.
+        // workflow file that loads.
         let block = format!("cache:\n{yaml}");
-        let config: CiabattaConfig =
+        let workflow: crate::workspace::Workflow =
             crate::format::from_str(&block, crate::format::Format::Yaml).unwrap();
-        let cache = config.cache.unwrap();
+        let cache = workflow.cache.unwrap();
         assert!(!cache.is_on());
         assert!(cache.inputs.is_empty());
 
@@ -703,67 +762,70 @@ mod tests {
     }
 
     #[test]
-    fn the_generated_yaml_parses_back_into_the_config_it_claims_to_be() {
+    fn the_generated_yaml_parses_back_into_the_workflow_it_claims_to_be() {
         let dir = scratch("yaml");
         write(&dir, "src/main.rs", "fn main() {}");
         write(&dir, "Cargo.toml", "[package]");
         write(&dir, "dist/app", "built");
 
         let proposal = propose(&dir);
-        let block = format!(
-            "cache:\n{}",
-            proposal.to_yaml(true, Some("http://cache:8380"))
-        );
-        let config: CiabattaConfig = crate::format::from_str(&block, crate::format::Format::Yaml)
-            .unwrap_or_else(|e| panic!("generated cache section didn't parse: {e}\n\n{block}"));
+        let block = format!("cache:\n{}", proposal.to_yaml(true));
+        let workflow: crate::workspace::Workflow =
+            crate::format::from_str(&block, crate::format::Format::Yaml)
+                .unwrap_or_else(|e| panic!("generated cache section didn't parse: {e}\n\n{block}"));
 
-        let cache = config.cache.expect("cache section written");
+        let cache = workflow.cache.expect("cache section written");
         assert!(cache.is_on());
         assert!(cache.inputs.contains(&"src/**/*".to_string()));
         assert_eq!(cache.outputs, vec!["dist/**/*".to_string()]);
         assert!(cache.exclude.contains(&"dist".to_string()));
 
-        let remote = cache.remote.expect("remote written");
-        assert_eq!(remote.url, "http://cache:8380");
-        assert!(
-            remote.project.is_none(),
-            "the id is assigned by the server, not guessed by the client"
-        );
-        assert!(remote.enabled, "a configured remote defaults to on");
-
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn writing_the_section_preserves_the_rest_of_the_config() {
+    fn writing_the_section_preserves_the_rest_of_the_workflow() {
         let dir = scratch("write");
-        std::fs::create_dir_all(dir.join(".ciabatta")).unwrap();
+        std::fs::create_dir_all(dir.join(".ciabatta/workflows")).unwrap();
         std::fs::write(
             dir.join(".ciabatta/ciabatta.yaml"),
-            "# my careful comment\nworkspace:\n  name: api\n  owner: Ada\n",
+            "workspace:\n  name: api\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join(".ciabatta/workflows/build.yaml"),
+            "# my careful comment\ndescription: Build it\nowner: Ada\nsteps:\n  \
+             - name: compile\n    run: make\n",
         )
         .unwrap();
         write(&dir, "src/main.rs", "fn main() {}");
         write(&dir, "dist/app", "built");
 
         let proposal = propose(&dir);
-        let path = write_cache_section(&dir, &proposal, true, None, false).unwrap();
+        let written = write_cache_section(&dir, "build", &proposal, true, None, false).unwrap();
+        let path = written[0].clone();
+        assert_eq!(
+            written.len(),
+            1,
+            "no remote asked for, so only the workflow"
+        );
 
         let rendered = std::fs::read_to_string(&path).unwrap();
         assert!(rendered.contains("# my careful comment"));
 
-        let config: CiabattaConfig = crate::format::load(&path).unwrap();
-        assert_eq!(config.workspace.unwrap().name.as_deref(), Some("api"));
-        assert!(config.cache.unwrap().is_on());
+        let workflow: crate::workspace::Workflow = crate::format::load(&path).unwrap();
+        assert_eq!(workflow.owner.as_deref(), Some("Ada"));
+        assert_eq!(workflow.steps.len(), 1, "the steps must survive");
+        assert!(workflow.cache.unwrap().is_on());
 
         // A second run refuses rather than clobbering what's there…
-        let err = write_cache_section(&dir, &proposal, true, None, false).unwrap_err();
+        let err = write_cache_section(&dir, "build", &proposal, true, None, false).unwrap_err();
         assert!(err.to_string().contains("already has a `cache:` section"));
 
         // …unless asked to.
-        assert!(write_cache_section(&dir, &proposal, false, None, true).is_ok());
-        let config: CiabattaConfig = crate::format::load(&path).unwrap();
-        assert!(!config.cache.unwrap().is_on());
+        assert!(write_cache_section(&dir, "build", &proposal, false, None, true).is_ok());
+        let workflow: crate::workspace::Workflow = crate::format::load(&path).unwrap();
+        assert!(!workflow.cache.unwrap().is_on());
         assert_eq!(
             rendered.matches("\ncache:").count(),
             1,
@@ -773,39 +835,39 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A step's own nested `cache:` is not the workspace's section — mistaking
-    /// one for the other refuses `cache init` on any project that has ever run
-    /// `ciabatta convert`.
+    /// A step's own nested `cache:` is not the workflow's section — mistaking
+    /// one for the other refuses `cache init` on any workflow that has ever
+    /// been written by `ciabatta convert`.
     #[test]
-    fn a_nested_cache_key_is_not_the_workspace_section() {
+    fn a_nested_cache_key_is_not_the_workflows_section() {
         let dir = scratch("nested");
-        std::fs::create_dir_all(dir.join(".ciabatta")).unwrap();
+        std::fs::create_dir_all(dir.join(".ciabatta/workflows")).unwrap();
         std::fs::write(
             dir.join(".ciabatta/ciabatta.yaml"),
+            "workspace:\n  name: api\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join(".ciabatta/workflows/build.yaml"),
             concat!(
-                "recipies:\n",
-                "  build:\n",
-                "    run:\n",
-                "      steps:\n",
-                "        - name: build\n",
-                "          run: make\n",
-                "          cache:\n",
-                "            enabled: false\n",
+                "steps:\n",
+                "  - name: build\n",
+                "    run: make\n",
+                "    cache:\n",
+                "      enabled: false\n",
             ),
         )
         .unwrap();
         write(&dir, "src/main.rs", "fn main() {}");
         write(&dir, "dist/app", "built");
 
-        let path = write_cache_section(&dir, &propose(&dir), true, None, false)
-            .expect("a step-level cache: must not block the workspace section");
+        let written = write_cache_section(&dir, "build", &propose(&dir), true, None, false)
+            .expect("a step-level cache: must not block the workflow section");
 
-        let config: CiabattaConfig = crate::format::load(&path).unwrap();
-        assert!(config.cache.expect("workspace section written").is_on());
+        let workflow: crate::workspace::Workflow = crate::format::load(&written[0]).unwrap();
+        assert!(workflow.cache.expect("workflow section written").is_on());
         assert!(
-            config.recipes["build"].run_recipe().unwrap().steps[0]
-                .cache
-                .is_some(),
+            workflow.steps[0].cache.is_some(),
             "and the step's own settings must survive"
         );
 
@@ -813,10 +875,71 @@ mod tests {
     }
 
     #[test]
-    fn cache_init_needs_a_project_to_write_into() {
-        let dir = scratch("noproject");
-        let err = write_cache_section(&dir, &propose(&dir), true, None, false).unwrap_err();
-        assert!(err.to_string().contains("ciabatta init"));
+    fn cache_init_needs_a_workflow_to_write_into() {
+        let dir = scratch("noworkflow");
+        std::fs::create_dir_all(dir.join(".ciabatta")).unwrap();
+        std::fs::write(
+            dir.join(".ciabatta/ciabatta.yaml"),
+            "workspace:\n  name: api\n",
+        )
+        .unwrap();
+
+        let err =
+            write_cache_section(&dir, "build", &propose(&dir), true, None, false).unwrap_err();
+        assert!(
+            err.to_string().contains("No workflow called 'build'"),
+            "{err}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The remote is one server per checkout, so it lands in `ciabatta.yaml`
+    /// while the file definition stays with the workflow that reads them.
+    #[test]
+    fn a_remote_goes_to_the_config_and_the_files_to_the_workflow() {
+        let dir = scratch("remote");
+        std::fs::create_dir_all(dir.join(".ciabatta/workflows")).unwrap();
+        std::fs::write(
+            dir.join(".ciabatta/ciabatta.yaml"),
+            "workspace:\n  name: api\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join(".ciabatta/workflows/build.yaml"),
+            "steps:\n  - name: build\n    run: make\n",
+        )
+        .unwrap();
+        write(&dir, "src/main.rs", "fn main() {}");
+        write(&dir, "dist/app", "built");
+
+        let written = write_cache_section(
+            &dir,
+            "build",
+            &propose(&dir),
+            true,
+            Some("http://c:8380"),
+            false,
+        )
+        .unwrap();
+        assert_eq!(written.len(), 2, "the workflow file and the config");
+
+        let workflow: crate::workspace::Workflow = crate::format::load(&written[0]).unwrap();
+        let cache = workflow.cache.expect("workflow section written");
+        assert!(cache.inputs.contains(&"src/**/*".to_string()));
+        assert!(
+            cache.remote.is_none(),
+            "the server does not belong to any one workflow"
+        );
+
+        let config: CiabattaConfig = crate::format::load(&written[1]).unwrap();
+        let remote = config.cache.and_then(|c| c.remote).expect("remote written");
+        assert_eq!(remote.url, "http://c:8380");
+        assert!(
+            remote.project.is_none(),
+            "the id is assigned by the server, not guessed by the client"
+        );
+        assert!(remote.enabled, "a configured remote defaults to on");
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 

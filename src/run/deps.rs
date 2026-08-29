@@ -3,7 +3,7 @@
 //! A ciabatta target — one node of a run graph — is defined by five things, and
 //! until now each of them lived somewhere different: the files it reads and
 //! writes in its `cache:` section, the variables it needs half in that section
-//! and half in the commands themselves, the commands in `run`/`script`/`recipe`,
+//! and half in the commands themselves, the commands in `run`/`script`/`workflow`,
 //! and the targets it needs in `needs`. Anyone asking "why did this rebuild?" or
 //! "what does this actually touch?" had to assemble that answer by hand.
 //!
@@ -39,7 +39,7 @@ pub struct TargetDeps {
     pub dir: String,
 
     /// The commands it runs to produce its outputs, as they go into its cache
-    /// key — an inline `run`, a `script:<path>`, or a `recipe:<name>`.
+    /// key — an inline `run`, a `script:<path>`, or a `workflow:<name>`.
     pub commands: Vec<String>,
 
     /// The input globs it declares (its own, or the ones it inherited).
@@ -133,7 +133,6 @@ pub fn collect_with(
         workspace: workspace.as_ref(),
         root: root.to_path_buf(),
         config,
-        recipe_cache: config.cache.clone(),
     };
 
     steps
@@ -208,14 +207,14 @@ fn relative(root: &Path, dir: &Path) -> String {
 /// asked.
 ///
 /// Returns `None` when there is nothing to say.
-pub fn render(targets: &[TargetDeps], recipe: &str) -> Option<String> {
+pub fn render(targets: &[TargetDeps], workflow: &str) -> Option<String> {
     if targets.is_empty() {
         return None;
     }
 
     let mut out = String::new();
     out.push_str(&format!(
-        "Targets for '{recipe}' — {} to build\n",
+        "Targets for '{workflow}' — {} to build\n",
         targets.len()
     ));
 
@@ -290,11 +289,11 @@ fn files_and_size(count: usize, bytes: u64) -> String {
 pub fn report(
     config: &CiabattaConfig,
     root: &Path,
-    recipe: &str,
+    workflow: &str,
     steps: &[RunStep],
     _vars: &HashMap<String, String>,
 ) -> Option<String> {
-    render(&collect(config, root, steps), recipe)
+    render(&collect(config, root, steps), workflow)
 }
 
 #[cfg(test)]

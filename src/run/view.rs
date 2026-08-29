@@ -7,25 +7,25 @@
 //! Everything here is `pub(crate)` rather than private, because the transport
 //! now lives in `crate::daemon::routes::run` instead of alongside it.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use serde::Serialize;
 
 use crate::config::CiabattaConfig;
-use crate::runner::{ProgressUpdate, RunMode, StageKind};
+use crate::runner::{ProgressUpdate, StageKind};
 
-use super::{envdeps, resolve_run};
+use super::envdeps;
 
 // ─── Serializable live state ────────────────────────────────────────────────
 
 #[derive(Serialize, Clone, Default)]
 pub struct GuiState {
-    recipes: Vec<RecipeView>,
+    workflows: Vec<WorkflowView>,
     done: bool,
     dry_run: bool,
 }
 
 #[derive(Serialize, Clone)]
-pub struct RecipeView {
+pub struct WorkflowView {
     name: String,
     status: String,
     error: Option<String>,
@@ -124,15 +124,15 @@ pub struct PendingChoice {
     options: Vec<String>,
 }
 
-impl RecipeView {
+impl WorkflowView {
     fn step_mut(&mut self, name: &str) -> Option<&mut StepView> {
         self.steps.iter_mut().find(|s| s.name == name)
     }
 }
 
 impl GuiState {
-    fn recipe_mut(&mut self, name: &str) -> Option<&mut RecipeView> {
-        self.recipes.iter_mut().find(|r| r.name == name)
+    fn recipe_mut(&mut self, name: &str) -> Option<&mut WorkflowView> {
+        self.workflows.iter_mut().find(|r| r.name == name)
     }
 
     /// Fold one progress update into the live state.
@@ -148,17 +148,17 @@ impl GuiState {
                     r.logs.push(line);
                 }
             }
-            ProgressUpdate::StepStarted { recipe, step } => {
-                if let Some(r) = self.recipe_mut(&recipe) {
-                    // Reaching a step clears any prior pending choice on the recipe.
+            ProgressUpdate::StepStarted { workflow, step } => {
+                if let Some(r) = self.recipe_mut(&workflow) {
+                    // Reaching a step clears any prior pending choice on the workflow.
                     r.pending = None;
                     if let Some(s) = r.step_mut(&step) {
                         s.status = "running".into();
                     }
                 }
             }
-            ProgressUpdate::StepFinished { recipe, step, ok } => {
-                if let Some(r) = self.recipe_mut(&recipe)
+            ProgressUpdate::StepFinished { workflow, step, ok } => {
+                if let Some(r) = self.recipe_mut(&workflow)
                     && let Some(s) = r.step_mut(&step)
                 {
                     s.status = if ok {
@@ -169,11 +169,11 @@ impl GuiState {
                 }
             }
             ProgressUpdate::StepSkipped {
-                recipe,
+                workflow,
                 step,
                 reason,
             } => {
-                if let Some(r) = self.recipe_mut(&recipe) {
+                if let Some(r) = self.recipe_mut(&workflow) {
                     if let Some(s) = r.step_mut(&step) {
                         s.status = "skipped".into();
                         s.logs.push(format!("skipped: {reason}"));
@@ -181,8 +181,12 @@ impl GuiState {
                     r.logs.push(format!("[{step}] skipped: {reason}"));
                 }
             }
-            ProgressUpdate::StepLog { recipe, step, line } => {
-                if let Some(r) = self.recipe_mut(&recipe) {
+            ProgressUpdate::StepLog {
+                workflow,
+                step,
+                line,
+            } => {
+                if let Some(r) = self.recipe_mut(&workflow) {
                     if let Some(s) = r.step_mut(&step) {
                         s.logs.push(line.clone());
                     }
@@ -190,12 +194,12 @@ impl GuiState {
                 }
             }
             ProgressUpdate::StepNeedsChoice {
-                recipe,
+                workflow,
                 step,
                 message,
                 options,
             } => {
-                if let Some(r) = self.recipe_mut(&recipe) {
+                if let Some(r) = self.recipe_mut(&workflow) {
                     r.pending = Some(PendingChoice {
                         step,
                         message,
@@ -228,17 +232,21 @@ impl GuiState {
                     }
                 }
             }
-            ProgressUpdate::StageStarted { recipe, stage } => {
-                let label = stage.label(RunMode::Run);
-                if let Some(r) = self.recipe_mut(&recipe)
+            ProgressUpdate::StageStarted { workflow, stage } => {
+                let label = stage.label();
+                if let Some(r) = self.recipe_mut(&workflow)
                     && let Some(s) = r.stages.iter_mut().find(|s| s.name == label)
                 {
                     s.status = "running".into();
                 }
             }
-            ProgressUpdate::StageFinished { recipe, stage, ran } => {
-                let label = stage.label(RunMode::Run);
-                if let Some(r) = self.recipe_mut(&recipe)
+            ProgressUpdate::StageFinished {
+                workflow,
+                stage,
+                ran,
+            } => {
+                let label = stage.label();
+                if let Some(r) = self.recipe_mut(&workflow)
                     && let Some(s) = r.stages.iter_mut().find(|s| s.name == label)
                     // A stage that already failed stays failed.
                     && s.status != "failed"
@@ -254,7 +262,7 @@ impl GuiState {
             ProgressUpdate::TransferProgress { .. } => {}
         }
         self.done = self
-            .recipes
+            .workflows
             .iter()
             .all(|r| r.status == "success" || r.status == "failed");
     }
@@ -268,20 +276,13 @@ impl GuiState {
 pub fn initial_state(
     config: &CiabattaConfig,
     root: &std::path::Path,
-    names: &[String],
+    runs: &[(String, crate::run::ResolvedRun)],
     dry_run: bool,
     env: &std::collections::HashMap<String, String>,
 ) -> Result<GuiState> {
-    let mut recipes = Vec::new();
-    for name in names {
-        let entry = config
-            .recipes
-            .get(name)
-            .with_context(|| format!("Recipe '{name}' not found"))?;
-        let run = entry
-            .run_recipe()
-            .with_context(|| format!("Recipe '{name}' has no [run] definition"))?;
-        let resolved = resolve_run(run, name, root)?;
+    let mut workflows = Vec::new();
+    for (name, resolved) in runs {
+        let resolved = resolved.clone();
 
         // One walk for the whole graph, keyed by step name: every node's
         // inputs, outputs, declared variables and commands, resolved through
@@ -349,12 +350,12 @@ pub fn initial_state(
         let stages = StageKind::ALL
             .iter()
             .map(|s| StageView {
-                name: s.label(RunMode::Run).to_string(),
+                name: s.label().to_string(),
                 status: "pending".into(),
             })
             .collect();
 
-        recipes.push(RecipeView {
+        workflows.push(WorkflowView {
             name: name.clone(),
             status: "pending".into(),
             error: None,
@@ -367,7 +368,7 @@ pub fn initial_state(
         });
     }
     Ok(GuiState {
-        recipes,
+        workflows,
         done: false,
         dry_run,
     })

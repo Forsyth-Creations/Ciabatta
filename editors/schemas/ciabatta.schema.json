@@ -1,0 +1,270 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://forsyth-creations.github.io/Ciabatta/schemas/ciabatta.schema.json",
+  "title": "Ciabatta workspace config",
+  "description": "A sub-workspace's .ciabatta/ciabatta.yaml: who it is in the monorepo, what it depends on, and how to reach the registries and caches it uses.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "system": {
+      "type": "object",
+      "description": "Host-level settings for this checkout.",
+      "additionalProperties": false,
+      "properties": {
+        "ci": {
+          "type": "string",
+          "description": "Which CI system to read build metadata from. Auto-detected when unset.",
+          "examples": [
+            "github",
+            "gitlab",
+            "jenkins",
+            "circleci",
+            "travis",
+            "azure"
+          ]
+        },
+        "containers": {
+          "type": "string",
+          "enum": [
+            "docker",
+            "podman"
+          ],
+          "description": "Container runtime. When unset, ciabatta auto-detects whichever is installed."
+        }
+      }
+    },
+    "workspace": {
+      "type": "object",
+      "description": "This directory's identity as a sub-workspace of the monorepo \u2014 written by `ciabatta init --lib`, absent for a standalone project.",
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "This sub-workspace's name across the monorepo. Defaults to the directory name."
+        },
+        "description": {
+          "type": "string",
+          "description": "One line on what lives here. `ciabatta list` prints it."
+        },
+        "owner": {
+          "type": "string",
+          "description": "Who owns this sub-workspace \u2014 a name, handle, or team. Unset shows as \"unowned\"."
+        },
+        "depends_on": {
+          "type": "array",
+          "description": "Other sub-workspaces every workflow here depends on: \"<member>\" for their same-named workflow, or \"<member>:<workflow>\" for one specific workflow.",
+          "items": {
+            "$ref": "./common.schema.json#/$defs/workflowRef"
+          }
+        },
+        "tags": {
+          "type": "array",
+          "description": "Free-form labels for search (`ciabatta list --search backend`).",
+          "items": {
+            "type": "string"
+          }
+        },
+        "requires": {
+          "type": "array",
+          "description": "Tools every workflow here needs on PATH.",
+          "items": {
+            "type": "string"
+          }
+        },
+        "env_file": {
+          "$ref": "./common.schema.json#/$defs/stringOrList",
+          "description": ".env file path(s) relative to this sub-workspace, sourced before any of its workflows run. Unset means `.env`; setting it REPLACES that default rather than adding to it."
+        },
+        "env_default": {
+          "type": "string",
+          "description": "The checked-in template the .env is generated from when it's missing \u2014 conventionally `.env.default`. Required of any workspace whose workflows declare REQUIRED_ENV.",
+          "examples": [
+            ".env.default"
+          ]
+        },
+        "env": {
+          "$ref": "./common.schema.json#/$defs/envMap",
+          "description": "Environment variables applied to every step defined here."
+        },
+        "umbrella": {
+          "type": "boolean",
+          "default": false,
+          "description": "Set on the monorepo root when the root is only an umbrella \u2014 shared `toolchain:` and `env:` \u2014 rather than a package of its own."
+        }
+      }
+    },
+    "workflows": {
+      "type": "object",
+      "description": "Workflows written inline, for a sub-workspace small enough not to want a file each. The usual home is .ciabatta/workflows/<name>.yaml.",
+      "additionalProperties": {
+        "$ref": "./workflow.schema.json"
+      }
+    },
+    "toolchain": {
+      "type": "object",
+      "description": "How to install the build tools workflows declare in `requires`. Usually written once at the monorepo root and inherited by every sub-workspace, so \"install X\" is written down where the person hitting the error will see it.",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "hint": {
+            "type": "string",
+            "description": "The command that installs it, printed verbatim when it's missing.",
+            "examples": [
+              "brew install protobuf"
+            ]
+          },
+          "check": {
+            "type": "string",
+            "description": "An alternative way to detect the tool when a bare PATH lookup won't do. Run through the shell; a zero exit means present.",
+            "examples": [
+              "protoc --version"
+            ]
+          },
+          "description": {
+            "type": "string",
+            "description": "What the tool is for, in one line."
+          }
+        }
+      }
+    },
+    "registries": {
+      "type": "object",
+      "description": "The registries `push` and `pull` steps transfer through, by name.",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "url"
+        ],
+        "properties": {
+          "url": {
+            "type": "string",
+            "description": "Base URL of the registry. For Nexus with `repository` set, this is the bare host \u2014 the /repository/<repository> segment is appended automatically."
+          },
+          "type": {
+            "type": "string",
+            "description": "Explicit registry type. Inferred from the registry's name when absent.",
+            "examples": [
+              "nexus",
+              "ecr",
+              "docker"
+            ]
+          },
+          "tls_verify": {
+            "type": "boolean",
+            "default": true,
+            "description": "Verify the registry's TLS certificate."
+          },
+          "needs_auth": {
+            "type": "boolean",
+            "default": false,
+            "description": "Whether this registry requires credentials."
+          },
+          "login_script": {
+            "type": "string",
+            "description": "A command that authenticates against this registry before a transfer."
+          },
+          "repository": {
+            "type": "string",
+            "description": "Nexus only: the repository to publish into.",
+            "examples": [
+              "raw-hosted",
+              "npm-hosted",
+              "pypi-hosted"
+            ]
+          },
+          "base_path": {
+            "type": "string",
+            "description": "Nexus raw only: a path prefix prepended to every publish_path, so raw artifacts land under a common folder."
+          },
+          "format": {
+            "type": "string",
+            "enum": [
+              "raw",
+              "npm",
+              "pypi"
+            ],
+            "description": "Nexus only: the repository format, selecting how the push happens \u2014 HTTP PUT, `npm publish`, or `twine upload`."
+          }
+        }
+      }
+    },
+    "cache": {
+      "$ref": "./common.schema.json#/$defs/cache",
+      "description": "Build caching for this workspace. Per-workflow `cache:` blocks narrow it; the `remote:` server belongs here, since that is one endpoint per checkout rather than a property of any one build."
+    },
+    "analyze": {
+      "type": "object",
+      "description": "Optional inputs for `ciabatta analyze` (paths relative to the project root).",
+      "additionalProperties": false,
+      "properties": {
+        "requirements": {
+          "type": "string",
+          "description": "A file listing project requirements, one per line (`id` or `id, description`)."
+        },
+        "trace": {
+          "type": "string",
+          "description": "A CSV tracing requirements to source files (columns: requirement, file)."
+        }
+      }
+    },
+    "ai": {
+      "type": "object",
+      "description": "Settings for the `ciabatta ai` assistant (see `ciabatta ai setup`).",
+      "properties": {
+        "provider": {
+          "type": "string",
+          "enum": [
+            "claude",
+            "openai",
+            "vllm"
+          ],
+          "description": "Which wire format to speak. `openai` and `vllm` both cover any OpenAI-compatible endpoint (OpenAI, vLLM, Ollama, LM Studio)."
+        },
+        "endpoint": {
+          "type": "string",
+          "description": "Base URL of the API. Defaults per provider; point it at a local or remote server for self-hosted models."
+        },
+        "model": {
+          "type": "string",
+          "description": "Model name. Defaults per provider."
+        },
+        "api_key_env": {
+          "type": "string",
+          "description": "Name of the environment variable holding the API key.",
+          "examples": [
+            "ANTHROPIC_API_KEY",
+            "OPENAI_API_KEY"
+          ]
+        },
+        "tls_verify": {
+          "type": "boolean",
+          "default": true,
+          "description": "Verify the endpoint's TLS certificate. Turn it off only for a self-hosted endpoint behind a self-signed cert."
+        },
+        "images": {
+          "type": "array",
+          "description": "Container base images the assistant may spin up as sandboxes. It can only use images listed here.",
+          "items": {
+            "type": "string"
+          }
+        },
+        "verify": {
+          "type": "string",
+          "description": "Command that proves the project still builds after the assistant changes code (`cargo test`, `npm run build`). The agent loop won't finish a code-changing task until this passes. Omitted, it is auto-detected; set it to an empty string to turn the gate off."
+        },
+        "max_tokens": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Ceiling on the model's reply length per request. Claude requires a value (default 8192); OpenAI-compatible endpoints only receive it when set. Raise it if large edits are being truncated mid-tool-call."
+        },
+        "max_tool_rounds": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Cap on model/tool round trips per question (default 50). Raise it for long autonomous tasks; lower it to fail fast on a confused model."
+        }
+      }
+    }
+  }
+}

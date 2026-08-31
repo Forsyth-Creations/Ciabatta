@@ -193,6 +193,7 @@ artifacts are published from. For workflows it goes one level further out: the
 | `ciabatta convert --script PATH` | Turn an existing script into a workflow: its tools, its variables, its outputs, and the description in its header. |
 | `ciabatta register` | Tell the daemon this checkout exists, so it shows up in the web app's project switcher. `init` does this for you. |
 | `ciabatta config migrate` | Convert this checkout's TOML config files to YAML. |
+| `ciabatta lsp` | Speak the Language Server Protocol on stdio, so an editor can complete and check `.ciabatta/` files. Your editor extension launches this; you don't. |
 | `ciabatta list` | Every workflow in the monorepo — with descriptions, owners and dependencies. `-s TERM` to search, `-v` for steps. |
 | `ciabatta init --lib` | Opt this package in as a sub-workspace: a `workspace:` identity plus a starter workflow. |
 | `ciabatta init [--ci SYSTEM]` | Create a `.ciabatta/` directory with a starter publishing `ciabatta.yaml`. |
@@ -855,6 +856,55 @@ that moved, and the upstream stages that produced something different. The same
 view is on the **Cache** page of the web app, and on each node of the workflow
 graph.
 
+### Proving the inputs are right: `--authoritative`
+
+`dry-run` shows you what the cache *thinks*. `--authoritative` checks whether it
+is entitled to think it.
+
+```bash
+ciabatta build --authoritative
+```
+
+Every step runs in its own directory containing the files it declared under
+`cache.inputs` and nothing else, laid out the way the project root is — so a
+path that reaches sideways (`../schemas/*.json`) or writes upward
+(`../dist/thing.vsix`) still resolves. A step that reads something it never
+declared doesn't find it and fails, right now, instead of being handed a stale
+artifact six weeks later when the undeclared file has changed and nothing
+noticed. Declared outputs are copied back afterwards, so the run leaves the same
+artifacts in the same places as an ordinary one.
+
+The cache is switched off for these runs. A cache hit skips a step, and a step
+that doesn't run isn't held to anything — and the cache is the thing under
+suspicion in the first place.
+
+**It is opt-in and stays that way.** This is not Bazel and doesn't pretend to
+be: there is no hermetic toolchain, and no attempt to isolate `$HOME`, the
+network, or the clock. The compiler and the package manager are whatever the
+machine has. It answers one question — *are my inputs complete?*
+
+Some steps genuinely need state that is not a source file. `yarn run check` has
+to sit inside its yarn project; a cargo build wants the shared `target/`.
+Listing `node_modules` under `inputs` would put a hundred thousand derived files
+in the cache key and call them sources, so name them separately instead:
+
+```bash
+ciabatta build --authoritative \
+  --sandbox-also node_modules --sandbox-also .yarn \
+  --sandbox-also package.json --sandbox-also yarn.lock --sandbox-also .yarnrc.yml
+```
+
+Those paths are symlinked rather than copied, and everything they cover is
+explicitly outside what the run vouches for. That it's a flag rather than a
+config field is deliberate: a weakened check you retype at the call site stays
+visible in a way that one line added to a config file two years ago does not.
+
+A failed step's sandbox is kept, at `.ciabatta/.cache/authoritative/<step>/`,
+because what the step could see when it failed is the whole question. A step
+that declares no `inputs` at all isn't isolated — an empty directory would fail
+it for reasons unrelated to its declarations — and is listed at the end as
+unverified.
+
 ## The remote cache
 
 A small server anyone can stand up, so a team's builds stop repeating each
@@ -1118,6 +1168,57 @@ a repo where the answer lives in somebody's shell history.
 `ciabatta watch` sources the same files a run would and prints exactly what it
 resolved before the command starts, so a watched dev server and a `dev` workflow
 step can't quietly see different environments.
+
+## Build features
+
+A **feature** is a build-shaping switch: telemetry compiled in or not, the new
+UI or the old one, the fast test suite or the slow one. Any environment variable
+named `CIABATTA_FEAT_<NAME>` is one.
+
+```bash
+CIABATTA_FEAT_NEW_UI=1 ciabatta build
+```
+
+There is nothing to declare. The name after the prefix is the feature — `new_ui`
+above — matched case-insensitively with `-` and `_` treated alike. A value that
+is empty, `0`, `false`, `no` or `off` turns the feature *off*; anything else
+turns it on. The same variable set in any `.env` file the run sources counts
+exactly the same, because features are read after the whole `env_file` chain has
+been layered in.
+
+A run says what it saw before it starts a step:
+
+```
+[build] features: new_ui (off: telemetry)
+```
+
+Steps gate on them the way they gate on anything else, with the feature spelled
+as a feature rather than as a variable:
+
+```yaml
+steps:
+  - name: bundle-new-ui
+    run: yarn build:next
+    when: "feature.new_ui"
+
+  - name: bundle-legacy
+    run: yarn build
+    skip_if: "feature.new_ui"
+```
+
+`!feature.x` negates, and `CIABATTA_FEAT_NEW_UI` still works if you prefer to
+write the variable out. Every step also gets `CIABATTA_FEATURES` — the enabled
+features, sorted and comma-separated — for scripts that want to pass the whole
+set on to something else rather than test one name.
+
+**Features are part of the cache key, and you don't have to remember that.**
+An artifact built with a feature on is not reusable by a build with it off, and
+before this the only way to say so was to list the variable under `cache.env` —
+where one forgotten line meant a build silently served the other
+configuration's artifacts. Anything named with the prefix is in the key by
+construction. A feature explicitly turned *off* is deliberately not in the key:
+`CIABATTA_FEAT_X=0` produces the same artifacts as never mentioning `X`, and
+giving them different keys would cost a rebuild to prove they were the same.
 
 ## Converting a script
 
@@ -1403,22 +1504,103 @@ This matters most with `CIABATTA_BIND_HOST=0.0.0.0`: without the token, anyone
 who could reach the port could run commands as you. Keep it on loopback unless
 you have a reason not to.
 
+## Editors
+
+Ciabatta's config files are full of references to things defined in other
+packages' files — the workflow a `needs:` points at, the tool a `requires:`
+expects the root to know how to install, the registry a `push` step publishes
+through. Get one wrong and the feedback arrives at build time, in someone
+else's terminal.
+
+The extensions in [`editors/`](editors/) move that feedback to the moment you
+type it. There are two halves, and they know different things:
+
+**JSON Schemas** describe the shape of the files — every field, what it takes,
+what it's for. They're plain JSON Schema in [`editors/schemas/`](editors/schemas/),
+so they need no binary and work in any editor with YAML support. A test in this
+crate compares them against the serde structs field by field, so the
+documentation you get while typing is the format ciabatta actually reads.
+
+**`ciabatta lsp`** is the other half: a language server, and a subcommand of
+the CLI you already have. It knows what a schema can't — which sub-workspaces
+*this* monorepo contains, which workflows they define, which tools the root
+promises to install:
+
+```yaml
+# .ciabatta/workflows/build.yaml
+needs:
+  - proto:g          # → proto:generate    Generate the protobufs
+  -                  # → common            The shared library crate
+```
+
+```
+needs: [protos]
+        ~~~~~~
+No sub-workspace here defines `protos`. Did you mean `proto`?
+```
+
+A step's `needs:` offers the steps in that file; a workflow's `needs:` offers
+the other packages' workflows. Two fields spelled the same way that mean
+different things, which is exactly the pair worth having an editor keep
+straight.
+
+| Editor | Install |
+| --- | --- |
+| VS Code | `ciabatta-vscode.vsix`, plus `cargo install ciabatta` for the server. See [`editors/vscode`](editors/vscode/). |
+| Zed | The extension from a checkout, plus one settings block for the schemas. See [`editors/zed`](editors/zed/). |
+
+Neither extension contains any knowledge of the format, which is why they
+can't disagree with each other or with the build.
+
+The VS Code extension isn't on the Marketplace, so there are three places to
+get the `.vsix`, all of them the same file:
+
+- **A running daemon** serves it at `127.0.0.1:8099/extensions`, and the
+  Editors page of the web app has a download button. This is the copy built
+  from the commit that built the binary, so the extension and the
+  `ciabatta lsp` it launches can't be different versions.
+- **The [releases page](https://github.com/forsyth-creations/ciabatta/releases/latest)**,
+  alongside the binaries, and the [project site](https://forsyth-creations.github.io/Ciabatta/#editors)
+  links straight at it.
+- **A checkout**, with `yarn workspace ciabatta-vscode build`, which writes
+  `editors/dist/ciabatta-vscode.vsix`.
+
+Then either drag the file onto the Extensions panel or run
+**Extensions: Install from VSIX…**.
+
 ## Web frontend
 
 Two separate front ends live in this repo:
 
 - **`tool_frontend/`** — the daemon's web app described above (React, MUI,
   TanStack, React Flow). It's compiled into the binary, so a release is still a
-  single file. Build it with
-  `yarn turbo run build --filter=ciabatta-tool-frontend`; `yarn dev` inside
-  `tool_frontend/` gives HMR against a running daemon.
+  single file. Build it with `yarn workspace ciabatta-tool-frontend build`;
+  `yarn dev` inside `tool_frontend/` gives HMR against a running daemon.
 - **`frontend/`** — the public docs site on GitHub Pages, with download links
   and usage instructions. See the
   [project site](https://forsyth-creations.github.io/Ciabatta/).
 
-Building the Rust binary without a built `tool_frontend/dist` still works: the
-daemon serves a placeholder page telling you to run the yarn build. CI and the
-release workflow always build it first.
+Building the Rust binary without them still works: the daemon serves a
+placeholder page telling you to run the yarn build, and its Editors page offers
+no download and points at the releases instead. CI and the release workflow
+always build both first.
+
+### Building it all
+
+Ciabatta builds itself. `.ciabatta/workflows/build.yaml` orders the web app and
+the extension ahead of the binary that embeds them, so one command does the
+whole graph:
+
+```bash
+ciabatta build     # web app, extension, website, then the binary
+ciabatta test      # fmt, clippy, the suite — exactly what CI gates on
+```
+
+That is also what CI runs, on all three platforms, which is why there is no
+second list of build steps in `.github/workflows/ci.yml` to drift away from
+this one. A checkout with no `ciabatta` on PATH bootstraps the same way CI
+does — `cargo build --release` first, then the commands above — or drives the
+JS half alone with `yarn build`.
 
 ## License
 

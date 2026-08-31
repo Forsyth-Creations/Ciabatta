@@ -355,6 +355,11 @@ code {
 }
 .pcard__dl:hover { text-decoration: underline; }
 .pcard__hint { font-family: var(--font-mono); font-size: 0.72rem; color: var(--faint); word-break: break-all; }
+/* Editor cards carry a sentence the platform cards don't need. */
+.pcard__what { margin: 0.1rem 0 0; font-size: 0.82rem; line-height: 1.55; color: var(--faint); }
+.pcard__what code { font-family: var(--font-mono); font-size: 0.92em; color: var(--crumb); }
+/* Zed has no file to link at, so the slot holds a label rather than a dead link. */
+.pcard__dl--none { color: var(--faint); font-style: italic; }
 
 /* ── Pipeline motif ───────────────────────────────────────────────────────── */
 .pipeline {

@@ -16,9 +16,13 @@
  * section can't be added to one and forgotten in the other.
  */
 
+import CheckIcon from "@mui/icons-material/Check";
+import ContentCopyIcon from "@mui/icons-material/ContentCopy";
+import DownloadIcon from "@mui/icons-material/Download";
 import {
   Alert,
   Box,
+  Button,
   Chip,
   Divider,
   Grid2 as Grid,
@@ -34,11 +38,11 @@ import {
   Typography,
 } from "@mui/material";
 import { Link } from "@tanstack/react-router";
-import { Fragment } from "react";
+import { Fragment, useState } from "react";
 import type { ReactNode } from "react";
 
 import { PageHeader } from "../components/Page";
-import { useHealth } from "../api/queries";
+import { useEditorExtensions, useHealth } from "../api/queries";
 import { monoFontStack } from "../theme";
 
 /** Clears the fixed app bar when the browser jumps to an anchor. */
@@ -518,6 +522,306 @@ function CommandReference() {
   );
 }
 
+// ─── Editor setup ───────────────────────────────────────────────────────────
+
+/**
+ * The config schemas, as this daemon serves them.
+ *
+ * All three have to live in one directory: `ciabatta.schema.json` and
+ * `workflow.schema.json` both `$ref` into `common.schema.json` by relative
+ * path, so a copy of one without the others resolves to nothing.
+ */
+const SCHEMA_FILES = [
+  {
+    file: "ciabatta.schema.json",
+    covers: ".ciabatta/ciabatta.yaml",
+    what: "The package's identity, its registries, its toolchain and its cache.",
+  },
+  {
+    file: "workflow.schema.json",
+    covers: ".ciabatta/workflows/*.yaml",
+    what: "A workflow and its steps — the file you write most often.",
+  },
+  {
+    file: "common.schema.json",
+    covers: "—",
+    what: "Step and cache definitions the other two share. Needed by both; not referenced directly.",
+  },
+];
+
+/** A labelled block of JSON or YAML with a button that copies it. */
+function CopyBlock({ children, label }: { children: string; label: string }) {
+  const [copied, setCopied] = useState(false);
+
+  return (
+    <Box sx={{ position: "relative", "&:hover .copy": { opacity: 1 } }}>
+      <Pre>{children}</Pre>
+      <Button
+        className="copy"
+        size="small"
+        startIcon={copied ? <CheckIcon /> : <ContentCopyIcon />}
+        onClick={() => {
+          void navigator.clipboard.writeText(children).then(() => {
+            setCopied(true);
+            window.setTimeout(() => setCopied(false), 2000);
+          });
+        }}
+        sx={{
+          position: "absolute",
+          top: 20,
+          right: 8,
+          opacity: 0,
+          transition: "opacity 120ms",
+          bgcolor: "background.paper",
+        }}
+      >
+        {copied ? "Copied" : label}
+      </Button>
+    </Box>
+  );
+}
+
+/** `104495` -> `102 KB`. Sizes here are always well under a megabyte. */
+function kilobytes(bytes: number): string {
+  return `${Math.round(bytes / 1024)} KB`;
+}
+
+const RELEASES_URL = "https://github.com/forsyth-creations/ciabatta/releases/latest";
+
+/**
+ * The VS Code extension, offered by the binary that is serving this page.
+ *
+ * Worth a component rather than a static link because the answer varies by
+ * build. A release binary carries the `.vsix`; one built with a plain
+ * `cargo build` does not, and pretending otherwise would hand someone a 404
+ * where a button was promised. So ask, and say which situation you are in.
+ */
+function ExtensionDownloads() {
+  const { data, isPending, isError } = useEditorExtensions();
+  const vsix = data?.find((e) => e.file.endsWith(".vsix"));
+
+  if (isPending) return null;
+
+  if (isError || !vsix) {
+    return (
+      <Alert severity="info" sx={{ my: 2, maxWidth: "90ch" }}>
+        This binary was built without <C>yarn package</C>, so it carries no extension to hand
+        you. Grab the <C>.vsix</C> from the{" "}
+        <Box component="a" href={RELEASES_URL} target="_blank" rel="noreferrer">
+          releases page
+        </Box>
+        , or build one from a checkout with <C>yarn package</C>.
+      </Alert>
+    );
+  }
+
+  return (
+    <Box sx={{ my: 2 }}>
+      <Button
+        variant="contained"
+        component="a"
+        href={`/extensions/${vsix.file}`}
+        download={vsix.file}
+        startIcon={<DownloadIcon />}
+      >
+        {vsix.file}
+      </Button>
+      <Typography variant="caption" color="text.secondary" sx={{ ml: 1.5 }}>
+        {kilobytes(vsix.bytes)} — built from the same commit as this binary
+      </Typography>
+    </Box>
+  );
+}
+
+/**
+ * The half of editor setup that has to know where it is running.
+ *
+ * The schema URLs go into somebody's editor settings, and they have to name
+ * the port *this* daemon is on — which is knowable here and nowhere in a
+ * static document. Hence a component rather than more prose: `origin` is read
+ * at render time, so the block you copy is the block that works.
+ */
+function EditorSetup() {
+  const origin = typeof window === "undefined" ? "http://127.0.0.1:8099" : window.location.origin;
+
+  const served = `{
+  "lsp": {
+    "yaml-language-server": {
+      "settings": {
+        "yaml": {
+          "schemas": {
+            "${origin}/schemas/ciabatta.schema.json": [
+              "**/.ciabatta/ciabatta.yaml"
+            ],
+            "${origin}/schemas/workflow.schema.json": [
+              "**/.ciabatta/workflows/*.yaml"
+            ]
+          }
+        }
+      }
+    }
+  }
+}`;
+
+  const committed = `{
+  "lsp": {
+    "yaml-language-server": {
+      "settings": {
+        "yaml": {
+          "schemas": {
+            ".ciabatta/schemas/ciabatta.schema.json": [
+              "**/.ciabatta/ciabatta.yaml"
+            ],
+            ".ciabatta/schemas/workflow.schema.json": [
+              "**/.ciabatta/workflows/*.yaml"
+            ]
+          }
+        }
+      }
+    }
+  }
+}`;
+
+  return (
+    <>
+      <SubHeading>Two halves</SubHeading>
+      <P>
+        Editor support is two independent pieces, and it is worth knowing which one you are
+        missing when something doesn&apos;t work.
+      </P>
+      <Bullets
+        items={[
+          <>
+            <strong>The JSON Schemas</strong> describe the <em>shape</em> of the files: every
+            field, what it takes, what it is for. That is where field-name completion, hover
+            documentation and &ldquo;unknown field&rdquo; errors come from. Plain JSON Schema, no
+            binary needed, works in any editor with YAML support.
+          </>,
+          <>
+            <strong>
+              <C>ciabatta lsp</C>
+            </strong>{" "}
+            is a language server, and a subcommand of the CLI you already have. It knows what a
+            schema cannot: which sub-workspaces <em>this</em> monorepo contains, which workflows
+            they define, which tools the root&apos;s <C>toolchain:</C> can install. That is what
+            completes a <C>needs:</C> and warns when one points at nothing.
+          </>,
+        ]}
+      />
+      <P>
+        A <C>needs:</C> on a step names steps in the same file; a <C>needs:</C> on the workflow
+        names other packages&apos; workflows. Same word, different vocabulary — the server keeps
+        them straight, and flags <C>protos</C> when you meant <C>proto</C>.
+      </P>
+
+      <SubHeading>VS Code</SubHeading>
+      <P>
+        The extension isn&apos;t on the Marketplace, so this daemon serves it. Download it and
+        either drag the file onto the Extensions panel, or run{" "}
+        <strong>Extensions: Install from VSIX…</strong> from the command palette.
+      </P>
+      <ExtensionDownloads />
+      <P>
+        It depends on Red Hat&apos;s YAML extension, which VS Code installs alongside it, and it
+        carries its own copy of the schemas — so that half needs no CLI at all. For the
+        repository-aware half, put the binary on your PATH:</P>
+      <Pre>{`cargo install ciabatta`}</Pre>
+      <P>
+        That is all. Without the binary you still get every field and its documentation, and
+        nothing complains. To run a build of your own instead, point{" "}
+        <C>ciabatta.server.path</C> at it and use <strong>Ciabatta: Restart Language Server</strong>
+        .
+      </P>
+      <P>
+        Building it from a checkout: <C>yarn install</C>, then{" "}
+        <C>yarn workspace ciabatta-vscode build</C>, then F5 with <C>editors/vscode</C> open.
+      </P>
+
+      <SubHeading>Zed</SubHeading>
+      <P>
+        Zed extensions launch language servers rather than shipping them, so install the CLI
+        first — it is the same binary that runs your builds, which is what keeps completions
+        agreeing with <C>ciabatta build</C>:
+      </P>
+      <Pre>{`cargo install ciabatta`}</Pre>
+      <P>
+        Then install the extension: <strong>zed: install dev extension</strong> and pick{" "}
+        <C>editors/zed</C> from a ciabatta checkout.
+      </P>
+      <P>
+        The schemas need one settings block, because Zed has no equivalent of the contribution
+        point VS Code uses. Put either of these in your project&apos;s <C>.zed/settings.json</C>.
+      </P>
+      <P>
+        <strong>Served by this daemon</strong> — nothing to download, but the schemas resolve only
+        while it is running:
+      </P>
+      <CopyBlock label="Copy">{served}</CopyBlock>
+      <P>
+        <strong>Committed to the repo</strong> — works offline, on a colleague&apos;s machine, and
+        in CI. Download the files below into <C>.ciabatta/schemas/</C> and commit them:
+      </P>
+      <CopyBlock label="Copy">{committed}</CopyBlock>
+
+      <SubHeading>Downloads</SubHeading>
+      <P>
+        The schemas this binary carries. Save <strong>all three</strong> into one directory: the
+        first two reference the third by relative path, and separated they resolve to nothing.
+      </P>
+      <Table size="small" sx={{ mb: 2, maxWidth: "90ch" }}>
+        <TableHead>
+          <TableRow>
+            <TableCell>File</TableCell>
+            <TableCell>Validates</TableCell>
+            <TableCell>What it covers</TableCell>
+            <TableCell align="right">&nbsp;</TableCell>
+          </TableRow>
+        </TableHead>
+        <TableBody>
+          {SCHEMA_FILES.map(({ file, covers, what }) => (
+            <TableRow key={file}>
+              <TableCell sx={{ fontFamily: monoFontStack, fontSize: 13, whiteSpace: "nowrap" }}>
+                {file}
+              </TableCell>
+              <TableCell sx={{ fontFamily: monoFontStack, fontSize: 13, whiteSpace: "nowrap" }}>
+                {covers}
+              </TableCell>
+              <TableCell>
+                <Typography variant="caption" color="text.secondary" sx={{ lineHeight: 1.6 }}>
+                  {what}
+                </Typography>
+              </TableCell>
+              <TableCell align="right">
+                <Button
+                  size="small"
+                  component="a"
+                  href={`/schemas/${file}`}
+                  download={file}
+                  startIcon={<DownloadIcon />}
+                >
+                  Download
+                </Button>
+              </TableCell>
+            </TableRow>
+          ))}
+        </TableBody>
+      </Table>
+      <P>
+        They are served unauthenticated on purpose — the thing fetching them is a language server
+        reading a URL out of a settings file, and a schema is a public description of a file
+        format. Everything under <C>/api</C> still needs the token.
+      </P>
+
+      <SubHeading>Any other editor</SubHeading>
+      <P>
+        Nothing above is specific to those two. Point any JSON Schema-aware YAML tool at the same
+        files, and any LSP client at <C>ciabatta lsp</C>, which speaks the protocol on stdio.
+        The same schemas will validate a config in CI.
+      </P>
+    </>
+  );
+}
+
 // ─── The sections ───────────────────────────────────────────────────────────
 
 interface DocSection {
@@ -666,6 +970,11 @@ ciabatta run test --filter tag:fast --filter tag:smoke   # either one`}</Pre>
         </P>
       </>
     ),
+  },
+  {
+    id: "editors",
+    title: "Editors",
+    body: <EditorSetup />,
   },
   {
     id: "todo",
@@ -944,6 +1253,47 @@ ciabatta dry-run build --diff  # ...with the lines that changed`}</Pre>
           the difference between &ldquo;we think this is current&rdquo; and &ldquo;this is
           current&rdquo;.
         </P>
+
+        <SubHeading>Proving the inputs are right</SubHeading>
+        <P>
+          A dry run shows what the cache <em>thinks</em>. <C>--authoritative</C> checks whether it
+          is entitled to think it.
+        </P>
+        <Pre>{`ciabatta build --authoritative`}</Pre>
+        <P>
+          Every step runs in its own directory holding the files it declared under <C>inputs</C>{" "}
+          and nothing else, laid out the way the project root is — so a path that reaches sideways
+          (<C>../schemas/*.json</C>) or writes upward (<C>../dist/thing.vsix</C>) still resolves. A
+          step that reads something it never declared cannot find it and fails, now, rather than
+          being handed a stale artifact weeks later when that file has changed and nothing noticed.
+          Declared outputs are copied back, so the run leaves the same artifacts an ordinary one
+          would.
+        </P>
+        <P>
+          The cache is switched off for these runs. A cache hit skips a step, and a step that does
+          not run is held to nothing — and the cache is the thing under suspicion to begin with.
+        </P>
+        <Alert severity="info" sx={{ my: 2, maxWidth: "90ch" }}>
+          Opt-in, and it stays that way. There is no hermetic toolchain and no attempt to isolate{" "}
+          <C>$HOME</C>, the network or the clock — the compiler and the package manager are
+          whatever the machine has. It answers one question: <em>are my inputs complete?</em>
+        </Alert>
+        <P>
+          Some steps need state that is not a source file. <C>yarn run check</C> has to sit inside
+          its yarn project; a cargo build wants the shared <C>target/</C>. Listing{" "}
+          <C>node_modules</C> under <C>inputs</C> would put a hundred thousand derived files into
+          the cache key and call them sources, so name them separately — symlinked in, and
+          explicitly outside what the run vouches for:
+        </P>
+        <Pre>{`ciabatta build --authoritative \\
+  --sandbox-also node_modules --sandbox-also .yarn \\
+  --sandbox-also package.json --sandbox-also yarn.lock`}</Pre>
+        <P>
+          A failed step keeps its sandbox, under <C>.ciabatta/.cache/authoritative/</C>, because
+          what the step could see when it failed is the whole question. A step that declares no{" "}
+          <C>inputs</C> is not isolated — an empty directory would fail it for reasons unrelated to
+          its declarations — and is listed at the end as unverified.
+        </P>
       </>
     ),
   },
@@ -1120,6 +1470,64 @@ cache:
           view hangs off each node of the <Link to="/workspace">workflow graph</Link>. From a
           terminal, <C>ciabatta dry-run &lt;workflow&gt;</C> prints the same answer and{" "}
           <C>--diff</C> adds the lines that changed.
+        </P>
+      </>
+    ),
+  },
+  {
+    id: "features",
+    title: "Build features",
+    body: (
+      <>
+        <P>
+          A feature is a build-shaping switch: telemetry compiled in or not, the new UI or the old
+          one, the fast test suite or the slow one. Any environment variable named{" "}
+          <C>CIABATTA_FEAT_&lt;NAME&gt;</C> is one.
+        </P>
+        <Pre>{`CIABATTA_FEAT_NEW_UI=1 ciabatta build`}</Pre>
+        <P>
+          Nothing is declared anywhere. The name after the prefix is the feature — <C>new_ui</C>{" "}
+          above — matched case-insensitively, with <C>-</C> and <C>_</C> treated alike. An empty
+          value, or <C>0</C>, <C>false</C>, <C>no</C> or <C>off</C>, turns the feature off;
+          anything else turns it on. The same variable set in any <C>.env</C> the run sources
+          counts identically, because features are read after the whole <C>env_file</C> chain has
+          been layered in.
+        </P>
+        <P>A run says what it saw before it starts a step:</P>
+        <Pre>{`[build] features: new_ui (off: telemetry)`}</Pre>
+
+        <SubHeading>Gating a step</SubHeading>
+        <P>
+          Steps condition on features the way they condition on anything else, with the feature
+          spelled as a feature rather than as a variable:
+        </P>
+        <Pre>{`steps:
+  - name: bundle-new-ui
+    run: yarn build:next
+    when: "feature.new_ui"
+
+  - name: bundle-legacy
+    run: yarn build
+    skip_if: "feature.new_ui"`}</Pre>
+        <P>
+          <C>!feature.x</C> negates, and the bare <C>CIABATTA_FEAT_NEW_UI</C> still works if you
+          would rather write the variable out. Every step also gets <C>CIABATTA_FEATURES</C> — the
+          enabled features, sorted and comma-separated — for scripts that want to pass the whole
+          set on to something else rather than test one name.
+        </P>
+
+        <SubHeading>They are part of the cache key</SubHeading>
+        <P>
+          An artifact built with a feature on is not reusable by a build with it off. Before this,
+          saying so meant listing the variable under <C>cache.env</C>, where one forgotten line
+          silently served the other configuration&apos;s artifacts. Anything named with the prefix
+          is in the key by construction, so that mistake is no longer available.
+        </P>
+        <P>
+          A feature explicitly turned <em>off</em> is deliberately not in the key:{" "}
+          <C>CIABATTA_FEAT_X=0</C> produces the same artifacts as never mentioning <C>X</C>, and
+          giving them different keys would cost a rebuild to prove they were the same. It is still
+          reported, so a misspelled name that did nothing does not look like one that worked.
         </P>
       </>
     ),

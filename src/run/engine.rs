@@ -147,6 +147,14 @@ pub async fn execute(
             .await;
     }
 
+    // Say which features are on before anything runs. A build shaped by a
+    // variable nobody mentioned is the hardest kind to explain afterwards, and
+    // these change the cache key — so a run that reuses nothing when you
+    // expected it to should be able to point at the line that says why.
+    if let Some(line) = prepared.features.describe() {
+        let _ = tx.send(ProgressUpdate::Log(name.to_string(), line)).await;
+    }
+
     if !prepared.is_ready() {
         let list = prepared.missing().join(", ");
         // Console: printed directly so it shows even in `--gui` mode, where
@@ -203,7 +211,15 @@ pub async fn execute(
                 // Caching is opt-in per workspace, so this is usually a no-op —
                 // but it has to be set up before the graph starts, since each
                 // step's key depends on what the steps before it produced.
-                let mut cache = if dry_run {
+                //
+                // Off entirely under `--authoritative`. A cache hit skips the
+                // step, and a step that doesn't run isn't held to anything —
+                // so on a warm cache the flag would quietly verify nothing,
+                // which is worse than not offering it. The cache is also the
+                // thing under suspicion: you reach for this flag precisely
+                // when you think it has been serving stale results, and
+                // answering the question with the accused is no answer.
+                let mut cache = if dry_run || ctl.authoritative {
                     None
                 } else {
                     let mut session = super::cached::Session::open(root, config);
@@ -211,6 +227,41 @@ pub async fn execute(
                         session.connect_remote().await;
                     }
                     session
+                };
+
+                if ctl.authoritative && !dry_run {
+                    let _ = tx
+                        .send(ProgressUpdate::Log(
+                            name.to_string(),
+                            "authoritative: every step runs against only its declared \
+                             cache.inputs, and the cache is bypassed so none is skipped"
+                                .to_string(),
+                        ))
+                        .await;
+                }
+
+                // `--authoritative` resolves what each step declared through
+                // the same context the cache uses, so "its inputs" means one
+                // thing across the whole tool. Built here rather than inside
+                // the cache session because the two are independent: holding a
+                // build to its declarations is worth doing with caching off,
+                // and is arguably most worth doing then.
+                let mut isolation = match ctl.authoritative && !dry_run {
+                    false => None,
+                    true => {
+                        let workspace = crate::workspace::Workspace::discover(root).ok();
+                        let context = crate::cache::cli::WorkspaceContext {
+                            workspace: workspace.as_ref(),
+                            root: root.to_path_buf(),
+                            config,
+                        };
+                        Some(super::isolate::Isolation::plan(
+                            root,
+                            &resolved.steps,
+                            &context,
+                            &ctl.sandbox_also,
+                        ))
+                    }
                 };
 
                 run_dag(
@@ -223,8 +274,15 @@ pub async fn execute(
                     ctl,
                     tx,
                     cache.as_mut(),
+                    isolation.as_mut(),
                 )
                 .await?;
+
+                if let Some(summary) = isolation.as_ref().and_then(|i| i.summary()) {
+                    let _ = tx
+                        .send(ProgressUpdate::Log(name.to_string(), summary))
+                        .await;
+                }
 
                 // The graph is done: tell the shared cache which of its
                 // entries this run leant on, so they age from now rather than
@@ -300,6 +358,7 @@ async fn run_dag(
     ctl: &RunCtl,
     tx: &mpsc::Sender<ProgressUpdate>,
     mut cache: Option<&mut super::cached::Session>,
+    mut isolation: Option<&mut super::isolate::Isolation>,
 ) -> Result<()> {
     // Every tool the graph's steps declare has to be on PATH before anything
     // runs. Discovering a missing toolchain three steps in — as a bare "command
@@ -411,9 +470,94 @@ async fn run_dag(
                 }
             }
 
+            // Under `--authoritative` the step runs against a copy of the
+            // tree holding only what it declared. A step that declares nothing
+            // gets no sandbox and is counted as unverified, and a sandbox that
+            // can't be built is reported and skipped rather than failing the
+            // build: the flag is here to find undeclared inputs, not to become
+            // a new way for a run to die.
+            let mut sandbox = None;
+            if let Some(iso) = isolation.as_deref_mut() {
+                match iso.prepare(step) {
+                    Ok(prepared) => sandbox = prepared,
+                    Err(e) => {
+                        let _ = tx
+                            .send(ProgressUpdate::Log(
+                                workflow.to_string(),
+                                format!(
+                                    "note: {} could not be isolated, running it normally ({e:#})",
+                                    step.name
+                                ),
+                            ))
+                            .await;
+                    }
+                }
+            }
+            if let Some(sandbox) = sandbox.as_ref() {
+                let _ = tx
+                    .send(ProgressUpdate::Log(
+                        workflow.to_string(),
+                        match sandbox.linked {
+                            0 => format!(
+                                "{}: isolated with {} declared input file(s)",
+                                step.name, sandbox.staged
+                            ),
+                            linked => format!(
+                                "{}: isolated with {} declared input file(s), plus {} \
+                                 unvouched-for path(s) from --sandbox-also",
+                                step.name, sandbox.staged, linked
+                            ),
+                        },
+                    ))
+                    .await;
+            }
+
             let started = std::time::Instant::now();
-            let outcome =
-                run_step_action(step, workflow, config, root, step_env, dry_run, tx).await;
+            let outcome = run_step_action(
+                step,
+                workflow,
+                config,
+                root,
+                step_env,
+                dry_run,
+                sandbox.as_ref().map(|s| s.dir.as_path()),
+                tx,
+            )
+            .await;
+
+            // Whatever happened, the sandbox has to be dealt with before the
+            // outcome is: a success owes its outputs to the real tree, and a
+            // failure owes the operator the directory to look in.
+            let outcome = match (sandbox, isolation.as_deref_mut()) {
+                (Some(sandbox), Some(iso)) if outcome.is_ok() => match iso.collect(sandbox) {
+                    Ok(_) => outcome,
+                    // The step worked but its outputs didn't come back, so the
+                    // tree is not what a successful run should leave behind.
+                    // That is a failure, and saying otherwise would strand
+                    // everything downstream on missing files.
+                    Err(e) => Err(e.context(format!(
+                        "{} succeeded in isolation but its declared outputs could not be collected",
+                        step.name
+                    ))),
+                },
+                (Some(sandbox), Some(iso)) => {
+                    let kept = iso.keep(sandbox);
+                    let _ = tx
+                        .send(ProgressUpdate::Log(
+                            workflow.to_string(),
+                            format!(
+                                "{} failed in isolation. Its sandbox is kept at {} — if it reads \
+                                 a file that isn't there, that file is missing from cache.inputs.",
+                                step.name,
+                                kept.display(),
+                            ),
+                        ))
+                        .await;
+                    outcome
+                }
+                (_, _) => outcome,
+            };
+
             match outcome {
                 Ok(()) => {
                     state.insert(step.name.as_str(), StepState::Succeeded);
@@ -1071,6 +1215,7 @@ async fn pick_option(
 /// Two guards wrap the action itself: a `timeout` that kills a step which has
 /// stopped making progress, and `retries` for a step that fails in a way worth
 /// trying again.
+#[allow(clippy::too_many_arguments)]
 async fn run_step_action(
     step: &RunStep,
     workflow: &str,
@@ -1078,6 +1223,9 @@ async fn run_step_action(
     root: &Path,
     env_vars: &HashMap<String, String>,
     dry_run: bool,
+    // `isolated_in`: where to run instead of the step's real directory — the
+    // sandbox, under `--authoritative`. `None` is the ordinary case.
+    isolated_in: Option<&Path>,
     tx: &mpsc::Sender<ProgressUpdate>,
 ) -> Result<()> {
     let _ = tx
@@ -1089,7 +1237,10 @@ async fn run_step_action(
 
     let limit = step.timeout_duration()?;
     let (script, run) = step.action();
-    let cwd = step_cwd(step, root);
+    let cwd = match isolated_in {
+        Some(dir) => dir.to_path_buf(),
+        None => step_cwd(step, root),
+    };
     let env_vars = &step_env(step, env_vars);
     let attempts = step.retries.saturating_add(1);
     let mut res = Ok(());
@@ -1300,6 +1451,8 @@ mod tests {
             // Tests must not reach for — let alone start — a real daemon, so
             // persistent steps take the in-process path here.
             persist_via_daemon: false,
+            authoritative: false,
+            sandbox_also: Vec::new(),
         };
         let env: HashMap<String, String> = std::env::vars().collect();
 
@@ -1324,6 +1477,7 @@ mod tests {
             false,
             &ctl,
             &tx,
+            None,
             None,
         )
         .await;

@@ -1,0 +1,15 @@
+# The public website — https://forsyth-creations.github.io/Ciabatta/.
+#
+# Nothing else in the monorepo depends on it: it documents ciabatta rather than
+# being part of it, and it is deployed to Pages by the release, not embedded in
+# the binary. It is a member so that `ciabatta build` covers it and a break
+# shows up with the change that caused it.
+workspace:
+  name: frontend
+  description: The public marketing and docs site, deployed to GitHub Pages
+  owner: Henry Forsyth
+  tags:
+    - web
+    - docs
+  requires:
+    - yarn

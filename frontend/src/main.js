@@ -15,6 +15,27 @@ const PLATFORMS = [
   { os: "🪟", label: "Windows · x86_64", file: "ciabatta-windows-x86_64.zip", hint: "unzip, add to PATH" },
 ];
 
+// The editor extensions, published as release assets alongside the binaries.
+// VS Code is a one-file install; Zed compiles its extensions from a directory,
+// so there is nothing to download for it and the card says so instead of
+// linking at a file that doesn't exist.
+const EDITORS = [
+  {
+    os: "🟦",
+    label: "VS Code",
+    file: "ciabatta-vscode.vsix",
+    hint: "Extensions: Install from VSIX…",
+    what: "Field completion and hover docs from the bundled JSON Schemas, plus a client for <code>ciabatta lsp</code> once the CLI is on your PATH.",
+  },
+  {
+    os: "⚡",
+    label: "Zed",
+    file: null,
+    hint: "zed: install dev extension",
+    what: "Point it at <code>editors/zed</code> in a checkout — Zed builds extensions from source, so there is no archive to fetch.",
+  },
+];
+
 const INSTALL_TABS = [
   { id: "quick", label: "Linux / macOS", cmd: "curl -fsSL https://forsyth-creations.github.io/Ciabatta/install.sh | sh", note: "Detects your OS and CPU, then installs the matching prebuilt binary. No Rust toolchain needed. Pin a version with <code>| sh -s -- --version 0.3.0</code>, or list them with <code>--list</code>." },
   { id: "windows", label: "Windows", cmd: "irm https://forsyth-creations.github.io/Ciabatta/install.ps1 | iex", note: "Run in PowerShell — downloads the binary and adds it to your PATH. To pin a version: <code>&amp; ([scriptblock]::Create((irm …install.ps1))) -Version 0.3.0</code>." },
@@ -158,6 +179,20 @@ const DEPLOY_CONFIG_HTML = `<span class="c"># packages/web/.ciabatta/workflows/d
     <span class="k">script</span>: <span class="v">scripts/release.sh</span>
     <span class="new">needs</span>: <span class="v">[migrate]</span>`;
 
+function editorCard(e) {
+  const action = e.file
+    ? `<a class="pcard__dl" href="${releaseBase}/${e.file}" download>${e.file} ↓</a>`
+    : `<span class="pcard__dl pcard__dl--none">from a checkout</span>`;
+  return `
+    <div class="pcard">
+      <div class="pcard__os">${e.os}</div>
+      <div class="pcard__label">${e.label}</div>
+      ${action}
+      <div class="pcard__hint">${e.hint}</div>
+      <p class="pcard__what">${e.what}</p>
+    </div>`;
+}
+
 function platformCard(p) {
   return `
     <div class="pcard">
@@ -176,6 +211,7 @@ function render() {
         <span class="brand"><span class="brand__loaf">🍞</span> ciabatta <span class="brand__ver">v${VERSION}</span></span>
         <span class="topbar__spacer"></span>
         <a class="topbar__link" href="#install">Install</a>
+        <a class="topbar__link" href="#editors">Editors</a>
         <a class="topbar__link" href="#config">Config</a>
         <a class="topbar__link" href="#s3">S3</a>
         <a class="topbar__link" href="#docker">Containers</a>
@@ -234,6 +270,25 @@ function render() {
         </div>
         <p class="cmdline__note" id="install-note">${INSTALL_TABS[0].note}</p>
         <div class="platforms">${PLATFORMS.map(platformCard).join("")}</div>
+      </section>
+
+      <section class="section reveal" id="editors">
+        <div class="section__head">
+          <div class="eyebrow">Editors</div>
+          <h2>Completion that knows your repo.</h2>
+          <p class="section__sub">
+            Two halves: JSON Schemas describe the <em>shape</em> of a config file and need no
+            binary, while <code>ciabatta lsp</code> — a subcommand of the CLI above — knows what
+            this monorepo actually contains, so it completes a <code>needs:</code> and warns when
+            one points at nothing.
+          </p>
+        </div>
+        <div class="platforms">${EDITORS.map(editorCard).join("")}</div>
+        <p class="cmdline__note">
+          A running daemon serves the same <code>.vsix</code> at
+          <code>127.0.0.1:8099/extensions</code>, built from the commit that built it — see the
+          Editors page of <code>ciabatta docs</code>.
+        </p>
       </section>
 
       <section class="section reveal">

@@ -8,12 +8,13 @@
 import { useQuery } from "@tanstack/react-query";
 
 import { api } from "./client";
-import type { Health, Project } from "./types";
+import type { EditorExtension, Health, Project } from "./types";
 
 export const queryKeys = {
   health: ["health"] as const,
   projects: ["projects"] as const,
   todos: ["todos"] as const,
+  extensions: ["extensions"] as const,
 };
 
 /**
@@ -30,6 +31,22 @@ export function useHealth() {
     refetchInterval: 10_000,
     retry: true,
     staleTime: 5_000,
+  });
+}
+
+/**
+ * The packaged editor extensions this binary carries.
+ *
+ * Unauthenticated, and legitimately empty: a `cargo build` that skipped
+ * `yarn package` serves no extensions, and the docs page offers the releases
+ * page instead. Nothing here changes while the daemon is up — the files are
+ * compiled into it — so this never refetches.
+ */
+export function useEditorExtensions() {
+  return useQuery({
+    queryKey: queryKeys.extensions,
+    queryFn: () => api.get<EditorExtension[]>("/extensions"),
+    staleTime: Infinity,
   });
 }
 

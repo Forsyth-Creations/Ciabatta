@@ -25,6 +25,12 @@ export default defineConfig({
         target: `http://127.0.0.1:${process.env.CIABATTA_DAEMON_PORT ?? 8099}`,
         changeOrigin: true,
       },
+      // The config schemas the editor docs link to and offer as downloads.
+      // Unauthenticated, and served by the daemon rather than by Vite.
+      "/schemas": {
+        target: `http://127.0.0.1:${process.env.CIABATTA_DAEMON_PORT ?? 8099}`,
+        changeOrigin: true,
+      },
     },
   },
 });

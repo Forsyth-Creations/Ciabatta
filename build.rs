@@ -1,14 +1,24 @@
-//! Makes sure `tool_frontend/dist` exists before the crate is compiled.
+//! Makes sure the directories the daemon embeds exist before the crate is
+//! compiled.
 //!
-//! The daemon embeds the built web app with `include_dir!`, which needs the
-//! directory to be present at compile time. On a fresh clone it isn't — the
-//! bundle is produced by `yarn turbo run build --filter=ciabatta-tool-frontend`
-//! and is gitignored. Rather than fail the build (which would mean nobody can
-//! `cargo build` without node installed), we drop in a placeholder page that
-//! tells the reader how to build the real thing.
+//! Two of them, both produced by yarn and both gitignored, and `include_dir!`
+//! needs each to be present at compile time:
 //!
-//! CI and the release workflow run the yarn build *before* cargo, so shipped
-//! binaries always carry the real app. See the "Release check" in the README.
+//! * `tool_frontend/dist` — the web app. Built by
+//!   `yarn workspace ciabatta-tool-frontend build`. Rather than fail the build
+//!   (which would mean nobody can `cargo build` without node installed), we
+//!   drop in a placeholder page that tells the reader how to build the real
+//!   thing.
+//! * `editors/dist` — the packaged editor extensions, built by
+//!   `yarn workspace ciabatta-vscode build`. Here an empty directory is the
+//!   honest answer
+//!   rather than a placeholder: a `.vsix` that isn't an extension is worse
+//!   than no `.vsix`, so the daemon serves whatever it finds and the web app
+//!   lists only that, falling back to the releases page when it finds nothing.
+//!
+//! CI and the release workflow run the yarn builds *before* cargo, so shipped
+//! binaries always carry the real app and the real extension. See the "Release
+//! check" in the README.
 
 use std::fs;
 use std::path::Path;
@@ -18,7 +28,11 @@ const PLACEHOLDER_MARKER: &str = "ciabatta-placeholder-bundle";
 
 fn main() {
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR is set");
-    let dist = Path::new(&manifest_dir).join("tool_frontend").join("dist");
+    let root = Path::new(&manifest_dir);
+
+    editors_dist(&root.join("editors").join("dist"));
+
+    let dist = root.join("tool_frontend").join("dist");
 
     // `rerun-if-changed` on a directory only tracks that directory's own mtime,
     // which does not change when a nested file is edited in place. Emit every
@@ -39,9 +53,23 @@ fn main() {
 
     println!(
         "cargo:warning=tool_frontend/dist was empty, so the daemon will serve a \
-         placeholder page. Run `yarn install && yarn turbo run build \
-         --filter=ciabatta-tool-frontend` and rebuild to embed the real web app."
+         placeholder page. Run `yarn install && yarn workspace \
+         ciabatta-tool-frontend build` and rebuild to embed the real web app."
     );
+}
+
+/// Make sure `editors/dist` exists, so `include_dir!` has a directory to read.
+///
+/// No placeholder file: unlike the web app, where a page saying "not built" is
+/// more useful than a 404, half an extension is of no use to anyone. An empty
+/// directory compiles to an empty download list, which is exactly true.
+fn editors_dist(dir: &Path) {
+    println!("cargo:rerun-if-changed=editors/dist");
+    track_recursively(dir);
+
+    if let Err(e) = fs::create_dir_all(dir) {
+        panic!("failed to create {}: {e}", dir.display());
+    }
 }
 
 /// Emit a `rerun-if-changed` line for every file under `dir`.
@@ -86,7 +114,7 @@ fn placeholder_html() -> String {
 </p>
 <p>Build it and recompile:</p>
 <pre>yarn install
-yarn turbo run build --filter=ciabatta-tool-frontend
+yarn workspace ciabatta-tool-frontend build
 cargo build --release</pre>
 <p>
   The JSON API is unaffected; <code>GET /api/health</code> works regardless.

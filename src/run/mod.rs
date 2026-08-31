@@ -13,6 +13,7 @@ pub mod deps;
 pub mod engine;
 pub mod envdeps;
 pub mod filter;
+pub mod isolate;
 pub mod transfer;
 pub mod view;
 pub mod why;
@@ -564,6 +565,10 @@ pub struct PreparedEnv {
     pub unresolved_paths: Vec<String>,
     /// `REQUIRED_ENV` variables that are empty or unset.
     pub missing_required: Vec<String>,
+    /// The build features this run was started with — every `CIABATTA_FEAT_*`
+    /// the resolved environment carries. Reported at the start of the run, and
+    /// folded into every cache key by [`crate::cache::plan`].
+    pub features: crate::environment::features::Features,
 }
 
 impl PreparedEnv {
@@ -712,12 +717,28 @@ pub fn prepare_env(
     }
     let missing_required = missing_required_env(&resolved.required_env, &supplied);
 
+    // Features last, once every `.env` in the chain has been layered in — a
+    // `CIABATTA_FEAT_*` set in a file is a feature exactly as much as one set
+    // on the command line, and reading them before the files were sourced
+    // would silently make only the latter count.
+    //
+    // Resolved per scope rather than once: a step with its own `.env` chain
+    // may see a feature its neighbours don't, and `CIABATTA_FEATURES` has to
+    // agree with the `CIABATTA_FEAT_*` variables sitting beside it.
+    let mut env = env;
+    let features = crate::environment::features::Features::from_env(&env);
+    features.export_into(&mut env);
+    for scope in steps.values_mut() {
+        crate::environment::features::Features::from_env(&scope.env).export_into(&mut scope.env);
+    }
+
     Ok(PreparedEnv {
         env,
         steps,
         sourced: files,
         unresolved_paths,
         missing_required,
+        features,
     })
 }
 
@@ -744,15 +765,13 @@ fn cond_var<'a>(name: &str, env: &'a HashMap<String, String>) -> &'a str {
     env.get(name).map(String::as_str).unwrap_or("")
 }
 
-/// Whether a value counts as "truthy" for a bare-variable condition: set and
-/// non-empty, and not one of the common falsey words.
+/// Whether a value counts as "truthy" for a bare-variable condition.
+///
+/// The rule lives in [`crate::environment::truthy`] because build features read
+/// their variables by exactly the same one, and two copies of it would
+/// eventually disagree about `off`.
 fn cond_truthy(val: &str) -> bool {
-    let v = val.trim();
-    !v.is_empty()
-        && !matches!(
-            v.to_ascii_lowercase().as_str(),
-            "false" | "0" | "no" | "off"
-        )
+    crate::environment::truthy(val)
 }
 
 /// Strip a single pair of matching surrounding quotes from a comparison operand.
@@ -774,6 +793,11 @@ fn cond_unquote(s: &str) -> &str {
 ///     (unset reads as empty); the right side may be quoted.
 ///   * `VAR` — true when `VAR` is truthy (set, non-empty, not `false`/`0`/`no`/`off`).
 ///   * `!VAR` — the negation of the truthy test.
+///   * `feature.<name>` — true when that build feature is on. Sugar for the
+///     `CIABATTA_FEAT_<NAME>` variable behind it, but spelled the way the
+///     feature is named rather than the way the variable is, and matched
+///     case-insensitively with `-` and `_` treated alike. `!feature.<name>` and
+///     comparisons work as they do for any other name.
 pub fn eval_condition(cond: &str, env: &HashMap<String, String>) -> Result<bool> {
     let cond = cond.trim();
     if cond.is_empty() {
@@ -786,9 +810,33 @@ pub fn eval_condition(cond: &str, env: &HashMap<String, String>) -> Result<bool>
         return Ok(cond_var(lhs, env) == cond_unquote(rhs));
     }
     if let Some(rest) = cond.strip_prefix('!') {
-        return Ok(!cond_truthy(cond_var(rest, env)));
+        return Ok(!cond_bare(rest, env));
     }
-    Ok(cond_truthy(cond_var(cond, env)))
+    Ok(cond_bare(cond, env))
+}
+
+/// The truthy test for a bare condition: a build feature when it is written as
+/// one, an environment variable otherwise.
+fn cond_bare(name: &str, env: &HashMap<String, String>) -> bool {
+    match feature_ref(name) {
+        Some(feature) => crate::environment::features::Features::from_env(env).is_on(&feature),
+        None => cond_truthy(cond_var(name, env)),
+    }
+}
+
+/// The feature a condition names, if it names one: `feature.new_ui` → `new_ui`.
+///
+/// `feat.` is accepted too, because the variable is spelled `CIABATTA_FEAT_`
+/// and typing the shorter one is the obvious mistake to make.
+fn feature_ref(cond: &str) -> Option<String> {
+    let cond = cond.trim();
+    let rest = cond
+        .strip_prefix("feature.")
+        .or_else(|| cond.strip_prefix("feat."))?;
+    match rest.trim().is_empty() {
+        true => None,
+        false => Some(rest.to_string()),
+    }
 }
 
 /// Decide whether a step should be skipped given the environment, returning a

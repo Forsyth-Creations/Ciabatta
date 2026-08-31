@@ -33,7 +33,7 @@ pub mod diff;
 pub mod graph;
 pub mod store;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -545,6 +545,16 @@ pub struct KeyInputs {
     pub inputs: Vec<FileHash>,
     /// The environment variables the config declared, and their values.
     pub env: BTreeMap<String, String>,
+    /// The build features that were enabled — every `CIABATTA_FEAT_*` set to a
+    /// truthy value, by normalized name.
+    ///
+    /// Unlike `env` this needs no declaring. A feature changes what a build
+    /// produces, so an artifact built with one is not reusable by a build
+    /// without it, and leaving that to be remembered per-workspace under
+    /// `cache.env` meant one forgotten line served the wrong artifacts.
+    #[serde(default)]
+    #[serde(skip_serializing_if = "BTreeSet::is_empty")]
+    pub features: BTreeSet<String>,
     /// Upstream step name → the hash of that step's output set.
     #[serde(default)]
     pub upstream: BTreeMap<String, String>,
@@ -563,7 +573,10 @@ pub fn fingerprint(outputs: &[FileHash]) -> String {
 
 /// The key-derivation version. Bump it when anything about how a key is
 /// computed changes.
-pub const KEY_VERSION: u32 = 1;
+///
+/// 2: build features joined the key. An entry stored by an earlier ciabatta
+/// can't say which features produced it, so it is missed rather than trusted.
+pub const KEY_VERSION: u32 = 2;
 
 impl KeyInputs {
     /// The cache key: hex SHA-256 of the canonical JSON encoding.
@@ -802,6 +815,14 @@ pub fn plan(
             .iter()
             .map(|name| (name.clone(), env.get(name).cloned().unwrap_or_default()))
             .collect(),
+        // Not declared and not per-target: every `CIABATTA_FEAT_*` in the
+        // environment, read straight out of the map every caller already
+        // passes. A feature is a property of the build, so deriving it here
+        // means no caller can construct a `Target` that forgets it.
+        features: crate::environment::features::Features::from_pairs(
+            env.iter().map(|(k, v)| (k.as_str(), v.as_str())),
+        )
+        .key_material(),
         upstream: target.upstream.clone(),
     };
     let key = key_inputs.key()?;
@@ -1088,6 +1109,7 @@ mod tests {
                 size: 9,
             }],
             env: BTreeMap::new(),
+            features: BTreeSet::new(),
             upstream: BTreeMap::new(),
         };
         let key = base.key().unwrap();

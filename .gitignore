@@ -20,3 +20,5 @@ ciabatta-analyze.json
 .pnp.*
 .ciabatta/cache/
 .key
+editors/vscode/schemas/
+editors/zed/target/

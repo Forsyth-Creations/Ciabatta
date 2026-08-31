@@ -1,0 +1,110 @@
+{
+  "name": "ciabatta-vscode",
+  "displayName": "Ciabatta",
+  "description": "Completion, documentation and reference checking for .ciabatta/ workspace and workflow files.",
+  "version": "0.3.0",
+  "private": true,
+  "license": "MIT",
+  "publisher": "forsyth-creations",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/forsyth-creations/ciabatta",
+    "directory": "editors/vscode"
+  },
+  "homepage": "https://forsyth-creations.github.io/Ciabatta/",
+  "icon": "icon.png",
+  "galleryBanner": {
+    "color": "#1D1A17",
+    "theme": "dark"
+  },
+  "categories": [
+    "Programming Languages",
+    "Linters"
+  ],
+  "keywords": [
+    "ciabatta",
+    "monorepo",
+    "build",
+    "workflow",
+    "yaml"
+  ],
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "extensionDependencies": [
+    "redhat.vscode-yaml"
+  ],
+  "activationEvents": [
+    "workspaceContains:**/.ciabatta/ciabatta.yaml"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "yamlValidation": [
+      {
+        "fileMatch": [
+          "**/.ciabatta/ciabatta.yaml",
+          "**/.ciabatta/ciabatta.yml"
+        ],
+        "url": "./schemas/ciabatta.schema.json"
+      },
+      {
+        "fileMatch": [
+          "**/.ciabatta/workflows/*.yaml",
+          "**/.ciabatta/workflows/*.yml"
+        ],
+        "url": "./schemas/workflow.schema.json"
+      }
+    ],
+    "configuration": {
+      "title": "Ciabatta",
+      "properties": {
+        "ciabatta.server.path": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Path to the `ciabatta` binary. Leave empty to use whichever one is on your `PATH`."
+        },
+        "ciabatta.server.enabled": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Run `ciabatta lsp` for repository-aware completion and reference checking. Turn it off to keep only the JSON Schema, which needs no binary."
+        },
+        "ciabatta.trace.server": {
+          "type": "string",
+          "enum": [
+            "off",
+            "messages",
+            "verbose"
+          ],
+          "default": "off",
+          "description": "Log the traffic between VS Code and the language server, in the Ciabatta output channel."
+        }
+      }
+    },
+    "commands": [
+      {
+        "command": "ciabatta.restartServer",
+        "title": "Restart Language Server",
+        "category": "Ciabatta"
+      }
+    ]
+  },
+  "scripts": {
+    "build": "yarn run bundle && yarn run package",
+    "bundle": "node scripts/build.mjs",
+    "package": "node scripts/package.mjs",
+    "dev": "node scripts/build.mjs --watch",
+    "check": "tsc --noEmit",
+    "schemas": "node scripts/schemas.mjs",
+    "clean": "rm -rf dist schemas ../dist/ciabatta-vscode.vsix"
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.9.0",
+    "@types/vscode": "^1.85.0",
+    "@vscode/vsce": "^3.2.1",
+    "esbuild": "^0.24.0",
+    "typescript": "^5.6.3"
+  }
+}

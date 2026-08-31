@@ -1,8 +1,17 @@
 name: CI
 
-# One workflow for everything. Ordinary pushes and PRs run the test matrix and
-# a website build; a `v*` tag additionally cuts the release, publishes the
-# crate, and deploys the website to GitHub Pages.
+# One workflow for everything. Ordinary pushes and PRs build every artifact and
+# run the gates on three platforms; a `v*` tag additionally cuts the release,
+# publishes the crate, and deploys the website to GitHub Pages.
+#
+# Ciabatta drives its own build. `ciabatta build` and `ciabatta test` are the
+# same two commands a contributor runs locally, and the graph they execute lives
+# in `.ciabatta/workflows/` — so the ordering (web app and extension before the
+# binary that embeds them) is described once, in the repository's own format,
+# rather than a second time in YAML here. That does mean bootstrapping: the
+# binary has to exist before it can orchestrate anything, so each job compiles
+# one first. The bootstrap is only a task runner and its own embedded assets
+# don't matter; `ciabatta build` rebuilds it properly with the real ones.
 on:
   push:
     branches: ["**"]
@@ -23,10 +32,10 @@ permissions:
 
 jobs:
   test:
-    name: Test (${{ matrix.os }})
+    name: Build and test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     # A hung test should fail the leg, not sit on a runner until GitHub's 6h cap.
-    timeout-minutes: 30
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -60,48 +69,60 @@ jobs:
 
       - run: yarn install --immutable
 
-      # The daemon embeds the built web app with include_dir!, so the bundle has
-      # to exist before cargo runs — otherwise the binary compiles against the
-      # "run yarn build" placeholder that build.rs drops in, and a couple of
-      # daemon tests assert against the real asset tree. `ciabatta-rust` depends
-      # on `ciabatta-tool-frontend`, so turbo orders the two for us rather than
-      # us hand-rolling the sequence here.
-      - name: Build the web app, then the binary
-        run: yarn turbo run build --filter=ciabatta-rust
+      # Stage 0. Nothing orchestrates this one, because there is nothing to
+      # orchestrate it with yet. build.rs fills in a placeholder web app and an
+      # empty extension directory so it compiles on a checkout where no JS has
+      # been built; both are replaced by the step below.
+      - name: Bootstrap a ciabatta to build with
+        run: cargo build --release
 
-      - name: Check formatting
-        run: cargo fmt --check
+      # On PATH rather than called by path, so the steps below read the same on
+      # Windows, where the file is `ciabatta.exe`, as everywhere else.
+      - name: Put the bootstrap on PATH
+        shell: bash
+        run: echo "${{ github.workspace }}/target/release" >> "$GITHUB_PATH"
 
-      - name: Clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
+      # Stage 1. The real build: tool_frontend, the VS Code extension, the
+      # website, and then the binary — which embeds the first two, so it is
+      # compiled again here with them in place.
+      - name: Build everything
+        run: ciabatta build
 
-      - name: Test
-        run: cargo test --release
+      - name: Verify the binary carries the real assets
+        shell: bash
+        run: |
+          # build.rs substitutes a placeholder page when the bundle is missing,
+          # and leaves editors/dist empty when the extension wasn't packaged.
+          # Shipping either would produce a release whose UI says "run yarn
+          # build" and whose Editors page offers nothing, so fail loudly here.
+          if grep -q 'ciabatta-placeholder-bundle' tool_frontend/dist/index.html; then
+            echo "::error::tool_frontend/dist holds the build.rs placeholder, not the built app."
+            exit 1
+          fi
+          test -d tool_frontend/dist/assets
+          test -s editors/dist/ciabatta-vscode.vsix
 
-  # The public website. Built on every push so a break shows up with the change
-  # that caused it, in parallel with the Rust matrix above — but only *published*
-  # for a tagged release, which is the job at the bottom of this file.
-  website:
-    name: Website
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v4
+      # Format, clippy and the test suite. The step list is in
+      # `.ciabatta/workflows/test.yaml`, which is what `ciabatta test` runs
+      # locally too — one definition, so the two can't disagree.
+      - name: Gates
+        run: ciabatta test
 
-      - name: Enable Corepack
-        run: corepack enable
-
-      - uses: actions/setup-node@v6
+      # Built on every push, not just releases: a PR that changes the extension
+      # should hand a reviewer something installable. The release job collects
+      # this same artifact when the ref is a tag.
+      - name: Upload the VS Code extension
+        if: matrix.os == 'ubuntu-latest'
+        uses: actions/upload-artifact@v4
         with:
-          cache: yarn
-          cache-dependency-path: yarn.lock
+          name: ciabatta-vscode.vsix
+          path: editors/dist/ciabatta-vscode.vsix
+          if-no-files-found: error
 
-      - run: yarn install --immutable
-
-      - run: yarn turbo run build --filter=ciabatta-frontend
-
+      # The public website is a member of the same graph, so `ciabatta build`
+      # above already built it. Only *publishing* waits for a tag.
       - name: Upload pages artifact
-        if: startsWith(github.ref, 'refs/tags/')
+        if: matrix.os == 'ubuntu-latest' && startsWith(github.ref, 'refs/tags/')
         uses: actions/upload-pages-artifact@v5
         with:
           path: frontend/dist
@@ -127,6 +148,19 @@ jobs:
           echo "Tag version:        $TAG_VERSION"
           if [ "$CARGO_VERSION" != "$TAG_VERSION" ]; then
             echo "::error::Tag $GITHUB_REF_NAME does not match Cargo.toml version $CARGO_VERSION. Bump Cargo.toml before tagging."
+            exit 1
+          fi
+
+      - name: Check the extension version matches too
+        run: |
+          # The .vsix is a release asset alongside the binaries, and an
+          # extension stamped with an older version than the CLI it launches is
+          # exactly the confusion the download button is meant to remove.
+          EXT_VERSION="$(node -p "require('./editors/vscode/package.json').version")"
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          echo "Extension version: $EXT_VERSION"
+          if [ "$EXT_VERSION" != "$TAG_VERSION" ]; then
+            echo "::error::editors/vscode/package.json is $EXT_VERSION, not $TAG_VERSION. Bump it before tagging."
             exit 1
           fi
 
@@ -191,10 +225,17 @@ jobs:
             target
           key: ${{ runner.os }}-${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
-      # Build the web app before cargo, on every target: the daemon embeds it at
-      # compile time. This runs on the host even for the musl legs — `cross`
-      # mounts the checkout into its container, so the dist/ produced here is
-      # visible to the build inside.
+      # The embedded assets are built on the host even for the musl legs —
+      # `cross` mounts the checkout into its container, so what is produced here
+      # is visible to the build inside.
+      #
+      # Called directly rather than through `ciabatta build`, which would mean
+      # bootstrapping a native binary on every leg purely to sequence two
+      # independent yarn commands. The one thing the graph adds — ordering the
+      # assets before the binary — is expressed by the step order here, because
+      # the binary below can't go through the graph anyway: it cross-compiles to
+      # a specific --target, which the workflow's plain `cargo build --release`
+      # can't express.
       - name: Enable Corepack
         run: corepack enable
 
@@ -206,23 +247,21 @@ jobs:
       - run: yarn install --immutable
 
       - name: Build the web app
-        run: yarn turbo run build --filter=ciabatta-tool-frontend
+        run: yarn workspace ciabatta-tool-frontend build
 
-      - name: Verify the real bundle will be embedded
+      - name: Package the VS Code extension
+        run: yarn workspace ciabatta-vscode build
+
+      - name: Verify the real assets will be embedded
         shell: bash
         run: |
-          # build.rs substitutes a placeholder page when the bundle is missing.
-          # Shipping that would produce a release whose UI just says "run yarn
-          # build", so fail loudly here instead.
           if grep -q 'ciabatta-placeholder-bundle' tool_frontend/dist/index.html; then
             echo "::error::tool_frontend/dist holds the build.rs placeholder, not the built app."
             exit 1
           fi
           test -d tool_frontend/dist/assets
+          test -s editors/dist/ciabatta-vscode.vsix
 
-      # Not `turbo run build` here: the release legs cross-compile to a specific
-      # --target, which the package's plain `cargo build --release` script can't
-      # express. The bundle it depends on was built by the step above.
       - name: Build release binary
         shell: bash
         run: |
@@ -256,7 +295,10 @@ jobs:
   release:
     name: Create GitHub Release
     if: startsWith(github.ref, 'refs/tags/')
-    needs: build
+    # `test` as well as `build`, because the .vsix attached to the release is
+    # the one that job uploaded — the release legs above build their own copy to
+    # embed, but only one should be published.
+    needs: [build, test]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -286,9 +328,10 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      # The crate carries tool_frontend/dist (see `include` in Cargo.toml), so
-      # the bundle has to be built here too or the published crate ships the
-      # placeholder page.
+      # The crate carries tool_frontend/dist and editors/dist (see `include` in
+      # Cargo.toml), so both have to be built here or the published crate ships
+      # a placeholder page and no extension. Same reasoning as the release legs
+      # for not going through `ciabatta build`.
       - name: Enable Corepack
         run: corepack enable
 
@@ -300,7 +343,10 @@ jobs:
       - run: yarn install --immutable
 
       - name: Build the web app
-        run: yarn turbo run build --filter=ciabatta-tool-frontend
+        run: yarn workspace ciabatta-tool-frontend build
+
+      - name: Package the VS Code extension
+        run: yarn workspace ciabatta-vscode build
 
       - name: Publish to crates.io
         run: cargo publish --allow-dirty
@@ -308,11 +354,11 @@ jobs:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
   # The website goes live with the release it documents, not with every push to
-  # a branch.
+  # a branch. It was built and uploaded by the ubuntu leg of `test`.
   deploy-pages:
     name: Deploy website to GitHub Pages
     if: startsWith(github.ref, 'refs/tags/')
-    needs: [website, release]
+    needs: [test, release]
     runs-on: ubuntu-latest
     permissions:
       pages: write

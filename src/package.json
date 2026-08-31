@@ -11,6 +11,7 @@
     "clean": "cargo clean"
   },
   "dependencies": {
-    "ciabatta-tool-frontend": "workspace:*"
+    "ciabatta-tool-frontend": "workspace:*",
+    "ciabatta-vscode": "workspace:*"
   }
 }

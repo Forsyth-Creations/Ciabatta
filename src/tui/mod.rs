@@ -21,6 +21,7 @@ use crate::config::CiabattaConfig;
 use crate::runner::{self, ProgressUpdate};
 use app::App;
 
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     name: &str,
     resolved: &crate::run::ResolvedRun,
@@ -28,6 +29,8 @@ pub async fn run(
     root: &std::path::Path,
     env_vars: &HashMap<String, String>,
     dry_run: bool,
+    authoritative: bool,
+    sandbox_also: &[String],
 ) -> Result<bool> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -43,6 +46,8 @@ pub async fn run(
         root,
         env_vars,
         dry_run,
+        authoritative,
+        sandbox_also,
     )
     .await;
 
@@ -62,6 +67,8 @@ async fn tui_loop(
     root: &std::path::Path,
     env_vars: &HashMap<String, String>,
     dry_run: bool,
+    authoritative: bool,
+    sandbox_also: &[String],
 ) -> Result<bool> {
     let mut app = App::new(name, dry_run);
     let (tx, mut rx) = mpsc::channel::<ProgressUpdate>(256);
@@ -72,15 +79,21 @@ async fn tui_loop(
     let root_clone = root.to_path_buf();
     let vars_clone = env_vars.clone();
     let tx_clone = tx.clone();
+    let sandbox_also = sandbox_also.to_vec();
 
     tokio::spawn(async move {
-        let _ = runner::run_workflow(
+        let _ = runner::run_workflow_ctl(
             &name_clone,
             &resolved_clone,
             &config_clone,
             &root_clone,
             &vars_clone,
             dry_run,
+            runner::RunCtl {
+                authoritative,
+                sandbox_also,
+                ..Default::default()
+            },
             tx_clone,
         )
         .await;

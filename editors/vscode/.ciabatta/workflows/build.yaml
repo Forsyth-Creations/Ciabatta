@@ -1,0 +1,54 @@
+# Bundling and packaging the extension. `yarn build` copies the shared schemas
+# in itself, so there is no separate step for that — the typecheck is the only
+# thing worth running as its own node, because a type error and a bundling
+# error are different problems and the graph should say which one you have.
+#
+# Packaging is part of `build` rather than a workflow of its own because the
+# `.vsix` is the only output anything downstream consumes: the daemon embeds it
+# from `editors/dist/` and serves it for download, and the release attaches it.
+# A "build" that stopped at dist/extension.js would leave the binary carrying
+# yesterday's extension.
+
+description: Bundle and package the VS Code extension
+owner: Henry Forsyth
+
+requires:
+  - yarn
+
+cache:
+  enabled: true
+  inputs:
+    - "src/**/*"
+    - "scripts/**/*"
+    - "package.json"
+    - "tsconfig.json"
+    - ".vscodeignore"
+    - "icon.png"
+    - "README.md"
+    - "../schemas/*.json"
+  outputs:
+    - "dist/**/*"
+    - "schemas/*.json"
+    # Outside the member on purpose: `editors/dist/` is the one directory
+    # `build.rs` embeds, so both editors' packaged output lands in it.
+    - "../dist/ciabatta-vscode.vsix"
+
+steps:
+  - name: types
+    description: Typecheck without emitting
+    run: yarn run check
+    timeout: 5m
+
+  - name: bundle
+    description: Copy the schemas in and bundle to dist/extension.js
+    run: yarn run bundle
+    needs:
+      - types
+    timeout: 5m
+
+  - name: package
+    description: Package the .vsix into editors/dist/, where the daemon embeds it
+    run: yarn run package
+    needs:
+      - bundle
+    timeout: 5m

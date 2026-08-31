@@ -1,0 +1,17 @@
+[package]
+name = "zed_ciabatta"
+version = "0.3.1"
+edition = "2024"
+publish = false
+license = "MIT"
+
+# Standalone on purpose: this compiles to wasm32-wasip1 for Zed's extension
+# host, and has nothing to do with the CLI it launches. The empty table keeps
+# it out of any workspace the parent directory might grow later.
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+zed_extension_api = "0.1"

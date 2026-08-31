@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://forsyth-creations.github.io/Ciabatta/schemas/workflow.schema.json",
+  "title": "Ciabatta workflow",
+  "description": "A named, described, owned set of steps — build, test, lint, deploy, whatever the repo agrees on. Lives at .ciabatta/workflows/<name>.yaml; the workflow's name is the filename.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "description": {
+      "type": "string",
+      "description": "What running this workflow accomplishes. `ciabatta list` prints it."
+    },
+    "owner": {
+      "type": "string",
+      "description": "Who owns it — a name, handle, or team. Falls back to the sub-workspace's owner."
+    },
+    "needs": {
+      "type": "array",
+      "description": "Workflows in OTHER sub-workspaces that must finish first, on top of whatever `workspace.depends_on` already declares. A step's own `needs` names steps in this file; cross-package dependencies belong here.",
+      "items": { "$ref": "./common.schema.json#/$defs/workflowRef" },
+      "examples": [["proto:generate", "common"]]
+    },
+    "requires": {
+      "type": "array",
+      "description": "Tools this workflow needs on PATH, applied to all of its steps. Missing ones are reported before anything runs, with the install command from the root's `toolchain:` section.",
+      "items": { "type": "string" }
+    },
+    "env_file": {
+      "$ref": "./common.schema.json#/$defs/stringOrList",
+      "description": ".env file path(s) relative to the sub-workspace, sourced before the graph runs."
+    },
+    "REQUIRED_ENV": {
+      "type": "array",
+      "description": "Variables that must be set and non-empty, or the run is refused up front.",
+      "items": { "type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*$" }
+    },
+    "env": {
+      "$ref": "./common.schema.json#/$defs/envMap",
+      "description": "Environment variables applied to every step of this workflow."
+    },
+    "tags": {
+      "type": "array",
+      "description": "Free-form labels for search and for `--filter tag:<name>`. Every step in this workflow inherits them.",
+      "items": { "type": "string" }
+    },
+    "cache": {
+      "$ref": "./common.schema.json#/$defs/cache",
+      "description": "What this workflow's builds read and write. It lives here rather than in ciabatta.yaml because the files a `build` reads are not the files a `test` reads. The cache *server* stays in ciabatta.yaml."
+    },
+    "steps": {
+      "type": "array",
+      "description": "The steps themselves. Order in the file doesn't matter — `needs` does.",
+      "items": { "$ref": "./common.schema.json#/$defs/step" }
+    }
+  }
+}

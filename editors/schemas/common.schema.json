@@ -1,0 +1,294 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://forsyth-creations.github.io/Ciabatta/schemas/common.schema.json",
+  "title": "Ciabatta shared definitions",
+  "description": "Definitions shared by ciabatta.yaml and .ciabatta/workflows/*.yaml.",
+  "$defs": {
+    "duration": {
+      "type": ["string", "integer"],
+      "description": "A duration — \"90s\", \"10m\", \"1h30m\" — or a bare number of seconds.",
+      "pattern": "^([0-9]+(\\.[0-9]+)?(ms|s|m|h))+$|^[0-9]+$",
+      "examples": ["30s", "10m", "1h30m"]
+    },
+
+    "stringOrList": {
+      "anyOf": [
+        { "type": "string" },
+        { "type": "array", "items": { "type": "string" } }
+      ]
+    },
+
+    "envMap": {
+      "type": "object",
+      "description": "Environment variables, as NAME: value pairs.",
+      "additionalProperties": { "type": ["string", "number", "boolean"] },
+      "propertyNames": { "pattern": "^[A-Za-z_][A-Za-z0-9_]*$" }
+    },
+
+    "workflowRef": {
+      "type": "string",
+      "description": "Another sub-workspace's workflow: \"<member>\" for its workflow of this same name, or \"<member>:<workflow>\" for one specific workflow.",
+      "pattern": "^[^:\\s]+(:[^:\\s]+)?$",
+      "examples": ["proto", "proto:generate"]
+    },
+
+    "cache": {
+      "type": "object",
+      "description": "What a build reads, what it writes, and whether to reuse the result. Declared at the workspace, workflow, or step level; the most specific one wins.",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Whether caching is on. Absent means \"inherit\" — a step that lists inputs without mentioning enabled is saying \"these are my files\", not \"turn caching off\"."
+        },
+        "inputs": {
+          "type": "array",
+          "description": "Glob patterns for the files this build reads, relative to the workspace directory. A build that reads something not listed here will be handed a stale result.",
+          "items": { "type": "string" },
+          "examples": [["src/**/*.rs", "Cargo.toml", "Cargo.lock"]]
+        },
+        "outputs": {
+          "type": "array",
+          "description": "Glob patterns for the files this build writes. These are what gets stored and restored on a cache hit.",
+          "items": { "type": "string" },
+          "examples": [["target/release/app", "dist/**/*"]]
+        },
+        "env": {
+          "type": "array",
+          "description": "Environment variables that are part of the cache key. A build whose result depends on PROFILE must say so, or switching profiles will silently reuse the other one's artifacts.",
+          "items": { "type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*$" }
+        },
+        "exclude": {
+          "type": "array",
+          "description": "Glob patterns never treated as inputs, even when `inputs` would match them. Build output living under a source tree is the usual case.",
+          "items": { "type": "string" },
+          "examples": [[".git", "node_modules", "target"]]
+        },
+        "remote": { "$ref": "#/$defs/remoteCache" }
+      }
+    },
+
+    "remoteCache": {
+      "type": "object",
+      "description": "The shared cache this workspace reads from and writes to. Local-only caching needs none of this.",
+      "additionalProperties": false,
+      "required": ["url"],
+      "properties": {
+        "url": {
+          "type": "string",
+          "description": "Base URL of the remote cache server (`ciabatta remote-cache start`).",
+          "format": "uri"
+        },
+        "name": {
+          "type": "string",
+          "description": "The name this project is known by on the server. Defaults to the workspace's own name."
+        },
+        "project": {
+          "type": "string",
+          "description": "The identifier the server assigned when this project first registered. Commit it — it is what makes every checkout and every CI runner resolve to the same project."
+        },
+        "read_only": {
+          "type": "boolean",
+          "default": false,
+          "description": "Read from the remote cache but never write to it. What CI wants for pull-request builds."
+        },
+        "tls_verify": {
+          "type": "boolean",
+          "default": true,
+          "description": "Verify the server's TLS certificate. Keep it on for anything reachable beyond your own machine."
+        },
+        "enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Turn the remote off without deleting its settings."
+        }
+      }
+    },
+
+    "fixOption": {
+      "type": "object",
+      "description": "One fix choice offered by a recovery node.",
+      "additionalProperties": false,
+      "required": ["label"],
+      "properties": {
+        "label": { "type": "string", "description": "Human-readable label shown in the UI." },
+        "script": { "type": "string", "description": "A bash script to run as the fix, relative to the project root." },
+        "run": { "type": "string", "description": "An inline shell command, as an alternative to `script`." },
+        "default": {
+          "type": "boolean",
+          "default": false,
+          "description": "Run this option automatically in non-interactive mode (plain / CI), where no operator is present to choose. The first `default` option wins."
+        }
+      }
+    },
+
+    "step": {
+      "type": "object",
+      "description": "A node in the run graph: a normal step, or a recovery node (`recover: true`) entered only via some step's `on_error`.",
+      "additionalProperties": false,
+      "required": ["name"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Unique node name; the target of `needs` / `on_error` / `retry` edges."
+        },
+        "run": {
+          "type": "string",
+          "description": "An inline shell command (`sh -c`)."
+        },
+        "script": {
+          "type": "string",
+          "description": "A bash script to run, path relative to the step's working directory. An alternative to `run`."
+        },
+        "description": {
+          "type": "string",
+          "description": "One line on what this step does, and what it expects to be true first. `ciabatta list` prints it, so nobody has to open the file to find out."
+        },
+        "owner": {
+          "type": "string",
+          "description": "Who owns this step — a name, handle, or team."
+        },
+        "tags": {
+          "type": "array",
+          "description": "Free-form labels — `fast`, `slow`, `integration`. These are what `--filter tag:fast` selects on.",
+          "items": { "type": "string" }
+        },
+        "requires": {
+          "type": "array",
+          "description": "Executables that must be on PATH for this step to work. Checked before the graph starts, with the install command from the matching `toolchain:` entry.",
+          "items": { "type": "string" },
+          "examples": [["cargo", "protoc", "docker"]]
+        },
+        "timeout": {
+          "$ref": "#/$defs/duration",
+          "description": "Wall-clock limit for this step. When it expires the step is killed and marked timed out, and the rest of the graph carries on."
+        },
+        "retries": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 0,
+          "description": "Extra attempts to make when the step fails, for transient errors. Default 0: one attempt, no retry."
+        },
+        "persistent": {
+          "type": "boolean",
+          "default": false,
+          "description": "A step that never exits on its own — a dev server, a log tailer, a watcher. Its dependents are released immediately and it keeps running for the rest of the graph. Follow its output with `ciabatta watch`."
+        },
+        "continue_on_error": {
+          "type": "boolean",
+          "default": false,
+          "description": "Don't fail the whole run when this step fails: its dependents are skipped, every other branch carries on, and the failure is reported at the end. Always applied when a `timeout` expires."
+        },
+        "kind": {
+          "type": "string",
+          "description": "The phase this step belongs to. Free-form and cosmetic (it labels the node on the graph) except for `push` and `pull`, which select the built-in registry action.",
+          "examples": ["setup", "build", "test", "deploy", "push", "pull"]
+        },
+        "registry": {
+          "type": "string",
+          "description": "The `registries:` entry a `push` / `pull` step transfers through."
+        },
+        "artifact": {
+          "type": "string",
+          "description": "The local file or directory to publish (or where a pull writes to), relative to the step's working directory. A directory is uploaded file by file, preserving its structure."
+        },
+        "local_image": {
+          "type": "string",
+          "description": "Docker/ECR only: a local image reference (`name` or `name:tag`) to push. It is retagged to the registry's target reference before pushing."
+        },
+        "publish_path": {
+          "description": "Destination path in the registry, with {CIABATTA_*} substitution — or a list of local globs, each uploaded under {CIABATTA_PATH} keeping its relative path.",
+          "anyOf": [
+            { "type": "string", "examples": ["team/app/{CIABATTA_COMMIT}/app.tar.gz"] },
+            { "type": "array", "items": { "type": "string" } }
+          ]
+        },
+        "strip_prefix": {
+          "type": "string",
+          "description": "For the glob-list form of `publish_path`: a leading path fragment stripped from each matched file before it is joined under {CIABATTA_PATH}."
+        },
+        "from": {
+          "type": "string",
+          "description": "For a `kind: pull` step: the push step it mirrors, as `<workflow>:<step>` or a bare `<step>` in this workflow. Its transfer fields are copied in, so push and pull can't drift apart."
+        },
+        "cwd": {
+          "type": "string",
+          "description": "Working directory for this step's action, relative to the project root. Workflow graphs default it to the owning sub-workspace's directory."
+        },
+        "env": {
+          "$ref": "#/$defs/envMap",
+          "description": "Environment variables for this step alone, layered over the run's own."
+        },
+        "needs": {
+          "type": "array",
+          "description": "Names of steps in this same file that must succeed before this one runs. Cross-workspace dependencies belong on the workflow's `needs:`, not here.",
+          "items": { "type": "string" }
+        },
+        "on_error": {
+          "type": "string",
+          "description": "On failure, jump to this recovery node instead of aborting the run."
+        },
+        "when": {
+          "$ref": "#/$defs/stringOrList",
+          "description": "Condition(s) that must ALL hold for this step to run. Forms: `VAR == value`, `VAR != value`, `VAR` (truthy), `!VAR`. The variable may carry an `env.` prefix.",
+          "examples": ["env.RUN_ENV == prod"]
+        },
+        "skip_if": {
+          "$ref": "#/$defs/stringOrList",
+          "description": "Condition(s) that skip this step when ANY holds — the inverse of `when`.",
+          "examples": ["env.IN_CI == true"]
+        },
+        "recover": {
+          "type": "boolean",
+          "default": false,
+          "description": "Marks this node as a recovery node: it presents `options` rather than running an action of its own."
+        },
+        "message": {
+          "type": "string",
+          "description": "Prompt shown when a recovery node is reached."
+        },
+        "retry": {
+          "type": "string",
+          "description": "After a chosen fix succeeds, re-run this node — typically the step that failed."
+        },
+        "options": {
+          "type": "array",
+          "description": "The fix choices offered by a recovery node.",
+          "items": { "$ref": "#/$defs/fixOption" }
+        },
+        "cache": {
+          "$ref": "#/$defs/cache",
+          "description": "Cache settings for this step alone, overriding the workflow's and the workspace's. Most steps inherit and never write this."
+        },
+        "workspace": {
+          "type": "string",
+          "doNotSuggest": true,
+          "description": "Which sub-workspace this step came from. Filled in when the graph is compiled — you don't normally write this."
+        },
+        "env_files": {
+          "type": "array",
+          "doNotSuggest": true,
+          "items": { "type": "string" },
+          "description": "The .env files this step resolves through, outermost first. Set by the workflow compiler — you don't normally write this."
+        }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "recover": { "const": true } }, "required": ["recover"] },
+          "then": { "required": ["options"] },
+          "else": {
+            "anyOf": [
+              { "required": ["run"] },
+              { "required": ["script"] },
+              { "required": ["kind"] }
+            ]
+          }
+        },
+        {
+          "if": { "properties": { "kind": { "enum": ["push", "pull"] } }, "required": ["kind"] },
+          "then": { "required": ["registry"] }
+        }
+      ]
+    }
+  }
+}

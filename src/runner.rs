@@ -125,8 +125,9 @@ pub struct StepChoice {
     pub option: usize,
 }
 
-/// How a run resolves recovery choices, and what happens to work that outlives
-/// it. Push/pull ignore this entirely.
+/// The policy a run is executed under: how it resolves recovery choices, what
+/// happens to work that outlives it, and how strictly it holds steps to what
+/// they declared. Push/pull ignore this entirely.
 #[derive(Clone)]
 pub struct RunCtl {
     /// When true, recovery nodes wait for a UI choice on `choices`; when false
@@ -141,6 +142,14 @@ pub struct RunCtl {
     /// all. Turned off where spawning a daemon would be a surprise: unit tests,
     /// and anywhere a caller asks for a self-contained run.
     pub persist_via_daemon: bool,
+    /// Run every step against only the files it declared under `cache.inputs`,
+    /// in an isolated copy of the tree — so a build that reads something it
+    /// never declared fails now rather than being served a stale artifact
+    /// later. Off by default and opt-in only; see [`crate::run::isolate`].
+    pub authoritative: bool,
+    /// Extra paths to stage into each `authoritative` sandbox, from
+    /// `--sandbox-also`. Symlinked, and explicitly outside the guarantee.
+    pub sandbox_also: Vec<String>,
 }
 
 impl Default for RunCtl {
@@ -149,6 +158,8 @@ impl Default for RunCtl {
             interactive: false,
             choices: None,
             persist_via_daemon: true,
+            authoritative: false,
+            sandbox_also: Vec::new(),
         }
     }
 }
@@ -159,29 +170,11 @@ impl Default for RunCtl {
 /// what used to be "several workflows in parallel" is now several branches of one
 /// DAG, scheduled by the engine against their real dependencies rather than by
 /// being named on the same command line.
-pub async fn run_workflow(
-    name: &str,
-    resolved: &crate::run::ResolvedRun,
-    config: &CiabattaConfig,
-    root: &Path,
-    env_vars: &HashMap<String, String>,
-    dry_run: bool,
-    tx: mpsc::Sender<ProgressUpdate>,
-) -> Result<()> {
-    run_workflow_ctl(
-        name,
-        resolved,
-        config,
-        root,
-        env_vars,
-        dry_run,
-        RunCtl::default(),
-        tx,
-    )
-    .await
-}
-
-/// Like [`run_workflow`], but with a [`RunCtl`] for interactive recovery choices.
+///
+/// [`RunCtl`] carries the run's policy — how recovery choices are resolved,
+/// whether persistent steps are handed to the daemon, and whether steps are
+/// held to their declared inputs. `RunCtl::default()` is the plain
+/// non-interactive run.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_workflow_ctl(
     name: &str,

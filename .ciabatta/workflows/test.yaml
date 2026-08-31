@@ -1,6 +1,7 @@
-# Converted from test.toml by `ciabatta config migrate`.
-# Comments in the original weren't carried over — test.toml is still there
-# if you want them back. Ciabatta now reads this file instead.
+# The gates. CI runs exactly this workflow, on all three platforms, so a green
+# `ciabatta test` locally means a green CI — there is no second list of checks
+# in .github/workflows/ci.yml to drift away from this one.
+
 description: Format, lint and test — everything CI gates on
 owner: Henry Forsyth
 requires:
@@ -10,14 +11,19 @@ steps:
   run: cargo fmt --check
   description: Verify the tree is rustfmt-clean
 - name: lint
-  run: cargo clippy -- -D warnings
-  description: Clippy with warnings denied, as CI runs it
+  # `--all-targets --all-features`, not a bare `cargo clippy`: without them the
+  # test and bench targets are never linted, so a lint that CI used to reject
+  # could pass here. They are the same flags the workflow below runs.
+  run: cargo clippy --all-targets --all-features -- -D warnings
+  description: Clippy with warnings denied, across every target and feature
   timeout: 20m
   needs:
   - format
 - name: unit
-  run: cargo test
+  # Release, because the suite is slow enough in debug to matter and because
+  # this is the profile the shipped binary is built with.
+  run: cargo test --release
   description: The full test suite
-  timeout: 20m
+  timeout: 30m
   needs:
   - lint

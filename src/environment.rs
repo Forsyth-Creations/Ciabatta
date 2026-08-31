@@ -8,12 +8,28 @@
 //!   * anything else (or unset) → resolve from the configured CI system.
 
 pub mod cache;
+pub mod features;
 pub mod files;
 
 use std::collections::HashMap;
 use std::path::Path;
 
 use anyhow::Result;
+
+/// Whether an environment variable's value counts as "on".
+///
+/// Set and non-empty, and not one of the common falsey words. Shared by the
+/// step conditions (`when:` / `skip_if:`) and by [`features`], because a
+/// `CIABATTA_FEAT_X=0` that a condition reads as off and a feature reads as on
+/// would be a genuinely baffling half-hour.
+pub fn truthy(value: &str) -> bool {
+    let value = value.trim();
+    !value.is_empty()
+        && !matches!(
+            value.to_ascii_lowercase().as_str(),
+            "false" | "0" | "no" | "off"
+        )
+}
 
 /// The environment variable that selects the resolution mode.
 pub const ENV_VAR: &str = "CIABATTA_ENV";

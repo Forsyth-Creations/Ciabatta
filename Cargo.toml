@@ -1,6 +1,6 @@
 [package]
 name = "ciabatta"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2024"
 description = "A command line tool for publishing artifacts to various registries"
 license = "MIT"
@@ -16,6 +16,12 @@ include = [
     "src/**/*",
     "build.rs",
     "tool_frontend/dist/**/*",
+    # The config schemas are embedded in the binary and served to editors, so a
+    # published crate has to carry them too, alongside the packaged extensions
+    # the daemon offers for download. `editors/` is otherwise excluded: the
+    # extensions' *sources* aren't part of the CLI, only their build output.
+    "editors/schemas/*.json",
+    "editors/dist/**/*",
     "Cargo.toml",
     "README.md",
     "LICENSE",

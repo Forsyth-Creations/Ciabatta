@@ -1,0 +1,24 @@
+# Building the website into frontend/dist, which the release uploads to Pages.
+
+description: Build the public website
+owner: Henry Forsyth
+
+requires:
+  - yarn
+
+cache:
+  enabled: true
+  inputs:
+    - "src/**/*"
+    - "*.html"
+    - "public/**/*"
+    - "package.json"
+    - "vite.config.js"
+  outputs:
+    - "dist/**/*"
+
+steps:
+  - name: build
+    description: Bundle the site with Vite
+    run: yarn build
+    timeout: 10m

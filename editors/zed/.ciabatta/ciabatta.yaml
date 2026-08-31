@@ -1,0 +1,11 @@
+# The Zed extension. Compiles to WASM for Zed's extension host, and does
+# nothing but find the `ciabatta` binary and hand Zed a command to run it.
+workspace:
+  name: zed-extension
+  description: Zed extension — a launcher for `ciabatta lsp`
+  owner: Henry Forsyth
+  tags:
+    - editors
+    - rust
+  requires:
+    - cargo

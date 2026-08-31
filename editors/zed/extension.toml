@@ -1,0 +1,16 @@
+id = "ciabatta"
+name = "Ciabatta"
+version = "0.3.1"
+schema_version = 1
+authors = ["Henry Forsyth"]
+description = "Repository-aware completion and reference checking for .ciabatta/ workspace and workflow files."
+repository = "https://github.com/forsyth-creations/ciabatta"
+
+# Ciabatta's config files are YAML, so this attaches to the YAML language
+# rather than defining one of its own. Zed's built-in yaml-language-server
+# keeps doing everything it already does — syntax, formatting, and the JSON
+# Schema (see the README for the one settings block that wires it up); this
+# server adds only what needs to know the repository.
+[language_servers.ciabatta]
+name = "Ciabatta"
+languages = ["YAML"]

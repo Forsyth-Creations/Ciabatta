@@ -6,19 +6,15 @@
     "workspaces": [
         "frontend",
         "src",
-        "tool_frontend"
+        "tool_frontend",
+        "editors/vscode"
     ],
     "scripts": {
-        "build": "turbo run build",
-        "dev": "turbo run dev",
-        "preview": "turbo run preview",
-        "lint": "turbo run lint",
-        "format": "turbo run format",
-        "check": "turbo run check",
-        "test": "turbo run test",
-        "clean": "turbo run clean"
-    },
-    "devDependencies": {
-        "turbo": "^2.0.0"
+        "build": "yarn workspaces foreach -A --topological-dev run build",
+        "dev": "yarn workspaces foreach -Api run dev",
+        "preview": "yarn workspaces foreach -Api run preview",
+        "check": "yarn workspaces foreach -A --topological-dev run check",
+        "package": "yarn workspace ciabatta-vscode package",
+        "clean": "yarn workspaces foreach -A run clean"
     }
 }

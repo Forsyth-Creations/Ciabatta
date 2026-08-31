@@ -12,6 +12,7 @@ mod environment;
 mod example;
 mod format;
 mod git;
+mod lsp;
 mod migrate;
 mod registry;
 mod remote_cache;
@@ -168,6 +169,12 @@ async fn main() -> Result<()> {
                 trace,
             )
             .await?;
+        }
+
+        Commands::Lsp { stdio: _ } => {
+            // The protocol owns stdout from here on: anything else printed to
+            // it would be read as a malformed message.
+            lsp::serve()?;
         }
 
         Commands::Watch {
@@ -412,6 +419,8 @@ async fn cmd_workflow(args: cli::WorkflowArgs, bare_name: bool) -> Result<()> {
         &vars,
         args.dry_run,
         args.use_tui(),
+        args.authoritative,
+        &args.sandbox_also,
     )
     .await
 }
@@ -1585,6 +1594,7 @@ fn shell_quote(value: &str) -> String {
 }
 
 /// Run one compiled workflow, in the terminal or the TUI.
+#[allow(clippy::too_many_arguments)]
 async fn execute_workflow(
     name: &str,
     resolved: &run::ResolvedRun,
@@ -1593,6 +1603,8 @@ async fn execute_workflow(
     vars: &HashMap<String, String>,
     dry_run: bool,
     use_tui: bool,
+    authoritative: bool,
+    sandbox_also: &[String],
 ) -> Result<()> {
     // What the run depends on, environment-wise, before a step touches it. It
     // goes to stderr when the TUI is about to take the screen, so it survives
@@ -1621,9 +1633,29 @@ async fn execute_workflow(
     });
 
     if !use_tui {
-        run_plain(name, resolved, cfg, root, vars, dry_run).await
+        run_plain(
+            name,
+            resolved,
+            cfg,
+            root,
+            vars,
+            dry_run,
+            authoritative,
+            sandbox_also,
+        )
+        .await
     } else {
-        let success = tui::run(name, resolved, cfg, root, vars, dry_run).await?;
+        let success = tui::run(
+            name,
+            resolved,
+            cfg,
+            root,
+            vars,
+            dry_run,
+            authoritative,
+            sandbox_also,
+        )
+        .await?;
         if !success {
             bail!("The workflow failed.");
         }
@@ -1631,6 +1663,7 @@ async fn execute_workflow(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_plain(
     name: &str,
     resolved: &run::ResolvedRun,
@@ -1638,6 +1671,8 @@ async fn run_plain(
     root: &Path,
     vars: &HashMap<String, String>,
     dry_run: bool,
+    authoritative: bool,
+    sandbox_also: &[String],
 ) -> Result<()> {
     use runner::ProgressUpdate;
     use tokio::sync::mpsc;
@@ -1649,15 +1684,21 @@ async fn run_plain(
     let cfg_clone = cfg.clone();
     let root_clone = root.to_path_buf();
     let vars_clone = vars.clone();
+    let sandbox_also = sandbox_also.to_vec();
 
     tokio::spawn(async move {
-        let _ = runner::run_workflow(
+        let _ = runner::run_workflow_ctl(
             &name_clone,
             &resolved_clone,
             &cfg_clone,
             &root_clone,
             &vars_clone,
             dry_run,
+            runner::RunCtl {
+                authoritative,
+                sandbox_also,
+                ..Default::default()
+            },
             tx,
         )
         .await;

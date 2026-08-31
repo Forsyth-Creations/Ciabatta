@@ -243,6 +243,26 @@ pub enum Commands {
         port: Option<u16>,
     },
 
+    /// Speak the Language Server Protocol on stdin/stdout, so an editor can
+    /// complete and check `.ciabatta/` files as you type.
+    ///
+    /// You don't run this yourself — the ciabatta extension for your editor
+    /// launches it. See `editors/` in the repository for VS Code and Zed.
+    ///
+    /// It offers the things only this repository knows: the workflows a
+    /// `needs:` can name, the tools the root's `toolchain:` promises to
+    /// install, the registries a `push` step can use — and warns when a
+    /// reference doesn't resolve. The shape of the files themselves comes from
+    /// the JSON Schemas the extensions register.
+    Lsp {
+        /// Speak over stdin/stdout. Accepted and ignored: it is the only
+        /// transport this server has, but LSP clients append the flag to
+        /// every server they launch — VS Code's `vscode-languageclient`
+        /// among them — and a server that rejects it dies on startup.
+        #[arg(long)]
+        stdio: bool,
+    },
+
     /// Run a command and stream its logs into a live, searchable web view.
     ///
     /// The command runs through your shell, so pipes, &&, and redirects work —
@@ -726,6 +746,37 @@ pub struct WorkflowArgs {
     /// Show the graph and everything it would do, without executing a step.
     #[arg(long)]
     pub dry_run: bool,
+
+    /// Hold every step to the files it declared: run it in an isolated copy of
+    /// the tree containing only its `cache.inputs`, then take its declared
+    /// outputs back.
+    ///
+    /// This is how you find out that an `inputs:` list is incomplete. A step
+    /// that reads a file it never declared can't find it here and fails, with
+    /// its sandbox left on disk to look at — instead of quietly being handed a
+    /// stale cached result weeks later, when the undeclared file has changed
+    /// and nothing noticed.
+    ///
+    /// Opt-in, and slower: every declared input is copied before the step
+    /// runs. Steps that declare no inputs aren't isolated at all and are
+    /// reported at the end, since an empty directory would fail them for
+    /// reasons unrelated to what they declared.
+    #[arg(long)]
+    pub authoritative: bool,
+
+    /// Also stage this path into every --authoritative sandbox (repeatable),
+    /// as a symlink, relative to the project root.
+    ///
+    /// For the ambient state a step needs but that isn't a source file:
+    /// `node_modules`, a shared `target/`, a lockfile a package manager
+    /// insists on finding. Listing those under `cache.inputs` would put a
+    /// hundred thousand derived files in the cache key and call them sources.
+    ///
+    /// Everything named here is outside what --authoritative vouches for. That
+    /// it has to be retyped rather than saved in a config file is the point:
+    /// a weakened check should stay visible.
+    #[arg(long = "sandbox-also", value_name = "GLOB", requires = "authoritative")]
+    pub sandbox_also: Vec<String>,
 
     /// Run inside the live TUI instead of printing plain progress. A workflow
     /// is an ordinary run, so it prints plain text unless you ask for the TUI.

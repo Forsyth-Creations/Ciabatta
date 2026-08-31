@@ -1,0 +1,12 @@
+# The VS Code extension. A thin client: it registers the JSON Schemas and
+# launches `ciabatta lsp`, and contains no knowledge of the config format
+# itself.
+workspace:
+  name: vscode-extension
+  description: VS Code extension — schemas, and a client for `ciabatta lsp`
+  owner: Henry Forsyth
+  tags:
+    - editors
+    - typescript
+  requires:
+    - yarn

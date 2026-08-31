@@ -1,19 +1,23 @@
-# Converted from build.toml by `ciabatta config migrate`.
-# Comments in the original weren't carried over — build.toml is still there
-# if you want them back. Ciabatta now reads this file instead.
-description: Build the daemon web app and the ciabatta binary
+description: Build everything the ciabatta binary embeds, then the binary
 owner: Henry Forsyth
 
 # Cross-package dependencies live here, on the workflow. A step's own `needs`
-# names steps *in this file*; `tool_frontend:build` is somebody else's workflow,
-# so it belongs at this level — the compiler pulls that whole unit in and orders
-# it before everything here.
+# names steps *in this file*; these are somebody else's workflows, so they
+# belong at this level — the compiler pulls each whole unit in and orders it
+# before everything here.
+#
+# Both of them produce something `build.rs` compiles into the binary, which is
+# why they are dependencies rather than siblings: `tool_frontend` builds the
+# web app the daemon serves, and `vscode-extension` packages the `.vsix` the
+# daemon offers for download. Build the binary without them and it carries a
+# placeholder page and no extension.
 needs:
 - tool_frontend:build
+- vscode-extension:build
 requires:
 - cargo
 steps:
 - name: binary
-  run: cargo build
-  description: Compile the ciabatta CLI
-  timeout: 20m
+  run: cargo build --release
+  description: Compile the ciabatta CLI, embedding the web app and the extension
+  timeout: 30m

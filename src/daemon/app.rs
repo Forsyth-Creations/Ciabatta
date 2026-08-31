@@ -15,7 +15,7 @@ use serde_json::json;
 use tokio::sync::Notify;
 
 use super::projects::{Project, Registry};
-use super::{DaemonRecord, assets, auth, routes};
+use super::{DaemonRecord, assets, auth, extensions, routes, schemas};
 
 /// State shared by every route handler.
 #[derive(Clone)]
@@ -142,7 +142,15 @@ impl AppState {
 /// 2. everything else under `/api` — token required (see [`auth`]).
 /// 3. the embedded web app, as the fallback, with SPA history routing.
 pub fn router(state: AppState) -> Router {
-    let public = Router::new().route("/api/health", get(health));
+    // Unauthenticated: a liveness probe has to work from anywhere; the config
+    // schemas are fetched by editors' language servers, which know nothing
+    // about the daemon's token; and the packaged extensions are followed as
+    // plain download links by a browser, which sends no token either. See
+    // [`super::schemas`] and [`super::extensions`].
+    let public = Router::new()
+        .route("/api/health", get(health))
+        .merge(schemas::router())
+        .merge(extensions::router());
 
     let api = Router::new()
         .route("/api/shutdown", post(shutdown))

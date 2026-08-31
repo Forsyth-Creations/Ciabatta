@@ -15,8 +15,10 @@
 pub mod app;
 pub mod assets;
 pub mod auth;
+pub mod extensions;
 pub mod projects;
 pub mod routes;
+pub mod schemas;
 
 use std::io::ErrorKind;
 use std::path::PathBuf;

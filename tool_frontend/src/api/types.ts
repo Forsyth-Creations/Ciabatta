@@ -7,6 +7,12 @@ export interface Health {
   started_at: string;
 }
 
+/** One packaged editor extension the running binary carries. */
+export interface EditorExtension {
+  file: string;
+  bytes: number;
+}
+
 export interface Project {
   id: string;
   path: string;

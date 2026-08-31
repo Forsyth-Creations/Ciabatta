@@ -76,11 +76,23 @@ jobs:
       - name: Bootstrap a ciabatta to build with
         run: cargo build --release
 
-      # On PATH rather than called by path, so the steps below read the same on
-      # Windows, where the file is `ciabatta.exe`, as everywhere else.
+      # Copied out of `target/release` rather than run from it, and on PATH
+      # rather than called by path, so the steps below read the same on Windows,
+      # where the file is `ciabatta.exe`, as everywhere else. The copy is what
+      # makes Windows work at all: `ciabatta build` recompiles the binary into
+      # `target/release`, and Windows locks a running executable's image file,
+      # so cargo's attempt to replace the bootstrap while it is the process
+      # orchestrating the build fails with "Access is denied. (os error 5)".
       - name: Put the bootstrap on PATH
         shell: bash
-        run: echo "${{ github.workspace }}/target/release" >> "$GITHUB_PATH"
+        run: |
+          mkdir -p "${{ github.workspace }}/.bootstrap"
+          if [ -f target/release/ciabatta.exe ]; then
+            cp target/release/ciabatta.exe "${{ github.workspace }}/.bootstrap/"
+          else
+            cp target/release/ciabatta "${{ github.workspace }}/.bootstrap/"
+          fi
+          echo "${{ github.workspace }}/.bootstrap" >> "$GITHUB_PATH"
 
       # Stage 1. The real build: tool_frontend, the VS Code extension, the
       # website, and then the binary — which embeds the first two, so it is

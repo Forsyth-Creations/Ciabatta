@@ -1,6 +1,6 @@
 id = "ciabatta"
 name = "Ciabatta"
-version = "0.3.4"
+version = "0.3.5"
 schema_version = 1
 authors = ["Henry Forsyth"]
 description = "Repository-aware completion and reference checking for .ciabatta/ workspace and workflow files."

@@ -25,10 +25,16 @@ pub fn graph(workspace: &Workspace, graph: &WorkflowGraph) -> String {
         names
     };
 
+    let background: Vec<&RunStep> = graph.steps.iter().filter(|s| s.background).collect();
+
     out.push_str(&format!(
         "Workflow '{}' — {} step(s) across {} sub-workspace(s), in {} wave(s)\n",
         graph.label(),
-        graph.steps.iter().filter(|s| !s.recover).count(),
+        graph
+            .steps
+            .iter()
+            .filter(|s| !s.recover && !s.background)
+            .count(),
         members.len(),
         waves.len()
     ));
@@ -71,6 +77,30 @@ pub fn graph(workspace: &Workspace, graph: &WorkflowGraph) -> String {
         }
     }
 
+    // Background targets are in the graph but not in the order — a wave means
+    // "the next one waits for these", and nothing waits for these — so they get
+    // their own section rather than being silently dropped from the picture.
+    if !background.is_empty() {
+        out.push_str(
+            "\n  ⚡ background — up before wave 1, nothing waits for them, \
+             stopped when the run ends\n",
+        );
+        for node in &background {
+            out.push_str(&format!(
+                "  ⚡ {}   from {} ({})\n",
+                node.name,
+                node.workspace.as_deref().unwrap_or("—"),
+                node.cwd.as_deref().unwrap_or("."),
+            ));
+            if let Some(desc) = node.description.as_deref() {
+                out.push_str(&format!("       {desc}\n"));
+            }
+            if !node.needs.is_empty() {
+                out.push_str(&format!("       after {}\n", node.needs.join(", ")));
+            }
+        }
+    }
+
     // Recovery nodes hang off a step rather than sitting in a wave, so they get
     // their own section instead of being silently dropped from the picture.
     let recoveries: Vec<&RunStep> = graph.steps.iter().filter(|s| s.recover).collect();
@@ -94,7 +124,9 @@ fn badges(step: &RunStep) -> Option<String> {
     } else if let Some(kind) = step.kind.as_deref() {
         tags.push(kind.to_string());
     }
-    if step.persistent {
+    if step.background {
+        tags.push("⚡ background".to_string());
+    } else if step.persistent {
         tags.push("persistent".to_string());
     }
     if let Some(timeout) = step.timeout.as_deref() {

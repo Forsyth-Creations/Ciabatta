@@ -1370,26 +1370,38 @@ Workflows: 24 tracked, 3 not run by anyone in over 30d
           finish, and waiting for one is waiting forever. Those go in the workflow&apos;s{" "}
           <C>background:</C> array, alongside <C>steps:</C> rather than inside it.
         </P>
-        <Pre>{`background:
-  - name: mock-api
-    description: Stub API the integration step talks to
-    run: node scripts/mock-api.js
+        <Pre>{`# packages/mock-api/.ciabatta/workflows/serve.yaml
+steps:
+  - name: api
+    run: node mock.js
+    persistent: true
+
+# packages/web/.ciabatta/workflows/test.yaml
+needs:
+  - proto:generate     # must finish first
+background:
+  - mock-api:serve     # must be running; nothing waits for it
 
 steps:
-  - name: compile
-    run: cargo build
   - name: integration
-    run: yarn test:integration
-    needs: [compile]`}</Pre>
+    run: yarn test:integration`}</Pre>
         <P>
-          An array of their own, not a flag on a step, because they are not steps: they never
-          finish, so they can hold no position in the order, and nothing can sensibly declare{" "}
-          <C>needs</C> on one. Each is <strong>started before the first wave</strong>, so it is up
-          by the time anything wants it, and <strong>gates nothing</strong> — no mistake in one can
-          hold a build up, and it can never be the reason a run is slow. The graph views say the
-          same thing: background tasks are drawn in their own row at the bottom, under a lightning
-          bolt, because a wave means &ldquo;the next one waits for these&rdquo; and nothing here
-          waits.
+          Named exactly the way <C>needs</C> names things — <C>&quot;&lt;member&gt;&quot;</C> for
+          that sub-workspace&apos;s workflow of this name,{" "}
+          <C>&quot;&lt;member&gt;:&lt;workflow&gt;&quot;</C> for a specific one — because they are
+          the same kind of thing: a target that already exists, declared once, in its own package,
+          by whoever owns it. <strong>The only difference from <C>needs</C> is that a{" "}
+          <C>needs</C> target is waited for and a <C>background</C> target is merely started.</strong>{" "}
+          Its steps are started before the first wave, so they are up by the time anything wants
+          them, and <strong>gate nothing</strong> — no mistake in one can hold a build up. The graph
+          views say the same thing: background tasks are drawn in their own row at the bottom, under
+          a lightning bolt, because a wave means &ldquo;the next one waits for these&rdquo; and
+          nothing here waits.
+        </P>
+        <P>
+          A background target keeps the order its own steps declare among themselves — a database
+          has to be up before the app that talks to it — but it may not declare workflow-level{" "}
+          <C>needs</C>, because there is nowhere for those to run.
         </P>
         <Alert severity="info" sx={{ mb: 2, maxWidth: "78ch" }}>
           <strong>Nothing waits for it, so nothing checks it either.</strong> Started before the

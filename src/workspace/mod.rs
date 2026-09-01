@@ -200,26 +200,31 @@ pub struct Workflow {
     #[serde(default)]
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub steps: Vec<RunStep>,
-    /// Long-running processes this workflow's steps need *up* in order to
-    /// finish: a mock API the integration tests call, a database container, a
-    /// bundler in watch mode.
+    /// Workflows that have to be *running* for this one to finish: a mock API
+    /// the integration tests call, a database container, a bundler in watch
+    /// mode.
+    ///
+    /// Named the same way [`needs`](Self::needs) names things — `"<member>"`
+    /// for that sub-workspace's workflow of this name, `"<member>:<workflow>"`
+    /// for a specific one — because they are the same kind of thing: a target
+    /// that already exists somewhere, declared once, in its own package, by
+    /// whoever owns it.
     ///
     /// ```yaml
+    /// needs:
+    ///   - proto:generate     # must finish first
     /// background:
-    ///   - name: mock-api
-    ///     run: node scripts/mock-api.js
-    ///     description: Stub API the integration step talks to
+    ///   - mock-api:serve     # must be running; nothing waits for it
     ///
     /// steps:
     ///   - name: integration
     ///     run: yarn test:integration
     /// ```
     ///
-    /// Written as an array of their own rather than as steps with a flag,
-    /// because they are not steps: they never finish, so they can hold no
-    /// position in the order, and nothing can sensibly declare `needs` on one.
-    /// Every entry is started before the first wave and **gates nothing**, so
-    /// no mistake in one can hold a build up.
+    /// The difference from `needs` is the only difference: a `needs` target is
+    /// waited for, a `background` target is merely started. Its steps **gate
+    /// nothing**, so no mistake in one can hold a build up, and they are
+    /// started in their own declared order before the first wave.
     ///
     /// They are stopped again once every stage has succeeded or failed — that
     /// is the whole difference from a [`persistent`] step, which the daemon
@@ -230,7 +235,7 @@ pub struct Workflow {
     /// [`persistent`]: crate::run::RunStep::persistent
     #[serde(default)]
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub background: Vec<RunStep>,
+    pub background: Vec<String>,
 }
 
 /// How to satisfy a build tool a workflow declares in `requires`.

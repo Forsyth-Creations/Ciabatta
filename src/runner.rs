@@ -246,6 +246,7 @@ pub async fn run_workflow_ctl(
     let _ = tx.send(ProgressUpdate::Started(name.to_string())).await;
     tracing::debug!(workflow = %name, dry_run, "starting workflow");
 
+    let started = std::time::Instant::now();
     let result =
         crate::run::execute(name, resolved, config, root, env_vars, dry_run, &ctl, &tx).await;
 
@@ -260,7 +261,72 @@ pub async fn run_workflow_ctl(
         }
     }
 
+    // Write down that this ran. Here rather than inside the engine because this
+    // is the one place every run passes through — terminal, daemon, monorepo
+    // graph and plain project alike — so there is no second path that could
+    // quietly stop recording.
+    //
+    // A dry run is not a run: it is asking what *would* happen, and letting it
+    // refresh the timestamp would make "when did anyone last actually run this"
+    // answerable only by accident.
+    if !dry_run {
+        let outcome = match &result {
+            Ok(()) => crate::run::history::Outcome::Success,
+            Err(e) if e.to_string() == STOPPED_MESSAGE => crate::run::history::Outcome::Stopped,
+            Err(_) => crate::run::history::Outcome::Failed,
+        };
+        record_run(
+            name,
+            resolved,
+            config,
+            root,
+            outcome,
+            started.elapsed().as_millis() as u64,
+        )
+        .await;
+    }
+
     result
+}
+
+/// Note what this run covered, locally and — when one is configured — on the
+/// shared cache.
+///
+/// Entirely best-effort. Bookkeeping that could fail a build which otherwise
+/// succeeded would be a bad trade for a timestamp, so every error here is a
+/// note on stderr and nothing more.
+async fn record_run(
+    name: &str,
+    resolved: &crate::run::ResolvedRun,
+    config: &CiabattaConfig,
+    root: &Path,
+    outcome: crate::run::history::Outcome,
+    duration_ms: u64,
+) {
+    use crate::run::history::History;
+
+    // A plain project has no units of its own — one workflow, one workspace —
+    // so it is recorded under ".", the same name the rest of ciabatta gives the
+    // root when it is a package rather than an umbrella.
+    let units: Vec<crate::run::Unit> = if resolved.units.is_empty() {
+        vec![crate::run::Unit {
+            workspace: ".".to_string(),
+            workflow: name.to_string(),
+        }]
+    } else {
+        resolved.units.clone()
+    };
+
+    let mut history = History::load(root);
+    let records: Vec<crate::run::history::Record> = units
+        .iter()
+        .map(|unit| history.record(&unit.workspace, &unit.workflow, outcome, duration_ms))
+        .collect();
+    if let Err(e) = history.save(root) {
+        eprintln!("note: couldn't record this run in the workflow history ({e:#})");
+    }
+
+    crate::remote_cache::workflows::sync(config, root, &records).await;
 }
 
 #[cfg(test)]

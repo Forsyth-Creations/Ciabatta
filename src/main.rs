@@ -547,7 +547,18 @@ fn cmd_list(search: Option<&str>, verbose: bool, recipes_only: bool) -> Result<(
             Ok(ws)
                 if ws.members.len() > 1 || ws.members.iter().any(|m| !m.workflows.is_empty()) =>
             {
-                print!("{}", workspace::render::catalogue(&ws, search, verbose));
+                // Read straight off disk: the shared picture was merged in
+                // the last time this checkout ran anything, so `list` never
+                // waits on a network call to say when a workflow last ran.
+                let history = run::history::History::load(&ws.root);
+                // The threshold is the root's to set: "how long is too long" is
+                // a property of how the team works, not of any one package.
+                let root_config = config::load_config(&ws.root).unwrap_or_default();
+                let stale_after = run::history::stale_after(&root_config);
+                print!(
+                    "{}",
+                    workspace::render::catalogue(&ws, search, verbose, &history, stale_after)
+                );
                 println!();
             }
             _ => {}
@@ -2115,13 +2126,64 @@ fn print_remote_status(url: &str, stats: &serde_json::Value) {
         for entry in projects {
             let project = &entry["project"];
             let counters = &entry["counters"];
+            let stale = entry["stale_workflows"].as_u64().unwrap_or(0);
             println!(
-                "  {:<24} {:<38} {} hit / {} miss",
+                "  {:<24} {:<38} {} hit / {} miss{}",
                 project["name"].as_str().unwrap_or("?"),
                 project["id"].as_str().unwrap_or("?"),
                 counters["hits"].as_u64().unwrap_or(0),
                 counters["misses"].as_u64().unwrap_or(0),
+                match stale {
+                    0 => String::new(),
+                    n => format!("  ·  {n} stale workflow(s)"),
+                },
             );
+        }
+    }
+
+    // The question only this server can answer: not "have I run this lately"
+    // but "has anybody, on any machine, in any checkout". A workflow nobody
+    // anywhere has run is the one worth deleting; one you personally haven't
+    // run may be the one CI runs hourly.
+    let workflows = &stats["workflows"];
+    if let Some(stale) = workflows["stale"].as_array() {
+        let tracked = workflows["tracked"].as_u64().unwrap_or(0);
+        println!();
+        println!(
+            "Workflows: {tracked} tracked, {} not run by anyone in over {}",
+            stale.len(),
+            workflows["stale_after"].as_str().unwrap_or("30d"),
+        );
+        // Named by project, not just by workflow: one cache serves many
+        // repositories, and half of them call their workflow `build`. A list of
+        // bare workflow names would be unactionable the moment there are two.
+        let names: std::collections::HashMap<&str, &str> = stats["projects"]
+            .as_array()
+            .map(|projects| {
+                projects
+                    .iter()
+                    .filter_map(|entry| {
+                        Some((
+                            entry["project"]["id"].as_str()?,
+                            entry["project"]["name"].as_str()?,
+                        ))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        for entry in stale.iter().take(20) {
+            let id = entry["project"].as_str().unwrap_or("?");
+            println!(
+                "  {:<20} {:<24} {} days ago  ({} run(s) ever)",
+                names.get(id).copied().unwrap_or(id),
+                entry["workflow"].as_str().unwrap_or("?"),
+                entry["days"].as_i64().unwrap_or(0),
+                entry["runs"].as_u64().unwrap_or(0),
+            );
+        }
+        if stale.len() > 20 {
+            println!("  … and {} more", stale.len() - 20);
         }
     }
 }

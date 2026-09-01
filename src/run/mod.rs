@@ -13,6 +13,7 @@ pub mod deps;
 pub mod engine;
 pub mod envdeps;
 pub mod filter;
+pub mod history;
 pub mod isolate;
 pub mod transfer;
 pub mod view;
@@ -479,6 +480,22 @@ pub struct ResolvedRun {
     /// run starts, in the order they should be applied.
     pub env_files: Vec<String>,
     pub steps: Vec<RunStep>,
+    /// The `(sub-workspace, workflow)` units this run covers.
+    ///
+    /// A compiled graph spans several — `ciabatta build` in a monorepo runs
+    /// four packages' `build` workflows as one DAG — and the steps themselves
+    /// can't say which, because a step knows its sub-workspace but not the
+    /// workflow it came from. Carried here so the run can write down what it
+    /// actually ran; see [`history`].
+    pub units: Vec<Unit>,
+}
+
+/// One `(sub-workspace, workflow)` pair a run covered.
+#[derive(Debug, Deserialize, Serialize, Clone, Default, PartialEq, Eq)]
+pub struct Unit {
+    /// The sub-workspace's name, or `"."` for a project with no members.
+    pub workspace: String,
+    pub workflow: String,
 }
 
 impl ResolvedRun {

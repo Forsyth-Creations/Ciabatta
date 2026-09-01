@@ -428,6 +428,49 @@ impl Client {
         Ok(())
     }
 
+    /// Report what workflows this checkout just ran.
+    ///
+    /// The server merges rather than replaces, so reports arriving out of order
+    /// — which they will, from many machines — cannot walk the picture
+    /// backwards. See [`super::workflows`].
+    pub async fn report_workflows(
+        &self,
+        project: &str,
+        records: &[crate::run::history::Record],
+    ) -> Result<()> {
+        let capped: Vec<_> = records
+            .iter()
+            .take(super::workflows::MAX_REPORTED)
+            .collect();
+        self.authed(
+            self.http
+                .post(self.url(&format!("/api/projects/{project}/workflows"))),
+        )
+        .timeout(TIMEOUT)
+        .json(&serde_json::json!({ "workflows": capped }))
+        .send()
+        .await
+        .context("Failed to report workflow history")?
+        .error_for_status()
+        .context("Failed to report workflow history")?;
+        Ok(())
+    }
+
+    /// What every checkout of a project has run, as the server has it.
+    pub async fn workflows(&self, project: &str) -> Result<Vec<crate::run::history::Record>> {
+        let response = self
+            .authed(
+                self.http
+                    .get(self.url(&format!("/api/projects/{project}/workflows"))),
+            )
+            .timeout(TIMEOUT)
+            .send()
+            .await
+            .context("Failed to read the shared workflow history")?;
+        let body: serde_json::Value = parse(response).await?;
+        Ok(serde_json::from_value(body["workflows"].clone()).unwrap_or_default())
+    }
+
     /// What ciabatta build this server hands out.
     pub async fn release(&self) -> Result<Release> {
         let response = self

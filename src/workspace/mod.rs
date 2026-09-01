@@ -92,6 +92,12 @@ pub struct WorkspaceMeta {
     #[serde(default)]
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub requires: Vec<String>,
+    /// How long a workflow may go unrun before it is reported stale (`"30d"`,
+    /// `"6h"`). Read from the monorepo root and applied to every member, since
+    /// "how long is too long" is a property of how the team works rather than
+    /// of any one package. See [`crate::run::history`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stale_after: Option<String>,
     /// `.env` file path(s), relative to this sub-workspace, sourced before any
     /// of its workflows run.
     ///

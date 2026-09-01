@@ -35,6 +35,7 @@ import {
 } from "@mui/material";
 import AccountTreeIcon from "@mui/icons-material/AccountTree";
 import BoltIcon from "@mui/icons-material/Bolt";
+import WarningAmberIcon from "@mui/icons-material/WarningAmber";
 import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
 import PlayArrowIcon from "@mui/icons-material/PlayArrow";
 import PublishIcon from "@mui/icons-material/Publish";
@@ -50,6 +51,7 @@ import {
   type GraphNode,
   type MemberSummary,
   type WorkflowGraph,
+  type WorkflowHistory,
   type WorkflowStep,
   type WorkflowSummary,
 } from "../api/workspace";
@@ -239,6 +241,49 @@ function Catalogue({
   );
 }
 
+/**
+ * When this workflow last actually ran — the fact a repository otherwise never
+ * records, and the one that says whether a workflow is still alive.
+ *
+ * Three states, kept apart because collapsing them would be misleading rather
+ * than merely terse. **Stale** is a verdict and looks like one. **Never run**
+ * is not: a fresh checkout has no history, and the workflow may be the one CI
+ * runs hourly — so it is muted, and says where the gap is rather than implying
+ * the workflow is dead. Anything else is a plain fact about a workflow in use.
+ */
+function LastRunChip({ history }: { history: WorkflowHistory | null }) {
+  if (!history) {
+    return (
+      <Tooltip title="Nothing has recorded a run of this workflow — not on this machine, and not on the remote cache if one is configured. That is an absence of evidence, not evidence it is unused.">
+        <Chip size="small" variant="outlined" label="never run" sx={{ opacity: 0.6 }} />
+      </Tooltip>
+    );
+  }
+
+  const days = history.days_since;
+  const when =
+    days === null ? history.last_run_at : days <= 0 ? "today" : days === 1 ? "yesterday" : `${days}d ago`;
+
+  const detail =
+    `Last run ${history.last_run_at} (${history.last_outcome}). ` +
+    `${history.runs} run(s), ${history.failures} failed. ` +
+    (history.stale
+      ? "Longer ago than this workspace's `stale_after`, so it is flagged: either worth running or worth deleting."
+      : "Merged with what the remote cache knows, so this is when anyone last ran it — not just you.");
+
+  return (
+    <Tooltip title={detail}>
+      <Chip
+        size="small"
+        variant="outlined"
+        color={history.stale ? "warning" : "default"}
+        icon={history.stale ? <WarningAmberIcon /> : undefined}
+        label={history.stale ? `stale · ${when}` : when}
+      />
+    </Tooltip>
+  );
+}
+
 function WorkflowRow({
   workflow,
   onGraph,
@@ -265,6 +310,7 @@ function WorkflowRow({
           </Typography>
           <Chip size="small" variant="outlined" label={workflow.owner} />
           <Chip size="small" label={`${workflow.steps.length} step(s)`} />
+          <LastRunChip history={workflow.history} />
         </Stack>
       </AccordionSummary>
       <AccordionDetails>

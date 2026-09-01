@@ -186,6 +186,7 @@ fn workspace_meta() -> crate::workspace::WorkspaceMeta {
         depends_on: list(),
         tags: list(),
         requires: list(),
+        stale_after: Some(one()),
         env_file: list(),
         env_default: Some(one()),
         env: map(),

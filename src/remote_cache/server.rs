@@ -54,6 +54,9 @@ pub struct AppState {
     pub release: Arc<std::sync::RwLock<Release>>,
     /// Credentials the server manages itself, alongside the config's own.
     pub users: Arc<Users>,
+    /// What every checkout of every project has run, merged — see
+    /// [`super::workflows`].
+    pub workflows: Arc<super::workflows::Store>,
     pub started_at: String,
 }
 
@@ -69,12 +72,14 @@ impl AppState {
         let store = Store::at(config.server.storage.join("cache"))?;
         let projects = Registry::open(&config.server.storage)?;
         let users = Users::open(&config.server.storage)?;
+        let workflows = super::workflows::Store::open(&config.server.storage)?;
         let release = config.releases.scan();
 
         Ok(AppState {
             store: Arc::new(store),
             projects: Arc::new(projects),
             users: Arc::new(users),
+            workflows: Arc::new(workflows),
             sessions: Arc::new(Sessions::open(&config.server.storage)),
             release: Arc::new(std::sync::RwLock::new(release)),
             started_at: crate::cache::store::now(),
@@ -259,6 +264,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/stats", get(stats))
         .route("/api/projects", get(list_projects).post(register_project))
         .route("/api/projects/{id}", delete(forget_project))
+        .route(
+            "/api/projects/{id}/workflows",
+            get(get_workflows).post(report_workflows),
+        )
         .route("/api/projects/{id}/cache/touch", post(touch_entries))
         .route(
             "/api/projects/{id}/cache/{key}",
@@ -503,17 +512,45 @@ async fn stats(
 
     let store = state.store.stats()?;
     let totals = state.projects.totals();
+    // The whole point of reporting history here: one machine can only say what
+    // *it* ran, and the server is the only thing that sees everybody.
+    let workflows = state.workflows.all();
+    let stale_after = state.config.staleness();
+    let stale: Vec<serde_json::Value> = workflows
+        .iter()
+        .flat_map(|(project, records)| {
+            records
+                .iter()
+                .filter(|record| record.is_stale(stale_after))
+                .map(move |record| {
+                    json!({
+                        "project": project,
+                        "workflow": record.id(),
+                        "last_run_at": record.last_run_at,
+                        "days": record.days_since(),
+                        "runs": record.runs,
+                    })
+                })
+        })
+        .collect();
     let projects: Vec<serde_json::Value> = state
         .projects
         .list()
         .into_iter()
         .map(|project| {
             let counters = state.projects.counters(&project.id);
+            let runs = workflows.get(&project.id);
             json!({
                 "project": project,
                 "counters": counters,
                 "hit_rate": counters.hit_rate(),
                 "entries": store.by_workspace.get(&project.id).copied().unwrap_or(0),
+                "workflows": runs.map(Vec::len).unwrap_or(0),
+                "stale_workflows": runs
+                    .map(|records| {
+                        records.iter().filter(|r| r.is_stale(stale_after)).count()
+                    })
+                    .unwrap_or(0),
             })
         })
         .collect();
@@ -532,6 +569,11 @@ async fn stats(
         "retention": {
             "policy": state.config.retention,
             "description": state.config.retention.describe(),
+        },
+        "workflows": {
+            "tracked": workflows.values().map(Vec::len).sum::<usize>(),
+            "stale_after": state.config.staleness_raw(),
+            "stale": stale,
         },
         "sessions": state.sessions.live_count(),
         "release": *state.release.read().unwrap(),
@@ -590,6 +632,14 @@ async fn forget_project(
         }
     }
 
+    // Its run history goes with it. Leaving that behind would mean a project
+    // re-registered under a new id inherits nothing, while the old records sit
+    // there forever counting towards a staleness report for a project that no
+    // longer exists.
+    if let Err(e) = state.workflows.forget(&id) {
+        tracing::warn!("couldn't forget {id}'s workflow history: {e:#}");
+    }
+
     if !state.projects.forget(&id)? {
         return Err(ApiError::not_found(format!("No project {id}")));
     }
@@ -638,6 +688,13 @@ struct TouchPayload {
     keys: Vec<String>,
 }
 
+/// What a checkout reports about the workflows it just ran.
+#[derive(Debug, serde::Deserialize)]
+struct WorkflowsPayload {
+    #[serde(default)]
+    workflows: Vec<crate::run::history::Record>,
+}
+
 /// Mark entries as still in use, without downloading them.
 ///
 /// Retention ages an artifact from when it was last *used*, so that the thing
@@ -676,6 +733,46 @@ async fn touch_entries(
     }
 
     Ok(Json(json!({ "ok": true, "refreshed": refreshed })))
+}
+
+/// Fold a checkout's workflow history into the project's picture.
+///
+/// Allowed to any authenticated caller, not to writers only — for the same
+/// reason `touch` is. Saying "somebody ran this workflow" changes nothing about
+/// what anybody builds, and a read-only CI runner is exactly the caller whose
+/// runs most want counting.
+async fn report_workflows(
+    State(state): State<AppState>,
+    headers: header::HeaderMap,
+    Path(id): Path<String>,
+    Json(payload): Json<WorkflowsPayload>,
+) -> ApiResult<Json<serde_json::Value>> {
+    state.identify(&headers)?;
+    require_project(&state, &id)?;
+
+    let known = state
+        .workflows
+        .merge(&id, &payload.workflows)
+        .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Json(json!({ "ok": true, "workflows": known })))
+}
+
+/// What every checkout of this project has run.
+///
+/// The point of the whole exercise: a workflow you have not run since March may
+/// be the one CI runs hourly, and only the merged picture can tell the two
+/// apart.
+async fn get_workflows(
+    State(state): State<AppState>,
+    headers: header::HeaderMap,
+    Path(id): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    state.identify(&headers)?;
+    require_project(&state, &id)?;
+    Ok(Json(
+        json!({ "workflows": state.workflows.for_project(&id) }),
+    ))
 }
 
 /// How many keys one keep-alive request may refresh.

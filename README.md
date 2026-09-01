@@ -387,6 +387,61 @@ Missing 1 build tool(s):
 A run that tolerated failures still **fails**, and reports every one of them at
 the end — tolerating a failure is not hiding it.
 
+### Stale workflows
+
+A repository records everything about a workflow except the thing that says
+whether it still works: when anybody last ran it. Somebody adds
+`deploy-staging`, the staging environment goes away, and the workflow stays —
+listed, documented, apparently runnable, and broken in a way nobody finds until
+they try.
+
+So every run writes down what it ran, how it went and how long it took, and
+anything past `stale_after` is flagged:
+
+```yaml
+# .ciabatta/ciabatta.yaml, at the monorepo root
+workspace:
+  stale_after: 30d      # the default
+```
+
+```
+$ ciabatta list
+    deploy           Deploy to staging
+                     last run: 94 days ago (success, 7 run(s))  ← STALE
+
+2 workflow(s) not run in over 30 days:
+  api:deploy-staging           94 days ago
+Each is either worth running or worth deleting — a workflow nobody runs is
+one nobody has noticed is broken.
+```
+
+**"Never run" is not the same as stale.** The history lives under
+`.ciabatta/history/` and is not committed — it is observation, not
+configuration, and a file every run rewrites would conflict on every merge. So a
+fresh clone knows nothing, which is an absence of evidence rather than evidence
+a workflow is dead, and is reported differently.
+
+Which is why it is shared. With a [remote cache](#remote-cache) configured, each
+run reports what it ran and takes back what everyone else has run — so the
+question becomes "when did *anyone* last run this". A workflow you personally
+have not touched since March may be the one CI runs hourly; one nobody anywhere
+has run since March is the one worth deleting. Both directions happen at the end
+of a run, so `ciabatta list` never waits on the network.
+
+The server sees every project at once, which no single checkout can, and has its
+own threshold — a cache serving five teams may want to hear about a quarter of
+silence where one team calls a fortnight stale:
+
+```
+$ ciabatta remote-cache status
+
+Projects:
+  api        3f2a…   412 hit / 38 miss  ·  2 stale workflow(s)
+
+Workflows: 24 tracked, 3 not run by anyone in over 30d
+  api        api:deploy-staging       94 days ago  (7 run(s) ever)
+```
+
 ### Background tasks
 
 Some things a build needs are not steps in it: a mock API the integration tests

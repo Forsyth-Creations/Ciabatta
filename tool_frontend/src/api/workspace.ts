@@ -36,6 +36,17 @@ export interface WorkflowStep {
   env_refs: string[];
 }
 
+/** When a workflow last actually ran, merged with what the remote cache knows. */
+export interface WorkflowHistory {
+  last_run_at: string;
+  last_outcome: "success" | "failed" | "stopped";
+  last_duration_ms: number;
+  days_since: number | null;
+  runs: number;
+  failures: number;
+  stale: boolean;
+}
+
 export interface WorkflowSummary {
   name: string;
   description: string | null;
@@ -46,6 +57,8 @@ export interface WorkflowSummary {
   tags: string[];
   required_env: string[];
   steps: WorkflowStep[];
+  /** `null` when nothing has ever recorded a run — which is not the same as stale. */
+  history: WorkflowHistory | null;
 }
 
 export interface MemberSummary {

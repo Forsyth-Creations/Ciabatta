@@ -71,6 +71,11 @@
             "type": "string"
           }
         },
+        "stale_after": {
+          "type": "string",
+          "default": "30d",
+          "description": "How long a workflow may go unrun before ciabatta reports it stale (\"30d\", \"6h\"). Read from the monorepo root and applied to every member, since how long is too long is a property of how the team works rather than of any one package. Every run records what it ran; with a remote cache configured those records are shared, so \"nobody has run this since March\" is answerable rather than just \"I haven't\"."
+        },
         "env_file": {
           "$ref": "./common.schema.json#/$defs/stringOrList",
           "description": ".env file path(s) relative to this sub-workspace, sourced before any of its workflows run. Unset means `.env`; setting it REPLACES that default rather than adding to it."

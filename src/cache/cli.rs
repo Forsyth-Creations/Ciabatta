@@ -747,7 +747,12 @@ mod tests {
         );
         write(&dir, "editors/vscode/src/main.ts", "export {}");
 
-        let workspace = crate::workspace::Workspace::discover(&dir).unwrap();
+        // `load`, not `discover`: discovery walks *up* from the directory given,
+        // and every test here shares one temp dir, so on a machine where the
+        // walk settles above this tree it scans a sibling test's fixture —
+        // including ones that are deliberately malformed. The rest of the
+        // workspace tests take the same route for the same reason.
+        let workspace = crate::workspace::Workspace::load(&dir).unwrap();
         let config = CiabattaConfig::default();
         let context = WorkspaceContext {
             workspace: Some(&workspace),

@@ -296,16 +296,23 @@ pub fn insert_under(document: &str, key: &str, entry: &str) -> Result<String> {
     Ok(rendered)
 }
 
-/// Insert `line` as the first child of the `child` mapping inside the top-level
-/// `parent` mapping.
+/// Set `line` inside the `child` mapping of the top-level `parent` mapping,
+/// replacing the key it declares if that key is already there.
 ///
 /// Scoped on purpose. Scanning the whole document for an indented `url:` finds
 /// whichever one comes first — a registry's, most likely — and splices into the
 /// wrong place. Narrowing to the parent block first is the difference between
 /// editing `cache.remote` and editing whatever happened to look similar.
 ///
-/// `line` is written at the child's indentation plus two spaces, and needs no
-/// leading whitespace of its own.
+/// Replacing rather than always inserting, because the caller is writing a
+/// value that has exactly one correct setting. Appending a second `project:`
+/// produces a document that no longer parses (`duplicate field`), so the write
+/// is abandoned and the value can never be updated — which is what happened
+/// whenever a remote cache handed back an id different from the committed one.
+///
+/// A new `line` is written at the child's indentation plus two spaces; a
+/// replacement keeps the indentation the existing key already had, along with
+/// every other line in the block.
 pub fn insert_nested(document: &str, parent: &str, child: &str, line: &str) -> Result<String> {
     let (start, end) = top_level_span(document, parent)
         .ok_or_else(|| anyhow::anyhow!("this config has no top-level `{parent}:` section"))?;
@@ -321,12 +328,64 @@ pub fn insert_nested(document: &str, parent: &str, child: &str, line: &str) -> R
         .collect();
 
     let mut out: Vec<String> = lines[..=child_line].iter().map(|s| s.to_string()).collect();
-    out.push(format!("{indent}  {line}"));
-    out.extend(lines[child_line + 1..].iter().map(|s| s.to_string()));
+
+    // The key `line` sets, so an existing one can be found and overwritten.
+    let key = line.split(':').next().unwrap_or(line).trim();
+    match find_in_block(&lines, child_line, end, &indent, key) {
+        Some(existing) => {
+            let kept: String = lines[existing]
+                .chars()
+                .take_while(|c| c.is_whitespace())
+                .collect();
+            out.extend(
+                lines[child_line + 1..existing]
+                    .iter()
+                    .map(|s| s.to_string()),
+            );
+            out.push(format!("{kept}{line}"));
+            out.extend(lines[existing + 1..].iter().map(|s| s.to_string()));
+        }
+        None => {
+            out.push(format!("{indent}  {line}"));
+            out.extend(lines[child_line + 1..].iter().map(|s| s.to_string()));
+        }
+    }
 
     let mut rendered = out.join("\n");
     rendered.push('\n');
     Ok(rendered)
+}
+
+/// Find `key` among the direct lines of the block opened at `child_line`.
+///
+/// The block runs until something is indented no further than its opener — that
+/// is what ends a mapping in YAML. Blank and comment lines don't end it, since
+/// a commented explanation between two settings is normal and ending there
+/// would hide the second one.
+fn find_in_block(
+    lines: &[&str],
+    child_line: usize,
+    end: usize,
+    indent: &str,
+    key: &str,
+) -> Option<usize> {
+    let prefix = format!("{key}:");
+    let last = end.min(lines.len());
+    for (i, line) in lines.iter().enumerate().take(last).skip(child_line + 1) {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let line_indent: String = line.chars().take_while(|c| c.is_whitespace()).collect();
+        if line_indent.len() <= indent.len() {
+            return None;
+        }
+        // Only the block's own keys, not those of a mapping nested inside it.
+        if line_indent.len() == indent.len() + 2 && trimmed.starts_with(&prefix) {
+            return Some(i);
+        }
+    }
+    None
 }
 
 /// Render `value` as the body of a top-level `key` mapping, indented two spaces

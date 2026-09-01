@@ -317,17 +317,25 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download all artifacts
+      # `pattern`, not everything: the ubuntu test leg also uploads the website
+      # for `deploy-pages`, under the name `github-pages` and packaged as
+      # `artifact.tar`. Downloading the lot and globbing `artifacts/*` attached
+      # that tarball to the release as a seventh asset, offering anyone browsing
+      # the downloads a copy of the docs site next to the binaries. Every real
+      # asset is named `ciabatta-*`; `deploy-pages` reads the website from the
+      # Actions store, not from here, so filtering it out costs nothing.
+      - name: Download the release artifacts
         uses: actions/download-artifact@v4
         with:
           path: artifacts
+          pattern: ciabatta-*
           merge-multiple: true
 
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
-          files: artifacts/*
+          files: artifacts/ciabatta-*
 
   publish:
     name: Publish to crates.io

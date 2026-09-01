@@ -639,6 +639,57 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// Re-registering against a server that hands back a different id has to
+    /// overwrite the committed one.
+    ///
+    /// It used to append a second `project:`, so the document no longer parsed
+    /// (`duplicate field`), the write was abandoned, and the id could never be
+    /// updated — every run registered a brand-new project and the remote cache
+    /// never hit.
+    #[test]
+    fn an_existing_project_id_is_replaced_rather_than_duplicated() {
+        let root = scratch("projectidagain");
+        std::fs::create_dir_all(root.join(".ciabatta")).unwrap();
+        let path = root.join(".ciabatta/ciabatta.yaml");
+        std::fs::write(
+            &path,
+            "workspace:\n  name: api\n\ncache:\n  enabled: true\n  remote:\n    \
+             project: old-id\n    url: http://cache:8380\n    # `project` is filled in \
+             by the server.\n",
+        )
+        .unwrap();
+
+        record_project_id(&root, "new-id").unwrap();
+
+        let rendered = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            rendered.matches("project:").count(),
+            1,
+            "one project id, not two: {rendered}"
+        );
+        assert!(
+            rendered.contains("# `project` is filled in"),
+            "comments survive"
+        );
+
+        let config: CiabattaConfig = crate::format::load(&path).unwrap();
+        let remote = config.cache.unwrap().remote.unwrap();
+        assert_eq!(remote.project.as_deref(), Some("new-id"));
+        assert_eq!(remote.url, "http://cache:8380");
+
+        // And doing it twice is stable rather than accumulating keys.
+        record_project_id(&root, "third-id").unwrap();
+        let again = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(again.matches("project:").count(), 1);
+        let config: CiabattaConfig = crate::format::load(&path).unwrap();
+        assert_eq!(
+            config.cache.unwrap().remote.unwrap().project.as_deref(),
+            Some("third-id")
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn a_config_with_no_remote_is_reported_rather_than_mangled() {
         let root = scratch("noremote");

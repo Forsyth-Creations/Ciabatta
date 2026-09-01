@@ -19,13 +19,25 @@
 //! declared or not. Rule 1's reasoning is the same reasoning — nobody should
 //! have to configure the conventional thing.
 //!
-//! And one requirement that follows from the third: **a workspace whose builds
-//! depend on environment variables must declare `env_default`.** Not as
+//! And one requirement that follows from the third: **a build that depends on
+//! environment variables must be able to get them from somewhere.** Not as
 //! bureaucracy — as the thing that makes rule 3 possible. A repo where the
 //! required variables are written down somewhere reviewable is a repo where a
 //! new person can build it; a repo where they aren't is one where the answer
 //! lives in somebody's shell history.
+//!
+//! **"Somewhere" means anywhere up the chain.** A sub-library does not have to
+//! document a variable its parent already documents — that is what resolving
+//! upwards means, and demanding a template from every package that reads a
+//! shared `API_URL` would be asking the same question once per package, and
+//! would make declaring that variable once impossible. So
+//! [`unaccounted_for`] looks through every enclosing workspace's env files and
+//! templates, and through the environment the command is running in, and only
+//! objects to a variable that none of them provides. A plain project with
+//! nothing above it has a chain of one, and [`require_template`] still holds it
+//! to writing its variables down — there is nowhere else they could come from.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -126,6 +138,94 @@ pub fn resolve(meta: &WorkspaceMeta, dir: &Path) -> Resolved {
 /// optional variable with a default is not that.
 pub fn expects_env(required_env: &[String], meta: &WorkspaceMeta) -> bool {
     !required_env.is_empty() || !meta.env.is_empty() && !meta.env_file.is_empty()
+}
+
+/// Which of `required` nothing in the chain accounts for.
+///
+/// A sub-library does not have to document a variable its parent already
+/// documents — that is what resolving upwards *means*, and demanding a template
+/// from every package that reads a shared `API_URL` would be asking the same
+/// question once per package. So a variable is accounted for when any of these
+/// is true, anywhere in the chain from the monorepo root down to the member:
+///
+/// * it is set, and non-empty, in the environment this process is running in —
+///   which is how CI supplies secrets, and how a developer overrides one for a
+///   single command;
+/// * it is named in an env file some enclosing workspace sources;
+/// * it is listed in some enclosing workspace's checked-in template, which is
+///   what makes a fresh checkout — where the gitignored `.env` does not exist
+///   yet — able to build.
+///
+/// Anything left over is a variable a build has declared it cannot run without
+/// and that nothing, anywhere, provides. That is worth refusing over: the
+/// alternative is failing several minutes into a build on a variable nobody
+/// mentioned.
+pub fn unaccounted_for<'a>(layers: &[Layer<'_>], required: &'a [String]) -> Vec<&'a str> {
+    let mut known: BTreeSet<String> = BTreeSet::new();
+
+    for layer in layers {
+        // Whatever this layer sources, plus whatever it documents. Both, not
+        // either: the file is what makes it work here, the template is what
+        // makes it work for the next person.
+        let resolved = resolve(layer.meta, layer.dir);
+        let files = resolved
+            .files
+            .iter()
+            .cloned()
+            .chain(template_for(layer.meta, layer.dir).map(|t| t.file));
+
+        for file in files {
+            let Ok(content) = std::fs::read_to_string(layer.dir.join(&file)) else {
+                continue;
+            };
+            known.extend(
+                crate::run::parse_env_content(&content)
+                    .into_iter()
+                    .map(|(key, _)| key),
+            );
+        }
+    }
+
+    required
+        .iter()
+        .map(String::as_str)
+        .filter(|name| {
+            if known.contains(*name) {
+                return false;
+            }
+            // Set and non-empty. An empty value is the same as unset for a
+            // variable a build says it cannot run without.
+            !std::env::var(name).is_ok_and(|value| !value.trim().is_empty())
+        })
+        .collect()
+}
+
+/// Explain a variable nothing in the chain provides.
+///
+/// The point of the message is *where to put it*: a variable one package needs
+/// belongs in that package, and one several packages need belongs in the
+/// workspace above them — which is the decision the reader actually has to
+/// make, and the one a bare "missing API_URL" leaves them to guess at.
+pub fn describe_unaccounted(workspace: &str, rel: &str, missing: &[&str]) -> String {
+    let list = missing.join(", ");
+    let plural = if missing.len() == 1 { "it" } else { "them" };
+    let own = format!("{rel}/.env");
+    // The two paths line up, whatever the package is called.
+    let width = own.chars().count().max(".env".len());
+    format!(
+        "'{workspace}' declares environment variable(s) its build can't run without, and \
+         nothing provides {plural}: {list}.\n\n\
+         Looked in this workspace and every one enclosing it — their `.env` files, their \
+         checked-in templates, and the environment this command is running in.\n\n\
+         Set {plural} in the environment, or write {plural} down where whoever needs \
+         {plural} will find {plural}:\n\n    \
+         {own:<width$}   just this package\n    \
+         {root:<width$}   every package under the root\n\n\
+         Commit a template beside it (conventionally `.env.default`, or name one with \
+         `workspace.env_default`) so a fresh checkout — where `.env` is gitignored and \
+         absent — knows what to fill in.",
+        root = ".env",
+    )
 }
 
 /// Refuse a build that depends on environment variables from a workspace that

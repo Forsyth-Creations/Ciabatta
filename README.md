@@ -450,21 +450,36 @@ they never finish, and waiting for one is waiting forever. They go in the
 workflow's `background:` array, beside `steps:` rather than inside it.
 
 ```yaml
+# packages/mock-api/.ciabatta/workflows/serve.yaml — declared once, by whoever owns it
+steps:
+  - name: api
+    run: node mock.js
+    persistent: true
+
+# packages/web/.ciabatta/workflows/test.yaml — used by whoever needs it up
+needs:
+  - proto:generate     # must finish first
 background:
-  - name: mock-api
-    run: node scripts/mock-api.js
-    description: Stub API the integration step talks to
+  - mock-api:serve     # must be running; nothing waits for it
 
 steps:
   - name: integration
     run: yarn test:integration
 ```
 
-An array of their own, not a flag on a step, because they are not steps: they
-never finish, so they hold no position in the order and nothing can sensibly
-declare `needs` on one. Each is **started before the first wave** and **gates
+Named exactly the way `needs` names things — `"<member>"` for that
+sub-workspace's workflow of this name, `"<member>:<workflow>"` for a specific
+one — because they are the same kind of thing: a target that already exists,
+declared once, in its own package, by whoever owns it. **The only difference
+from `needs` is that a `needs` target is waited for and a `background` target is
+merely started.** Its steps are started before the first wave and **gate
 nothing** — no mistake in one can hold a build up. The graph draws them in a row
 of their own at the bottom, under a lightning bolt, rather than in a wave.
+
+A background target keeps the order its own steps declare among themselves — a
+database has to be up before the app that talks to it — but it may not declare
+workflow-level `needs`, because there is nowhere for those to run: it starts
+before the first wave and waits for nothing.
 
 Being started before wave 1 is not the same as being *ready* before wave 1. If
 a step would race the server it talks to, have that step wait for the port;
@@ -1249,6 +1264,28 @@ Four rules, in the order they apply:
    above it, up to the monorepo root. A *sibling's* `.env` is never a fallback —
    two packages that need the same variable declare it in the workspace above
    them, or each declares it for itself.
+
+`REQUIRED_ENV` resolves up that same chain. A sub-library that needs `API_URL`
+does **not** have to document it if the workspace above it already does —
+demanding a template from every package that reads a shared variable would be
+asking the same question once per package, and would make declaring it once
+impossible. A run is refused only when *nothing* provides the variable: not the
+package's own files, not any enclosing workspace's `.env` or checked-in
+template, and not the environment the command is running in. Then the error says
+where to put it:
+
+```
+Error: 'lib' declares environment variable(s) its build can't run without, and
+nothing provides it: API_URL.
+
+Looked in this workspace and every one enclosing it — their `.env` files, their
+checked-in templates, and the environment this command is running in.
+
+Set it in the environment, or write it down where whoever needs it will find it:
+
+    packages/lib/.env   just this package
+    .env                every package under the root
+```
 
 ```yaml
 workspace:

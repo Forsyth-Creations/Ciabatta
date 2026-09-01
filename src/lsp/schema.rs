@@ -174,7 +174,7 @@ fn workflow() -> crate::workspace::Workflow {
         tags: list(),
         cache: Some(cache()),
         steps: vec![step()],
-        background: vec![step()],
+        background: list(),
     }
 }
 

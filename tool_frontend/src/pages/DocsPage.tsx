@@ -16,6 +16,7 @@
  * section can't be added to one and forgotten in the other.
  */
 
+import BoltIcon from "@mui/icons-material/Bolt";
 import CheckIcon from "@mui/icons-material/Check";
 import ContentCopyIcon from "@mui/icons-material/ContentCopy";
 import DownloadIcon from "@mui/icons-material/Download";
@@ -822,6 +823,130 @@ function EditorSetup() {
   );
 }
 
+// ─── The LDAP settings table ────────────────────────────────────────────────
+
+interface LdapSetting {
+  name: string;
+  required: "yes" | "one of" | "no";
+  fallback: string;
+  note: string;
+}
+
+/** Every field under `auth.ldap`, with the default the server applies. */
+const LDAP_SETTINGS: LdapSetting[] = [
+  {
+    name: "url",
+    required: "yes",
+    fallback: "—",
+    note: "ldaps://host:636. Plain ldap:// works and is for test directories only — a bind sends the password.",
+  },
+  {
+    name: "bind_dn",
+    required: "one of",
+    fallback: "—",
+    note: "A DN template containing {username}. Use when everyone lives under one branch. No search, so no service account.",
+  },
+  {
+    name: "base_dn",
+    required: "one of",
+    fallback: "—",
+    note: "Where to search for the user's DN instead. Use when people are spread across OUs.",
+  },
+  {
+    name: "user_filter",
+    required: "no",
+    fallback: "(uid={username})",
+    note: "The filter that finds them under base_dn. Active Directory usually wants (sAMAccountName={username}).",
+  },
+  {
+    name: "search_dn",
+    required: "no",
+    fallback: "anonymous",
+    note: "A service account to run that search as, when the directory refuses anonymous search.",
+  },
+  {
+    name: "search_password_env",
+    required: "no",
+    fallback: "—",
+    note: "The environment variable holding that account's password. Required if search_dn is set; never the password itself.",
+  },
+  {
+    name: "required_group",
+    required: "no",
+    fallback: "anyone who binds",
+    note: "Refuse anyone who isn't a member. Without it, every account in the directory can read the cache.",
+  },
+  {
+    name: "write_groups",
+    required: "no",
+    fallback: "everyone may write",
+    note: "Members of these may write; everyone else who gets in is read-only. An empty list means no restriction.",
+  },
+  {
+    name: "group_attribute",
+    required: "no",
+    fallback: "memberOf",
+    note: "The attribute on the user's entry listing their groups. Read after the bind, as the user.",
+  },
+  {
+    name: "tls_verify",
+    required: "no",
+    fallback: "true",
+    note: "Verify the directory's certificate. Leave it on outside a test server.",
+  },
+  {
+    name: "timeout",
+    required: "no",
+    fallback: "10",
+    note: "Seconds to wait on the directory before giving up.",
+  },
+];
+
+function LdapSettingsTable() {
+  return (
+    <Box sx={{ overflowX: "auto" }}>
+      <Table size="small" sx={{ minWidth: 680 }}>
+        <TableHead>
+          <TableRow>
+            <TableCell sx={{ width: 200 }}>Setting</TableCell>
+            <TableCell sx={{ width: 150 }}>Default</TableCell>
+            <TableCell>What it does</TableCell>
+          </TableRow>
+        </TableHead>
+        <TableBody>
+          {LDAP_SETTINGS.map((setting) => (
+            <TableRow key={setting.name} hover>
+              <TableCell sx={{ fontFamily: monoFontStack, fontSize: 13, verticalAlign: "top" }}>
+                <Stack spacing={0.5} alignItems="flex-start">
+                  <span>{setting.name}</span>
+                  {setting.required !== "no" && (
+                    <Chip
+                      size="small"
+                      variant="outlined"
+                      color={setting.required === "yes" ? "warning" : "default"}
+                      label={setting.required === "yes" ? "required" : "one of these two"}
+                    />
+                  )}
+                </Stack>
+              </TableCell>
+              <TableCell
+                sx={{ fontFamily: monoFontStack, fontSize: 13, verticalAlign: "top" }}
+              >
+                {setting.fallback}
+              </TableCell>
+              <TableCell sx={{ verticalAlign: "top" }}>
+                <Typography variant="body2" color="text.secondary">
+                  {setting.note}
+                </Typography>
+              </TableCell>
+            </TableRow>
+          ))}
+        </TableBody>
+      </Table>
+    </Box>
+  );
+}
+
 // ─── The sections ───────────────────────────────────────────────────────────
 
 interface DocSection {
@@ -845,8 +970,9 @@ const SECTIONS: DocSection[] = [
           The important consequence is <strong>ownership</strong>: the daemon owns the work, not
           the terminal that asked for it. A watch session, a run, and a serial capture all outlive
           the command that started them and the tab that is watching them. Close the browser, come
-          back tomorrow, and a persistent dev server started by a workflow step is still there with
-          its logs intact.
+          back tomorrow, and the session is still there with its logs intact. (A{" "}
+          <a href="#run">background task</a> a workflow started is the one thing deliberately
+          stopped when its run ends — its <em>output</em> outlives the run, the process does not.)
         </P>
         <P>
           The daemon starts on demand — any ciabatta command probes for one and launches it if
@@ -1030,8 +1156,9 @@ ciabatta run test --filter tag:fast --filter tag:smoke   # either one`}</Pre>
         <P>
           Run a command and stream its output into a live, searchable view. The daemon spawns the
           process, so the session survives closing this tab or the terminal — including the
-          sessions that a workflow&apos;s <C>persistent</C> steps leave behind, which show up here
-          labelled with the graph node that started them.
+          sessions a workflow&apos;s <a href="#run">background tasks</a> leave behind, which show
+          up here labelled with the graph node that started them. Those sessions stay readable
+          after their run has stopped the process behind them.
         </P>
         <SubHeading>In a session</SubHeading>
         <Bullets
@@ -1132,8 +1259,10 @@ ciabatta run test --filter tag:fast --filter tag:smoke   # either one`}</Pre>
               identifiable so it can be skipped or required as a unit.
             </>,
             <>
-              <Chip size="small" variant="outlined" color="info" label="persistent" /> — started and
-              left running; the graph does not wait for it. Tail it under Watch.
+              <Chip size="small" variant="outlined" color="info" icon={<BoltIcon />} label="background" />{" "}
+              — a <C>persistent: true</C> step. Started and left running; nothing waits for it, so
+              the graph draws it in its own row at the bottom rather than in a wave. Tail it under
+              Watch.
             </>,
             <>
               <Chip size="small" variant="outlined" label="timeout" /> — killed past its limit, and
@@ -1188,6 +1317,54 @@ ciabatta run test --filter tag:fast --filter tag:smoke   # either one`}</Pre>
             <>Selecting any step shows its logs, streamed as they are produced.</>,
           ]}
         />
+        <SubHeading>Background tasks</SubHeading>
+        <P>
+          Some things a build needs are not steps in it. A mock API the integration tests talk to, a
+          bundler in watch mode, a database container — they have to be <em>running</em>, they never
+          finish, and waiting for one is waiting forever. A step marked{" "}
+          <C>persistent: true</C> is one of those: ciabatta starts it, releases everything behind it
+          immediately, and carries on.
+        </P>
+        <Pre>{`steps:
+  - name: mock-api
+    description: Stub API the integration step talks to
+    run: node scripts/mock-api.js
+    persistent: true          # <- a background task
+
+  - name: integration
+    run: yarn test:integration
+    needs: [compile]`}</Pre>
+        <P>
+          <strong>It gates nothing.</strong> That is the property worth stating plainly, because it
+          is what makes a background task safe to add to a graph: no step waits on it, so no
+          mistake in it can hold a build up, and it can never be the reason a run is slow. The graph
+          views say the same thing visually — background tasks are drawn in their own row at the
+          bottom, under a lightning bolt, rather than in a wave, because a wave means &ldquo;the
+          next one waits for these&rdquo; and nothing here waits.
+        </P>
+        <Alert severity="info" sx={{ mb: 2, maxWidth: "78ch" }}>
+          <strong>Nothing waits for it, so nothing checks it either.</strong> Releasing dependents
+          immediately means a step that needs the mock API may reach it before it is listening. If
+          that race matters, have the step that depends on it wait for the port rather than assuming
+          — the graph cannot do it for you, because &ldquo;ready&rdquo; is a different question for
+          every server.
+        </Alert>
+        <P>
+          The run <strong>stops it again when the graph finishes</strong>. What it existed for is
+          over at that point, and a mock API still holding port 3000 an hour later is the second
+          run&apos;s problem. Its output is kept: the task runs as a{" "}
+          <Link to="/watch">watch session</Link>, and that session stays readable — labelled with
+          the node that started it — after the process behind it has gone. To stop one early, or to
+          follow it live while the run is going:
+        </P>
+        <Pre>{`ciabatta watch --attach 3     # follow it
+ciabatta watch --stop 3       # stop it early`}</Pre>
+        <P>
+          If no daemon can be reached the task still runs, as a child of the run itself, and still
+          blocks nothing — but its output goes to the run&apos;s log rather than a session, and is
+          gone with it. The log says so at the time rather than leaving it to be discovered.
+        </P>
+
         <SubHeading>Flowchart builder</SubHeading>
         <P>
           <Link to="/run/builder">The builder</Link> is an authoring tool, not an executor. Lay out
@@ -1561,7 +1738,8 @@ ciabatta cache init --remote http://cache.example.com:8380`}</Pre>
           run, with group membership deciding who gets in and who may write. Read access is a
           convenience; <strong>write access is trust</strong> — whoever can write to a cache decides
           what everyone else&apos;s build produces — which is why read-only access exists for both
-          a token user and an LDAP group.
+          a token user and an LDAP group. <a href="#remote-cache-ldap">LDAP has its own section</a>:
+          the settings, both ways of finding a user, and what each error means.
         </P>
         <P>
           The <Link to="/cache">Remote tab</Link> shows the hit rate, what is stored, the retention
@@ -1581,12 +1759,14 @@ ciabatta cache init --remote http://cache.example.com:8380`}</Pre>
           exactly once — only its SHA-256 is kept — so a lost one is reissued, never recovered.
         </P>
         <P>
-          On a <C>token</C> or <C>ldap</C> server only an <strong>admin</strong> may do that. On an{" "}
+          On a <C>token</C> server only an <strong>admin</strong> may do that. On an{" "}
           <C>open</C> server anyone who can reach it may, because open mode already means &ldquo;I
           trust whoever is on this network&rdquo; and refusing would leave no way to mint the first
           credential when locking the cache down — but a user created on an open server is{" "}
           <strong>never</strong> an admin, or somebody could grant themselves lasting control while
-          the door was open and keep it after it was shut.
+          the door was open and keep it after it was shut. On an <C>ldap</C> server nobody is an
+          admin and there is nothing to mint — the{" "}
+          <a href="#remote-cache-ldap">directory is the user list</a>.
         </P>
         <P>
           So the migration from open to authenticated is: create the users you want on the page,
@@ -1678,6 +1858,301 @@ ciabatta remote-cache status         # hit rate, storage, retention`}</Pre>
         <P>
           Nothing updates automatically. A build tool that swaps its own binary out from under a
           running CI job is a bad build tool; this notices, tells you, and waits to be asked.
+        </P>
+      </>
+    ),
+  },
+  {
+    id: "remote-cache-ldap",
+    title: "LDAP for the remote cache",
+    body: (
+      <>
+        <P>
+          <C>auth.mode: ldap</C> hands the question of who somebody is back to the directory you
+          already run, so a cache needs no user list of its own: people leave the company in one
+          place, and the cache finds out. This is the whole of{" "}
+          <C>auth.ldap</C> in the server&apos;s <C>remote-cache.yaml</C> — see{" "}
+          <a href="#remote-cache">Remote cache</a> for the server itself.
+        </P>
+        <P>
+          It is two steps, and keeping them apart is what makes the settings below make sense.{" "}
+          <strong>Authentication</strong> is a bind: ciabatta connects as the user with the password
+          they typed, and if the directory accepts it, the password was right. Nothing is verified
+          locally and no credential is stored — ciabatta holds the password only for as long as it
+          takes to pass it on. <strong>Authorization</strong> is a second look, after the bind:
+          their group memberships decide whether they are allowed in at all, and whether they may
+          write.
+        </P>
+
+        <SubHeading>Step one: turning a username into a DN</SubHeading>
+        <P>
+          A bind needs a full DN, and people type usernames. There are two ways across that gap and
+          you must configure exactly one of them — the server refuses to start with neither.
+        </P>
+        <P>
+          <strong>A template</strong>, when everyone lives under one branch. Cheapest: no search, no
+          service account, one round trip.
+        </P>
+        <Pre>{`auth:
+  mode: ldap
+  ldap:
+    url: ldaps://ldap.example.com:636
+    bind_dn: "uid={username},ou=people,dc=example,dc=com"`}</Pre>
+        <P>
+          It stops working the moment somebody is in a different OU, which is the usual reason to
+          want the other one. <C>bind_dn</C> must contain <C>{"{username}"}</C> — it is a template,
+          and a DN without it would log everybody in as the same person, so the server refuses it at
+          startup rather than at first login.
+        </P>
+        <P>
+          <strong>A search</strong>, when they are not all in one place. Look the user up first,
+          then bind as whatever DN comes back.
+        </P>
+        <Pre>{`auth:
+  mode: ldap
+  ldap:
+    url: ldaps://ldap.example.com:636
+    base_dn: "dc=example,dc=com"
+    user_filter: "(uid={username})"          # AD: (sAMAccountName={username})
+    # Only if the directory refuses anonymous search:
+    search_dn: "cn=ciabatta,ou=services,dc=example,dc=com"
+    search_password_env: CIABATTA_LDAP_PASSWORD`}</Pre>
+        <P>
+          The service account is optional — without <C>search_dn</C> the search is anonymous, which
+          plenty of directories allow. If you do set it, <C>search_password_env</C> is required, and
+          it names an <em>environment variable</em> rather than holding the password: a password in
+          an environment variable is not wonderful, but a password in a config file that ends up in
+          git is worse. The variable has to be set in the environment{" "}
+          <C>remote-cache start</C> runs in, so it belongs in the service unit or the container
+          definition, not in a shell you later close.
+        </P>
+        <Alert severity="info" sx={{ mb: 2, maxWidth: "78ch" }}>
+          Usernames are escaped (RFC 4515) before they are substituted into either the template or
+          the filter, so a name containing <C>)</C> or <C>*</C> cannot rewrite the query it lands
+          in. You do not need to sanitise anything yourself.
+        </Alert>
+
+        <SubHeading>Step two: who gets in, and who may write</SubHeading>
+        <P>
+          After the bind, ciabatta reads the user&apos;s own entry for{" "}
+          <C>group_attribute</C> — <C>memberOf</C> unless you say otherwise — and compares it
+          against two lists. Comparisons ignore case, and the values are whatever your directory
+          puts in that attribute, which is normally a full group DN rather than a bare name.
+        </P>
+        <Bullets
+          items={[
+            <>
+              <C>required_group</C> — anyone not in it is refused, even though their password was
+              correct. <strong>Without it, every account in the directory can read the cache</strong>
+              , which is a larger set of people than it sounds.
+            </>,
+            <>
+              <C>write_groups</C> — members may write; everyone else who got in is read-only. An
+              empty list (the default) means everyone who authenticates may write.
+            </>,
+          ]}
+        />
+        <P>
+          Read access is a convenience. <strong>Write access is trust</strong>: whoever can write to
+          a cache decides what everyone else&apos;s build produces, because that is precisely what a
+          cache hand-back is. A reasonable shape is engineers read, CI writes.
+        </P>
+        <Pre>{`    required_group: "cn=engineering,ou=groups,dc=example,dc=com"
+    group_attribute: memberOf
+    write_groups:
+      - "cn=ci,ou=groups,dc=example,dc=com"`}</Pre>
+        <Alert severity="warning" sx={{ mb: 2, maxWidth: "78ch" }}>
+          <strong>Nobody is an admin on an LDAP cache.</strong> The directory is the user list, so
+          there is nothing to mint and no user-management API to reach: LDAP never grants{" "}
+          <C>admin</C>, and <C>auth.users</C> is not consulted in this mode at all. Membership
+          changes belong in the directory. (The 403 you get from{" "}
+          <C>/api/users</C> suggests adding <C>admin: true</C> under <C>auth.users</C>; that advice
+          is for a <C>token</C> server and will not work here.)
+        </Alert>
+
+        <SubHeading>TLS</SubHeading>
+        <P>
+          <C>tls_verify</C> defaults to on and should stay on. It matters more here than anywhere
+          else in ciabatta: LDAPS with verification off is an encrypted channel to{" "}
+          <em>whoever answered the connection</em>, and for a protocol whose entire job is to say
+          who somebody is, that is worse than useless — it means handing every password typed into{" "}
+          <C>remote-cache login</C> to whatever the network pointed you at. Turn it off only against
+          a directory you are running yourself to try this out.
+        </P>
+
+        <SubHeading>Every setting</SubHeading>
+        <LdapSettingsTable />
+
+        <SubHeading>What a developer does</SubHeading>
+        <P>
+          Nothing LDAP-specific. The client asks the server what it wants and prompts accordingly —
+          for a password rather than a token, in this mode.
+        </P>
+        <Pre>{`ciabatta remote-cache login https://cache.example.com
+# Username for https://cache.example.com: ada
+# Password for https://cache.example.com:`}</Pre>
+        <P>
+          What comes back is a session, not the password: the server issues a bearer token, keeps
+          only its SHA-256, and the client stores it in{" "}
+          <C>~/.ciabatta/remote-cache.json</C> keyed by server URL. The directory is contacted once,
+          at login — every build after that is the session token, so a slow directory costs one
+          login rather than one round trip per step. Sessions last{" "}
+          <C>auth.session_ttl</C> (30 days by default, and it is not LDAP-specific); after that,{" "}
+          <C>login</C> again. Revoking someone in the directory stops them logging in again, but
+          does not expire a session they already hold — shorten <C>session_ttl</C> if that gap
+          matters to you.
+        </P>
+        <P>
+          Non-interactive callers pass <C>--username</C> and <C>--password-env</C>, which is the
+          shape CI wants:
+        </P>
+        <Pre>{`ciabatta remote-cache login https://cache.example.com \\
+  --username ci --password-env CIABATTA_CACHE_PASSWORD`}</Pre>
+
+        <SubHeading>Trying it before you point a team at it</SubHeading>
+        <P>
+          A throwaway directory is the fastest way to find out whether your filter is right. This
+          one comes with a handful of users, all with the password <C>ada</C>:
+        </P>
+        <Pre>{`docker run --rm -p 1389:1389 \\
+  -e LDAP_USERS=ada,grace -e LDAP_PASSWORDS=ada,grace \\
+  -e LDAP_ROOT=dc=example,dc=org \\
+  bitnami/openldap:latest`}</Pre>
+        <Pre>{`# remote-cache.yaml — a test directory, so plaintext and no verification
+auth:
+  mode: ldap
+  ldap:
+    url: ldap://127.0.0.1:1389
+    bind_dn: "cn={username},ou=users,dc=example,dc=org"
+    tls_verify: false`}</Pre>
+        <P>
+          Then <C>ciabatta remote-cache start</C> in one terminal and{" "}
+          <C>ciabatta remote-cache login http://127.0.0.1:8380</C> in another. A wrong filter shows
+          up immediately as <C>Invalid username or password</C>; a wrong{" "}
+          <C>required_group</C> shows up as the more specific message below, which is how you tell
+          the two apart.
+        </P>
+
+        <SubHeading>When it doesn&apos;t work</SubHeading>
+        <P>
+          Settings are validated at <em>startup</em>, deliberately: a cache configured for LDAP with
+          no <C>ldap:</C> block refuses to start rather than serving happily for a week and then
+          failing the first person who tries to log in. So most mistakes are a server that will not
+          come up, with the reason on stderr.
+        </P>
+        <Table size="small" sx={{ minWidth: 620, mb: 2 }}>
+          <TableHead>
+            <TableRow>
+              <TableCell sx={{ width: "45%" }}>What you see</TableCell>
+              <TableCell>What it means</TableCell>
+            </TableRow>
+          </TableHead>
+          <TableBody>
+            <TableRow hover>
+              <TableCell sx={{ fontFamily: monoFontStack, fontSize: 13, verticalAlign: "top" }}>
+                auth.mode is &apos;ldap&apos; but there is no auth.ldap section
+              </TableCell>
+              <TableCell>
+                <Typography variant="body2" color="text.secondary">
+                  The mode is set but the block is missing or commented out.
+                </Typography>
+              </TableCell>
+            </TableRow>
+            <TableRow hover>
+              <TableCell sx={{ fontFamily: monoFontStack, fontSize: 13, verticalAlign: "top" }}>
+                auth.ldap needs either bind_dn or base_dn
+              </TableCell>
+              <TableCell>
+                <Typography variant="body2" color="text.secondary">
+                  Neither route to a DN is configured. Pick one of the two above.
+                </Typography>
+              </TableCell>
+            </TableRow>
+            <TableRow hover>
+              <TableCell sx={{ fontFamily: monoFontStack, fontSize: 13, verticalAlign: "top" }}>
+                auth.ldap.bind_dn must contain {"{username}"}
+              </TableCell>
+              <TableCell>
+                <Typography variant="body2" color="text.secondary">
+                  A literal DN was given where a template belongs — it would authenticate everyone
+                  as one person.
+                </Typography>
+              </TableCell>
+            </TableRow>
+            <TableRow hover>
+              <TableCell sx={{ fontFamily: monoFontStack, fontSize: 13, verticalAlign: "top" }}>
+                search_dn is set but search_password_env isn&apos;t
+              </TableCell>
+              <TableCell>
+                <Typography variant="body2" color="text.secondary">
+                  A service account with no way to authenticate it.
+                </Typography>
+              </TableCell>
+            </TableRow>
+            <TableRow hover>
+              <TableCell sx={{ fontFamily: monoFontStack, fontSize: 13, verticalAlign: "top" }}>
+                …names CIABATTA_LDAP_PASSWORD, but it isn&apos;t set
+              </TableCell>
+              <TableCell>
+                <Typography variant="body2" color="text.secondary">
+                  The variable is missing from the environment the <em>server</em> runs in. Usually
+                  a service unit that never got it.
+                </Typography>
+              </TableCell>
+            </TableRow>
+            <TableRow hover>
+              <TableCell sx={{ fontFamily: monoFontStack, fontSize: 13, verticalAlign: "top" }}>
+                The LDAP service account could not bind
+              </TableCell>
+              <TableCell>
+                <Typography variant="body2" color="text.secondary">
+                  <C>search_dn</C> or its password is wrong. This is the search account, not the
+                  person logging in.
+                </Typography>
+              </TableCell>
+            </TableRow>
+            <TableRow hover>
+              <TableCell sx={{ fontFamily: monoFontStack, fontSize: 13, verticalAlign: "top" }}>
+                Invalid username or password
+              </TableCell>
+              <TableCell>
+                <Typography variant="body2" color="text.secondary">
+                  Deliberately ambiguous — it is the same whether the account doesn&apos;t exist,
+                  the filter didn&apos;t match it, or the password was wrong, so the endpoint
+                  can&apos;t be used to enumerate accounts. Check <C>user_filter</C> against the
+                  directory before assuming a typo.
+                </Typography>
+              </TableCell>
+            </TableRow>
+            <TableRow hover>
+              <TableCell sx={{ fontFamily: monoFontStack, fontSize: 13, verticalAlign: "top" }}>
+                ada authenticated, but is not a member of cn=engineering,…
+              </TableCell>
+              <TableCell>
+                <Typography variant="body2" color="text.secondary">
+                  The password was right and <C>required_group</C> refused them. If it is wrong,
+                  compare against what <C>group_attribute</C> actually contains — usually full DNs,
+                  not bare names.
+                </Typography>
+              </TableCell>
+            </TableRow>
+            <TableRow hover>
+              <TableCell sx={{ fontFamily: monoFontStack, fontSize: 13, verticalAlign: "top" }}>
+                ada has read-only access to this cache
+              </TableCell>
+              <TableCell>
+                <Typography variant="body2" color="text.secondary">
+                  They got in, but are in none of <C>write_groups</C>. Builds still read from the
+                  cache; only the upload is refused.
+                </Typography>
+              </TableCell>
+            </TableRow>
+          </TableBody>
+        </Table>
+        <P>
+          An empty password is rejected before the directory is contacted at all: most directories
+          treat a bind with no password as an anonymous bind and <em>succeed</em>, which would let
+          anyone in as anyone.
         </P>
       </>
     ),

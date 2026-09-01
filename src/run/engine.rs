@@ -618,7 +618,7 @@ async fn run_dag(
                     }
 
                     // Nothing to fall back on: this failure ends the run.
-                    stop_persistent(persistent, workflow, tx).await;
+                    stop_persistent(persistent, workflow, root, tx).await;
                     bail!("Run step '{}' failed: {}", step.name, err);
                 }
             }
@@ -639,7 +639,7 @@ async fn run_dag(
         }
     }
 
-    stop_persistent(persistent, workflow, tx).await;
+    stop_persistent(persistent, workflow, root, tx).await;
 
     // A step still Failed and untolerated means recovery ran out of road.
     if let Some(failed) = resolved.steps.iter().find(|s| {
@@ -810,15 +810,15 @@ async fn preflight_tools(
 
 /// Start a `persistent` step and return immediately, without waiting for it.
 ///
-/// The step is handed to the daemon as a watch session, which is what makes it
-/// genuinely persistent: the daemon owns the process, so a dev server started
-/// by `ciabatta build` is still up — and still collecting output — after the
-/// build finishes and the terminal closes. The session id is reported so it can
-/// be tailed with `ciabatta watch --attach <id>` or stopped with `--stop <id>`.
+/// The step is handed to the daemon as a watch session, which is what collects
+/// its output: the process runs beside the graph rather than inside a step's
+/// log, and can be tailed live with `ciabatta watch --attach <id>`. The run
+/// stops it again on the way out (see [`stop_persistent`]) — the session, and
+/// everything it captured, stays readable afterwards.
 ///
 /// If no daemon can be reached, the step falls back to a background task inside
-/// this process. It still doesn't block the graph, but it can't outlive the run
-/// — which the log says plainly rather than leaving it to be discovered.
+/// this process. It behaves the same from the graph's point of view; the
+/// difference is that its output goes to this run's log and is gone with it.
 async fn start_persistent(
     step: &RunStep,
     workflow: &str,
@@ -867,14 +867,15 @@ async fn start_persistent(
     match handoff {
         Ok((session, url)) => {
             log(format!(
-                "handed to the ciabatta daemon as watch session #{session} — it outlives this run"
+                "handed to the ciabatta daemon as watch session #{session} — \
+                 it runs until this run finishes"
             ))
             .await;
             // Its output goes to the session from here on, not into this panel.
             // Saying so beats leaving an empty log to be puzzled over.
             log("its output is collected there, not below".to_string()).await;
             log(format!("follow it:  ciabatta watch --attach {session}")).await;
-            log(format!("stop it:    ciabatta watch --stop {session}")).await;
+            log(format!("stop it early:  ciabatta watch --stop {session}")).await;
             log(format!("live view:  {url}")).await;
             Ok(Persistent {
                 step: step.name.clone(),
@@ -884,7 +885,7 @@ async fn start_persistent(
         Err(err) => {
             log(format!(
                 "⚠ couldn't hand this to the daemon ({err}); running it here instead, \
-                 so it will stop when the run does"
+                 so its output won't be kept once this run is over"
             ))
             .await;
             Ok(Persistent {
@@ -893,6 +894,34 @@ async fn start_persistent(
             })
         }
     }
+}
+
+/// Ask the daemon to stop a watch session a persistent step left running.
+///
+/// The session itself is kept — only the process behind it ends. Its output
+/// stays readable at the same URL, which is what makes stopping the process
+/// safe to do automatically: nothing anybody might still want is thrown away.
+async fn stop_session(root: &Path, session_id: u64) -> Result<()> {
+    // `connect_at(root)`, matching `hand_to_daemon`: connecting registers a
+    // project, and it must be the run's root rather than wherever the operator
+    // happened to be standing.
+    let session = crate::daemon::connect_at(None, root).await?;
+    let response = session
+        .daemon
+        .client()?
+        .post(
+            session
+                .daemon
+                .url(&format!("/api/watch/sessions/{session_id}/stop")),
+        )
+        .send()
+        .await?;
+    anyhow::ensure!(
+        response.status().is_success(),
+        "the daemon refused: {}",
+        response.text().await.unwrap_or_default()
+    );
+    Ok(())
 }
 
 /// Register the run's project with the daemon and start the step as a watch
@@ -964,24 +993,35 @@ fn spawn_locally(
 
 /// Close out every persistent step now that the graph is done.
 ///
-/// Daemon-owned sessions are deliberately left running — outliving the run is
-/// the whole point — and are only reported, with the id needed to reach them
-/// later. Local fallbacks have nothing left to own them once this process goes
-/// away, so they're stopped here rather than orphaned.
+/// **Everything started by the run is stopped by the run**, whoever owns it. A
+/// background task exists to serve the build that needed it — a mock API the
+/// tests hit, a bundler in watch mode — so leaving it up once that build is
+/// over hands the operator a process they did not ask to be responsible for,
+/// still holding its port. The second run of the day should not have to fight
+/// the leftovers of the first.
 ///
-/// Either way the node stops showing as in-flight: a graph that leaves a step
-/// spinning forever after the run has finished is just misleading.
+/// A daemon-owned session is stopped through the daemon that owns it; a local
+/// fallback is aborted, which takes its subprocess with it. Its output is kept
+/// either way — the session stays readable in `ciabatta watch` after the
+/// process behind it has gone, which is the part worth outliving the run.
 async fn stop_persistent(
     running: Vec<Persistent>,
     workflow: &str,
+    root: &Path,
     tx: &mpsc::Sender<ProgressUpdate>,
 ) {
     for job in running {
         let line = match job.ownership {
-            Ownership::Daemon { session, url } => Some(format!(
-                "still running as watch session #{session} — {url}  \
-                 (stop it with `ciabatta watch --stop {session}`)"
-            )),
+            Ownership::Daemon { session, url } => Some(match stop_session(root, session).await {
+                Ok(()) => format!("stopped (the run finished) — its output is kept at {url}"),
+                // Worth saying precisely: the process is still up and still
+                // holding whatever port it bound, and the operator now has to
+                // deal with it.
+                Err(err) => format!(
+                    "⚠ couldn't stop watch session #{session} ({err}); it is still running — \
+                     stop it with `ciabatta watch --stop {session}`  ({url})"
+                ),
+            }),
             Ownership::Local(handle) => {
                 let was_running = !handle.is_finished();
                 handle.abort();
@@ -1633,10 +1673,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn without_a_daemon_a_persistent_step_says_it_will_not_outlive_the_run() {
-        // The fallback path has to be honest about what it gives up: the step
-        // still doesn't block the graph, but it dies with the run, and silently
-        // doing that would be worse than not persisting at all.
+    async fn without_a_daemon_a_background_step_says_what_it_gives_up() {
+        // Both paths stop the task when the run ends, so the fallback doesn't
+        // differ in lifetime — what it gives up is the *output*, which without
+        // a daemon has no session to be kept in and goes with the run. Silently
+        // losing it would be worse than not persisting at all.
         let steps = vec![RunStep {
             persistent: true,
             ..step("server", "while true; do sleep 1; done")
@@ -1646,10 +1687,39 @@ mod tests {
 
         let logs = step_logs(&updates);
         assert!(logs.contains("couldn't hand this to the daemon"), "{logs}");
-        assert!(logs.contains("stop when the run does"), "{logs}");
+        assert!(logs.contains("output won't be kept"), "{logs}");
         assert!(logs.contains("stopped (the run finished)"), "{logs}");
         // And nothing is left behind.
         assert!(!logs.contains("watch session"), "{logs}");
+    }
+
+    #[tokio::test]
+    async fn a_background_step_never_gates_what_comes_after_it() {
+        // The property the whole feature rests on. `probe` declares it needs a
+        // task that never exits, and still runs — if background steps were
+        // waited on like any other, this test would hang until the harness
+        // killed it rather than fail.
+        let steps = vec![
+            RunStep {
+                persistent: true,
+                ..step("server", "while true; do sleep 1; done")
+            },
+            RunStep {
+                needs: vec!["server".to_string()],
+                ..step("probe", "echo reached")
+            },
+        ];
+        let started = std::time::Instant::now();
+        let (result, updates) = drive(steps, Path::new(".")).await;
+
+        assert!(result.is_ok(), "{:?}", result.err());
+        assert!(
+            outcomes(&updates).contains(&("probe".to_string(), true)),
+            "the step behind a background task has to run"
+        );
+        assert!(started.elapsed() < std::time::Duration::from_secs(10));
+        // And the task is closed out rather than left spinning.
+        assert!(step_logs(&updates).contains("stopped (the run finished)"));
     }
 
     /// Every step log line the run emitted, joined.

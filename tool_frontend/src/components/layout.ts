@@ -98,16 +98,32 @@ export function layeredLayout(
   ids: string[],
   edges: { source: string; target: string }[],
   data: (id: string) => Record<string, unknown>,
-  options: { columnWidth?: number; rowHeight?: number } = {},
+  options: {
+    columnWidth?: number;
+    rowHeight?: number;
+    /**
+     * Nodes to lift out of the layering and park in a row underneath it.
+     *
+     * For nodes that are in the picture but not in the flow — background
+     * tasks, which nothing waits for. Depth is "how far along the run is this",
+     * and a node that gates nothing has no honest answer, so placing it in a
+     * column claims an ordering that isn't there.
+     */
+    bottom?: (id: string) => boolean;
+  } = {},
 ): Node[] {
   const columnWidth = options.columnWidth ?? 260;
   const rowHeight = options.rowHeight ?? 76;
+  const isBottom = options.bottom ?? (() => false);
 
-  const depth = computeDepths(ids, edges);
+  const layered = ids.filter((id) => !isBottom(id));
+  const parked = ids.filter(isBottom);
+
+  const depth = computeDepths(layered, edges);
 
   // Bucket by depth, then stack each column.
   const columns = new Map<number, string[]>();
-  for (const id of ids) {
+  for (const id of layered) {
     const d = depth.get(id) ?? 0;
     const column = columns.get(d) ?? [];
     column.push(id);
@@ -136,6 +152,22 @@ export function layeredLayout(
     });
   }
 
+  // The parked row, clear of the deepest column the layered nodes reached.
+  if (parked.length > 0) {
+    const tallest = Math.max(1, ...[...columns.values()].map((column) => column.length));
+    const y = ((tallest - 1) / 2) * rowHeight + rowHeight * 2;
+    parked.forEach((id, index) => {
+      nodes.push({
+        id,
+        data: data(id),
+        position: { x: index * columnWidth, y },
+        type: "default",
+        sourcePosition: Position.Right,
+        targetPosition: Position.Left,
+      });
+    });
+  }
+
   return nodes;
 }
 
@@ -153,7 +185,9 @@ export function layeredLayout(
 export function executionOrder(
   ids: string[],
   edges: { source: string; target: string }[],
+  options: { exclude?: (id: string) => boolean } = {},
 ): Map<string, number> {
+  if (options.exclude) ids = ids.filter((id) => !options.exclude!(id));
   const depth = computeDepths(ids, edges);
   // Array#sort is stable, so equal depths keep their declaration order.
   const sequence = [...ids].sort((a, b) => (depth.get(a) ?? 0) - (depth.get(b) ?? 0));

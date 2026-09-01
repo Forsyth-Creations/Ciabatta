@@ -125,6 +125,58 @@ pub struct StepChoice {
     pub option: usize,
 }
 
+/// What a run reports when it was stopped rather than failed.
+///
+/// A constant rather than a string written twice, because the view layer has to
+/// recognise exactly what the engine produced in order to tell "somebody
+/// pressed Stop" from "the build is broken" — and two copies of a sentence are
+/// two things to keep in step.
+pub const STOPPED_MESSAGE: &str = "Run stopped.";
+
+/// A run's stop switch: shared with whoever might ask it to stop, and checked
+/// by the engine between steps and while one is in flight.
+///
+/// A flag rather than dropping the run's future outright, because a run that is
+/// merely killed leaves whatever it started behind — the background tasks it
+/// launched, most of all. Asking gives the engine the chance to unwind: stop
+/// scheduling, kill the step that is running, and still close out everything it
+/// owns on the way past.
+#[derive(Default, Debug)]
+pub struct Cancel {
+    stopped: std::sync::atomic::AtomicBool,
+    notify: tokio::sync::Notify,
+}
+
+impl Cancel {
+    /// Ask the run to stop. Idempotent: stopping a stopped run is not an error,
+    /// which matters when the button can be clicked twice.
+    pub fn stop(&self) {
+        self.stopped
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        self.notify.notify_waiters();
+    }
+
+    /// Whether a stop has been asked for.
+    pub fn is_stopped(&self) -> bool {
+        self.stopped.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Resolves once a stop has been asked for, for racing against a step.
+    ///
+    /// The waiter is registered *before* the flag is re-read, so a stop landing
+    /// between the two isn't missed — the opposite order is a run that ignores
+    /// the button until its current step happens to finish.
+    pub async fn stopped(&self) {
+        loop {
+            let waiting = self.notify.notified();
+            if self.is_stopped() {
+                return;
+            }
+            waiting.await;
+        }
+    }
+}
+
 /// The policy a run is executed under: how it resolves recovery choices, what
 /// happens to work that outlives it, and how strictly it holds steps to what
 /// they declared. Push/pull ignore this entirely.
@@ -150,6 +202,10 @@ pub struct RunCtl {
     /// Extra paths to stage into each `authoritative` sandbox, from
     /// `--sandbox-also`. Symlinked, and explicitly outside the guarantee.
     pub sandbox_also: Vec<String>,
+    /// The run's stop switch, when something is in a position to ask — the
+    /// daemon holds one per run so the Stop button in the web app can reach it.
+    /// `None` for a run nobody can interrupt.
+    pub cancel: Option<std::sync::Arc<Cancel>>,
 }
 
 impl Default for RunCtl {
@@ -160,6 +216,7 @@ impl Default for RunCtl {
             persist_via_daemon: true,
             authoritative: false,
             sandbox_also: Vec::new(),
+            cancel: None,
         }
     }
 }

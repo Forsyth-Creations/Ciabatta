@@ -27,11 +27,6 @@ registries:
     needs_auth: true
     repository: raw-hosted
     format: raw
-recipies:
-  ciabatta_binary:
-    registry: nexus
-    local_artifact_path: target/release/ciabatta
-    publish_path: ciabatta/{CIABATTA_BRANCH}/{CIABATTA_COMMIT}/ciabatta
 ai:
   provider: openai
   endpoint: http://localhost:11434

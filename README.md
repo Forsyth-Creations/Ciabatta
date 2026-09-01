@@ -387,6 +387,46 @@ Missing 1 build tool(s):
 A run that tolerated failures still **fails**, and reports every one of them at
 the end — tolerating a failure is not hiding it.
 
+### Background tasks
+
+Some things a build needs are not steps in it: a mock API the integration tests
+call, a database container, a bundler in watch mode. They have to be *running*,
+they never finish, and waiting for one is waiting forever. They go in the
+workflow's `background:` array, beside `steps:` rather than inside it.
+
+```yaml
+background:
+  - name: mock-api
+    run: node scripts/mock-api.js
+    description: Stub API the integration step talks to
+
+steps:
+  - name: integration
+    run: yarn test:integration
+```
+
+An array of their own, not a flag on a step, because they are not steps: they
+never finish, so they hold no position in the order and nothing can sensibly
+declare `needs` on one. Each is **started before the first wave** and **gates
+nothing** — no mistake in one can hold a build up. The graph draws them in a row
+of their own at the bottom, under a lightning bolt, rather than in a wave.
+
+Being started before wave 1 is not the same as being *ready* before wave 1. If
+a step would race the server it talks to, have that step wait for the port;
+ciabatta can't, because "ready" is a different question for every server.
+
+**Background vs. persistent** is a question of what happens when the run ends,
+and nothing else:
+
+| | When the run ends |
+| --- | --- |
+| `background:` entry | **Stopped.** It existed to get this run through; leaving it up would hand you a process still holding its port for the next run to collide with. |
+| step with `persistent = true` | **Left running.** The daemon owns it, so `ciabatta dev` leaves you a dev server to work against. Stop it with `ciabatta watch --stop <id>`. |
+
+Either way it runs as a watch session labelled with the node that started it, so
+its output is readable live and afterwards — a stopped background task leaves
+its session behind even though its process is gone.
+
 ### Persistent steps outlive the run
 
 A dev server that dies with the build that started it isn't persistent at all,

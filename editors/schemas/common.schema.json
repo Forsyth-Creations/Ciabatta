@@ -172,7 +172,7 @@
         "persistent": {
           "type": "boolean",
           "default": false,
-          "description": "A background task: a step that never exits on its own — a mock API, a dev server, a bundler in watch mode. Its dependents are released immediately and it runs alongside the rest of the graph, gating nothing, so it can never hold a build up. The run stops it again when the graph finishes; its output stays readable in `ciabatta watch`."
+          "description": "A step that never exits on its own — a dev server, a log tailer, a watcher. Its dependents are released immediately and it runs alongside the rest of the graph rather than hanging it. It OUTLIVES the run: the daemon takes ownership as a watch session, so `ciabatta dev` leaves you a server to work against. Stop it with `ciabatta watch --stop <id>`. For a process that exists only to get this run through and should go away with it, use the workflow's `background:` array instead."
         },
         "continue_on_error": {
           "type": "boolean",

@@ -41,6 +41,7 @@ pub fn router() -> Router<AppState> {
         .route("/api/run/runs/{id}", get(detail))
         .route("/api/run/runs/{id}/stream", get(stream))
         .route("/api/run/runs/{id}/choose", post(choose))
+        .route("/api/run/runs/{id}/stop", post(stop))
 }
 
 /// Take a lock, surviving a poisoned one.
@@ -72,6 +73,8 @@ pub struct Run {
     pub state: Arc<Mutex<GuiState>>,
     /// Carries a browser's answer back to a waiting recovery step.
     pub choices: broadcast::Sender<StepChoice>,
+    /// The run's stop switch, held so the Stop button can reach the engine.
+    pub cancel: Arc<runner::Cancel>,
     /// Bumped on every applied update, so the SSE loop can tell whether
     /// anything changed without diffing the whole state.
     pub seq: Arc<AtomicU64>,
@@ -262,6 +265,9 @@ async fn create(
 
     let (choice_tx, _) = broadcast::channel::<StepChoice>(64);
     let (progress_tx, mut progress_rx) = mpsc::channel(256);
+    // Shared three ways: the run record (so `stop` can reach it), the engine
+    // (which checks it), and nothing else.
+    let cancel = Arc::new(runner::Cancel::default());
 
     let run = state.runs.insert(Run {
         id: state.runs.next_id(),
@@ -270,6 +276,7 @@ async fn create(
         created_at: chrono::Local::now().to_rfc3339(),
         state: gui_state.clone(),
         choices: choice_tx.clone(),
+        cancel: cancel.clone(),
         seq: Arc::new(AtomicU64::new(0)),
         changed: Arc::new(tokio::sync::Notify::new()),
     });
@@ -349,10 +356,12 @@ async fn create(
         });
     }
 
-    // Interactive, so recovery steps wait for a browser choice.
+    // Interactive, so recovery steps wait for a browser choice, and
+    // interruptible, so the Stop button has something to press.
     let ctl = RunCtl {
         interactive: true,
         choices: Some(choice_tx),
+        cancel: Some(cancel),
         ..Default::default()
     };
     tokio::spawn(async move {
@@ -554,6 +563,29 @@ async fn stream(
     };
 
     Ok(Sse::new(events).keep_alive(KeepAlive::default()))
+}
+
+/// Ask a run to stop.
+///
+/// Asking rather than killing: the engine stops scheduling, cuts short the step
+/// in flight, and still closes out the background tasks it started on the way
+/// past. Killing the task outright would leave those holding their ports, which
+/// is the state the Stop button most needs to avoid.
+///
+/// Idempotent, and not an error on a finished run — the button can be clicked
+/// twice, or clicked just as the last step lands, and neither is worth an error
+/// in somebody's face.
+async fn stop(State(state): State<AppState>, Path(id): Path<u64>) -> RouteResult<Json<Value>> {
+    let run = get_run(&state, id)?;
+    let done = serde_json::to_value(&*lock(&run.state))
+        .ok()
+        .and_then(|v| v["done"].as_bool())
+        .unwrap_or(false);
+
+    if !done {
+        run.cancel.stop();
+    }
+    Ok(Json(json!({ "ok": true, "already_finished": done })))
 }
 
 /// Answer a waiting recovery prompt.

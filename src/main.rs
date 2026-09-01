@@ -2907,12 +2907,6 @@ workspace:
 #   nexus:
 #     url: https://nexus.example.com
 #     repository: raw-hosted
-#
-# recipies:
-#   binary:
-#     registry: nexus
-#     local_artifact_path: target/release/{name}
-#     publish_path: "{name}/{{CIABATTA_BRANCH}}/{{CIABATTA_COMMIT}}/{name}"
 "#
     )
 }

@@ -971,8 +971,8 @@ const SECTIONS: DocSection[] = [
           the terminal that asked for it. A watch session, a run, and a serial capture all outlive
           the command that started them and the tab that is watching them. Close the browser, come
           back tomorrow, and the session is still there with its logs intact. (A{" "}
-          <a href="#run">background task</a> a workflow started is the one thing deliberately
-          stopped when its run ends — its <em>output</em> outlives the run, the process does not.)
+          <a href="#run">background task</a> is the one thing deliberately stopped when its run
+          ends — its <em>output</em> outlives the run, the process does not.)
         </P>
         <P>
           The daemon starts on demand — any ciabatta command probes for one and launches it if
@@ -1260,9 +1260,12 @@ ciabatta run test --filter tag:fast --filter tag:smoke   # either one`}</Pre>
             </>,
             <>
               <Chip size="small" variant="outlined" color="info" icon={<BoltIcon />} label="background" />{" "}
-              — a <C>persistent: true</C> step. Started and left running; nothing waits for it, so
-              the graph draws it in its own row at the bottom rather than in a wave. Tail it under
-              Watch.
+              — from the workflow&apos;s <C>background:</C> array. Up before wave 1, gates nothing,
+              stopped when the run ends. Drawn in its own row at the bottom rather than in a wave.
+            </>,
+            <>
+              <Chip size="small" variant="outlined" color="info" label="persistent" /> — a step that
+              never exits and is <em>left</em> running when the run ends. Tail either under Watch.
             </>,
             <>
               <Chip size="small" variant="outlined" label="timeout" /> — killed past its limit, and
@@ -1320,49 +1323,90 @@ ciabatta run test --filter tag:fast --filter tag:smoke   # either one`}</Pre>
         <SubHeading>Background tasks</SubHeading>
         <P>
           Some things a build needs are not steps in it. A mock API the integration tests talk to, a
-          bundler in watch mode, a database container — they have to be <em>running</em>, they never
-          finish, and waiting for one is waiting forever. A step marked{" "}
-          <C>persistent: true</C> is one of those: ciabatta starts it, releases everything behind it
-          immediately, and carries on.
+          database container, a bundler in watch mode — they have to be <em>running</em>, they never
+          finish, and waiting for one is waiting forever. Those go in the workflow&apos;s{" "}
+          <C>background:</C> array, alongside <C>steps:</C> rather than inside it.
         </P>
-        <Pre>{`steps:
+        <Pre>{`background:
   - name: mock-api
     description: Stub API the integration step talks to
     run: node scripts/mock-api.js
-    persistent: true          # <- a background task
 
+steps:
+  - name: compile
+    run: cargo build
   - name: integration
     run: yarn test:integration
     needs: [compile]`}</Pre>
         <P>
-          <strong>It gates nothing.</strong> That is the property worth stating plainly, because it
-          is what makes a background task safe to add to a graph: no step waits on it, so no
-          mistake in it can hold a build up, and it can never be the reason a run is slow. The graph
-          views say the same thing visually — background tasks are drawn in their own row at the
-          bottom, under a lightning bolt, rather than in a wave, because a wave means &ldquo;the
-          next one waits for these&rdquo; and nothing here waits.
+          An array of their own, not a flag on a step, because they are not steps: they never
+          finish, so they can hold no position in the order, and nothing can sensibly declare{" "}
+          <C>needs</C> on one. Each is <strong>started before the first wave</strong>, so it is up
+          by the time anything wants it, and <strong>gates nothing</strong> — no mistake in one can
+          hold a build up, and it can never be the reason a run is slow. The graph views say the
+          same thing: background tasks are drawn in their own row at the bottom, under a lightning
+          bolt, because a wave means &ldquo;the next one waits for these&rdquo; and nothing here
+          waits.
         </P>
         <Alert severity="info" sx={{ mb: 2, maxWidth: "78ch" }}>
-          <strong>Nothing waits for it, so nothing checks it either.</strong> Releasing dependents
-          immediately means a step that needs the mock API may reach it before it is listening. If
-          that race matters, have the step that depends on it wait for the port rather than assuming
-          — the graph cannot do it for you, because &ldquo;ready&rdquo; is a different question for
-          every server.
+          <strong>Nothing waits for it, so nothing checks it either.</strong> Started before the
+          first wave is not the same as <em>ready</em> before the first wave — a step may still
+          reach the mock API before it is listening. If that race matters, have the step wait for
+          the port rather than assuming; the graph cannot do it for you, because
+          &ldquo;ready&rdquo; is a different question for every server.
         </Alert>
+
+        <SubHeading>Background vs. persistent</SubHeading>
         <P>
-          The run <strong>stops it again when the graph finishes</strong>. What it existed for is
-          over at that point, and a mock API still holding port 3000 an hour later is the second
-          run&apos;s problem. Its output is kept: the task runs as a{" "}
-          <Link to="/watch">watch session</Link>, and that session stays readable — labelled with
-          the node that started it — after the process behind it has gone. To stop one early, or to
-          follow it live while the run is going:
+          There are two ways to run something that never exits, and the only difference is{" "}
+          <strong>what happens when the run ends</strong>.
+        </P>
+        <Bullets
+          items={[
+            <>
+              A <C>background:</C> entry is <strong>stopped</strong> when every stage has succeeded
+              or failed. It existed to get this run through; leaving it up would hand you a process
+              still holding its port for the next run to collide with.
+            </>,
+            <>
+              A step with <C>persistent: true</C> is <strong>left running</strong>. The daemon takes
+              ownership, so <C>ciabatta dev</C> leaves you a dev server to work against — killing it
+              on the way out would make persistence pointless. Stop it yourself with{" "}
+              <C>ciabatta watch --stop &lt;id&gt;</C>.
+            </>,
+          ]}
+        />
+        <P>
+          Both run as <Link to="/watch">watch sessions</Link>, labelled with the node that started
+          them, so their output is readable live and afterwards — a stopped background task leaves
+          its session behind even though its process is gone. To follow either while a run is going:
         </P>
         <Pre>{`ciabatta watch --attach 3     # follow it
 ciabatta watch --stop 3       # stop it early`}</Pre>
         <P>
-          If no daemon can be reached the task still runs, as a child of the run itself, and still
-          blocks nothing — but its output goes to the run&apos;s log rather than a session, and is
-          gone with it. The log says so at the time rather than leaving it to be discovered.
+          If no daemon can be reached, either kind still runs — as a child of the run itself, still
+          blocking nothing — but it cannot outlive this process and its output goes to the run&apos;s
+          log rather than a session. The log says so at the time rather than leaving it to be
+          discovered.
+        </P>
+
+        <SubHeading>Stopping a run</SubHeading>
+        <P>
+          A run in flight has a <strong>Stop</strong> button beside its status. The daemon{" "}
+          <em>asks</em> the engine to stop rather than killing it: the step running now is killed,
+          nothing further is scheduled, and the background tasks the run started are stopped on the
+          way past. Killing the run outright would leave those behind, which is the state stopping
+          most needs to avoid.
+        </P>
+        <Alert severity="warning" sx={{ mb: 2, maxWidth: "78ch" }}>
+          <strong>What has already happened stays happened.</strong> Steps are side-effecting shell
+          work; stopping halfway can leave a migration applied and the deploy that follows it not.
+          Stopping is a way out of a run that is going nowhere, not an undo.
+        </Alert>
+        <P>
+          A stopped run is reported as stopped, not as a failed build — nobody should go looking for
+          a bug that isn&apos;t there. Its logs stay readable. Clicking Stop on a run that has
+          already finished does nothing.
         </P>
 
         <SubHeading>Flowchart builder</SubHeading>

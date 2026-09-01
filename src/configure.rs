@@ -209,9 +209,8 @@ pub fn run_auto(root: &Path, cfg: &CiabattaConfig, assume_yes: bool) -> Result<(
         return Ok(());
     }
 
-    // Reversed so the entries land under `recipies:` in the order they were
-    // chosen — each insert goes in directly after the key, so the last one
-    // spliced ends up first.
+    // Reversed so the entries land in the order they were chosen — each insert
+    // goes in directly after the key, so the last one spliced ends up first.
     let blocks: Vec<Block> = chosen
         .iter()
         .rev()

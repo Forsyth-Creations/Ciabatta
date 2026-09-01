@@ -120,6 +120,17 @@ jobs:
       - name: Gates
         run: ciabatta test
 
+      # The Zed extension is the one thing here nothing else would notice
+      # breaking: it compiles to wasm for Zed's own host rather than being
+      # embedded in the binary, so it is outside the `build` graph and no other
+      # step touches it. One leg is enough — the wasm is the same wherever it is
+      # built — and `rustup target add` is a no-op when the target is present.
+      - name: Build the Zed extension
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          rustup target add wasm32-wasip1
+          ciabatta package --only zed-extension
+
       # Built on every push, not just releases: a PR that changes the extension
       # should hand a reviewer something installable. The release job collects
       # this same artifact when the ref is a tag.

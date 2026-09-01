@@ -27,6 +27,8 @@ export interface StepView {
   /** The special, identifiable publishing phase. */
   push: boolean;
   persistent: boolean;
+  /** From the workflow's `background:` array: started first, gates nothing, stopped when the run ends. */
+  background: boolean;
   timeout: string | null;
   requires: string[];
 
@@ -264,5 +266,21 @@ export function useChoose(runId: number) {
   return useMutation({
     mutationFn: (body: { workflow: string; step: string; option: number }) =>
       api.post(`/api/run/runs/${runId}/choose`, body),
+  });
+}
+
+/**
+ * Ask a run to stop.
+ *
+ * The daemon *asks* rather than killing: the engine stops scheduling, cuts the
+ * step in flight short, and still stops the background tasks it started on the
+ * way past. Stopping a run that has already finished is a no-op rather than an
+ * error, so a click landing as the last step lands is harmless.
+ */
+export function useStopRun() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (runId: number) => api.post(`/api/run/runs/${runId}/stop`, {}),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: runKeys.runs }),
   });
 }

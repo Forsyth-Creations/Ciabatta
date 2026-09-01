@@ -104,8 +104,12 @@ impl Plan {
 pub trait StepContext {
     /// The cache settings in force for a step.
     fn cache_config(&self, step: &RunStep) -> CacheConfig;
-    /// The directory its `inputs`/`outputs` are relative to.
+    /// The workspace root, which every `inputs`/`outputs` path is relative to.
     fn dir(&self, step: &RunStep) -> PathBuf;
+    /// The step's own sub-workspace, relative to [`Self::dir`], or `None` when
+    /// it belongs to the root. Only its own inputs survive the nested-member
+    /// exclusion, so this says which member that is.
+    fn member(&self, step: &RunStep) -> Option<String>;
     /// The workspace it belongs to.
     fn workspace(&self, step: &RunStep) -> String;
 }
@@ -151,10 +155,12 @@ pub fn plan_graph(
             })
             .collect();
 
+        let member = context.member(step);
         let target = Target {
             name: step.name.clone(),
             workspace: workspace.clone(),
             dir: dir.clone(),
+            member: member.clone(),
             commands: commands_of(step),
             config: config.clone(),
             upstream: upstream.clone(),
@@ -181,7 +187,7 @@ pub fn plan_graph(
             unaccounted.insert(step.name.clone());
         }
 
-        let inputs = config.hash_inputs(&dir)?;
+        let inputs = config.hash_inputs(&dir, member.as_deref())?;
         let outputs = config.hash_outputs(&dir)?;
 
         // Downstream steps depend on what this one produced. On a hit that's
@@ -353,6 +359,10 @@ mod tests {
         fn dir(&self, _step: &RunStep) -> PathBuf {
             self.dir.clone()
         }
+
+        fn member(&self, _step: &RunStep) -> Option<String> {
+            None
+        }
         fn workspace(&self, _step: &RunStep) -> String {
             "api".to_string()
         }
@@ -371,6 +381,10 @@ mod tests {
         }
         fn dir(&self, _step: &RunStep) -> PathBuf {
             self.dir.clone()
+        }
+
+        fn member(&self, _step: &RunStep) -> Option<String> {
+            None
         }
         fn workspace(&self, _step: &RunStep) -> String {
             "api".to_string()
@@ -394,7 +408,7 @@ mod tests {
                 crate::cache::store::Build {
                     target: "build".into(),
                     workspace: "api".into(),
-                    inputs: config.hash_inputs(dir).unwrap(),
+                    inputs: config.hash_inputs(dir, None).unwrap(),
                     outputs: config.hash_outputs(dir).unwrap(),
                     env: BTreeMap::new(),
                     upstream: BTreeMap::new(),

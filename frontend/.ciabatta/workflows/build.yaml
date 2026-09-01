@@ -6,16 +6,17 @@ owner: Henry Forsyth
 requires:
   - yarn
 
+# Paths are relative to the workspace root, not to this directory.
 cache:
   enabled: true
   inputs:
-    - "src/**/*"
-    - "*.html"
-    - "public/**/*"
-    - "package.json"
-    - "vite.config.js"
+    - "frontend/src/**/*"
+    - "frontend/*.html"
+    - "frontend/public/**/*"
+    - "frontend/package.json"
+    - "frontend/vite.config.js"
   outputs:
-    - "dist/**/*"
+    - "frontend/dist/**/*"
 
 steps:
   - name: build

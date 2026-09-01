@@ -65,8 +65,12 @@ const SANDBOX_DIR: &str = ".ciabatta/.cache/authoritative";
 
 /// What one step declared, and where it really lives.
 struct Declared {
-    /// The real directory its `inputs`/`outputs` are relative to.
+    /// The real directory its `inputs`/`outputs` are relative to: the
+    /// workspace root, for every step.
     dir: PathBuf,
+    /// Its own sub-workspace, relative to `dir` — see
+    /// [`crate::cache::Target::member`].
+    member: Option<String>,
     config: CacheConfig,
 }
 
@@ -102,6 +106,7 @@ impl Isolation {
                     step.name.clone(),
                     Declared {
                         dir: context.dir(step),
+                        member: context.member(step),
                         config: context.cache_config(step),
                     },
                 )
@@ -143,10 +148,10 @@ impl Isolation {
                 .with_context(|| format!("Failed to clear {}", root.display()))?;
         }
 
-        // The sandbox mirrors the project root, not just the step's directory,
-        // so a relative path that leaves that directory still resolves. Steps
-        // reach sideways for shared files and upward to publish; a sandbox
-        // rooted at the step would turn both into "no such file".
+        // The sandbox mirrors the project root, which is what every declared
+        // path is relative to — so a step reaching sideways for a shared file
+        // or upward to publish finds it at the same relative place it sits in
+        // the real tree.
         let rel = declared
             .dir
             .strip_prefix(&self.root)
@@ -155,14 +160,14 @@ impl Isolation {
         std::fs::create_dir_all(&dir)
             .with_context(|| format!("Failed to create {}", dir.display()))?;
 
-        let inputs = config.list_inputs(&declared.dir)?;
+        let inputs = config.list_inputs(&declared.dir, declared.member.as_deref())?;
         let mut copied = 0usize;
         for input in &inputs {
             let from = declared.dir.join(&input.path);
             let to = dir.join(&input.path);
-            // `input.path` comes from a glob rooted at the step's directory, so
-            // it is already inside the tree — but it may legitimately begin
-            // `../`, and the result still has to land under the sandbox.
+            // Paths are root-relative and the matcher refuses any that escape,
+            // so this holds by construction — checked anyway, because what it
+            // is guarding is a write outside the sandbox.
             if !within(&root, &to) {
                 anyhow::bail!(
                     "input '{}' of step '{}' resolves outside the project root",
@@ -380,6 +385,10 @@ mod tests {
         fn dir(&self, _step: &RunStep) -> PathBuf {
             self.dir.clone()
         }
+
+        fn member(&self, _step: &RunStep) -> Option<String> {
+            None
+        }
         fn workspace(&self, _step: &RunStep) -> String {
             ".".to_string()
         }
@@ -428,11 +437,16 @@ mod tests {
         assert!(!sandbox.dir.join("undeclared.txt").exists());
     }
 
-    /// A path that reaches out of the step's directory has to keep working —
+    /// A step reading and writing outside its own package has to keep working —
     /// shared schemas are read that way and packaged output is written that
     /// way, and a sandbox that broke both would be unusable on a real repo.
+    ///
+    /// Paths are relative to the workspace root, so "outside its own package"
+    /// needs no `../`: the sibling is simply named from the root. That is what
+    /// makes the sandbox's containment check trivially true rather than a
+    /// judgement call about how far up a `../` chain is allowed to climb.
     #[test]
-    fn a_path_that_leaves_the_step_directory_still_resolves() {
+    fn a_step_reaching_into_a_sibling_package_still_resolves() {
         let root = scratch("sideways");
         let member = root.join("editors/vscode");
         std::fs::create_dir_all(root.join("editors/schemas")).unwrap();
@@ -441,10 +455,13 @@ mod tests {
         std::fs::write(member.join("main.ts"), "source").unwrap();
 
         let context = Fixed {
-            dir: member.clone(),
+            dir: root.clone(),
             config: CacheConfig {
-                inputs: vec!["main.ts".to_string(), "../schemas/*.json".to_string()],
-                outputs: vec!["../dist/out.vsix".to_string()],
+                inputs: vec![
+                    "editors/vscode/main.ts".to_string(),
+                    "editors/schemas/*.json".to_string(),
+                ],
+                outputs: vec!["editors/dist/out.vsix".to_string()],
                 ..Default::default()
             },
         };
@@ -453,12 +470,12 @@ mod tests {
         let sandbox = isolation.prepare(&steps[0]).unwrap().expect("sandboxed");
 
         assert_eq!(sandbox.staged, 2);
-        assert!(sandbox.dir.join("main.ts").is_file());
-        assert!(sandbox.dir.join("../schemas/a.json").is_file());
+        assert!(sandbox.dir.join("editors/vscode/main.ts").is_file());
+        assert!(sandbox.dir.join("editors/schemas/a.json").is_file());
 
         // The step "produces" its output, which must come back to the real tree.
-        std::fs::create_dir_all(sandbox.dir.join("../dist")).unwrap();
-        std::fs::write(sandbox.dir.join("../dist/out.vsix"), "packaged").unwrap();
+        std::fs::create_dir_all(sandbox.dir.join("editors/dist")).unwrap();
+        std::fs::write(sandbox.dir.join("editors/dist/out.vsix"), "packaged").unwrap();
         let collected = isolation.collect(sandbox).unwrap();
 
         assert_eq!(collected, 1);

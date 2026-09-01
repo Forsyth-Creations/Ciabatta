@@ -5,7 +5,7 @@
  * them all would be hopeless. Only the visible slice is ever in the DOM.
  */
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   Alert,
   Box,
@@ -83,13 +83,52 @@ export function WatchSessionPage() {
     overscan: 40,
   });
 
+  // `follow` is also read from a scroll handler, which fires far too often to
+  // wait for a re-render: by the time React had re-rendered with follow off,
+  // several more frames of output would have pinned the view back down.
+  const followRef = useRef(follow);
+  const setFollowing = (next: boolean) => {
+    followRef.current = next;
+    setFollow(next);
+  };
+
+  // Whether the viewport is at the bottom, within a line. Not an exact
+  // comparison: scrollHeight and scrollTop are fractional under browser zoom
+  // and on hidpi displays, so `=== 0` would be false at the bottom.
+  const atBottom = (el: HTMLElement) =>
+    el.scrollHeight - el.scrollTop - el.clientHeight <= LINE_HEIGHT;
+
+  // Follow is a fact about where the viewport is, not a gesture to intercept.
+  //
+  // It used to be turned off by an `onWheel` handler, which meant it only
+  // noticed a mouse wheel — dragging the scrollbar, PageUp, Home, arrow keys
+  // and touch scrolling all left it on, so the next line of output yanked the
+  // view straight back to the bottom. Deriving it from the scroll position
+  // instead covers every way there is to scroll, including ones that don't
+  // exist yet. A scroll we caused ourselves lands at the bottom and so reads
+  // as follow-on, which is what it already was: no need to tell the two apart.
+  const onScroll = () => {
+    const el = parentRef.current;
+    if (!el || searching) return;
+    const bottom = atBottom(el);
+    if (bottom !== followRef.current) setFollowing(bottom);
+  };
+
   // Stick to the bottom while following. Only while not searching — jumping the
   // view around under someone reading search results would be hostile.
-  useEffect(() => {
-    if (follow && !searching && rows.length > 0) {
-      virtualizer.scrollToIndex(rows.length - 1, { align: "end" });
-    }
-  }, [rows.length, follow, searching, virtualizer]);
+  //
+  // Setting scrollTop directly rather than going through the virtualizer:
+  // `scrollToIndex` schedules retries on later frames to land accurately on
+  // dynamically-sized rows, and with output arriving every frame there was
+  // always one in flight to undo the scroll the reader had just made. Rows here
+  // are a fixed LINE_HEIGHT, so the bottom is just the bottom. Layout effect, so
+  // it runs after the new rows are in the DOM but before the browser paints —
+  // no visible jump.
+  useLayoutEffect(() => {
+    const el = parentRef.current;
+    if (!el || !follow || searching || rows.length === 0) return;
+    el.scrollTop = el.scrollHeight;
+  }, [rows.length, follow, searching]);
 
   const addBookmark = useMutation({
     mutationFn: (line: LogLine) =>
@@ -182,7 +221,7 @@ export function WatchSessionPage() {
           size="small"
           variant={follow ? "contained" : "outlined"}
           startIcon={<VerticalAlignBottomIcon />}
-          onClick={() => setFollow((f) => !f)}
+          onClick={() => setFollowing(!follow)}
           disabled={searching}
         >
           Follow
@@ -201,8 +240,9 @@ export function WatchSessionPage() {
       <Box
         ref={parentRef}
         // Scrolling away from the bottom turns follow off, so reading history
-        // isn't fought by incoming output.
-        onWheel={(e) => e.deltaY < 0 && follow && !searching && setFollow(false)}
+        // isn't fought by incoming output — and scrolling back to the bottom
+        // turns it on again, which is the only thing anyone means by it.
+        onScroll={onScroll}
         sx={{
           flexGrow: 1,
           overflow: "auto",

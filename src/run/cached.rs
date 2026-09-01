@@ -231,6 +231,7 @@ impl Session {
         let context = self.context();
         let config = context.cache_config(step);
         let dir = context.dir(step);
+        let member = context.member(step);
         let workspace = context.workspace(step);
 
         let upstream: BTreeMap<String, String> = step
@@ -272,6 +273,7 @@ impl Session {
             name: step.name.clone(),
             workspace: workspace.clone(),
             dir: dir.clone(),
+            member: member.clone(),
             commands: crate::cache::graph::commands_of(step),
             config: config.clone(),
             upstream: upstream.clone(),
@@ -317,7 +319,7 @@ impl Session {
             }
         }
 
-        let inputs = config.hash_inputs(&dir)?;
+        let inputs = config.hash_inputs(&dir, member.as_deref())?;
         let env_declared = crate::cache::graph::declared_env(&config, &env_map);
 
         match decision {

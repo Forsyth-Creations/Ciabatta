@@ -15,23 +15,25 @@ owner: Henry Forsyth
 requires:
   - yarn
 
+# Paths are relative to the workspace root, not to this directory. That is what
+# lets the last output below be named plainly: `editors/dist/` is the one
+# directory `build.rs` embeds, so both editors' packaged output lands in it, and
+# reaching it from here used to take a `../` that the cache could not store.
 cache:
   enabled: true
   inputs:
-    - "src/**/*"
-    - "scripts/**/*"
-    - "package.json"
-    - "tsconfig.json"
-    - ".vscodeignore"
-    - "icon.png"
-    - "README.md"
-    - "../schemas/*.json"
+    - "editors/vscode/src/**/*"
+    - "editors/vscode/scripts/**/*"
+    - "editors/vscode/package.json"
+    - "editors/vscode/tsconfig.json"
+    - "editors/vscode/.vscodeignore"
+    - "editors/vscode/icon.png"
+    - "editors/vscode/README.md"
+    - "editors/schemas/*.json"
   outputs:
-    - "dist/**/*"
-    - "schemas/*.json"
-    # Outside the member on purpose: `editors/dist/` is the one directory
-    # `build.rs` embeds, so both editors' packaged output lands in it.
-    - "../dist/ciabatta-vscode.vsix"
+    - "editors/vscode/dist/**/*"
+    - "editors/vscode/schemas/*.json"
+    - "editors/dist/ciabatta-vscode.vsix"
 
 steps:
   - name: types

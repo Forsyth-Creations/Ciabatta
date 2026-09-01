@@ -18,13 +18,15 @@ use crate::config::CiabattaConfig;
 use crate::run::RunStep;
 use crate::workspace::Workspace;
 
-/// Resolves each step's cache settings and working directory from the
-/// monorepo it came from.
+/// Resolves each step's cache settings from the monorepo it came from.
 ///
 /// A compiled workflow graph carries the sub-workspace on every node, which is
 /// what lets one graph spanning four packages resolve four different `cache:`
 /// sections — the alternative, one cache config for the whole repo, would be
 /// wrong for every package but the first.
+///
+/// The *paths* in those four sections are another matter: they all resolve
+/// against the workspace root. See [`StepContext::dir`] below for why.
 pub struct WorkspaceContext<'a> {
     pub workspace: Option<&'a Workspace>,
     /// The project root, for steps with no sub-workspace of their own.
@@ -52,21 +54,34 @@ impl StepContext for WorkspaceContext<'_> {
         super::graph::effective(workspace_level.as_ref(), step.cache.as_ref())
     }
 
-    fn dir(&self, step: &RunStep) -> PathBuf {
-        // A workflow step runs in its own sub-workspace, and its inputs and
-        // outputs are written relative to that — the same paths somebody would
-        // type if they ran the script by hand.
-        if let Some(member) = step
-            .workspace
+    fn dir(&self, _step: &RunStep) -> PathBuf {
+        // The workspace root, for every step, whichever sub-workspace it came
+        // from. The cache is one thing per project — one store, one entry
+        // namespace, and one `cache.remote` read from the root — so one
+        // directory has to be what its paths mean, and the root is the only
+        // one every member can name a file through.
+        //
+        // Resolving against the member instead is what this used to do, and it
+        // forced any step reaching a sibling to write `../`. That `../`
+        // survived into the stored manifest, where joining it onto the entry's
+        // artifact directory walked back out of it: every key for that target
+        // wrote its output to the same shared path, so restoring one entry
+        // handed back another's file. The remote cache rejects such a path
+        // outright (`safe_relative`), so those steps could never be shared at
+        // all.
+        self.workspace
+            .map(|ws| ws.root.clone())
+            .unwrap_or_else(|| self.root.clone())
+    }
+
+    fn member(&self, step: &RunStep) -> Option<String> {
+        step.workspace
             .as_deref()
             .and_then(|name| self.workspace.and_then(|ws| ws.member(name)))
-        {
-            return member.dir.clone();
-        }
-        match step.cwd.as_deref() {
-            Some(cwd) => self.root.join(cwd),
-            None => self.root.clone(),
-        }
+            // The root member's `rel` is ".", which is not a subtree to keep
+            // out of anything.
+            .map(|member| member.rel.clone())
+            .filter(|rel| !rel.is_empty() && rel != ".")
     }
 
     fn workspace(&self, step: &RunStep) -> String {
@@ -270,34 +285,49 @@ const ALWAYS_EXCLUDE: &[&str] = &["node_modules", "target", ".git", "__pycache__
 /// a file the build reads produces a cache that confidently serves stale
 /// artifacts — so the proposal comes from the directory, and every entry says
 /// why it's there for the user to check.
-pub fn propose(dir: &Path) -> Proposal {
+/// Propose a cache config for `dir`, with every pattern written relative to the
+/// workspace root.
+///
+/// `dir` is still where the looking happens — a package's `src/` is found by
+/// looking in the package. `rel` is where that package sits in the monorepo, and
+/// every proposed pattern is prefixed with it, because that is the only spelling
+/// the cache resolves (see the [`crate::cache`] module docs). Scaffolding a
+/// member with the bare `src/**/*` it would once have got means a `cache:`
+/// section that matches nothing at all, which is the silent kind of wrong: a
+/// build keyed on an empty input set hits forever.
+pub fn propose_under(dir: &Path, rel: Option<&str>) -> Proposal {
+    let at = |pattern: &str| match rel {
+        Some(rel) if !rel.is_empty() && rel != "." => format!("{rel}/{pattern}"),
+        _ => pattern.to_string(),
+    };
+
     let mut inputs = Vec::new();
     let mut reasons = Vec::new();
 
     for (pattern, why) in INPUT_CANDIDATES {
         if matches_anything(dir, pattern) {
-            inputs.push((*pattern).to_string());
-            reasons.push(((*pattern).to_string(), *why));
+            inputs.push(at(pattern));
+            reasons.push((at(pattern), *why));
         }
     }
 
     let outputs: Vec<String> = OUTPUT_DIRS
         .iter()
         .filter(|(name, _)| dir.join(name).is_dir())
-        .map(|(name, _)| format!("{name}/**/*"))
+        .map(|(name, _)| at(&format!("{name}/**/*")))
         .collect();
 
     let exclude: Vec<String> = ALWAYS_EXCLUDE
         .iter()
         .filter(|name| dir.join(name).exists())
-        .map(|name| (*name).to_string())
+        .map(|name| at(name))
         // Anything proposed as an output must never also count as an input, or
         // every build would invalidate itself.
         .chain(
             OUTPUT_DIRS
                 .iter()
                 .filter(|(name, _)| dir.join(name).is_dir())
-                .map(|(name, _)| (*name).to_string()),
+                .map(|(name, _)| at(name)),
         )
         .collect();
 
@@ -338,6 +368,10 @@ impl Proposal {
         out.push_str("  # What this workflow reads and writes. Getting `inputs` right\n");
         out.push_str("  # is the part that matters: a build that reads a file not listed here\n");
         out.push_str("  # will be handed a stale result when that file changes.\n");
+        out.push_str("  #\n");
+        out.push_str("  # Paths are relative to the workspace root, not to this file's\n");
+        out.push_str("  # directory — one project is one cache, so one directory has to be\n");
+        out.push_str("  # what they mean. `ciabatta why <step>` lists what they matched.\n");
         out.push_str(&format!("  enabled: {enabled}\n"));
 
         out.push_str("  inputs:\n");
@@ -691,6 +725,114 @@ mod tests {
         std::fs::write(path, body).unwrap();
     }
 
+    /// Every step resolves its paths against the workspace root, whichever
+    /// sub-workspace it came from — and says which member it is, so its own
+    /// files survive the nested-workspace exclusion.
+    ///
+    /// This is the whole of the fix: resolving against the member instead made
+    /// any step reaching a sibling write `../`, and a `../` in a stored path
+    /// escapes the cache entry it belongs to.
+    #[test]
+    fn every_step_resolves_its_paths_against_the_workspace_root() {
+        let dir = scratch("rootrelative");
+        write(
+            &dir,
+            ".ciabatta/ciabatta.yaml",
+            "workspace:\n  name: repo\n",
+        );
+        write(
+            &dir,
+            "editors/vscode/.ciabatta/ciabatta.yaml",
+            "workspace:\n  name: vscode-extension\n",
+        );
+        write(&dir, "editors/vscode/src/main.ts", "export {}");
+
+        // `load`, not `discover`: discovery walks *up* from the directory given,
+        // and every test here shares one temp dir, so on a machine where the
+        // walk settles above this tree it scans a sibling test's fixture —
+        // including ones that are deliberately malformed. The rest of the
+        // workspace tests take the same route for the same reason.
+        let workspace = crate::workspace::Workspace::load(&dir).unwrap();
+        let config = CiabattaConfig::default();
+        let context = WorkspaceContext {
+            workspace: Some(&workspace),
+            root: dir.clone(),
+            config: &config,
+        };
+
+        let member_step = RunStep {
+            name: "package".to_string(),
+            workspace: Some("vscode-extension".to_string()),
+            ..Default::default()
+        };
+        let root_step = RunStep {
+            name: "binary".to_string(),
+            workspace: None,
+            ..Default::default()
+        };
+
+        // Not `editors/vscode` — the root, so `editors/dist/…` is nameable
+        // without climbing out of anything.
+        assert_eq!(context.dir(&member_step), workspace.root);
+        assert_eq!(context.dir(&root_step), workspace.root);
+
+        assert_eq!(
+            context.member(&member_step),
+            Some("editors/vscode".to_string())
+        );
+        // The root is not a subtree to keep out of its own inputs.
+        assert_eq!(context.member(&root_step), None);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `cache init` in a package proposes paths already rooted at the monorepo,
+    /// because the bare `src/**/*` it would once have written now matches
+    /// nothing — and a build keyed on an empty input set hits forever.
+    #[test]
+    fn a_proposal_for_a_member_is_written_from_the_root() {
+        let dir = scratch("proposeunder");
+        write(&dir, "src/main.rs", "fn main() {}");
+        write(&dir, "Cargo.toml", "[package]");
+        write(&dir, "dist/app", "built");
+        write(&dir, "node_modules/left-pad/index.js", "");
+
+        let proposal = propose_under(&dir, Some("packages/api"));
+
+        assert!(
+            proposal
+                .inputs
+                .contains(&"packages/api/src/**/*".to_string())
+        );
+        assert!(
+            proposal
+                .inputs
+                .contains(&"packages/api/Cargo.toml".to_string())
+        );
+        assert!(
+            proposal
+                .outputs
+                .contains(&"packages/api/dist/**/*".to_string())
+        );
+        // Excludes are matched against the same root-relative path, so they are
+        // prefixed too or they would stop excluding anything.
+        assert!(
+            proposal
+                .exclude
+                .contains(&"packages/api/node_modules".to_string())
+        );
+        // The reasons are keyed by the pattern actually written, or `cache init`
+        // would print every input with a blank explanation.
+        assert!(
+            proposal
+                .reasons
+                .iter()
+                .any(|(p, why)| p == "packages/api/src/**/*" && !why.is_empty())
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn the_proposal_comes_from_what_is_actually_in_the_directory() {
         let dir = scratch("propose");
@@ -701,7 +843,7 @@ mod tests {
         write(&dir, "dist/app", "built");
         write(&dir, "node_modules/left-pad/index.js", "");
 
-        let proposal = propose(&dir);
+        let proposal = propose_under(&dir, None);
         assert!(proposal.is_usable());
 
         assert!(proposal.inputs.contains(&"src/**/*".to_string()));
@@ -739,7 +881,7 @@ mod tests {
     #[test]
     fn an_empty_directory_proposes_nothing_usable_and_says_so_in_the_yaml() {
         let dir = scratch("empty");
-        let proposal = propose(&dir);
+        let proposal = propose_under(&dir, None);
         assert!(!proposal.is_usable());
 
         let yaml = proposal.to_yaml(false);
@@ -768,7 +910,7 @@ mod tests {
         write(&dir, "Cargo.toml", "[package]");
         write(&dir, "dist/app", "built");
 
-        let proposal = propose(&dir);
+        let proposal = propose_under(&dir, None);
         let block = format!("cache:\n{}", proposal.to_yaml(true));
         let workflow: crate::workspace::Workflow =
             crate::format::from_str(&block, crate::format::Format::Yaml)
@@ -801,7 +943,7 @@ mod tests {
         write(&dir, "src/main.rs", "fn main() {}");
         write(&dir, "dist/app", "built");
 
-        let proposal = propose(&dir);
+        let proposal = propose_under(&dir, None);
         let written = write_cache_section(&dir, "build", &proposal, true, None, false).unwrap();
         let path = written[0].clone();
         assert_eq!(
@@ -861,8 +1003,9 @@ mod tests {
         write(&dir, "src/main.rs", "fn main() {}");
         write(&dir, "dist/app", "built");
 
-        let written = write_cache_section(&dir, "build", &propose(&dir), true, None, false)
-            .expect("a step-level cache: must not block the workflow section");
+        let written =
+            write_cache_section(&dir, "build", &propose_under(&dir, None), true, None, false)
+                .expect("a step-level cache: must not block the workflow section");
 
         let workflow: crate::workspace::Workflow = crate::format::load(&written[0]).unwrap();
         assert!(workflow.cache.expect("workflow section written").is_on());
@@ -884,8 +1027,8 @@ mod tests {
         )
         .unwrap();
 
-        let err =
-            write_cache_section(&dir, "build", &propose(&dir), true, None, false).unwrap_err();
+        let err = write_cache_section(&dir, "build", &propose_under(&dir, None), true, None, false)
+            .unwrap_err();
         assert!(
             err.to_string().contains("No workflow called 'build'"),
             "{err}"
@@ -915,7 +1058,7 @@ mod tests {
         let written = write_cache_section(
             &dir,
             "build",
-            &propose(&dir),
+            &propose_under(&dir, None),
             true,
             Some("http://c:8380"),
             false,

@@ -145,14 +145,16 @@ pub fn collect_with(
 fn one(context: &WorkspaceContext<'_>, root: &Path, step: &RunStep, detail: Detail) -> TargetDeps {
     let cache = context.cache_config(step);
     let dir = context.dir(step);
+    let member = context.member(step);
 
     // Best-effort: a directory that can't be walked costs a count in a summary,
     // not the run itself.
-    let inputs = cache.list_inputs(&dir).unwrap_or_default();
+    let inputs = cache
+        .list_inputs(&dir, member.as_deref())
+        .unwrap_or_default();
     let outputs = cache.list_outputs(&dir).unwrap_or_default();
 
-    let mut exclude = cache.exclude.clone();
-    exclude.extend(crate::cache::nested_workspaces(&dir));
+    let mut exclude = cache.input_exclude(&dir, member.as_deref());
     exclude.sort();
     exclude.dedup();
 

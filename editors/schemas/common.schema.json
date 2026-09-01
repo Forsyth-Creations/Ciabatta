@@ -43,13 +43,13 @@
         },
         "inputs": {
           "type": "array",
-          "description": "Glob patterns for the files this build reads, relative to the workspace directory. A build that reads something not listed here will be handed a stale result.",
+          "description": "Glob patterns for the files this build reads, relative to the WORKSPACE ROOT — not to the sub-workspace this section is written in. A build that reads something not listed here will be handed a stale result.",
           "items": { "type": "string" },
           "examples": [["src/**/*.rs", "Cargo.toml", "Cargo.lock"]]
         },
         "outputs": {
           "type": "array",
-          "description": "Glob patterns for the files this build writes. These are what gets stored and restored on a cache hit.",
+          "description": "Glob patterns for the files this build writes, relative to the workspace root like `inputs`. These are what gets stored and restored on a cache hit.",
           "items": { "type": "string" },
           "examples": [["target/release/app", "dist/**/*"]]
         },
@@ -60,7 +60,7 @@
         },
         "exclude": {
           "type": "array",
-          "description": "Glob patterns never treated as inputs, even when `inputs` would match them. Build output living under a source tree is the usual case.",
+          "description": "Glob patterns never treated as inputs, even when `inputs` would match them, relative to the workspace root like `inputs`. Build output living under a source tree is the usual case.",
           "items": { "type": "string" },
           "examples": [[".git", "node_modules", "target"]]
         },

@@ -10,15 +10,16 @@ owner: Henry Forsyth
 requires:
   - cargo
 
+# Paths are relative to the workspace root, not to this directory.
 cache:
   enabled: true
   inputs:
-    - "src/**/*"
-    - "Cargo.toml"
-    - "Cargo.lock"
-    - "extension.toml"
+    - "editors/zed/src/**/*"
+    - "editors/zed/Cargo.toml"
+    - "editors/zed/Cargo.lock"
+    - "editors/zed/extension.toml"
   outputs:
-    - "target/wasm32-wasip1/release/zed_ciabatta.wasm"
+    - "editors/zed/target/wasm32-wasip1/release/zed_ciabatta.wasm"
 
 steps:
   - name: wasm

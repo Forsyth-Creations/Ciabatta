@@ -2491,7 +2491,16 @@ fn cmd_cache(subcommand: CacheCommand) -> Result<()> {
             force,
         } => {
             let workflow = resolve_cache_workflow(&root, workflow.as_deref())?;
-            let proposal = cache::cli::propose(&root);
+            // Look in this package, but write the patterns relative to the
+            // monorepo root — that is what the cache resolves them against.
+            let workspace_root =
+                workspace::find_workspace_root(&cwd).unwrap_or_else(|| root.clone());
+            let rel = root
+                .strip_prefix(&workspace_root)
+                .ok()
+                .map(|rel| rel.to_string_lossy().replace('\\', "/"))
+                .filter(|rel| !rel.is_empty());
+            let proposal = cache::cli::propose_under(&root, rel.as_deref());
 
             println!("Looking at {} …\n", root.display());
             if proposal.inputs.is_empty() {

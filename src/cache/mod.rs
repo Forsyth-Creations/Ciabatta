@@ -26,6 +26,14 @@
 //!   why [`ciabatta dry-run`] exists, and why `cache init` scaffolds `inputs`
 //!   from what's actually in the directory instead of leaving it empty.
 //!
+//! * **Every path is relative to the workspace root.** Not to the
+//!   sub-workspace a step came from — to the root, the same place `cache.remote`
+//!   is configured. One project is one cache, so one directory has to be what
+//!   its paths mean; anything else needs `../` to reach a sibling, and a `../`
+//!   in a stored path escapes the entry it belongs to and collides with every
+//!   other entry for that target. So `tool_frontend/dist/**/*`, never `dist/**/*`
+//!   written inside `tool_frontend`.
+//!
 //! [`ciabatta dry-run`]: crate::cache::plan
 
 pub mod cli;
@@ -36,7 +44,7 @@ pub mod store;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -65,9 +73,10 @@ pub struct CacheConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub enabled: Option<bool>,
 
-    /// Glob patterns for the files a build reads, relative to the workspace
-    /// directory. Changing any of them changes the key, and so forces a
-    /// rebuild.
+    /// Glob patterns for the files a build reads, relative to the **workspace
+    /// root** — not to the sub-workspace the step came from, even when the
+    /// `cache:` section is written there. Changing any of them changes the key,
+    /// and so forces a rebuild.
     ///
     /// A build that reads something not listed here will be handed a stale
     /// result. `ciabatta cache init` scaffolds these from the directory's real
@@ -76,9 +85,9 @@ pub struct CacheConfig {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub inputs: Vec<String>,
 
-    /// Glob patterns for the files a build writes. These are what gets stored
-    /// and restored on a hit, and what's verified against the manifest before a
-    /// hit is granted.
+    /// Glob patterns for the files a build writes, relative to the workspace
+    /// root like [`Self::inputs`]. These are what gets stored and restored on a
+    /// hit, and what's verified against the manifest before a hit is granted.
     #[serde(default)]
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub outputs: Vec<String>,
@@ -207,20 +216,26 @@ impl CacheConfig {
     /// `exclude: dist`), applying it to outputs as well would erase them and
     /// quietly turn caching off. Hence two named methods rather than one
     /// function with a flag.
-    /// A sub-workspace's files are never a super-workspace's inputs: see
-    /// [`nested_workspaces`].
-    pub fn hash_inputs(&self, dir: &Path) -> Result<Vec<FileHash>> {
-        let mut exclude = self.exclude.clone();
-        exclude.extend(nested_workspaces(dir));
-        hash_matching(dir, &self.inputs, &exclude)
+    /// Another sub-workspace's files are never this build's inputs: see
+    /// [`nested_workspaces_except`]. `own` is the step's own sub-workspace,
+    /// relative to `dir` — the one member whose files it is precisely the
+    /// point of this build to read. `None` for a step belonging to the root.
+    pub fn hash_inputs(&self, dir: &Path, own: Option<&str>) -> Result<Vec<FileHash>> {
+        hash_matching(dir, &self.inputs, &self.input_exclude(dir, own))
     }
 
     /// The files this build reads, listed but not hashed — see
     /// [`list_matching`].
-    pub fn list_inputs(&self, dir: &Path) -> Result<Vec<FileHash>> {
+    pub fn list_inputs(&self, dir: &Path, own: Option<&str>) -> Result<Vec<FileHash>> {
+        list_matching(dir, &self.inputs, &self.input_exclude(dir, own))
+    }
+
+    /// What is kept out of this build's inputs: what it declared, plus every
+    /// sub-workspace that owns its own cache entry.
+    pub fn input_exclude(&self, dir: &Path, own: Option<&str>) -> Vec<String> {
         let mut exclude = self.exclude.clone();
-        exclude.extend(nested_workspaces(dir));
-        list_matching(dir, &self.inputs, &exclude)
+        exclude.extend(nested_workspaces_except(dir, own));
+        exclude
     }
 
     /// The files this build writes, listed but not hashed.
@@ -270,9 +285,19 @@ impl CacheConfig {
 /// A member can still opt back in by naming files under it explicitly: exclude
 /// patterns are matched against the relative path, so `inputs` reaching into a
 /// nested workspace loses only what that workspace already owns.
-pub fn nested_workspaces(dir: &Path) -> Vec<String> {
+///
+/// `own` is the exception: the member whose build this is. Every path is
+/// relative to the workspace root, so a member's own step names its own files
+/// through the root — `tool_frontend:build` declares
+/// `tool_frontend/src/**/*`. Excluding every member from every step would
+/// therefore exclude that step's entire reason for existing, leaving it keyed
+/// on nothing and hitting forever — the exact failure this auto-exclusion was
+/// written to prevent, aimed at the wrong target. So `own` is kept in, and the
+/// scan descends *through* it to exclude what is nested below it. Everybody
+/// else's subtree is still somebody else's entry.
+pub fn nested_workspaces_except(dir: &Path, own: Option<&str>) -> Vec<String> {
     let mut found = Vec::new();
-    collect_nested(dir, dir, 0, &mut found);
+    collect_nested(dir, dir, own, 0, &mut found);
     found
 }
 
@@ -280,7 +305,13 @@ pub fn nested_workspaces(dir: &Path) -> Vec<String> {
 /// own limit, so the two agree about what counts as a member.
 const MAX_NEST_DEPTH: usize = 6;
 
-fn collect_nested(root: &Path, dir: &Path, depth: usize, found: &mut Vec<String>) {
+fn collect_nested(
+    root: &Path,
+    dir: &Path,
+    own: Option<&str>,
+    depth: usize,
+    found: &mut Vec<String>,
+) {
     if depth >= MAX_NEST_DEPTH {
         return;
     }
@@ -299,14 +330,24 @@ fn collect_nested(root: &Path, dir: &Path, depth: usize, found: &mut Vec<String>
         if name.starts_with('.') || SKIP_SCAN_DIRS.contains(&name.as_ref()) {
             continue;
         }
+        let rel = path
+            .strip_prefix(root)
+            .ok()
+            .map(|rel| rel.to_string_lossy().replace('\\', "/"));
         if path.join(crate::config::CIABATTA_DIR).is_dir() {
-            if let Ok(rel) = path.strip_prefix(root) {
-                found.push(rel.to_string_lossy().replace('\\', "/"));
+            // The step's own member: its files are what this build reads, so
+            // keep them, and carry on down to exclude anything nested inside it.
+            if rel.as_deref() == own {
+                collect_nested(root, &path, own, depth + 1, found);
+                continue;
+            }
+            if let Some(rel) = rel {
+                found.push(rel);
             }
             // Stop here: whatever is below belongs to this member, not to us.
             continue;
         }
-        collect_nested(root, &path, depth + 1, found);
+        collect_nested(root, &path, own, depth + 1, found);
     }
 }
 
@@ -329,8 +370,10 @@ const SKIP_SCAN_DIRS: &[&str] = &[
 /// One file's contribution to a key or a manifest: where it is and what's in it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FileHash {
-    /// Path relative to the workspace directory, with `/` separators so a key
-    /// computed on Windows matches one computed on Linux.
+    /// Path relative to the workspace root, with `/` separators so a key
+    /// computed on Windows matches one computed on Linux. Never begins `../`:
+    /// the matcher refuses a pattern that reaches outside the root, because
+    /// such a path escapes the artifact directory it is stored under.
     pub path: String,
     /// Hex SHA-256 of the file's contents.
     ///
@@ -451,6 +494,20 @@ fn collect_into(
     // An empty `rel` is `dir` itself — what `inputs: [.]` resolves to. It is a
     // directory to walk, never a file to hash.
     let rel = rel.to_string_lossy().replace('\\', "/");
+    // `strip_prefix` is lexical, so `dir/../sibling` strips to `../sibling`
+    // rather than failing. Such a path is stored in the manifest and then
+    // joined onto the entry's artifact directory, where it escapes into a
+    // location every other key for the same target also writes to — one entry
+    // silently overwriting another's outputs. The remote refuses it outright.
+    // Nothing needs it now that paths are relative to the workspace root.
+    if rel.starts_with("../") || rel == ".." {
+        bail!(
+            "cache path '{rel}' reaches outside {} — write it relative to the \
+             workspace root instead (that is where `cache.remote` lives, so it \
+             is what every cached path is resolved against)",
+            dir.display(),
+        );
+    }
     if !rel.is_empty() && is_excluded(&rel, dir, exclude) {
         return Ok(());
     }
@@ -576,7 +633,11 @@ pub fn fingerprint(outputs: &[FileHash]) -> String {
 ///
 /// 2: build features joined the key. An entry stored by an earlier ciabatta
 /// can't say which features produced it, so it is missed rather than trusted.
-pub const KEY_VERSION: u32 = 2;
+///
+/// 3: input and output paths became relative to the workspace root rather than
+/// to the sub-workspace. The same file is spelled differently now, so a v2
+/// entry's manifest would be read against the wrong directory.
+pub const KEY_VERSION: u32 = 3;
 
 impl KeyInputs {
     /// The cache key: hex SHA-256 of the canonical JSON encoding.
@@ -773,8 +834,13 @@ pub struct Target {
     pub name: String,
     /// The workspace the build belongs to.
     pub workspace: String,
-    /// The directory `inputs`/`outputs` are relative to.
+    /// The workspace root. Every `inputs`/`outputs` path is relative to it —
+    /// see the module docs on why it is the root and not the member's own
+    /// directory.
     pub dir: PathBuf,
+    /// The step's own sub-workspace, relative to `dir`, so its files are not
+    /// excluded from its own inputs. `None` for a step belonging to the root.
+    pub member: Option<String>,
     /// The commands the build runs, folded into the key.
     pub commands: Vec<String>,
     /// The cache settings in force for it.
@@ -802,7 +868,9 @@ pub fn plan(
         });
     }
 
-    let inputs = target.config.hash_inputs(&target.dir)?;
+    let inputs = target
+        .config
+        .hash_inputs(&target.dir, target.member.as_deref())?;
     let key_inputs = KeyInputs {
         version: KEY_VERSION,
         target: target.name.clone(),
@@ -956,14 +1024,17 @@ mod tests {
         write(&dir, "packages/api/nested/deep.rs", "// still the api's");
         write(&dir, "packages/loose/notes.md", "not a workspace");
 
-        assert_eq!(nested_workspaces(&dir), vec!["packages/api".to_string()]);
+        assert_eq!(
+            nested_workspaces_except(&dir, None),
+            vec!["packages/api".to_string()]
+        );
 
         let config = CacheConfig {
             enabled: Some(true),
             inputs: vec![".".to_string()],
             ..Default::default()
         };
-        let inputs = config.hash_inputs(&dir).unwrap();
+        let inputs = config.hash_inputs(&dir, None).unwrap();
         let paths: Vec<&str> = inputs.iter().map(|f| f.path.as_str()).collect();
 
         assert!(paths.contains(&"tools/shared.sh"));
@@ -983,6 +1054,87 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(producing.hash_outputs(&dir).unwrap().len(), 1);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The member's *own* build is the exception to that exclusion.
+    ///
+    /// Its inputs are named through the root (`packages/api/src/**/*`), so
+    /// excluding every member from every step would exclude the step's entire
+    /// reason for existing — leaving it keyed on nothing, which hits forever.
+    #[test]
+    fn a_members_own_files_survive_the_nested_workspace_exclusion() {
+        let dir = scratch("ownmember");
+        write(
+            &dir,
+            "packages/api/.ciabatta/ciabatta.yaml",
+            "workspace:\n  name: api\n",
+        );
+        write(
+            &dir,
+            "packages/web/.ciabatta/ciabatta.yaml",
+            "workspace:\n  name: web\n",
+        );
+        write(&dir, "packages/api/src/main.rs", "fn main() {}");
+        write(&dir, "packages/web/src/app.ts", "export {}");
+
+        // Everyone but the api is still somebody else's entry.
+        assert_eq!(
+            nested_workspaces_except(&dir, Some("packages/api")),
+            vec!["packages/web".to_string()]
+        );
+
+        let config = CacheConfig {
+            enabled: Some(true),
+            inputs: vec!["packages/api/src/**/*".to_string()],
+            ..Default::default()
+        };
+        let paths: Vec<String> = config
+            .hash_inputs(&dir, Some("packages/api"))
+            .unwrap()
+            .into_iter()
+            .map(|f| f.path)
+            .collect();
+        assert_eq!(paths, vec!["packages/api/src/main.rs".to_string()]);
+
+        // Without it, the same declaration matches nothing at all — the silent
+        // failure this exists to prevent.
+        assert!(config.hash_inputs(&dir, None).unwrap().is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A path that climbs out of the workspace root is refused.
+    ///
+    /// `strip_prefix` is lexical, so `root/../sibling` used to strip to
+    /// `../sibling` and be stored in the manifest verbatim. Joining that onto
+    /// the entry's artifact directory walked back out of it, so every key for
+    /// that target wrote its output to one shared location and restoring one
+    /// entry handed back another's file. The remote cache rejects such a path
+    /// outright, so those steps could never be shared at all.
+    #[test]
+    fn a_pattern_climbing_out_of_the_root_is_refused_not_stored() {
+        let dir = scratch("escape");
+        write(&dir, "workspace/src/main.rs", "fn main() {}");
+        write(&dir, "outside/secret.txt", "not ours");
+
+        let root = dir.join("workspace");
+        let err = hash_matching(&root, &["../outside/*.txt".to_string()], &[])
+            .expect_err("a path leaving the root must not be silently stored");
+        let message = format!("{err:#}");
+        assert!(
+            message.contains("reaches outside"),
+            "the error has to name the problem: {message}"
+        );
+
+        // And the ordinary case is untouched.
+        assert_eq!(
+            hash_matching(&root, &["src/**/*".to_string()], &[])
+                .unwrap()
+                .len(),
+            1
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1079,7 +1231,7 @@ mod tests {
             ..Default::default()
         };
 
-        let inputs = config.hash_inputs(&dir).unwrap();
+        let inputs = config.hash_inputs(&dir, None).unwrap();
         assert_eq!(
             inputs.iter().map(|f| f.path.as_str()).collect::<Vec<_>>(),
             vec!["src/main.rs"],
@@ -1149,6 +1301,7 @@ mod tests {
             name: "build".into(),
             workspace: "api".into(),
             dir: work.clone(),
+            member: None,
             commands: vec!["make".into()],
             config: CacheConfig {
                 enabled: Some(true),
@@ -1264,6 +1417,7 @@ mod tests {
             name: "build".into(),
             workspace: "api".into(),
             dir: work.clone(),
+            member: None,
             commands: vec!["make".into()],
             config: CacheConfig {
                 enabled: Some(true),
@@ -1337,6 +1491,7 @@ mod tests {
             name: "build".into(),
             workspace: "api".into(),
             dir: work.clone(),
+            member: None,
             commands: vec!["make".into()],
             config: CacheConfig {
                 enabled: Some(true),

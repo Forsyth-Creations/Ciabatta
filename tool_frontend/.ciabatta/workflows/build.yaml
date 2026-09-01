@@ -18,10 +18,14 @@ requires: []
 # REQUIRED_ENV: [API_TOKEN]   # refuse to start unless these are set
 # env_file: .env              # sourced before the run
 
+# Paths are relative to the workspace root, not to this directory — the cache
+# is one thing per project (one store, one `cache.remote`), so one directory has
+# to be what its paths mean. `ciabatta why tool_frontend:build` lists what these
+# actually matched.
 cache:
   enabled: true
-  inputs:  ["src/**/*", "package.json"]
-  outputs: ["dist/**/*"]
+  inputs:  ["tool_frontend/src/**/*", "tool_frontend/package.json"]
+  outputs: ["tool_frontend/dist/**/*"]
 
 steps:
   - name: build

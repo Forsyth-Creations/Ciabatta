@@ -787,9 +787,12 @@ gave them no way to say so.
 # packages/api/.ciabatta/workflows/build.yaml
 cache:
   enabled: true
-  inputs:  ["src/**/*", "Cargo.toml"]   # what the build READS
-  outputs: ["target/release/app"]       # what the build WRITES
-  exclude: [target]                     # never counted as an input, so a build
+  # Paths are relative to the WORKSPACE ROOT, not to this file — note the
+  # `packages/api/` on each one. See below for why.
+  inputs:  ["packages/api/src/**/*",     # what the build READS
+            "packages/api/Cargo.toml"]
+  outputs: ["packages/api/target/release/app"]   # what the build WRITES
+  exclude: [packages/api/target]        # never counted as an input, so a build
                                         # can't invalidate itself with its own
                                         # output
   env: [PROFILE]                        # variables the RESULT depends on
@@ -798,6 +801,19 @@ steps:
   - name: compile
     run: cargo build --release
 ```
+
+**Every path is relative to the workspace root**, wherever the `cache:` section
+is written. One project is one cache — one store, one entry namespace, and one
+`cache.remote`, which is read from the root — so one directory has to be what
+those paths mean. Resolving them against each package instead would leave any
+step reaching a sibling to spell it `../`, and a `../` in a stored path walks
+back out of the cache entry it belongs to: every entry for that target ends up
+writing its output to the same shared location, and restoring one hands back
+another's file. `ciabatta why <step>` lists what a section actually matched,
+which is the fastest way to check you got the prefix right.
+
+`ciabatta cache init` writes the prefix for you — run it in the package and it
+proposes paths already rooted correctly.
 
 A step can narrow it further with its own `cache:`, layered over the workflow's
 field by field — so a step that declares only `env:` keeps the workflow's inputs

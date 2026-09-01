@@ -151,6 +151,17 @@ pub fn into_run(graph: WorkflowGraph) -> Result<crate::run::ResolvedRun> {
     let mut steps = graph.steps;
     resolve_transfer_refs(&mut steps)?;
     crate::run::validate_flowchart(&steps, &label)?;
+    // The units come along: once the graph is flattened into steps, which
+    // package's `build` a given step came from is recoverable but which
+    // *workflows took part* is not, and that is what a run has to write down.
+    let units = graph
+        .units
+        .iter()
+        .map(|unit| crate::run::Unit {
+            workspace: unit.member.clone(),
+            workflow: unit.workflow.clone(),
+        })
+        .collect();
     Ok(crate::run::ResolvedRun {
         login: None,
         pre: None,
@@ -158,6 +169,7 @@ pub fn into_run(graph: WorkflowGraph) -> Result<crate::run::ResolvedRun> {
         required_env: graph.required_env,
         env_files: graph.env_files,
         steps: crate::run::topo_order(&steps),
+        units,
     })
 }
 

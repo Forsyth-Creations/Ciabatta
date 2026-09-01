@@ -1283,6 +1283,49 @@ ciabatta run test --filter tag:fast --filter tag:smoke   # either one`}</Pre>
           graph the same way <C>ciabatta build</C> does, so the UI and the CLI can&apos;t disagree
           about what executes.
         </P>
+
+        <SubHeading>Stale workflows</SubHeading>
+        <P>
+          A repository records everything about a workflow except the one thing that says whether it
+          still works: when anybody last ran it. So somebody adds <C>deploy-staging</C>, the staging
+          environment goes away, and the workflow stays — listed, documented, apparently a thing you
+          could run, and broken in a way nobody discovers until they try.
+        </P>
+        <P>
+          Every run writes down what it ran, how it went and how long it took, and each workflow
+          here carries a chip saying when it last ran. Anything past{" "}
+          <C>workspace.stale_after</C> in the root config (30 days by default) is flagged{" "}
+          <strong>stale</strong>. <C>ciabatta list</C> shows the same thing and names them all at
+          the end.
+        </P>
+        <Alert severity="info" sx={{ mb: 2, maxWidth: "78ch" }}>
+          <strong>&ldquo;Never run&rdquo; is not the same as stale</strong>, and is deliberately not
+          styled like a verdict. The history is per checkout and not committed — it is observation,
+          not configuration, and a file every run rewrites would conflict on every merge — so a
+          fresh clone starts out knowing nothing. That is an absence of evidence, not evidence the
+          workflow is dead.
+        </Alert>
+        <P>
+          Which is why it is shared. When the project has a{" "}
+          <a href="#remote-cache">remote cache</a>, each run reports what it ran and takes back what
+          everyone else has run, so the answer is &ldquo;when did <em>anyone</em> last run
+          this&rdquo; rather than &ldquo;when did I&rdquo;. A workflow you have not touched since
+          March may be the one CI runs hourly; one nobody anywhere has run since March is the one
+          worth deleting. Both directions happen at the end of a run, so reading this page never
+          waits on the network — a cache that is down costs you a stale picture, not a slow page.
+        </P>
+        <P>
+          The server sees every project at once, which no single checkout can. Its own{" "}
+          <C>stale_after</C> — a cache serving five teams may want to hear about a quarter of
+          silence where one team calls a fortnight stale — decides what it reports:
+        </P>
+        <Pre>{`$ ciabatta remote-cache status
+
+Projects:
+  api        3f2a…   412 hit / 38 miss  ·  2 stale workflow(s)
+
+Workflows: 24 tracked, 3 not run by anyone in over 30d
+  api        api:deploy-staging       94 days ago  (7 run(s) ever)`}</Pre>
       </>
     ),
   },

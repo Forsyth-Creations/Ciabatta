@@ -112,6 +112,19 @@ async fn catalogue(
     let root = state.project_root(&query.project)?;
     let workspace = Workspace::discover(&root).map_err(RouteError::bad_request)?;
 
+    // Read off disk, never over the network: the shared picture was merged in
+    // the last time this checkout ran anything, so opening this page can't hang
+    // on a cache server that happens to be down.
+    let history = crate::run::history::History::load(&workspace.root);
+    let stale_after = crate::config::load_config(&workspace.root)
+        .map(|config| crate::run::history::stale_after(&config))
+        .unwrap_or_else(|_| {
+            std::time::Duration::from_secs(
+                crate::cache::store::parse_duration(crate::run::history::DEFAULT_STALE_AFTER)
+                    .unwrap_or(30 * 24 * 60 * 60) as u64,
+            )
+        });
+
     let members: Vec<Value> = workspace
         .members
         .iter()
@@ -129,6 +142,7 @@ async fn catalogue(
                         "tags": workflow.tags,
                         "required_env": workflow.required_env,
                         "steps": workflow.steps.iter().map(step_json).collect::<Vec<_>>(),
+                        "history": history_json(&history, &member.name, name, stale_after),
                     })
                 })
                 .collect();
@@ -269,6 +283,31 @@ async fn graph(
 /// `env` is what the step sets for itself and `env_refs` what it reads: a step
 /// depends on its variables every bit as much as on the steps before it, and
 /// the graph draws both.
+/// One workflow's run history, or `null` where there is none.
+///
+/// Null rather than a zeroed record on purpose: "never run here" is a different
+/// answer from "run once, ages ago", and collapsing them would have the web app
+/// report a fresh checkout as a repository full of stale workflows.
+fn history_json(
+    history: &crate::run::history::History,
+    member: &str,
+    workflow: &str,
+    stale_after: std::time::Duration,
+) -> Value {
+    match history.get(member, workflow) {
+        Some(record) => json!({
+            "last_run_at": record.last_run_at,
+            "last_outcome": record.last_outcome.label(),
+            "last_duration_ms": record.last_duration_ms,
+            "days_since": record.days_since(),
+            "runs": record.runs,
+            "failures": record.failures,
+            "stale": record.is_stale(stale_after),
+        }),
+        None => Value::Null,
+    }
+}
+
 fn step_json(step: &crate::run::RunStep) -> Value {
     let env: serde_json::Map<String, Value> = step
         .env

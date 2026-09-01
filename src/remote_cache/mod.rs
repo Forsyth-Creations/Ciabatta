@@ -35,6 +35,7 @@ pub mod projects;
 pub mod releases;
 pub mod server;
 pub mod users;
+pub mod workflows;
 
 use std::path::{Path, PathBuf};
 
@@ -72,6 +73,17 @@ pub struct ServerConfig {
     /// What the server writes to its log for each request it handles.
     #[serde(default)]
     pub log: LogConfig,
+
+    /// How long a workflow may go unrun before this server calls it stale
+    /// (`"30d"`, `"90d"`).
+    ///
+    /// The server's own threshold, not its clients'. A team can decide a
+    /// workflow is stale after a fortnight while the cache serving five teams
+    /// only wants to hear about a quarter of silence — and the server is
+    /// answering a different question from any one checkout: not "have I run
+    /// this lately" but "has anybody".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stale_after: Option<String>,
 }
 
 /// How much the server says about the traffic it serves.
@@ -165,6 +177,23 @@ impl Default for Listen {
 }
 
 impl ServerConfig {
+    /// The staleness threshold, as configured or defaulted.
+    pub fn staleness(&self) -> std::time::Duration {
+        let raw = self.staleness_raw();
+        let seconds = crate::cache::store::parse_duration(&raw).unwrap_or_else(|_| {
+            crate::cache::store::parse_duration(crate::run::history::DEFAULT_STALE_AFTER)
+                .expect("the default is a valid duration")
+        });
+        std::time::Duration::from_secs(seconds.max(0) as u64)
+    }
+
+    /// The threshold as written, for saying what it is.
+    pub fn staleness_raw(&self) -> String {
+        self.stale_after
+            .clone()
+            .unwrap_or_else(|| crate::run::history::DEFAULT_STALE_AFTER.to_string())
+    }
+
     /// Load a server config, resolving `storage` relative to the config file so
     /// a server can be started from any working directory.
     pub fn load(path: &Path) -> Result<(Self, PathBuf)> {

@@ -116,6 +116,42 @@ fn badges(step: &RunStep) -> Option<String> {
     }
 }
 
+/// One workflow's "when did this last run", phrased for a person.
+///
+/// Three distinct answers, kept distinct on purpose. **Never run here** is not
+/// evidence of anything — a fresh checkout has no history and a colleague may
+/// run it hourly — so it must not read like a verdict. **Stale** is the verdict.
+/// Anything else is just a fact about a workflow that is plainly in use.
+fn last_run(
+    history: &crate::run::history::History,
+    member: &str,
+    workflow: &str,
+    stale_after: std::time::Duration,
+) -> String {
+    let Some(record) = history.get(member, workflow) else {
+        return "last run: never run here (no history for it on this machine)".to_string();
+    };
+
+    let when = match record.days_since() {
+        Some(0) => "today".to_string(),
+        Some(1) => "yesterday".to_string(),
+        Some(days) if days > 0 => format!("{days} days ago"),
+        // A record from the future is a clock disagreement, not a lie worth
+        // arithmetic. Show the timestamp and let the reader judge.
+        _ => record.last_run_at.clone(),
+    };
+
+    let mut line = format!(
+        "last run: {when} ({}, {} run(s))",
+        record.last_outcome.label(),
+        record.runs
+    );
+    if record.is_stale(stale_after) {
+        line.push_str("  ← STALE");
+    }
+    line
+}
+
 /// The whole monorepo's catalogue: every sub-workspace, its workflows, and
 /// their steps — with descriptions and owners, so nobody has to open a script
 /// to learn what it does.
@@ -123,7 +159,13 @@ fn badges(step: &RunStep) -> Option<String> {
 /// `search` filters to entries matching the term anywhere that matters (names,
 /// descriptions, owners, tags, commands); a sub-workspace with no surviving
 /// workflow is dropped entirely.
-pub fn catalogue(workspace: &Workspace, search: Option<&str>, verbose: bool) -> String {
+pub fn catalogue(
+    workspace: &Workspace,
+    search: Option<&str>,
+    verbose: bool,
+    history: &crate::run::history::History,
+    stale_after: std::time::Duration,
+) -> String {
     let needle = search.map(|s| s.to_lowercase());
     let mut out = String::new();
     let mut shown = 0usize;
@@ -194,6 +236,11 @@ pub fn catalogue(workspace: &Workspace, search: Option<&str>, verbose: bool) -> 
                 "    {:<16} run: ciabatta {name} --only {}\n",
                 "", member.name
             ));
+            out.push_str(&format!(
+                "    {:<16} {}\n",
+                "",
+                last_run(history, &member.name, name, stale_after)
+            ));
             if verbose {
                 for step in &workflow.steps {
                     out.push_str(&format!(
@@ -223,9 +270,47 @@ pub fn catalogue(workspace: &Workspace, search: Option<&str>, verbose: bool) -> 
             "\n{shown} workflow(s). Run one across the whole workspace with `ciabatta <workflow>`,\n\
              or see the graph first with `ciabatta <workflow> --graph`.\n"
         ));
+
+        // Named, not just counted. "3 stale workflows" sends somebody hunting
+        // through the list above; naming them is the difference between a
+        // number and something to act on.
+        let stale: Vec<&crate::run::history::Record> = history
+            .records()
+            .into_iter()
+            .filter(|record| record.is_stale(stale_after))
+            .collect();
+        if !stale.is_empty() {
+            out.push_str(&format!(
+                "\n{} workflow(s) not run in over {}:\n",
+                stale.len(),
+                humanize(stale_after)
+            ));
+            for record in stale {
+                out.push_str(&format!(
+                    "  {:<28} {} days ago\n",
+                    record.id(),
+                    record.days_since().unwrap_or_default()
+                ));
+            }
+            out.push_str(
+                "Each is either worth running or worth deleting — a workflow nobody runs is\n\
+                 one nobody has noticed is broken.\n",
+            );
+        }
     }
 
     out
+}
+
+/// A duration as somebody would have written it in the config.
+fn humanize(d: std::time::Duration) -> String {
+    let secs = d.as_secs();
+    match (secs / 86_400, secs / 3600) {
+        (0, 0) => format!("{secs}s"),
+        (0, hours) => format!("{hours}h"),
+        (1, _) => "a day".to_string(),
+        (days, _) => format!("{days} days"),
+    }
 }
 
 /// Every workflow name in the monorepo with the sub-workspaces that define it —
@@ -362,6 +447,16 @@ mod tests {
         (root, ws)
     }
 
+    /// No history: what a fresh checkout has, and the state most of these
+    /// assertions are indifferent to.
+    fn empty_history() -> crate::run::history::History {
+        crate::run::history::History::default()
+    }
+
+    fn month() -> std::time::Duration {
+        std::time::Duration::from_secs(30 * 24 * 60 * 60)
+    }
+
     #[test]
     fn the_graph_labels_every_node_with_its_sub_workspace() {
         let (root, ws) = sample("graph");
@@ -385,7 +480,7 @@ mod tests {
     #[test]
     fn the_catalogue_lists_owners_and_descriptions() {
         let (root, ws) = sample("catalogue");
-        let text = catalogue(&ws, None, true);
+        let text = catalogue(&ws, None, true, &empty_history(), month());
         assert!(text.contains("▪ api  (packages/api)"));
         assert!(text.contains("owner: Ada"));
         assert!(text.contains("Build the API"));
@@ -400,17 +495,17 @@ mod tests {
         let (root, ws) = sample("search");
 
         // Matches a workflow description.
-        let text = catalogue(&ws, Some("stubs"), false);
+        let text = catalogue(&ws, Some("stubs"), false, &empty_history(), month());
         assert!(text.contains("proto"));
         assert!(!text.contains("Build the API"));
 
         // Matches an owner.
-        let text = catalogue(&ws, Some("ada"), false);
+        let text = catalogue(&ws, Some("ada"), false, &empty_history(), month());
         assert!(text.contains("api"));
         assert!(!text.contains("Generate stubs"));
 
         // Matches nothing.
-        let text = catalogue(&ws, Some("kubernetes"), false);
+        let text = catalogue(&ws, Some("kubernetes"), false, &empty_history(), month());
         assert!(text.contains("Nothing matches"));
 
         std::fs::remove_dir_all(&root).ok();

@@ -1250,6 +1250,28 @@ Four rules, in the order they apply:
    two packages that need the same variable declare it in the workspace above
    them, or each declares it for itself.
 
+`REQUIRED_ENV` resolves up that same chain. A sub-library that needs `API_URL`
+does **not** have to document it if the workspace above it already does —
+demanding a template from every package that reads a shared variable would be
+asking the same question once per package, and would make declaring it once
+impossible. A run is refused only when *nothing* provides the variable: not the
+package's own files, not any enclosing workspace's `.env` or checked-in
+template, and not the environment the command is running in. Then the error says
+where to put it:
+
+```
+Error: 'lib' declares environment variable(s) its build can't run without, and
+nothing provides it: API_URL.
+
+Looked in this workspace and every one enclosing it — their `.env` files, their
+checked-in templates, and the environment this command is running in.
+
+Set it in the environment, or write it down where whoever needs it will find it:
+
+    packages/lib/.env   just this package
+    .env                every package under the root
+```
+
 ```yaml
 workspace:
   env_file: .env               # the default; set it to override

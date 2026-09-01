@@ -853,17 +853,30 @@ fn compile(
         // A member's `.env` belongs to that member's steps and to nothing else
         // — it rides on `compiled.env_files` above rather than being poured
         // into one shared map where every other package would read it too.
-        // A workflow that can't run without certain variables must say where
-        // they're documented — and the workspace that has to say so is the one
-        // that declared the requirement, not the monorepo root. Checked here
-        // because this is the only place both facts are in scope.
+        //
+        // A workflow that can't run without certain variables has to be able to
+        // get them from *somewhere*, and "somewhere" includes every workspace
+        // enclosing this one: that is what resolving upwards means. Asking each
+        // package to document a variable its parent already documents would be
+        // asking the same question once per package, and refusing to build over
+        // it — which is what this used to do — makes a shared `API_URL`
+        // impossible to declare once. Checked here because this is the only
+        // place the member, its chain, and the requirement are all in scope.
         if !workflow.required_env.is_empty() {
-            crate::environment::files::require_template(
-                &member.meta,
-                &member.dir,
+            let missing = crate::environment::files::unaccounted_for(
+                &env_layers(workspace, member),
                 &workflow.required_env,
-                &member.name,
-            )?;
+            );
+            if !missing.is_empty() {
+                bail!(
+                    "{}",
+                    crate::environment::files::describe_unaccounted(
+                        &member.name,
+                        &member.rel,
+                        &missing,
+                    )
+                );
+            }
         }
 
         for var in &workflow.required_env {
@@ -885,9 +898,23 @@ fn compile(
 /// that need the same variable declare it in the workspace above them, or each
 /// declares it for itself.
 fn env_chain(workspace: &Workspace, member: &Member) -> Vec<String> {
+    crate::environment::files::chain(&env_layers(workspace, member))
+}
+
+/// The workspaces a member's environment resolves through, outermost first.
+///
+/// The monorepo root, then every sub-workspace between it and this member, then
+/// the member itself — the same order [`env_chain`] turns into file paths, and
+/// the same order a required variable is looked for in. Kept as its own
+/// function because those two callers must not be able to disagree about what
+/// "upwards" means.
+fn env_layers<'a>(
+    workspace: &'a Workspace,
+    member: &'a Member,
+) -> Vec<crate::environment::files::Layer<'a>> {
     use crate::environment::files::Layer;
 
-    let mut layers: Vec<Layer<'_>> = Vec::new();
+    let mut layers: Vec<Layer<'a>> = Vec::new();
     // The root is a level even when it's an umbrella — it isn't a package, but
     // its `.env` is still the outermost thing a step falls back to.
     if member.rel != "." {
@@ -898,7 +925,7 @@ fn env_chain(workspace: &Workspace, member: &Member) -> Vec<String> {
         });
     }
 
-    let mut between: Vec<&Member> = workspace
+    let mut between: Vec<&'a Member> = workspace
         .members
         .iter()
         .filter(|other| other.rel != "." && encloses(&other.rel, &member.rel))
@@ -919,7 +946,7 @@ fn env_chain(workspace: &Workspace, member: &Member) -> Vec<String> {
         meta: &member.meta,
     });
 
-    crate::environment::files::chain(&layers)
+    layers
 }
 
 /// Whether `outer` is a workspace directory containing `inner` — a proper
@@ -1004,6 +1031,79 @@ mod tests {
 
     /// A workflow's `background:` array compiles into nodes that sit outside
     /// the order entirely — no incoming edge, and never a wave.
+    /// A sub-library resolves `REQUIRED_ENV` upwards, and is only refused when
+    /// nothing anywhere provides the variable.
+    ///
+    /// The bug this pins: the member's own `env_default` used to be demanded
+    /// outright, so a package reading an `API_URL` its monorepo root already
+    /// documents could not build at all — which made declaring a shared
+    /// variable once impossible.
+    #[test]
+    fn a_members_required_env_resolves_upwards() {
+        let root = scratch("envupwards");
+        let lib = member(&root, "packages/lib", "[workspace]\nname = \"lib\"\n");
+        workflow(
+            &lib,
+            "build",
+            "REQUIRED_ENV = [\"CIAB_TEST_API_URL\"]\n\
+             [[steps]]\nname = \"compile\"\nrun = \"echo $CIAB_TEST_API_URL\"\n",
+        );
+
+        // Nothing provides it: refused, and the message says where to put it.
+        let ws = Workspace::load(&root).unwrap();
+        let err = build(&ws, "build", &Selection::default())
+            .expect_err("a variable nothing provides has to fail")
+            .to_string();
+        assert!(
+            err.contains("CIAB_TEST_API_URL"),
+            "names the variable: {err}"
+        );
+        assert!(err.contains("packages/lib/.env"), "says where: {err}");
+
+        // The root's `.env` provides it: the member resolves upwards and builds,
+        // without a template of its own.
+        std::fs::write(root.join(".env"), "CIAB_TEST_API_URL=https://example\n").unwrap();
+        let ws = Workspace::load(&root).unwrap();
+        build(&ws, "build", &Selection::default())
+            .expect("the root's .env is in the member's chain");
+
+        // The root's *template* provides it too — which is the case that makes a
+        // fresh checkout, where `.env` is gitignored and absent, still build.
+        std::fs::remove_file(root.join(".env")).unwrap();
+        std::fs::write(
+            root.join(".env.default"),
+            "CIAB_TEST_API_URL=https://placeholder\n",
+        )
+        .unwrap();
+        let ws = Workspace::load(&root).unwrap();
+        build(&ws, "build", &Selection::default())
+            .expect("a checked-in template counts as providing it");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// An intermediate workspace counts, not just the root — "upwards" means
+    /// every enclosing workspace, and the nearest one answers first.
+    #[test]
+    fn an_enclosing_workspace_between_root_and_member_provides_it_too() {
+        let root = scratch("envbetween");
+        member(&root, "packages", "[workspace]\nname = \"packages\"\n");
+        let lib = member(&root, "packages/lib", "[workspace]\nname = \"lib\"\n");
+        workflow(
+            &lib,
+            "build",
+            "REQUIRED_ENV = [\"CIAB_TEST_BETWEEN\"]\n\
+             [[steps]]\nname = \"compile\"\nrun = \"echo hi\"\n",
+        );
+
+        std::fs::write(root.join("packages/.env"), "CIAB_TEST_BETWEEN=yes\n").unwrap();
+        let ws = Workspace::load(&root).unwrap();
+        build(&ws, "build", &Selection::default())
+            .expect("an enclosing workspace is part of the chain");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn background_tasks_compile_outside_the_waves() {
         let root = scratch("background");
@@ -1355,6 +1455,10 @@ mod tests {
             "env_file = [\".env.build\"]\nREQUIRED_ENV = [\"API_TOKEN\"]\n\
              [[steps]]\nname = \"b\"\nrun = \"true\"\n",
         );
+        // The declared template has to exist and name the variable: declaring a
+        // template that doesn't say what the variable is documents nothing, and
+        // the chain check reads it rather than taking the declaration on trust.
+        std::fs::write(api.join(".env.default"), "API_TOKEN=placeholder\n").unwrap();
         let ws = Workspace::load(&root).unwrap();
         let graph = build(&ws, "build", &Selection::default()).unwrap();
         assert!(

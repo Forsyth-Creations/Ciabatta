@@ -12,6 +12,10 @@ import {
   Box,
   Button,
   Chip,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogTitle,
   FormControlLabel,
   Stack,
   Switch,
@@ -21,6 +25,7 @@ import {
   Typography,
 } from "@mui/material";
 import ArrowBackIcon from "@mui/icons-material/ArrowBack";
+import StopIcon from "@mui/icons-material/Stop";
 import { IconButton } from "@mui/material";
 import { useTheme } from "@mui/material/styles";
 import type { Theme } from "@mui/material/styles";
@@ -30,6 +35,7 @@ import { Position, type Edge, type Node } from "@xyflow/react";
 import { streamUrl } from "../api/client";
 import {
   useChoose,
+  useStopRun,
   undeclaredEnv,
   type WorkflowView,
   type RunState,
@@ -135,6 +141,7 @@ export function RunDetailPage() {
           color={state.done ? "default" : "success"}
           label={state.done ? "finished" : "running"}
         />
+        {!state.done && <StopRunButton id={id} />}
       </Stack>
 
       {state.workflows.length > 1 && (
@@ -468,13 +475,73 @@ function NodeLabel({ step, order }: { step: StepView; order: number | null }) {
   );
 }
 
+/**
+ * Stop a run in flight.
+ *
+ * Confirmed rather than immediate: a run is side-effecting shell work, and
+ * stopping one halfway can leave a migration applied and the deploy that
+ * follows it not — which is a worse position than either finishing or never
+ * starting. The dialog says what will happen rather than asking "are you sure",
+ * because "are you sure" tells nobody anything they didn't already know.
+ */
+function StopRunButton({ id }: { id: number }) {
+  const stop = useStopRun();
+  const [asking, setAsking] = useState(false);
+
+  return (
+    <>
+      <Tooltip title="Stop this run">
+        <span>
+          <Button
+            size="small"
+            color="error"
+            variant="outlined"
+            startIcon={<StopIcon />}
+            onClick={() => setAsking(true)}
+            disabled={stop.isPending}
+          >
+            Stop
+          </Button>
+        </span>
+      </Tooltip>
+
+      <Dialog open={asking} onClose={() => setAsking(false)}>
+        <DialogTitle>Stop run #{id}?</DialogTitle>
+        <DialogContent>
+          <Typography variant="body2" sx={{ mb: 1.5 }}>
+            The step running now is killed, nothing further is started, and any
+            background tasks this run started are stopped.
+          </Typography>
+          <Typography variant="body2" color="text.secondary">
+            Whatever has already happened stays happened — a step that wrote files or
+            published an artifact is not undone. The logs remain readable.
+          </Typography>
+          {stop.error && <ErrorNote error={stop.error} />}
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setAsking(false)}>Keep running</Button>
+          <Button
+            color="error"
+            variant="contained"
+            disabled={stop.isPending}
+            onClick={() => stop.mutate(id, { onSuccess: () => setAsking(false) })}
+          >
+            Stop it
+          </Button>
+        </DialogActions>
+      </Dialog>
+    </>
+  );
+}
+
 /** What a selected step is, beyond its command: where it's from, how it
  *  behaves, and the variables it depends on. */
 function StepDetails({ step, env }: { step: StepView; env: EnvVar[] }) {
   const badges: string[] = [];
   if (step.push) badges.push("push");
   else if (step.kind) badges.push(step.kind);
-  if (step.persistent) badges.push("⚡ background");
+  if (step.background) badges.push("⚡ background");
+  else if (step.persistent) badges.push("persistent");
   if (step.timeout) badges.push(`timeout ${step.timeout}`);
   if (step.requires.length > 0) badges.push(`needs ${step.requires.join(", ")}`);
 
@@ -778,7 +845,7 @@ function buildFlow(
     ? executionOrder(
         workflow.steps.filter((s) => !s.recover).map((s) => s.name),
         orderEdges,
-        { exclude: (id) => byName.get(id)?.persistent ?? false },
+        { exclude: (id) => byName.get(id)?.background ?? false },
       )
     : new Map<string, number>();
 
@@ -802,7 +869,7 @@ function buildFlow(
     },
     // Background tasks sit in a row underneath rather than in a column, because
     // a column would claim they gate what follows them. They don't.
-    { bottom: (id) => byName.get(id)?.persistent ?? false },
+    { bottom: (id) => byName.get(id)?.background ?? false },
   );
 
   const nodes: Node[] = positioned.map((node) => {
@@ -1213,6 +1280,8 @@ function stageColor(status: string): "success" | "error" | "warning" | "default"
       return "error";
     case "running":
       return "warning";
+    // "stopped" falls through to neutral on purpose: somebody asked for it, so
+    // it is not an error, and colouring it red would send them looking for one.
     default:
       return "default";
   }

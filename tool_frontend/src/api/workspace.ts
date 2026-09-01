@@ -25,6 +25,8 @@ export interface WorkflowStep {
   timeout: string | null;
   retries: number;
   persistent: boolean;
+  /** From the workflow's `background:` array: started first, gates nothing, stopped when the run ends. */
+  background: boolean;
   continue_on_error: boolean;
   recover: boolean;
   on_error: string | null;

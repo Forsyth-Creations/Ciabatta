@@ -320,10 +320,18 @@ function StepRow({ step }: { step: WorkflowStep }) {
  * claim, and two copies of it are two things to keep true.
  */
 const BACKGROUND_TOOLTIP =
-  "A background task: started when the run reaches it, and nothing ever waits for it. " +
-  "Use it for the mini-servers a build or a dev loop needs running alongside it — a mock API, " +
-  "a bundler in watch mode. It gates no step, so it can't hold the graph up, and it is stopped " +
-  "when the run finishes. Declare one with `persistent: true`.";
+  "A background task, from the workflow's `background:` array. Started before the first wave " +
+  "so it is up when the steps need it, and nothing ever waits for it — it gates no step, so " +
+  "it can't hold the graph up. Stopped again once every stage has succeeded or failed, so it " +
+  "isn't left holding its port when the next run begins. For a mock API, a database container, " +
+  "a bundler in watch mode.";
+
+/** The other kind: a step that runs forever and is meant to. */
+const PERSISTENT_TOOLTIP =
+  "A persistent step: started, dependents released immediately, and left running when the run " +
+  "ends — the daemon takes ownership, so `ciabatta dev` leaves you a server to work against. " +
+  "Stop it with `ciabatta watch --stop <id>`. Use a background task instead for something that " +
+  "should go away with the run that started it.";
 
 function StepBadges({ step }: { step: WorkflowStep }) {
   return (
@@ -334,9 +342,14 @@ function StepBadges({ step }: { step: WorkflowStep }) {
         </Tooltip>
       )}
       {!step.push && step.kind && <Chip size="small" variant="outlined" label={step.kind} />}
-      {step.persistent && (
+      {step.background && (
         <Tooltip title={BACKGROUND_TOOLTIP}>
           <Chip size="small" color="info" variant="outlined" icon={<BoltIcon />} label="background" />
+        </Tooltip>
+      )}
+      {step.persistent && !step.background && (
+        <Tooltip title={PERSISTENT_TOOLTIP}>
+          <Chip size="small" color="info" variant="outlined" label="persistent" />
         </Tooltip>
       )}
       {step.timeout && (
@@ -387,7 +400,11 @@ function GraphPanel({ project, workflow }: { project: string; workflow: string }
   // so drawing one inside a wave states a dependency the engine does not have.
   // They get their own section at the bottom instead, out of the flow they are
   // not part of.
-  const background = data.nodes.filter((node) => node.persistent && !node.recover);
+  //
+  // A `persistent` step stays where it is: it *is* a step, with a place in the
+  // order and dependents that were released early. Only its lifetime is
+  // unusual, and the badge says so.
+  const background = data.nodes.filter((node) => node.background && !node.recover);
   const isBackground = new Set(background.map((node) => node.id));
   const planned = new Map((plan?.steps ?? []).map((step) => [step.name, step]));
   const caching = plan?.caching ?? false;
@@ -400,7 +417,7 @@ function GraphPanel({ project, workflow }: { project: string; workflow: string }
             {data.workflow}
           </Typography>
           <Typography variant="body2" color="text.secondary" sx={{ flexGrow: 1 }}>
-            {data.nodes.filter((n) => !n.recover && !n.persistent).length} step(s) across{" "}
+            {data.nodes.filter((n) => !n.recover && !n.background).length} step(s) across{" "}
             {data.units.length} sub-workspace(s), in {data.waves.length} wave(s)
             {background.length > 0 && ` · ${background.length} background`}
           </Typography>
@@ -486,7 +503,7 @@ function GraphPanel({ project, workflow }: { project: string; workflow: string }
                 >
                   <BoltIcon fontSize="small" color="info" />
                   <Typography variant="overline" color="text.secondary">
-                    background — started alongside the run, nothing waits for them
+                    background — up before wave 1, nothing waits for them, stopped when the run ends
                   </Typography>
                 </Stack>
               </Tooltip>
@@ -554,7 +571,7 @@ function GraphNodeCard({
         // on failure, and the background task that is in neither.
         borderColor: node.recover
           ? "warning.main"
-          : node.persistent
+          : node.background
             ? "info.main"
             : "primary.main",
         bgcolor: "action.hover",

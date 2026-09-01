@@ -76,6 +76,9 @@ pub struct StepView {
     push: bool,
     /// Whether it is started and left running rather than waited for.
     persistent: bool,
+    /// From a workflow's `background:` array: started before the first wave,
+    /// gates nothing, stopped when the run ends.
+    background: bool,
     /// Its wall-clock limit, as written.
     timeout: Option<String>,
     /// Tools it needs on `PATH`.
@@ -214,17 +217,27 @@ impl GuiState {
                 }
             }
             ProgressUpdate::Failed(name, err) => {
+                // A run somebody stopped is not a run that failed. It arrives
+                // on the same channel because it is still an unsuccessful end,
+                // but reporting it as a failure sends the next person looking
+                // for a bug that isn't there.
+                let stopped = err == crate::runner::STOPPED_MESSAGE;
+                let outcome = if stopped { "stopped" } else { "failed" };
                 if let Some(r) = self.recipe_mut(&name) {
-                    r.status = "failed".into();
+                    r.status = outcome.into();
                     r.error = Some(err.clone());
                     r.pending = None;
-                    r.logs.push(format!("✗ {err}"));
+                    r.logs.push(if stopped {
+                        format!("■ {err}")
+                    } else {
+                        format!("✗ {err}")
+                    });
                     // Pin the blame on whichever stage was mid-flight, and mark
                     // any later stages as not reached.
                     let mut hit = false;
                     for st in &mut r.stages {
                         if st.status == "running" {
-                            st.status = "failed".into();
+                            st.status = outcome.into();
                             hit = true;
                         } else if hit && st.status == "pending" {
                             st.status = "skipped".into();
@@ -261,10 +274,13 @@ impl GuiState {
             // Runs don't emit stage-file-transfer progress.
             ProgressUpdate::TransferProgress { .. } => {}
         }
+        // Every terminal status, "stopped" included — a stopped run that never
+        // reported itself done would leave the page saying "running" with a
+        // Stop button on a run that had already stopped.
         self.done = self
             .workflows
             .iter()
-            .all(|r| r.status == "success" || r.status == "failed");
+            .all(|r| matches!(r.status.as_str(), "success" | "failed" | "stopped"));
     }
 }
 
@@ -331,6 +347,7 @@ pub fn initial_state(
                 kind: step.kind.clone(),
                 push: step.is_push(),
                 persistent: step.persistent,
+                background: step.background,
                 timeout: step.timeout.clone(),
                 requires: step.requires.clone(),
                 env: step

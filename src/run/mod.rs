@@ -102,18 +102,36 @@ pub struct RunStep {
     #[serde(default)]
     #[serde(skip_serializing_if = "crate::format::is_zero")]
     pub retries: u32,
-    /// A **background task**: a step that never exits on its own — a mock API, a
-    /// dev server, a bundler in watch mode. It is started, its dependents are
-    /// released immediately, and it runs alongside the rest of the graph rather
-    /// than hanging it. It gates nothing, so it can never hold a build up, and
-    /// the run stops it again when the graph finishes — what it exists for is
-    /// over at that point, and leaving it up hands the operator a process still
-    /// holding its port. Follow it live, or read it back afterwards, with
-    /// `ciabatta watch`. The graph views draw these apart from the flow, under
-    /// a lightning bolt.
+    /// A step that never exits on its own — a dev server, a log tailer, a
+    /// watcher. It is started, its dependents are released immediately, and it
+    /// keeps running for the rest of the graph rather than hanging it.
+    ///
+    /// It **outlives the run**: the daemon takes ownership as a watch session,
+    /// so `ciabatta dev` leaves you a dev server to work against rather than
+    /// killing it on the way out. Stop it with `ciabatta watch --stop <id>`.
+    /// For a server that exists only to get this run through and should go away
+    /// with it, use the workflow's [`background`] array instead.
+    ///
+    /// [`background`]: crate::workspace::Workflow::background
     #[serde(default)]
     #[serde(skip_serializing_if = "crate::format::is_false")]
     pub persistent: bool,
+    /// Set by the compiler on entries of a workflow's `background:` array.
+    ///
+    /// `#[serde(skip)]` on purpose: it is not a key anybody writes on a step,
+    /// and accepting one there would give two spellings for the same idea with
+    /// different meanings — a step is in the order, a background task is not.
+    /// The API surfaces build their own JSON, so the flag still reaches the web
+    /// app without living in the config format.
+    ///
+    /// A background task is a persistent one scoped to a single run: it is
+    /// started before the first wave, gates nothing, and is stopped again once
+    /// every stage has succeeded or failed. The distinction from
+    /// [`Self::persistent`] is only ever *lifetime* — a mock API that exists to
+    /// get this run through should not still be holding its port afterwards,
+    /// and a dev server should.
+    #[serde(skip)]
+    pub background: bool,
     /// Don't fail the whole run when this step fails: its dependents are
     /// skipped, every other branch carries on, and the run reports the failure
     /// at the end. Always applied when a `timeout` expires.

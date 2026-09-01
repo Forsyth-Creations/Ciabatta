@@ -72,7 +72,14 @@ impl WorkflowGraph {
     pub fn waves(&self) -> Vec<Vec<&RunStep>> {
         let mut placed: HashMap<&str, usize> = HashMap::new();
         let mut waves: Vec<Vec<&RunStep>> = Vec::new();
-        let normal: Vec<&RunStep> = self.steps.iter().filter(|s| !s.recover).collect();
+        // Background tasks are in the graph but not in the order: they are
+        // started before the first wave and nothing waits for them, so putting
+        // one in a wave would claim the next wave waits for it.
+        let normal: Vec<&RunStep> = self
+            .steps
+            .iter()
+            .filter(|s| !s.recover && !s.background)
+            .collect();
 
         let mut remaining: Vec<&RunStep> = normal.clone();
         while !remaining.is_empty() {
@@ -598,12 +605,99 @@ fn compile(
         let (member, workflow) = resolve(workspace, unit)?;
 
         if workflow.steps.is_empty() {
+            // Background tasks alone are not a workflow: nothing would keep the
+            // run alive, so they would be started and stopped in the same
+            // breath. Say that rather than the generic "no steps".
+            if !workflow.background.is_empty() {
+                bail!(
+                    "Workflow '{}' in sub-workspace '{}' declares `background:` but no steps. \
+                     Background tasks are stopped when the run ends, so a workflow of nothing \
+                     but background tasks would start them and immediately stop them again. \
+                     Add the step they are there to support.",
+                    unit.workflow,
+                    unit.member
+                );
+            }
             bail!(
                 "Workflow '{}' in sub-workspace '{}' has no steps. Give it at least one \
                  [[steps]] entry, or remove it.",
                 unit.workflow,
                 unit.member
             );
+        }
+
+        // Background tasks compile into nodes with no edges in either
+        // direction. Nothing waits for them (they never finish) and they wait
+        // for nothing (a step that needed one to be built first would be a
+        // step, not a background task) — so they are neither entries nor exits
+        // of the unit, and the wave layering never sees them.
+        for task in &workflow.background {
+            if workflow.steps.iter().any(|s| s.name == task.name) {
+                bail!(
+                    "'{}' is both a step and a background task of workflow '{}' in \
+                     sub-workspace '{}'. One name, one node.",
+                    task.name,
+                    unit.workflow,
+                    unit.member
+                );
+            }
+            if task.script.is_none() && task.run.is_none() {
+                bail!(
+                    "Background task '{}' of workflow '{}' in sub-workspace '{}' has nothing \
+                     to run. Give it `run:` or `script:`.",
+                    task.name,
+                    unit.workflow,
+                    unit.member
+                );
+            }
+            if !task.needs.is_empty() {
+                bail!(
+                    "Background task '{}' of workflow '{}' in sub-workspace '{}' declares \
+                     `needs`. A background task is started before the first wave and gates \
+                     nothing, so it can neither wait nor be waited for — if it has to run in \
+                     order, it is a step.",
+                    task.name,
+                    unit.workflow,
+                    unit.member
+                );
+            }
+
+            let mut compiled = task.clone();
+            compiled.name = node_id(unit, &task.name);
+            compiled.workspace = Some(member.name.clone());
+            compiled.cwd = Some(member.rel.clone());
+            compiled.background = true;
+            // A background task is persistent by definition — it is what the
+            // engine already knows how to start without waiting for.
+            compiled.persistent = true;
+            compiled.needs = Vec::new();
+            compiled.recover = false;
+            compiled.on_error = None;
+            compiled.retry = None;
+
+            compiled.requires = merge_unique(
+                &member.meta.requires,
+                &merge_unique(&workflow.requires, &task.requires),
+            );
+            let mut env = workspace.env.clone();
+            env.extend(member.meta.env.clone());
+            env.extend(workflow.env.clone());
+            env.extend(task.env.clone());
+            compiled.env = env;
+            compiled.env_files = env_chain(workspace, member);
+            for file in &workflow.env_file {
+                let path = join_rel(&member.rel, file);
+                if !compiled.env_files.contains(&path) {
+                    compiled.env_files.push(path);
+                }
+            }
+            compiled.tags =
+                merge_unique(&member.meta.tags, &merge_unique(&workflow.tags, &task.tags));
+            if compiled.owner.is_none() {
+                compiled.owner = workflow.owner.clone().or_else(|| member.meta.owner.clone());
+            }
+
+            graph.steps.push(compiled);
         }
 
         // What this unit waits on: every dependency unit's exit steps.
@@ -894,6 +988,98 @@ mod tests {
         );
         let ws = Workspace::load(&root).unwrap();
         (root, ws)
+    }
+
+    /// A workflow's `background:` array compiles into nodes that sit outside
+    /// the order entirely — no incoming edge, and never a wave.
+    #[test]
+    fn background_tasks_compile_outside_the_waves() {
+        let root = scratch("background");
+        let web = member(&root, "packages/web", "[workspace]\nname = \"web\"\n");
+        workflow(
+            &web,
+            "dev",
+            "[[background]]\nname = \"mock-api\"\nrun = \"node mock.js\"\n\
+             [[steps]]\nname = \"compile\"\nrun = \"yarn build\"\n\
+             [[steps]]\nname = \"integration\"\nrun = \"yarn test\"\nneeds = [\"compile\"]\n",
+        );
+        let ws = Workspace::load(&root).unwrap();
+        let graph = build(&ws, "dev", &Selection::default()).unwrap();
+
+        let task = graph
+            .steps
+            .iter()
+            .find(|s| s.name == "web:mock-api")
+            .expect("the background task is a node of the graph");
+        assert!(task.background, "it has to be marked as one");
+        assert!(task.persistent, "a background task never exits");
+        assert!(task.needs.is_empty(), "it waits for nothing");
+
+        // Nothing depends on it, so it can never gate anything.
+        assert!(
+            !graph
+                .steps
+                .iter()
+                .any(|s| s.needs.iter().any(|n| n == "web:mock-api")),
+            "nothing may declare a dependency on a background task"
+        );
+
+        // And it is in no wave: the waves are the ordinary two.
+        let waves: Vec<Vec<&str>> = graph
+            .waves()
+            .iter()
+            .map(|w| w.iter().map(|s| s.name.as_str()).collect())
+            .collect();
+        assert_eq!(waves, vec![vec!["web:compile"], vec!["web:integration"]]);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The mistakes worth catching at compile time rather than at 3am.
+    #[test]
+    fn a_background_task_that_cannot_work_is_refused() {
+        let cases: [(&str, &str); 4] = [
+            (
+                // `needs` on something that is started before the first wave.
+                "[[background]]\nname = \"mock\"\nrun = \"node mock.js\"\nneeds = [\"compile\"]\n\
+                 [[steps]]\nname = \"compile\"\nrun = \"yarn build\"\n",
+                "gates nothing",
+            ),
+            (
+                // Nothing to run.
+                "[[background]]\nname = \"mock\"\n\
+                 [[steps]]\nname = \"compile\"\nrun = \"yarn build\"\n",
+                "nothing to run",
+            ),
+            (
+                // One name, two nodes.
+                "[[background]]\nname = \"compile\"\nrun = \"node mock.js\"\n\
+                 [[steps]]\nname = \"compile\"\nrun = \"yarn build\"\n",
+                "One name, one node",
+            ),
+            (
+                // Background tasks and nothing to support: they would be
+                // started and stopped in the same breath.
+                "[[background]]\nname = \"mock\"\nrun = \"node mock.js\"\n",
+                "no steps",
+            ),
+        ];
+
+        for (index, (body, expected)) in cases.iter().enumerate() {
+            let root = scratch(&format!("badbackground{index}"));
+            let web = member(&root, "packages/web", "[workspace]\nname = \"web\"\n");
+            workflow(&web, "dev", body);
+            let ws = Workspace::load(&root).unwrap();
+
+            let err = build(&ws, "dev", &Selection::default())
+                .expect_err("this configuration cannot work")
+                .to_string();
+            assert!(
+                err.contains(expected),
+                "case {index} should explain '{expected}', got: {err}"
+            );
+            let _ = std::fs::remove_dir_all(&root);
+        }
     }
 
     #[test]

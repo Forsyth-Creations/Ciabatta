@@ -51,6 +51,11 @@
       "type": "array",
       "description": "The steps themselves. Order in the file doesn't matter — `needs` does.",
       "items": { "$ref": "./common.schema.json#/$defs/step" }
+    },
+    "background": {
+      "type": "array",
+      "description": "Long-running processes the steps need UP in order to finish: a mock API the integration tests call, a database container, a bundler in watch mode. Each is started before the first wave and gates nothing, so no mistake in one can hold a build up, and each is stopped again once every stage has succeeded or failed. That lifetime is the whole difference from a step with `persistent: true`, which the daemon keeps alive on purpose so a `dev` workflow leaves you a server to work against. They are not steps and cannot declare `needs`, be depended on, or route to recovery.",
+      "items": { "$ref": "./common.schema.json#/$defs/step" }
     }
   }
 }

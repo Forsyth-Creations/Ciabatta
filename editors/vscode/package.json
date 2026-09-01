@@ -2,7 +2,7 @@
   "name": "ciabatta-vscode",
   "displayName": "Ciabatta",
   "description": "Completion, documentation and reference checking for .ciabatta/ workspace and workflow files.",
-  "version": "0.3.3",
+  "version": "0.3.4",
   "private": true,
   "license": "MIT",
   "publisher": "forsyth-creations",

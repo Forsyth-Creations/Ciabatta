@@ -147,6 +147,9 @@ fn step() -> crate::run::RunStep {
         retry: Some(one()),
         options: vec![fix_option()],
         cache: Some(cache()),
+        // Not a config key — `#[serde(skip)]`, set by the compiler on entries
+        // of a workflow's `background:` array — so the schemas don't name it.
+        background: false,
     }
 }
 
@@ -171,6 +174,7 @@ fn workflow() -> crate::workspace::Workflow {
         tags: list(),
         cache: Some(cache()),
         steps: vec![step()],
+        background: vec![step()],
     }
 }
 

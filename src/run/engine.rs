@@ -54,9 +54,13 @@ struct StepFailure {
     detail: String,
 }
 
-/// A started `persistent` step, and what now owns it.
+/// A started `persistent` step or background task, and what now owns it.
 struct Persistent {
     step: String,
+    /// Whether it came from a workflow's `background:` array, which is what
+    /// decides whether it is stopped when the run ends. See
+    /// [`stop_persistent`].
+    background: bool,
     ownership: Ownership,
 }
 
@@ -376,7 +380,32 @@ async fn run_dag(
     let mut tolerated: Vec<StepFailure> = Vec::new();
     let mut persistent: Vec<Persistent> = Vec::new();
 
+    // Background tasks go up before the first wave, not when the scheduler
+    // happens to reach them. They exist so the steps can finish, so "started
+    // somewhere in wave 1, in whatever order the units compiled" is not good
+    // enough — a step in wave 1 could otherwise run before the mock API it
+    // talks to had been launched at all.
+    if !dry_run {
+        for step in resolved.steps.iter().filter(|s| s.background) {
+            let step_env = env.for_step(&step.name);
+            persistent.push(start_persistent(step, workflow, root, step_env, ctl, tx).await?);
+            state.insert(step.name.as_str(), StepState::Started);
+        }
+    }
+
+    // Set once the run has been asked to stop, so the unwinding below can say
+    // that is what happened rather than reporting a failed build.
+    let mut stopped = false;
+
     loop {
+        // Asked to stop: schedule nothing further. The loop breaks rather than
+        // returning, so `stop_persistent` still runs — a stopped run that left
+        // its background tasks holding their ports would be the worst of both.
+        if ctl.cancel.as_ref().is_some_and(|c| c.is_stopped()) {
+            stopped = true;
+            break;
+        }
+
         // A step is ready when it is Pending, not a recovery node, and all its
         // `needs` are satisfied. Recovery nodes are only entered via on_error.
         let ready: Vec<&RunStep> = resolved
@@ -402,6 +431,14 @@ async fn run_dag(
         // shell work (build → migrate → release); serial execution keeps their
         // logs readable and recovery prompts unambiguous.
         for step in ready {
+            // Checked per step as well as per wave: a wave is serial, so an
+            // eight-step wave asked to stop after the first would otherwise run
+            // the remaining seven.
+            if ctl.cancel.as_ref().is_some_and(|c| c.is_stopped()) {
+                stopped = true;
+                break;
+            }
+
             // A `when`/`skip_if` condition can exclude the step; if so, mark it
             // satisfied (so dependents proceed) and move on without running it.
             // Every one of these reads the step's *own* environment: its
@@ -424,6 +461,8 @@ async fn run_dag(
 
             // A persistent step is started and left running: the graph moves on
             // without it, so a dev server can't hang everything behind it.
+            // Background tasks never reach here — they were started before the
+            // first wave and are already marked `Started`.
             if step.persistent && !dry_run {
                 persistent.push(start_persistent(step, workflow, root, step_env, ctl, tx).await?);
                 state.insert(step.name.as_str(), StepState::Started);
@@ -521,6 +560,7 @@ async fn run_dag(
                 step_env,
                 dry_run,
                 sandbox.as_ref().map(|s| s.dir.as_path()),
+                ctl.cancel.as_ref(),
                 tx,
             )
             .await;
@@ -567,6 +607,19 @@ async fn run_dag(
                             .after(step, token, started.elapsed().as_millis() as u64)
                             .await;
                     }
+                }
+                Err(err) if err.is::<Stopped>() => {
+                    // Not a failure: somebody pressed Stop, and this step was
+                    // cut short by that. Recovery must not be entered — there
+                    // is nothing to put back on the rails — and it must not be
+                    // reported as a broken build, or the next person goes
+                    // looking for a bug that isn't there.
+                    state.insert(step.name.as_str(), StepState::Failed);
+                    if let Some(session) = cache.as_deref_mut() {
+                        session.mark_unaccounted(&step.name);
+                    }
+                    stopped = true;
+                    break;
                 }
                 Err(err) => {
                     state.insert(step.name.as_str(), StepState::Failed);
@@ -641,6 +694,20 @@ async fn run_dag(
 
     stop_persistent(persistent, workflow, root, tx).await;
 
+    // A stopped run is not a failed one. Somebody asked for this, they know why,
+    // and reporting it as a broken build would send the next person looking for
+    // a bug that isn't there. Whatever the step that was cut short reported is
+    // beside the point, so this is checked before the failure summaries.
+    if stopped || ctl.cancel.as_ref().is_some_and(|c| c.is_stopped()) {
+        let _ = tx
+            .send(ProgressUpdate::Log(
+                workflow.to_string(),
+                "■ stopped — the run was asked to stop, so nothing further was started".to_string(),
+            ))
+            .await;
+        bail!("{}", crate::runner::STOPPED_MESSAGE);
+    }
+
     // A step still Failed and untolerated means recovery ran out of road.
     if let Some(failed) = resolved.steps.iter().find(|s| {
         state.get(s.name.as_str()) == Some(&StepState::Failed)
@@ -679,6 +746,22 @@ impl std::fmt::Display for TimedOut {
 }
 
 impl std::error::Error for TimedOut {}
+
+/// Marker error for a step cut short because the run was asked to stop.
+///
+/// Kept apart from an ordinary failure because it is not one: nobody needs to
+/// go and look at why the step "failed", and a stopped run should not be
+/// reported as a broken build. See [`crate::runner::Cancel`].
+#[derive(Debug)]
+struct Stopped;
+
+impl std::fmt::Display for Stopped {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "stopped")
+    }
+}
+
+impl std::error::Error for Stopped {}
 
 /// Put a missing `.env` in place, for the project root and for every
 /// sub-workspace this run's steps come from.
@@ -866,30 +949,42 @@ async fn start_persistent(
 
     match handoff {
         Ok((session, url)) => {
-            log(format!(
-                "handed to the ciabatta daemon as watch session #{session} — \
-                 it runs until this run finishes"
-            ))
+            log(match step.background {
+                true => format!(
+                    "handed to the ciabatta daemon as watch session #{session} — \
+                     it runs until this run finishes"
+                ),
+                false => format!(
+                    "handed to the ciabatta daemon as watch session #{session} — \
+                     it outlives this run"
+                ),
+            })
             .await;
             // Its output goes to the session from here on, not into this panel.
             // Saying so beats leaving an empty log to be puzzled over.
             log("its output is collected there, not below".to_string()).await;
             log(format!("follow it:  ciabatta watch --attach {session}")).await;
-            log(format!("stop it early:  ciabatta watch --stop {session}")).await;
+            log(match step.background {
+                true => format!("stop it early:  ciabatta watch --stop {session}"),
+                false => format!("stop it:    ciabatta watch --stop {session}"),
+            })
+            .await;
             log(format!("live view:  {url}")).await;
             Ok(Persistent {
                 step: step.name.clone(),
+                background: step.background,
                 ownership: Ownership::Daemon { session, url },
             })
         }
         Err(err) => {
             log(format!(
                 "⚠ couldn't hand this to the daemon ({err}); running it here instead, \
-                 so its output won't be kept once this run is over"
+                 so it stops with this run and its output is not kept"
             ))
             .await;
             Ok(Persistent {
                 step: step.name.clone(),
+                background: step.background,
                 ownership: Ownership::Local(spawn_locally(&command, &cwd, env, step, workflow, tx)),
             })
         }
@@ -991,19 +1086,22 @@ fn spawn_locally(
     })
 }
 
-/// Close out every persistent step now that the graph is done.
+/// Close out everything the run started and left running.
 ///
-/// **Everything started by the run is stopped by the run**, whoever owns it. A
-/// background task exists to serve the build that needed it — a mock API the
-/// tests hit, a bundler in watch mode — so leaving it up once that build is
-/// over hands the operator a process they did not ask to be responsible for,
-/// still holding its port. The second run of the day should not have to fight
-/// the leftovers of the first.
+/// The two kinds part company here, and only here — starting them is identical.
 ///
-/// A daemon-owned session is stopped through the daemon that owns it; a local
-/// fallback is aborted, which takes its subprocess with it. Its output is kept
-/// either way — the session stays readable in `ciabatta watch` after the
-/// process behind it has gone, which is the part worth outliving the run.
+/// A **background task** is scoped to this run: it was started so the steps
+/// could finish, they have, and leaving it up would hand the operator a process
+/// still holding its port for the next run to collide with. It is stopped. Its
+/// watch session survives, so what it logged is still readable afterwards.
+///
+/// A **`persistent` step** is the opposite promise: `ciabatta dev` exists to
+/// leave a dev server to work against, and killing it on the way out would make
+/// persistence pointless. The daemon owns it, it is left alone, and the id
+/// needed to reach it later is reported.
+///
+/// A local fallback has no daemon to outlive this process, so it is stopped
+/// whichever kind it is — there is nothing left that could own it.
 async fn stop_persistent(
     running: Vec<Persistent>,
     workflow: &str,
@@ -1012,16 +1110,26 @@ async fn stop_persistent(
 ) {
     for job in running {
         let line = match job.ownership {
-            Ownership::Daemon { session, url } => Some(match stop_session(root, session).await {
-                Ok(()) => format!("stopped (the run finished) — its output is kept at {url}"),
-                // Worth saying precisely: the process is still up and still
-                // holding whatever port it bound, and the operator now has to
-                // deal with it.
-                Err(err) => format!(
-                    "⚠ couldn't stop watch session #{session} ({err}); it is still running — \
+            Ownership::Daemon { session, url } if job.background => {
+                Some(match stop_session(root, session).await {
+                    Ok(()) => format!("stopped (the run finished) — its output is kept at {url}"),
+                    // Worth saying precisely: the process is still up and still
+                    // holding whatever port it bound, and the operator now has to
+                    // deal with it.
+                    Err(err) => format!(
+                        "⚠ couldn't stop watch session #{session} ({err}); it is still running — \
                      stop it with `ciabatta watch --stop {session}`  ({url})"
-                ),
-            }),
+                    ),
+                })
+            }
+            // A `persistent` step is the opposite promise: `ciabatta dev`
+            // exists to leave a dev server behind, and killing it on the way
+            // out would make persistence pointless. Left alone, and reported
+            // with the id needed to reach it later.
+            Ownership::Daemon { session, url } => Some(format!(
+                "still running as watch session #{session} — {url}  \
+                 (stop it with `ciabatta watch --stop {session}`)"
+            )),
             Ownership::Local(handle) => {
                 let was_running = !handle.is_finished();
                 handle.abort();
@@ -1154,6 +1262,7 @@ async fn recover<'a>(
             env_vars,
             dry_run,
             None,
+            ctl.cancel.as_ref(),
             &mut sink,
         )
         .await
@@ -1266,6 +1375,9 @@ async fn run_step_action(
     // `isolated_in`: where to run instead of the step's real directory — the
     // sandbox, under `--authoritative`. `None` is the ordinary case.
     isolated_in: Option<&Path>,
+    // The run's stop switch, raced against the action so a step already in
+    // flight ends when the button is pressed rather than when it finishes.
+    cancel: Option<&std::sync::Arc<crate::runner::Cancel>>,
     tx: &mpsc::Sender<ProgressUpdate>,
 ) -> Result<()> {
     let _ = tx
@@ -1337,6 +1449,7 @@ async fn run_step_action(
                         env_vars,
                         dry_run,
                         limit,
+                        cancel,
                         &mut sink,
                     )
                     .await
@@ -1369,6 +1482,7 @@ async fn run_step_action(
 ///
 /// `limit`, when set, caps how long the action may take; past it the child is
 /// killed and the action fails with [`TimedOut`].
+#[allow(clippy::too_many_arguments)]
 async fn run_action(
     script: Option<&str>,
     run: Option<&str>,
@@ -1376,6 +1490,7 @@ async fn run_action(
     env_vars: &HashMap<String, String>,
     dry_run: bool,
     limit: Option<std::time::Duration>,
+    cancel: Option<&std::sync::Arc<crate::runner::Cancel>>,
     sink: &mut LogSink<'_>,
 ) -> Result<()> {
     let Some(command) = shell_form(script, run) else {
@@ -1393,18 +1508,32 @@ async fn run_action(
         return Ok(());
     }
 
-    // `kill_on_drop` is what makes the timeout real: dropping the future has to
-    // take the stuck child with it, or the "killed" step would keep running.
-    let action = registry::run_shell_command_opts(&command, cwd, env_vars, limit.is_some(), sink);
-    match limit {
-        None => action.await,
-        Some(limit) => match tokio::time::timeout(limit, action).await {
-            Ok(result) => result,
-            Err(_) => Err(anyhow::Error::new(TimedOut).context(format!(
-                "timed out after {} and was killed",
-                format_duration(limit)
-            ))),
-        },
+    // `kill_on_drop` is what makes both the timeout and the stop button real:
+    // dropping the future has to take the child with it, or a "killed" step
+    // would keep running with nothing left watching it.
+    let killable = limit.is_some() || cancel.is_some();
+    let action = registry::run_shell_command_opts(&command, cwd, env_vars, killable, sink);
+
+    let timed = async {
+        match limit {
+            None => action.await,
+            Some(limit) => match tokio::time::timeout(limit, action).await {
+                Ok(result) => result,
+                Err(_) => Err(anyhow::Error::new(TimedOut).context(format!(
+                    "timed out after {} and was killed",
+                    format_duration(limit)
+                ))),
+            },
+        }
+    };
+
+    let Some(cancel) = cancel else {
+        return timed.await;
+    };
+    tokio::select! {
+        result = timed => result,
+        // Losing the race drops `timed`, and with it the child.
+        () = cancel.stopped() => Err(anyhow::Error::new(Stopped)),
     }
 }
 
@@ -1480,6 +1609,15 @@ mod tests {
     /// Non-interactive (no operator to answer a recovery prompt), which is the
     /// mode CI runs in and the one these behaviours have to hold up under.
     async fn drive(steps: Vec<RunStep>, root: &Path) -> (Result<()>, Vec<ProgressUpdate>) {
+        drive_with(steps, root, None).await
+    }
+
+    /// [`drive`], with a stop switch the test can press.
+    async fn drive_with(
+        steps: Vec<RunStep>,
+        root: &Path,
+        cancel: Option<std::sync::Arc<crate::runner::Cancel>>,
+    ) -> (Result<()>, Vec<ProgressUpdate>) {
         let resolved = ResolvedRun {
             steps,
             ..Default::default()
@@ -1493,6 +1631,7 @@ mod tests {
             persist_via_daemon: false,
             authoritative: false,
             sandbox_also: Vec::new(),
+            cancel,
         };
         let env: HashMap<String, String> = std::env::vars().collect();
 
@@ -1673,11 +1812,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn without_a_daemon_a_background_step_says_what_it_gives_up() {
-        // Both paths stop the task when the run ends, so the fallback doesn't
-        // differ in lifetime — what it gives up is the *output*, which without
-        // a daemon has no session to be kept in and goes with the run. Silently
-        // losing it would be worse than not persisting at all.
+    async fn without_a_daemon_a_persistent_step_says_it_cannot_outlive_the_run() {
+        // A `persistent` step is meant to outlive the run, and the fallback
+        // cannot deliver that: there is no daemon to hand ownership to, so it
+        // dies with this process. Silently doing that would be worse than not
+        // persisting at all.
         let steps = vec![RunStep {
             persistent: true,
             ..step("server", "while true; do sleep 1; done")
@@ -1687,10 +1826,128 @@ mod tests {
 
         let logs = step_logs(&updates);
         assert!(logs.contains("couldn't hand this to the daemon"), "{logs}");
-        assert!(logs.contains("output won't be kept"), "{logs}");
+        assert!(logs.contains("stops with this run"), "{logs}");
         assert!(logs.contains("stopped (the run finished)"), "{logs}");
         // And nothing is left behind.
         assert!(!logs.contains("watch session"), "{logs}");
+    }
+
+    /// The lifetime split, which is the whole point of the two kinds existing.
+    ///
+    /// Both take the local fallback here (no daemon in tests), and the fallback
+    /// stops everything — so what this pins is the *reporting*: the background
+    /// task is stopped because it is a background task, and the persistent step
+    /// is stopped only because there was no daemon to hand it to.
+    #[tokio::test]
+    async fn a_background_task_and_a_persistent_step_say_different_things() {
+        let steps = vec![
+            RunStep {
+                persistent: true,
+                background: true,
+                ..step("mock-api", "while true; do sleep 1; done")
+            },
+            RunStep {
+                persistent: true,
+                ..step("dev-server", "while true; do sleep 1; done")
+            },
+            step("compile", "echo built"),
+        ];
+        let (result, updates) = drive(steps, Path::new(".")).await;
+        assert!(result.is_ok(), "{:?}", result.err());
+
+        let logs = step_logs(&updates);
+        // The persistent step is told it can't outlive this run, because
+        // without a daemon it can't. The background task is never promised
+        // that in the first place.
+        assert!(logs.contains("stops with this run"), "{logs}");
+        assert!(outcomes(&updates).contains(&("compile".to_string(), true)));
+    }
+
+    /// A background task is up before anything else runs — not merely somewhere
+    /// in wave 1, which is where the scheduler would otherwise have put it.
+    #[tokio::test]
+    async fn a_background_task_starts_before_the_first_wave() {
+        // Declared *after* the step, so declaration order can't be what makes
+        // this pass.
+        let steps = vec![
+            step("compile", "echo built"),
+            RunStep {
+                persistent: true,
+                background: true,
+                ..step("mock-api", "while true; do sleep 1; done")
+            },
+        ];
+        let (result, updates) = drive(steps, Path::new(".")).await;
+        assert!(result.is_ok(), "{:?}", result.err());
+
+        let order: Vec<&str> = updates
+            .iter()
+            .filter_map(|u| match u {
+                ProgressUpdate::StepStarted { step, .. } => Some(step.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            order.first(),
+            Some(&"mock-api"),
+            "the background task has to be up first: {order:?}"
+        );
+    }
+
+    /// Asking a run to stop ends it without running what was left.
+    #[tokio::test]
+    async fn a_stopped_run_skips_what_it_had_not_started() {
+        let cancel = std::sync::Arc::new(crate::runner::Cancel::default());
+        // Already stopped when the engine starts, which is the same state the
+        // engine sees when the button is pressed a moment in.
+        cancel.stop();
+
+        let steps = vec![step("first", "echo one"), step("second", "echo two")];
+        let (result, updates) = drive_with(steps, Path::new("."), Some(cancel)).await;
+
+        let err = result.expect_err("a stopped run does not report success");
+        assert!(err.to_string().contains("stopped"), "{err}");
+        assert!(
+            outcomes(&updates).is_empty(),
+            "nothing should have run: {:?}",
+            outcomes(&updates)
+        );
+    }
+
+    /// A stopped run still closes out the background tasks it started —
+    /// otherwise stopping would leave exactly the mess it exists to prevent.
+    #[tokio::test]
+    async fn a_stopped_run_still_stops_its_background_tasks() {
+        let cancel = std::sync::Arc::new(crate::runner::Cancel::default());
+        let steps = vec![
+            RunStep {
+                persistent: true,
+                background: true,
+                ..step("mock-api", "while true; do sleep 1; done")
+            },
+            // Long enough that the stop below lands while it is in flight.
+            step("slow", "sleep 30"),
+        ];
+
+        let armed = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+            armed.stop();
+        });
+
+        let started = std::time::Instant::now();
+        let (result, updates) = drive_with(steps, Path::new("."), Some(cancel)).await;
+
+        assert!(result.is_err(), "a stopped run does not report success");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(20),
+            "the step in flight has to be cut short, not waited out"
+        );
+        assert!(
+            step_logs(&updates).contains("stopped (the run finished)"),
+            "the background task must be closed out: {}",
+            step_logs(&updates)
+        );
     }
 
     #[tokio::test]

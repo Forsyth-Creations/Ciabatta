@@ -194,6 +194,37 @@ pub struct Workflow {
     #[serde(default)]
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub steps: Vec<RunStep>,
+    /// Long-running processes this workflow's steps need *up* in order to
+    /// finish: a mock API the integration tests call, a database container, a
+    /// bundler in watch mode.
+    ///
+    /// ```yaml
+    /// background:
+    ///   - name: mock-api
+    ///     run: node scripts/mock-api.js
+    ///     description: Stub API the integration step talks to
+    ///
+    /// steps:
+    ///   - name: integration
+    ///     run: yarn test:integration
+    /// ```
+    ///
+    /// Written as an array of their own rather than as steps with a flag,
+    /// because they are not steps: they never finish, so they can hold no
+    /// position in the order, and nothing can sensibly declare `needs` on one.
+    /// Every entry is started before the first wave and **gates nothing**, so
+    /// no mistake in one can hold a build up.
+    ///
+    /// They are stopped again once every stage has succeeded or failed — that
+    /// is the whole difference from a [`persistent`] step, which the daemon
+    /// keeps alive on purpose so a `dev` workflow leaves you something to work
+    /// against. A mock API that outlived the test run it was started for would
+    /// be holding its port when the next one began.
+    ///
+    /// [`persistent`]: crate::run::RunStep::persistent
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub background: Vec<RunStep>,
 }
 
 /// How to satisfy a build tool a workflow declares in `requires`.

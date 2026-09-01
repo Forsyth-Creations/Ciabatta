@@ -102,10 +102,15 @@ pub struct RunStep {
     #[serde(default)]
     #[serde(skip_serializing_if = "crate::format::is_zero")]
     pub retries: u32,
-    /// A step that never exits on its own — a dev server, a log tailer, a
-    /// watcher. It is started, its dependents are released immediately, and it
-    /// keeps running for the rest of the graph rather than hanging it. Follow
-    /// its output with `ciabatta watch`.
+    /// A **background task**: a step that never exits on its own — a mock API, a
+    /// dev server, a bundler in watch mode. It is started, its dependents are
+    /// released immediately, and it runs alongside the rest of the graph rather
+    /// than hanging it. It gates nothing, so it can never hold a build up, and
+    /// the run stops it again when the graph finishes — what it exists for is
+    /// over at that point, and leaving it up hands the operator a process still
+    /// holding its port. Follow it live, or read it back afterwards, with
+    /// `ciabatta watch`. The graph views draw these apart from the flow, under
+    /// a lightning bolt.
     #[serde(default)]
     #[serde(skip_serializing_if = "crate::format::is_false")]
     pub persistent: bool,

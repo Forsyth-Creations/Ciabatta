@@ -474,7 +474,7 @@ function StepDetails({ step, env }: { step: StepView; env: EnvVar[] }) {
   const badges: string[] = [];
   if (step.push) badges.push("push");
   else if (step.kind) badges.push(step.kind);
-  if (step.persistent) badges.push("persistent");
+  if (step.persistent) badges.push("⚡ background");
   if (step.timeout) badges.push(`timeout ${step.timeout}`);
   if (step.requires.length > 0) badges.push(`needs ${step.requires.join(", ")}`);
 
@@ -771,29 +771,39 @@ function buildFlow(
 
   // Recovery steps are left out of the numbering: the engine only enters them
   // from a failed step's `on_error`, so they have no position in the sequence
-  // the run takes when everything works.
+  // the run takes when everything works. Background tasks are left out for the
+  // opposite reason — they always run, but nothing waits for them, so they hold
+  // no position in the sequence either.
   const sequence = showOrder
     ? executionOrder(
         workflow.steps.filter((s) => !s.recover).map((s) => s.name),
         orderEdges,
+        { exclude: (id) => byName.get(id)?.persistent ?? false },
       )
     : new Map<string, number>();
 
   // A workflow graph draws nodes from several packages at once, so each one
   // leads with the sub-workspace it came from — "which package is this step
   // from?" is the first thing anyone asks when a shared build goes wrong.
-  const positioned = layeredLayout(ids, orderEdges, (id) => {
-    const step = byName.get(id);
-    return {
-      label:
-        step && (step.workspace || showOrder) ? (
-          <NodeLabel step={step} order={sequence.get(id) ?? null} />
-        ) : (
-          id
-        ),
-      status: step?.status ?? "pending",
-    };
-  });
+  const positioned = layeredLayout(
+    ids,
+    orderEdges,
+    (id) => {
+      const step = byName.get(id);
+      return {
+        label:
+          step && (step.workspace || showOrder) ? (
+            <NodeLabel step={step} order={sequence.get(id) ?? null} />
+          ) : (
+            id
+          ),
+        status: step?.status ?? "pending",
+      };
+    },
+    // Background tasks sit in a row underneath rather than in a column, because
+    // a column would claim they gate what follows them. They don't.
+    { bottom: (id) => byName.get(id)?.persistent ?? false },
+  );
 
   const nodes: Node[] = positioned.map((node) => {
     const step = byName.get(node.id);

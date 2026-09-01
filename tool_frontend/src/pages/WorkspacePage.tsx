@@ -34,6 +34,7 @@ import {
   Typography,
 } from "@mui/material";
 import AccountTreeIcon from "@mui/icons-material/AccountTree";
+import BoltIcon from "@mui/icons-material/Bolt";
 import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
 import PlayArrowIcon from "@mui/icons-material/PlayArrow";
 import PublishIcon from "@mui/icons-material/Publish";
@@ -312,6 +313,18 @@ function StepRow({ step }: { step: WorkflowStep }) {
  * The markers that change what "this step finished" means — plus the phase it
  * belongs to. Anything not shown here behaves the ordinary way.
  */
+/**
+ * What the lightning bolt means, in one sentence.
+ *
+ * Shared by the badge and the section heading deliberately: they are the same
+ * claim, and two copies of it are two things to keep true.
+ */
+const BACKGROUND_TOOLTIP =
+  "A background task: started when the run reaches it, and nothing ever waits for it. " +
+  "Use it for the mini-servers a build or a dev loop needs running alongside it — a mock API, " +
+  "a bundler in watch mode. It gates no step, so it can't hold the graph up, and it is stopped " +
+  "when the run finishes. Declare one with `persistent: true`.";
+
 function StepBadges({ step }: { step: WorkflowStep }) {
   return (
     <>
@@ -322,8 +335,8 @@ function StepBadges({ step }: { step: WorkflowStep }) {
       )}
       {!step.push && step.kind && <Chip size="small" variant="outlined" label={step.kind} />}
       {step.persistent && (
-        <Tooltip title="Started and left running; the graph doesn't wait for it">
-          <Chip size="small" color="info" variant="outlined" label="persistent" />
+        <Tooltip title={BACKGROUND_TOOLTIP}>
+          <Chip size="small" color="info" variant="outlined" icon={<BoltIcon />} label="background" />
         </Tooltip>
       )}
       {step.timeout && (
@@ -369,6 +382,13 @@ function GraphPanel({ project, workflow }: { project: string; workflow: string }
 
   const byId = new Map(data.nodes.map((node) => [node.id, node]));
   const recoveries = data.nodes.filter((node) => node.recover);
+  // Background tasks come out of the waves entirely. A wave means "these run
+  // together, and the next wave waits for them" — and nothing waits for these,
+  // so drawing one inside a wave states a dependency the engine does not have.
+  // They get their own section at the bottom instead, out of the flow they are
+  // not part of.
+  const background = data.nodes.filter((node) => node.persistent && !node.recover);
+  const isBackground = new Set(background.map((node) => node.id));
   const planned = new Map((plan?.steps ?? []).map((step) => [step.name, step]));
   const caching = plan?.caching ?? false;
 
@@ -380,8 +400,9 @@ function GraphPanel({ project, workflow }: { project: string; workflow: string }
             {data.workflow}
           </Typography>
           <Typography variant="body2" color="text.secondary" sx={{ flexGrow: 1 }}>
-            {data.nodes.filter((n) => !n.recover).length} step(s) across {data.units.length}{" "}
-            sub-workspace(s), in {data.waves.length} wave(s)
+            {data.nodes.filter((n) => !n.recover && !n.persistent).length} step(s) across{" "}
+            {data.units.length} sub-workspace(s), in {data.waves.length} wave(s)
+            {background.length > 0 && ` · ${background.length} background`}
           </Typography>
           <FormControlLabel
             control={<Switch checked={dryRun} onChange={(e) => setDryRun(e.target.checked)} />}
@@ -426,28 +447,61 @@ function GraphPanel({ project, workflow }: { project: string; workflow: string }
           <EnvPanel report={data.env} title="environment — read before wave 1" />
           {caching && plan && <GraphInputsPanel plan={plan} />}
 
-          {data.waves.map((wave, index) => (
-            <Box key={index}>
-              <Typography variant="overline" color="text.secondary">
-                wave {index + 1} — runs in parallel
-              </Typography>
-              <Stack spacing={1} sx={{ mt: 0.5 }}>
-                {wave.map((id) => {
-                  const node = byId.get(id);
-                  return node ? (
-                    <GraphNodeCard
-                      key={id}
-                      node={node}
-                      env={envFor(data, id)}
-                      planned={planned.get(id)}
-                    />
-                  ) : null;
-                })}
-              </Stack>
-            </Box>
-          ))}
+          {data.waves.map((wave, index) => {
+            const steps = wave.filter((id) => !isBackground.has(id));
+            // A wave that held nothing but background tasks isn't a wave.
+            if (steps.length === 0) return null;
+            return (
+              <Box key={index}>
+                <Typography variant="overline" color="text.secondary">
+                  wave {index + 1} — runs in parallel
+                </Typography>
+                <Stack spacing={1} sx={{ mt: 0.5 }}>
+                  {steps.map((id) => {
+                    const node = byId.get(id);
+                    return node ? (
+                      <GraphNodeCard
+                        key={id}
+                        node={node}
+                        env={envFor(data, id)}
+                        planned={planned.get(id)}
+                      />
+                    ) : null;
+                  })}
+                </Stack>
+              </Box>
+            );
+          })}
 
           {caching && plan && <GraphOutputsPanel plan={plan} />}
+
+          {background.length > 0 && (
+            <Box>
+              <Tooltip title={BACKGROUND_TOOLTIP}>
+                <Stack
+                  direction="row"
+                  spacing={0.5}
+                  alignItems="center"
+                  sx={{ width: "fit-content", cursor: "help" }}
+                >
+                  <BoltIcon fontSize="small" color="info" />
+                  <Typography variant="overline" color="text.secondary">
+                    background — started alongside the run, nothing waits for them
+                  </Typography>
+                </Stack>
+              </Tooltip>
+              <Stack spacing={1} sx={{ mt: 0.5 }}>
+                {background.map((node) => (
+                  <GraphNodeCard
+                    key={node.id}
+                    node={node}
+                    env={envFor(data, node.id)}
+                    planned={planned.get(node.id)}
+                  />
+                ))}
+              </Stack>
+            </Box>
+          )}
 
           {recoveries.length > 0 && (
             <Box>
@@ -496,7 +550,13 @@ function GraphNodeCard({
       sx={{
         p: 1,
         borderLeft: 3,
-        borderColor: node.recover ? "warning.main" : "primary.main",
+        // Three kinds of node, three colours: the flow, the branch entered only
+        // on failure, and the background task that is in neither.
+        borderColor: node.recover
+          ? "warning.main"
+          : node.persistent
+            ? "info.main"
+            : "primary.main",
         bgcolor: "action.hover",
         borderRadius: 1,
       }}

@@ -172,7 +172,7 @@
         "persistent": {
           "type": "boolean",
           "default": false,
-          "description": "A step that never exits on its own — a dev server, a log tailer, a watcher. Its dependents are released immediately and it keeps running for the rest of the graph. Follow its output with `ciabatta watch`."
+          "description": "A background task: a step that never exits on its own — a mock API, a dev server, a bundler in watch mode. Its dependents are released immediately and it runs alongside the rest of the graph, gating nothing, so it can never hold a build up. The run stops it again when the graph finishes; its output stays readable in `ciabatta watch`."
         },
         "continue_on_error": {
           "type": "boolean",

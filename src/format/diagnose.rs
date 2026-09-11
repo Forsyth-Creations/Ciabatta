@@ -197,6 +197,19 @@ fn hint(message: &str, content: &str, location: Option<Location>) -> Option<Stri
         );
     }
 
+    // An unterminated quote swallows the following lines into one scalar, so
+    // the parser complains about whatever it eventually choked on — several
+    // lines below the quote, and phrased as an indentation problem. Checked
+    // before the indentation hint for exactly that reason: that hint is right
+    // far more often, and wrong in precisely this case.
+    if let Some(opened) = unclosed_quote(content, location) {
+        return Some(format!(
+            "The quote opened on line {opened} is never closed, so everything after it \
+             was read as one value and the parser only noticed further down. Close it, \
+             or escape the quote inside it."
+        ));
+    }
+
     if message.contains("did not find expected '-' indicator")
         || message.contains("did not find expected key")
         || message.contains("did not find expected node content")
@@ -262,6 +275,56 @@ fn hint(message: &str, content: &str, location: Option<Location>) -> Option<Stri
     }
 
     None
+}
+
+/// The line number of a quote that opens a scalar and is never closed, when one
+/// sits at or above the reported error.
+///
+/// Counting quotes per line rather than running a real scanner: a correct YAML
+/// line has an even number of unescaped quotes of each kind, and the first line
+/// at or above the error that breaks that rule is the one that ran on. Wrong on
+/// a line that legitimately contains an apostrophe in an unquoted scalar — so
+/// single quotes are only counted on lines that look like they open one, and
+/// the caller treats the answer as a hint rather than a diagnosis.
+fn unclosed_quote(content: &str, location: Option<Location>) -> Option<usize> {
+    let limit = location.map(|l| l.line).unwrap_or(usize::MAX);
+
+    for (index, line) in content.lines().enumerate() {
+        let number = index + 1;
+        if number > limit {
+            break;
+        }
+        // Only the value half can open a scalar; a `#` starts a comment.
+        let value = match line.split_once(':') {
+            Some((_, value)) => value,
+            None => continue,
+        };
+        let value = value.split('#').next().unwrap_or(value);
+
+        if odd_unescaped(value, '"') {
+            return Some(number);
+        }
+    }
+    None
+}
+
+/// Whether `text` holds an odd number of `quote` characters that aren't
+/// backslash-escaped.
+fn odd_unescaped(text: &str, quote: char) -> bool {
+    let mut count = 0usize;
+    let mut escaped = false;
+    for c in text.chars() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match c {
+            '\\' => escaped = true,
+            c if c == quote => count += 1,
+            _ => {}
+        }
+    }
+    count % 2 == 1
 }
 
 /// The text between `needle` and the closing backtick after it.
@@ -561,5 +624,38 @@ mod tests {
             out.contains("Keys this file accepts: name, steps."),
             "{out}"
         );
+    }
+
+    #[test]
+    fn an_unterminated_quote_is_blamed_on_the_line_that_opened_it() {
+        let doc = "description: \"never closed\nsteps:\n  - name: a\n    run: \"true\"\n";
+        let out = hint(
+            "did not find expected key",
+            doc,
+            Some(Location {
+                line: 4,
+                column: 11,
+            }),
+        )
+        .unwrap();
+        // Line 1, not line 4 — the parser's location is where it gave up, not
+        // where the mistake is.
+        assert!(out.contains("line 1"), "{out}");
+        assert!(out.contains("never closed"), "{out}");
+    }
+
+    #[test]
+    fn balanced_quotes_do_not_trigger_the_unclosed_quote_hint() {
+        let doc = "run: \"echo hi\"\nname: \"a\"\n";
+        assert_eq!(
+            unclosed_quote(doc, Some(Location { line: 2, column: 1 })),
+            None
+        );
+    }
+
+    #[test]
+    fn an_escaped_quote_does_not_count_as_opening_one() {
+        assert!(!odd_unescaped(r#" "he said \"hi\"" "#, '"'));
+        assert!(odd_unescaped(r#" "unclosed "#, '"'));
     }
 }

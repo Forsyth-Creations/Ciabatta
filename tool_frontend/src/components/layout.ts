@@ -6,7 +6,7 @@
  * engine would be a large dependency baked into the Rust binary for very little.
  */
 
-import { Position, type Edge, type Node } from "@xyflow/react";
+import { MarkerType, Position, type Edge, type Node } from "@xyflow/react";
 
 /**
  * Edge styling for the layered graphs: orthogonal segments with rounded
@@ -19,7 +19,20 @@ import { Position, type Edge, type Node } from "@xyflow/react";
  */
 export const ORTHOGONAL_EDGE = {
   type: "smoothstep" as const,
-  pathOptions: { borderRadius: 14 },
+  pathOptions: {
+    borderRadius: 14,
+    // How far an edge runs straight out of a node before it turns. Larger than
+    // react-flow's default so the turn happens in the gap between columns
+    // rather than against the node's edge, which is what lets several edges
+    // arriving at one node fan out instead of converging into a single stroke
+    // three nodes back.
+    offset: 24,
+  },
+  markerEnd: {
+    type: MarkerType.ArrowClosed,
+    width: 14,
+    height: 14,
+  },
 };
 
 /**
@@ -130,17 +143,28 @@ export function layeredLayout(
     columns.set(d, column);
   }
 
+  // Columns in depth order, which is what the sweeps below walk. The map is in
+  // whatever order the nodes were declared in, and a sweep that visits depth 3
+  // before depth 2 is not sweeping.
+  const depths = [...columns.keys()].sort((a, b) => a - b);
+  const order = depths.map((d) => columns.get(d)!);
+
+  // Only edges whose both ends are in the layering, since these drive both the
+  // ordering and the positioning and an edge to a parked node would pull on a
+  // row that isn't there.
+  const inner = edges.filter((e) => depth.has(e.source) && depth.has(e.target));
+
+  reduceCrossings(order, inner);
+  const rows = assignRows(order, inner, rowHeight);
+
   const nodes: Node[] = [];
-  for (const [d, column] of columns) {
-    column.forEach((id, index) => {
+  order.forEach((column, index) => {
+    const d = depths[index];
+    for (const id of column) {
       nodes.push({
         id,
         data: data(id),
-        position: {
-          x: d * columnWidth,
-          // Centre each column vertically against the others.
-          y: (index - (column.length - 1) / 2) * rowHeight,
-        },
+        position: { x: d * columnWidth, y: rows.get(id) ?? 0 },
         type: "default",
         // The graph runs left to right, so edges must leave the right side and
         // arrive at the left. With react-flow's default top/bottom handles
@@ -149,13 +173,13 @@ export function layeredLayout(
         sourcePosition: Position.Right,
         targetPosition: Position.Left,
       });
-    });
-  }
+    }
+  });
 
-  // The parked row, clear of the deepest column the layered nodes reached.
+  // The parked row, clear of the lowest any layered node reached.
   if (parked.length > 0) {
-    const tallest = Math.max(1, ...[...columns.values()].map((column) => column.length));
-    const y = ((tallest - 1) / 2) * rowHeight + rowHeight * 2;
+    const lowest = Math.max(0, ...[...rows.values()]);
+    const y = lowest + rowHeight * 2;
     parked.forEach((id, index) => {
       nodes.push({
         id,
@@ -169,6 +193,207 @@ export function layeredLayout(
   }
 
   return nodes;
+}
+
+/** How many ordering sweeps to run before taking the best result. */
+const SWEEPS = 8;
+
+/**
+ * Reorder each column, in place, to cut the number of edges that cross.
+ *
+ * The layering alone decides which column a node is in; it says nothing about
+ * where in the column it sits, and the answer used to be "wherever it was
+ * declared". On a four-node graph that is fine. On a monorepo graph — forty
+ * steps across six packages, every package's `compile` feeding every package's
+ * `test` — declaration order interleaves the packages and every edge crosses
+ * most of the others. The picture is technically correct and completely
+ * unreadable, which is the complaint this answers.
+ *
+ * The method is the standard one (Sugiyama's second phase, by barycentres):
+ * sweep forward putting each node at the average height of the nodes feeding
+ * it, sweep back putting it at the average height of the nodes it feeds, and
+ * keep whichever pass crossed least. It is a heuristic — minimising crossings
+ * exactly is NP-hard — but it reliably turns that tangle into something with
+ * visible lanes, and it is thirty lines rather than a layout engine in the
+ * bundle.
+ */
+function reduceCrossings(order: string[][], edges: { source: string; target: string }[]): void {
+  if (order.length < 2) return;
+
+  const successors = new Map<string, string[]>();
+  const predecessors = new Map<string, string[]>();
+  for (const edge of edges) {
+    successors.set(edge.source, [...(successors.get(edge.source) ?? []), edge.target]);
+    predecessors.set(edge.target, [...(predecessors.get(edge.target) ?? []), edge.source]);
+  }
+
+  let best = order.map((column) => [...column]);
+  let fewest = countCrossings(order, edges);
+
+  for (let sweep = 0; sweep < SWEEPS; sweep++) {
+    // Forward, then back. Alternating matters: a forward-only sweep settles
+    // the later columns against the earlier ones and never asks whether the
+    // earlier ones could move to suit.
+    const neighbours = sweep % 2 === 0 ? predecessors : successors;
+    const columns =
+      sweep % 2 === 0
+        ? order.map((_, index) => index).slice(1)
+        : order
+            .map((_, index) => index)
+            .slice(0, -1)
+            .reverse();
+
+    for (const index of columns) {
+      const fixed = new Map(
+        order[sweep % 2 === 0 ? index - 1 : index + 1].map((id, position) => [id, position]),
+      );
+      // A node with no neighbours in the fixed column has no barycentre, so it
+      // keeps the position it has rather than being swept to the top.
+      const keys = new Map<string, number>();
+      order[index].forEach((id, position) => {
+        const linked = (neighbours.get(id) ?? [])
+          .map((other) => fixed.get(other))
+          .filter((p): p is number => p !== undefined);
+        keys.set(id, linked.length === 0 ? position : mean(linked));
+      });
+      // Stable, so nodes that tie keep the order they already had — which on
+      // the first sweep is declaration order, the most meaningful tiebreak
+      // available.
+      order[index] = [...order[index]].sort((a, b) => keys.get(a)! - keys.get(b)!);
+    }
+
+    const crossings = countCrossings(order, edges);
+    if (crossings < fewest) {
+      fewest = crossings;
+      best = order.map((column) => [...column]);
+    }
+    if (fewest === 0) break;
+  }
+
+  best.forEach((column, index) => {
+    order[index] = column;
+  });
+}
+
+/**
+ * Edge pairs that cross, summed over every adjacent pair of columns.
+ *
+ * Two edges between the same pair of columns cross exactly when their endpoints
+ * are in opposite orders, so this counts inversions in the target positions
+ * after sorting by source position. Quadratic in the edges between one pair of
+ * columns, which on graphs of this size is nothing, and it is only ever
+ * compared against itself.
+ */
+function countCrossings(order: string[][], edges: { source: string; target: string }[]): number {
+  const position = new Map<string, { column: number; row: number }>();
+  order.forEach((column, index) => {
+    column.forEach((id, row) => position.set(id, { column: index, row }));
+  });
+
+  let crossings = 0;
+  for (let index = 0; index + 1 < order.length; index++) {
+    const between = edges
+      .map((edge) => ({ from: position.get(edge.source), to: position.get(edge.target) }))
+      .filter((e) => e.from?.column === index && e.to?.column === index + 1)
+      .map((e) => [e.from!.row, e.to!.row] as const)
+      .sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+
+    for (let a = 0; a < between.length; a++) {
+      for (let b = a + 1; b < between.length; b++) {
+        if (between[a][1] > between[b][1]) crossings++;
+      }
+    }
+  }
+  return crossings;
+}
+
+/**
+ * The y position of every node, once the columns are ordered.
+ *
+ * Index times row height would keep the ordering and throw away the reason for
+ * it: a node whose only parent sits four rows up is drawn level with the top of
+ * its own column, and the edge between them is a long diagonal across
+ * everything in between. So each node is pulled towards the average height of
+ * what it connects to, and then each column is pushed apart again until nothing
+ * overlaps.
+ *
+ * The push-apart is what keeps this honest — barycentres alone will happily
+ * stack two nodes on the same pixel — and doing it after every relaxation pass
+ * rather than once at the end stops the two from fighting.
+ */
+function assignRows(
+  order: string[][],
+  edges: { source: string; target: string }[],
+  rowHeight: number,
+): Map<string, number> {
+  const rows = new Map<string, number>();
+  for (const column of order) {
+    column.forEach((id, index) => rows.set(id, index * rowHeight));
+  }
+
+  const successors = new Map<string, string[]>();
+  const predecessors = new Map<string, string[]>();
+  for (const edge of edges) {
+    successors.set(edge.source, [...(successors.get(edge.source) ?? []), edge.target]);
+    predecessors.set(edge.target, [...(predecessors.get(edge.target) ?? []), edge.source]);
+  }
+
+  for (let pass = 0; pass < SWEEPS; pass++) {
+    const forward = pass % 2 === 0;
+    const columns = forward ? order : [...order].reverse();
+
+    for (const column of columns) {
+      for (const id of column) {
+        const linked = (forward ? predecessors : successors).get(id) ?? [];
+        const heights = linked
+          .map((other) => rows.get(other))
+          .filter((y): y is number => y !== undefined);
+        if (heights.length > 0) rows.set(id, mean(heights));
+      }
+    }
+
+    // Separate, in order, so the ordering the sweeps chose survives being
+    // pulled around by the barycentres.
+    for (const column of order) separate(column, rows, rowHeight);
+  }
+
+  // Centre the whole thing on zero, so the canvas opens on the graph rather
+  // than below it.
+  const values = [...rows.values()];
+  if (values.length > 0) {
+    const middle = (Math.min(...values) + Math.max(...values)) / 2;
+    for (const [id, y] of rows) rows.set(id, y - middle);
+  }
+
+  return rows;
+}
+
+/**
+ * Push a column's nodes apart until none overlaps, keeping the column centred
+ * where the barycentres wanted it.
+ *
+ * The push itself walks top to bottom, which on its own anchors the column to
+ * whichever node happens to be first and slides every other one down: the two
+ * halves of a diamond come out as "level with the parent" and "one row below
+ * it" rather than straddling it, and the parent then reads as belonging to the
+ * upper branch. Shifting the column back by the average displacement undoes
+ * exactly that bias without disturbing the order or the spacing.
+ */
+function separate(column: string[], rows: Map<string, number>, rowHeight: number): void {
+  if (column.length < 2) return;
+
+  const wanted = column.map((id) => rows.get(id)!);
+  const placed = [...wanted];
+  for (let index = 1; index < placed.length; index++) {
+    placed[index] = Math.max(placed[index], placed[index - 1] + rowHeight);
+  }
+
+  const drift = mean(placed) - mean(wanted);
+  column.forEach((id, index) => rows.set(id, placed[index] - drift));
+}
+
+function mean(values: number[]): number {
+  return values.reduce((total, value) => total + value, 0) / values.length;
 }
 
 /**

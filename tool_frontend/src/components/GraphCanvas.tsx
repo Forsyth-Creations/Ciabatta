@@ -30,6 +30,9 @@ interface GraphCanvasProps {
   edges: Edge[];
   height?: number | string;
   onNodeClick?: NodeMouseHandler;
+  /** Clicking empty canvas — the way out of a focus without hunting for the
+   *  node that started it. */
+  onPaneClick?: () => void;
   /** Colour used by the minimap for a node. */
   nodeColor?: (node: Node) => string;
   /**
@@ -54,6 +57,7 @@ export function GraphCanvas({
   edges,
   height = 560,
   onNodeClick,
+  onPaneClick,
   nodeColor,
   minimap,
   fitKey,
@@ -138,6 +142,7 @@ export function GraphCanvas({
         edges={edges}
         onNodesChange={onNodesChange}
         onNodeClick={onNodeClick}
+        onPaneClick={onPaneClick}
         fitView
         // These are views of computed state, not editors: dragging a node
         // around would imply the position means something and survives a
@@ -151,7 +156,17 @@ export function GraphCanvas({
         <Background variant={BackgroundVariant.Dots} gap={18} size={1} />
         <Controls showInteractive={false} />
         {(minimap ?? (typeof height === "number" && height >= 400)) && (
-          <MiniMap pannable zoomable nodeColor={nodeColor} nodeStrokeWidth={2} />
+          <MiniMap
+            pannable
+            zoomable
+            nodeColor={nodeColor}
+            nodeStrokeWidth={2}
+            // Explicitly small and see-through. react-flow's default is a fixed
+            // 200×150 panel, which is a corner of a full-width canvas and most
+            // of a half-width one — on the split run view it covered the part of
+            // the flowchart it was there to help you find.
+            style={{ width: 132, height: 88, opacity: 0.85 }}
+          />
         )}
       </ReactFlow>
     </Box>

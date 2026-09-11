@@ -21,7 +21,7 @@ pub mod render;
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 
 use crate::config::{CIABATTA_DIR, CiabattaConfig, config_path, load_config_file};
@@ -236,6 +236,30 @@ pub struct Workflow {
     #[serde(default)]
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub background: Vec<String>,
+}
+
+impl Workflow {
+    /// Every key a workflow file may set at the top level.
+    ///
+    /// Maintained by hand alongside the fields above, and checked against them
+    /// by a test, because serde's own list isn't reachable at runtime and the
+    /// alternative — `deny_unknown_fields` — would turn a typo into a parse
+    /// error phrased in serde's vocabulary rather than one that says which key
+    /// was meant. `REQUIRED_ENV` appears as it is written in the file, not as
+    /// the field is spelled in Rust.
+    pub const KNOWN_KEYS: &'static [&'static str] = &[
+        "description",
+        "owner",
+        "needs",
+        "requires",
+        "env_file",
+        "REQUIRED_ENV",
+        "env",
+        "tags",
+        "cache",
+        "steps",
+        "background",
+    ];
 }
 
 /// How to satisfy a build tool a workflow declares in `requires`.
@@ -572,8 +596,12 @@ fn load_workflows(
         let Some(name) = path.file_stem().and_then(|s| s.to_str()) else {
             continue;
         };
-        let workflow: Workflow = crate::format::load(&path)
-            .with_context(|| format!("Failed to load workflow file '{}'", path.display()))?;
+        // No `.context()` naming the file: `format::load` already opens its
+        // error with the path, and a wrapper repeating it pushed the quoted
+        // line and the caret down under a "Caused by:" where they read as
+        // incidental detail rather than as the answer.
+        let workflow: Workflow = crate::format::load(&path)?;
+        check_workflow_keys(&path)?;
 
         if config.workflows.contains_key(name) {
             bail!(
@@ -588,6 +616,52 @@ fn load_workflows(
     }
 
     Ok(workflows)
+}
+
+/// Reject a workflow file that sets a top-level key ciabatta has no field for.
+///
+/// Serde ignores unknown keys, which for a hand-written config means a typo is
+/// a silent no-op: `step:` for `steps:` parsed cleanly, produced a workflow
+/// with nothing in it, and failed several layers later complaining that the
+/// workflow had no steps — a true statement that sends you to look at the one
+/// part of the file that was fine.
+///
+/// Only YAML files are checked. A TOML workflow predates 0.2.0 by definition,
+/// and breaking one over a key it has always been allowed to carry would be a
+/// poor trade for a check aimed at files being written today.
+fn check_workflow_keys(path: &Path) -> Result<()> {
+    if crate::format::Format::of_path(path) != crate::format::Format::Yaml {
+        return Ok(());
+    }
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return Ok(());
+    };
+
+    let unknown = crate::format::diagnose::unknown_keys(&content, Workflow::KNOWN_KEYS);
+    if unknown.is_empty() {
+        return Ok(());
+    }
+
+    // `name:` is the one unknown key worth answering specifically. It is the
+    // obvious thing to write at the top of a workflow file, it is what the
+    // other CI formats use, and the generic "did you mean" has nothing close
+    // to suggest — so the answer has to be where the name actually comes from.
+    if let Some(entry) = unknown.iter().find(|entry| entry.key == "name") {
+        let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("build");
+        bail!(
+            "{} sets `name:` on line {}, which ciabatta ignores.\n\n\
+             A workflow file is named by its filename — this one defines the \
+             workflow `{stem}`, whatever `name:` says. Rename the file to rename \
+             the workflow, and delete the key.",
+            path.display(),
+            entry.line,
+        );
+    }
+
+    bail!(
+        "{}",
+        crate::format::diagnose::unknown_key_report(path, &content, &unknown, Workflow::KNOWN_KEYS)
+    )
 }
 
 /// The workflow names declared as files in `dir` (`<name>.yaml`).
@@ -891,6 +965,115 @@ mod tests {
         write_workflow(&m, "build", "[[steps]]\nname = \"b\"\nrun = \"true\"\n");
         let err = Workspace::load(&root).unwrap_err().to_string();
         assert!(err.contains("twice"), "{err}");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// `KNOWN_KEYS` is maintained by hand; this is what keeps it honest. A
+    /// field added to `Workflow` without a matching entry would make that key
+    /// an error in every workflow file that used it — a worse failure than the
+    /// silent ignoring the list exists to replace.
+    #[test]
+    fn every_workflow_field_is_listed_as_a_known_key() {
+        // Populated rather than defaulted: nearly every field is
+        // `skip_serializing_if`, so a default workflow serializes to almost
+        // nothing and would assert almost nothing.
+        let workflow = Workflow {
+            description: Some("d".into()),
+            owner: Some("o".into()),
+            needs: vec!["n".into()],
+            requires: vec!["r".into()],
+            env_file: vec![".env".into()],
+            required_env: vec!["E".into()],
+            env: [("K".to_string(), "V".to_string())].into_iter().collect(),
+            tags: vec!["t".into()],
+            cache: Some(Default::default()),
+            steps: vec![Default::default()],
+            background: vec!["b".into()],
+        };
+
+        let yaml = crate::format::to_string(&workflow, crate::format::Format::Yaml).unwrap();
+        let serialized: std::collections::BTreeMap<String, serde_yaml_ng::Value> =
+            crate::format::from_str(&yaml, crate::format::Format::Yaml).unwrap();
+
+        for key in serialized.keys() {
+            assert!(
+                Workflow::KNOWN_KEYS.contains(&key.as_str()),
+                "`{key}` is a Workflow field but is missing from KNOWN_KEYS, so a \
+                 workflow file setting it would be rejected"
+            );
+        }
+        for key in Workflow::KNOWN_KEYS {
+            assert!(
+                serialized.contains_key(*key),
+                "KNOWN_KEYS lists `{key}`, which is not a Workflow field"
+            );
+        }
+    }
+
+    #[test]
+    fn a_typoed_workflow_key_is_refused_rather_than_ignored() {
+        let root = scratch("typo_key");
+        let m = write_member_as(&root, "api", "ciabatta.yaml", "workspace:\n  name: api\n");
+        write_workflow_as(&m, "build.yaml", "step:\n  - name: b\n    run: \"true\"\n");
+
+        let err = Workspace::load(&root).unwrap_err().to_string();
+        // The key, the line it is on, and what it was probably meant to be.
+        assert!(err.contains("`step` is not a key here"), "{err}");
+        assert!(err.contains("did you mean `steps`"), "{err}");
+        assert!(err.contains("> 1 | step:"), "{err}");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// `name:` is the most natural wrong key to write here, so it gets its own
+    /// answer rather than a "did you mean" with nothing close to offer.
+    #[test]
+    fn a_workflow_file_setting_name_is_told_where_the_name_comes_from() {
+        let root = scratch("name_key");
+        let m = write_member_as(&root, "api", "ciabatta.yaml", "workspace:\n  name: api\n");
+        write_workflow_as(
+            &m,
+            "build.yaml",
+            "name: something-else\nsteps:\n  - name: b\n    run: \"true\"\n",
+        );
+
+        let err = Workspace::load(&root).unwrap_err().to_string();
+        assert!(err.contains("named by its filename"), "{err}");
+        assert!(err.contains("`build`"), "{err}");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A TOML workflow predates the check, and a key it has always carried
+    /// must not start failing now.
+    #[test]
+    fn an_unknown_key_in_a_legacy_toml_workflow_is_left_alone() {
+        let root = scratch("toml_key");
+        let m = write_member(&root, "api", "[workspace]\nname = \"api\"\n");
+        write_workflow(
+            &m,
+            "build",
+            "step = 1\n[[steps]]\nname = \"b\"\nrun = \"true\"\n",
+        );
+
+        assert!(Workspace::load(&root).is_ok());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// The whole point of the diagnostic: the error names the file, quotes the
+    /// line and says what was wrong with it.
+    #[test]
+    fn a_malformed_workflow_file_reports_the_line_it_failed_on() {
+        let root = scratch("bad_yaml");
+        let m = write_member_as(&root, "api", "ciabatta.yaml", "workspace:\n  name: api\n");
+        write_workflow_as(
+            &m,
+            "build.yaml",
+            "steps:\n  - name: compile\n    run: cargo build\n   - name: test\n     run: cargo test\n",
+        );
+
+        let err = format!("{:#}", Workspace::load(&root).unwrap_err());
+        assert!(err.contains("build.yaml is not valid YAML"), "{err}");
+        assert!(err.contains("> 4 |    - name: test"), "{err}");
+        assert!(err.contains("indentation-sensitive"), "{err}");
         std::fs::remove_dir_all(&root).ok();
     }
 

@@ -538,6 +538,20 @@ async fn detail(State(state): State<AppState>, Path(id): Path<u64>) -> RouteResu
     Ok(Json(snapshot(&run)))
 }
 
+/// How long a burst of updates is allowed to accumulate before the next
+/// snapshot goes out.
+///
+/// Every frame carries the *whole* run state, so one frame per update meant one
+/// full serialization of every step, every dependency and every log line held
+/// so far — per log line. A step printing a few thousand lines a second turned
+/// that into megabytes a second of near-identical JSON, and the browser, which
+/// re-renders the flowchart and the log pane on each frame, stopped responding.
+///
+/// A tenth of a second is below what anyone reads as lag on a build log and
+/// puts a hard ceiling of ten frames a second on the work either end has to do,
+/// whatever the step is printing.
+const COALESCE: std::time::Duration = std::time::Duration::from_millis(100);
+
 /// Live run state as Server-Sent Events.
 async fn stream(
     State(state): State<AppState>,
@@ -546,19 +560,42 @@ async fn stream(
     let run = get_run(&state, id)?;
 
     let events = async_stream::stream! {
+        // The sequence last sent, so a tick with nothing new behind it sends
+        // nothing. `u64::MAX` rather than 0: a run whose first update lands
+        // before the first subscriber must still get an opening frame.
+        let mut sent = u64::MAX;
+
         loop {
-            let payload = snapshot(&run);
-            let done = payload["done"].as_bool().unwrap_or(false);
+            // Registered *before* the state is read, which is what makes this
+            // loop safe to coalesce. `notify_waiters` only wakes waiters that
+            // are already registered, so an update landing between the read and
+            // the await used to be dropped on the floor — the stream then sat
+            // idle until the *next* update pushed it along, and on the last
+            // line of a run there is no next update. Holding the registration
+            // across the read means such an update wakes this immediately.
+            let changed = run.changed.notified();
+            tokio::pin!(changed);
 
-            if let Ok(event) = Event::default().json_data(&payload) {
-                yield Ok(event);
+            let seq = run.seq.load(Ordering::Relaxed);
+            if seq != sent {
+                sent = seq;
+                let payload = snapshot(&run);
+                let done = payload["done"].as_bool().unwrap_or(false);
+
+                if let Ok(event) = Event::default().json_data(&payload) {
+                    yield Ok(event);
+                }
+
+                if done {
+                    break;
+                }
             }
 
-            if done {
-                break;
-            }
-
-            run.changed.notified().await;
+            changed.await;
+            // Let the rest of the burst land before taking the next snapshot.
+            // This is the whole coalescing step: whatever arrives in this
+            // window is folded into one frame instead of one frame each.
+            tokio::time::sleep(COALESCE).await;
         }
     };
 

@@ -657,8 +657,8 @@ fn compile(
 
         if workflow.steps.is_empty() {
             bail!(
-                "Workflow '{}' in sub-workspace '{}' has no steps. Give it at least one \
-                 [[steps]] entry, or remove it.",
+                "Workflow '{}' in sub-workspace '{}' has no steps. Give it a `steps:` \
+                 list with at least one entry, or remove it.",
                 unit.workflow,
                 unit.member
             );

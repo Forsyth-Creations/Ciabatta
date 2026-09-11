@@ -287,6 +287,19 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+/// Whether a `prepare_many` failure means "there is no such workflow" rather
+/// than "the workflow is there and something about it is wrong".
+///
+/// The distinction decides whether it is worth telling somebody that what they
+/// typed is not a subcommand either. On a mistyped name that is the most useful
+/// sentence in the message; on a workflow file with a stray indent it is a red
+/// herring pointing away from the actual error, which is three lines further
+/// down and about YAML.
+fn unknown_workflow(err: &anyhow::Error) -> bool {
+    err.chain()
+        .any(|cause| cause.to_string().starts_with("No sub-workspace defines a "))
+}
+
 /// Dispatch `ciabatta <workflow>` (and `ciabatta workflow <name>`): compile one
 /// graph across every sub-workspace that takes part, show it, then run it.
 ///
@@ -328,11 +341,18 @@ async fn cmd_workflow(args: cli::WorkflowArgs, bare_name: bool) -> Result<()> {
     };
     let (ws, mut graph) = workspace::graph::prepare_many(&cwd, &workflows, &selection).map_err(
         |err| match bare_name {
-            true => anyhow::anyhow!(
-                "{err}\n'{first}' is not a ciabatta command either — run \
+            // Only when nothing *defines* the workflow. Rebuilding the error
+            // with `anyhow!("{err}\n…")` unconditionally — which is what this
+            // did — threw away the whole cause chain, so a workflow file with a
+            // syntax error reported "Failed to load workflow file 'build.yaml'"
+            // and not one word about the syntax. It also appended "not a
+            // ciabatta command" to failures that had found the command
+            // perfectly well and choked on its contents.
+            true if unknown_workflow(&err) => anyhow::anyhow!(
+                "{err:#}\n'{first}' is not a ciabatta command either — run \
                  `ciabatta --help` for the list."
             ),
-            false => err,
+            _ => err,
         },
     )?;
 

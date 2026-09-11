@@ -23,6 +23,8 @@ use anyhow::{Context, Result};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
+pub mod diagnose;
+
 /// Which of the two config syntaxes a file is written in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Format {
@@ -60,10 +62,47 @@ impl Format {
 }
 
 /// Parse `content` as `T` in the given format.
+///
+/// The error is a full diagnostic — the line quoted, a caret under the column,
+/// and a note on the failure's shape — rather than the parser's bare sentence.
+/// See [`diagnose`] for why: "did not find expected '-' indicator at line 5
+/// column 4" is accurate and nearly unusable, because the one thing it lacks is
+/// line 5.
 pub fn from_str<T: DeserializeOwned>(content: &str, format: Format) -> Result<T> {
+    from_str_named(content, format, None)
+}
+
+/// [`from_str`], with the file name to put in the diagnostic.
+///
+/// Separate from `from_str` only because a good half of the call sites are
+/// parsing a string that never was a file — a fenced block out of a README, a
+/// document assembled in memory — and those have no name to give.
+pub fn from_str_named<T: DeserializeOwned>(
+    content: &str,
+    format: Format,
+    path: Option<&Path>,
+) -> Result<T> {
     match format {
-        Format::Yaml => serde_yaml_ng::from_str(content).map_err(Into::into),
-        Format::Toml => toml::from_str(content).map_err(Into::into),
+        Format::Yaml => serde_yaml_ng::from_str(content).map_err(|err| {
+            let location = err.location().map(|l| diagnose::Location {
+                line: l.line(),
+                column: l.column(),
+            });
+            anyhow::anyhow!(diagnose::report(
+                path,
+                content,
+                format,
+                &err.to_string(),
+                location
+            ))
+        }),
+        // toml's own Display already quotes the offending line and points at
+        // it, so running it through `diagnose` would print the excerpt twice.
+        // The only thing it omits is which file it was reading.
+        Format::Toml => toml::from_str(content).map_err(|err: toml::de::Error| match path {
+            Some(path) => anyhow::anyhow!("{} is not valid TOML.\n\n{err}", path.display()),
+            None => anyhow::anyhow!("{err}"),
+        }),
     }
 }
 
@@ -77,9 +116,10 @@ pub fn to_string<T: Serialize>(value: &T, format: Format) -> Result<String> {
 
 /// Read and parse a config file, choosing the parser from its extension.
 ///
-/// The error names the file and the format it was read as, because "expected a
-/// mapping" is a great deal less useful than knowing ciabatta tried to read
-/// your TOML as YAML.
+/// The error names the file, quotes the line it failed on and says what the
+/// parser wanted there. No `.context()` wrapper on top: the diagnostic already
+/// opens with the file name, and a context line repeating it just pushes the
+/// part worth reading further down the screen.
 pub fn load<T: DeserializeOwned>(path: &Path) -> Result<T> {
     let content = std::fs::read_to_string(path)
         .with_context(|| format!("Failed to read {}", path.display()))?;
@@ -87,8 +127,7 @@ pub fn load<T: DeserializeOwned>(path: &Path) -> Result<T> {
     if format == Format::Toml {
         deprecation_notice(path);
     }
-    from_str(&content, format)
-        .with_context(|| format!("Failed to parse {} as {}", path.display(), format.ext()))
+    from_str_named(&content, format, Some(path))
 }
 
 /// Look for `<dir>/<stem>.<ext>` across [`CONFIG_EXTS`], returning the first

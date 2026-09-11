@@ -45,7 +45,7 @@ import {
 } from "../api/run";
 import { humanizeBytes } from "../api/cache";
 import type { EnvVar } from "../api/types";
-import { AnsiText } from "../components/AnsiText";
+import { LogView } from "../components/LogView";
 import { GraphCanvas } from "../components/GraphCanvas";
 import {
   EnvPanel,
@@ -89,6 +89,10 @@ const isDependencyNode = (id: string) => isFileNode(id) || envKeyOf(id) !== null
 
 /** How far the graph fades what the focused node doesn't reach. */
 const DIMMED = 0.18;
+
+/** Height of the graph and log panes, which are the same so they line up when
+ *  they sit side by side. */
+const PANE_HEIGHT = 460;
 
 /**
  * What one click on a dependency node lights up.
@@ -320,103 +324,97 @@ function WorkflowPanel({
 
       {choose.error && <ErrorNote error={choose.error} />}
 
-      <GraphCanvas
-        nodes={nodes}
-        edges={edges}
-        height={420}
-        // Turning the environment column on and off changes the graph's
-        // extent, so the view has to be re-fitted around it.
-        fitKey={`${showEnv ? "env" : ""}${showFiles ? "+files" : ""}` || "steps-only"}
-        // A dependency node — a variable, or a set of files read or written —
-        // isn't a step and has no logs of its own. Clicking one focuses the
-        // graph on the steps it touches instead; clicking it again (or picking
-        // any step) puts the whole graph back.
-        onNodeClick={(_, node) => {
-          if (!isDependencyNode(node.id)) {
-            setFocused(null);
-            onSelectStep(node.id);
-            return;
-          }
-          setFocused((current) => (current === node.id ? null : node.id));
-          onSelectStep(null);
+      {/*
+        Graph and logs side by side once there is width for both, stacked below
+        that. Watching a step run means watching two things — which node is
+        lit, and what it is printing — and stacked panes put one of them off
+        the bottom of the screen at exactly the moment both matter. The
+        breakpoint is `lg` because the graph needs real width before splitting
+        it helps: narrower than that, a half-width flowchart is worse than a
+        full-width one above the logs.
+      */}
+      <Box
+        sx={{
+          display: "grid",
+          gap: 2,
+          alignItems: "stretch",
+          gridTemplateColumns: { xs: "1fr", lg: "minmax(0, 1fr) minmax(0, 1fr)" },
         }}
-        nodeColor={(node) => statusColor(node.data?.status as StepStatus, theme)}
-      />
+      >
+        <Box sx={{ minWidth: 0, display: "flex", flexDirection: "column", gap: 1 }}>
+          <GraphCanvas
+            nodes={nodes}
+            edges={edges}
+            height={PANE_HEIGHT}
+            // Turning the environment column on and off changes the graph's
+            // extent, so the view has to be re-fitted around it.
+            fitKey={`${showEnv ? "env" : ""}${showFiles ? "+files" : ""}` || "steps-only"}
+            // Clicking a node focuses the graph on what it depends on. For a
+            // step that means the chain it waits for; for a dependency node — a
+            // variable, or a set of files read or written — it means the steps
+            // that touch it. Clicking the same node again, or the canvas, puts
+            // the whole graph back.
+            onNodeClick={(_, node) => {
+              setFocused((current) => (current === node.id ? null : node.id));
+              if (!isDependencyNode(node.id)) onSelectStep(node.id);
+              else onSelectStep(null);
+            }}
+            onPaneClick={() => setFocused(null)}
+            nodeColor={(node) => statusColor(node.data?.status as StepStatus, theme)}
+          />
 
-      {focused !== null && (
-        <FocusNote workflow={workflow} focused={focused} onClear={() => setFocused(null)} />
-      )}
+          {focused !== null && (
+            <FocusNote
+              workflow={workflow}
+              focused={focused}
+              onClear={() => setFocused(null)}
+            />
+          )}
+        </Box>
+
+        <Box sx={{ minWidth: 0, display: "flex", flexDirection: "column", minHeight: 0 }}>
+          <Typography variant="h3" sx={{ mb: 1 }}>
+            {step ? `${step.name} logs` : "Workflow logs"}
+          </Typography>
+          {step && (
+            <StepDetails
+              step={step}
+              env={workflow.env.vars.filter((variable) => variable.steps.includes(step.name))}
+            />
+          )}
+          {step?.action && (
+            <Typography
+              variant="caption"
+              color="text.secondary"
+              sx={{ display: "block", mb: 1, fontFamily: monoFontStack }}
+            >
+              {step.action}
+            </Typography>
+          )}
+          <LogView
+            // Keyed by what is being shown, so switching steps starts the new
+            // log at its end rather than inheriting the old one's scroll.
+            key={step ? step.name : "__workflow__"}
+            lines={step ? step.logs : workflow.logs}
+            dropped={(step ? step.dropped_logs : workflow.dropped_logs) ?? 0}
+            height={PANE_HEIGHT}
+          />
+          {step && (
+            <Button
+              size="small"
+              sx={{ mt: 1, alignSelf: "flex-start" }}
+              onClick={() => onSelectStep(null)}
+            >
+              Show all workflow logs
+            </Button>
+          )}
+        </Box>
+      </Box>
 
       <Box sx={{ mt: 2 }}>
         <EnvPanel report={workflow.env} title="Environment this run started with" />
       </Box>
-
-      <Box sx={{ mt: 2 }}>
-        <Typography variant="h3" sx={{ mb: 1 }}>
-          {step ? `${step.name} logs` : "Workflow logs"}
-        </Typography>
-        {step && (
-          <StepDetails
-            step={step}
-            env={workflow.env.vars.filter((variable) => variable.steps.includes(step.name))}
-          />
-        )}
-        {step?.action && (
-          <Typography
-            variant="caption"
-            color="text.secondary"
-            sx={{ display: "block", mb: 1, fontFamily: monoFontStack }}
-          >
-            {step.action}
-          </Typography>
-        )}
-        <LogBox lines={step ? step.logs : workflow.logs} />
-        {step && (
-          <Button size="small" sx={{ mt: 1 }} onClick={() => onSelectStep(null)}>
-            Show all workflow logs
-          </Button>
-        )}
-      </Box>
     </>
-  );
-}
-
-function LogBox({ lines }: { lines: string[] }) {
-  return (
-    <Box
-      sx={{
-        maxHeight: 320,
-        overflow: "auto",
-        p: 1.5,
-        border: 1,
-        borderColor: "divider",
-        borderRadius: 1,
-        bgcolor: "background.default",
-        fontFamily: monoFontStack,
-        fontSize: 12.5,
-        whiteSpace: "pre-wrap",
-      }}
-    >
-      {lines.length === 0 ? (
-        <Typography variant="body2" color="text.secondary">
-          No output yet.
-        </Typography>
-      ) : (
-        // Steps are asked for colour (the daemon sets FORCE_COLOR, since a pipe
-        // would otherwise turn it off) and tools that cache their logs — turbo,
-        // for one — replay escapes whatever the current environment says. Either
-        // way the lines arrive carrying SGR, and printed raw they are worse than
-        // no colour at all.
-        lines.map((line, index) => (
-          <div key={index}>
-            <AnsiText
-              text={line}
-              fallbackColor={line.startsWith("[stderr]") ? "error.main" : undefined}
-            />
-          </div>
-        ))
-      )}
-    </Box>
   );
 }
 
@@ -689,11 +687,50 @@ function FocusNote({
 }) {
   const groups = useMemo(() => inputGroups(workflow), [workflow]);
 
+  // A focused *step* says what it waits for, which is the answer the dimming
+  // is drawing. Held separately from the dependency-node cases below because
+  // it is a different sentence about a different kind of thing.
+  const step = isDependencyNode(focused)
+    ? null
+    : (workflow.steps.find((s) => s.name === focused) ?? null);
+
   const key = envKeyOf(focused);
   const variable = key === null ? null : (workflow.env.vars.find((v) => v.key === key) ?? null);
   const writer = outputStepOf(focused);
   const producer = writer === null ? null : (workflow.steps.find((s) => s.name === writer) ?? null);
   const group = groups.get(focused) ?? null;
+
+  if (step) {
+    const upstream = [...dependencyClosure(workflow, focused)].filter(
+      (id) => id !== focused && !isDependencyNode(id),
+    );
+    return (
+      <Stack
+        direction="row"
+        spacing={1}
+        sx={{ mt: 1 }}
+        alignItems="center"
+        flexWrap="wrap"
+        useFlexGap
+      >
+        <Chip
+          size="small"
+          variant="outlined"
+          color="secondary"
+          label={step.name}
+          sx={{ fontFamily: monoFontStack, maxWidth: 420 }}
+        />
+        <Typography variant="caption" color="text.secondary">
+          {upstream.length === 0
+            ? "depends on nothing — it can start immediately"
+            : `waits for ${upstream.length} step${upstream.length === 1 ? "" : "s"}: ${upstream.join(", ")}`}
+        </Typography>
+        <Button size="small" onClick={onClear}>
+          Clear
+        </Button>
+      </Stack>
+    );
+  }
 
   // The run's shape can change under a focus — a workflow recompiles, a step
   // is filtered out. A node that isn't there any more has nothing to say.
@@ -807,6 +844,62 @@ function litSteps(
   return new Set(groups.get(id)?.steps ?? []);
 }
 
+/**
+ * Everything a step depends on: the steps it waits for, transitively, and the
+ * variables and file sets those steps read.
+ *
+ * *Transitively* is the point. A step's own `needs` are already drawn as the
+ * edges touching it, and reading them off the graph is easy while the graph is
+ * small. The question that gets hard on a monorepo graph — the one the dimming
+ * answers — is "what does this actually wait for", whose answer is four
+ * packages deep and reachable only by tracing edges backwards by eye across a
+ * canvas wide enough to need scrolling.
+ *
+ * Ancestors only, never descendants: a step is not dependent on what comes
+ * after it, and lighting both directions would make every node in a chain look
+ * like every other node's dependency.
+ */
+function dependencyClosure(workflow: WorkflowView, start: string): Set<string> {
+  // Predecessors by `needs` alone. Error and retry branches are where a run
+  // goes when something fails, not what a step waits for.
+  const parents = new Map<string, string[]>();
+  for (const edge of workflow.edges) {
+    if (edge.kind !== "needs") continue;
+    const list = parents.get(edge.to) ?? [];
+    list.push(edge.from);
+    parents.set(edge.to, list);
+  }
+
+  const lit = new Set<string>([start]);
+  const queue = [start];
+  while (queue.length > 0) {
+    const current = queue.pop()!;
+    for (const parent of parents.get(current) ?? []) {
+      // The guard is also the cycle break: a malformed workflow can have one,
+      // and the graph should still render.
+      if (lit.has(parent)) continue;
+      lit.add(parent);
+      queue.push(parent);
+    }
+  }
+
+  // The dependency nodes those steps hang off, so turning on Environment or
+  // Files while a step is focused shows what the chain reads rather than
+  // dimming all of it. `litSteps` is the same relation read the other way, so
+  // the two directions cannot disagree about which edges exist.
+  for (const variable of workflow.env.vars) {
+    if (variable.steps.some((name) => lit.has(name))) lit.add(envNodeId(variable.key));
+  }
+  for (const [id, group] of inputGroups(workflow)) {
+    if (group.steps.some((name) => lit.has(name))) lit.add(id);
+  }
+  for (const name of [...lit]) {
+    if (!isDependencyNode(name)) lit.add(outputNodeId(name));
+  }
+
+  return lit;
+}
+
 function buildFlow(
   workflow: WorkflowView,
   theme: Theme,
@@ -826,7 +919,13 @@ function buildFlow(
     focused === null
       ? NO_FOCUS
       : (() => {
-          const reached = litSteps(workflow, focused, groups);
+          // A dependency node lights what it feeds; a step lights what feeds
+          // it. Two directions, because the two kinds of node are asked
+          // opposite questions — "who reads DATABASE_URL?" of a variable, and
+          // "what does this wait for?" of a step.
+          const reached = isDependencyNode(focused)
+            ? litSteps(workflow, focused, groups)
+            : dependencyClosure(workflow, focused);
           return { id: focused, lit: (id: string) => id === focused || reached.has(id) };
         })();
 
@@ -876,7 +975,10 @@ function buildFlow(
     const step = byName.get(node.id);
     const color = statusColor(step?.status ?? "pending", theme);
     const on = focus.lit(node.id);
-    const picked = on && focus.id !== null;
+    // The ring marks the node that was *clicked*, not everything the click lit
+    // up. With a step's whole upstream chain lit, ringing all of it would say
+    // every node in the chain was the subject of the question.
+    const picked = focus.id === node.id;
     return {
       ...node,
       style: {
@@ -898,26 +1000,39 @@ function buildFlow(
     };
   });
 
-  const edges: Edge[] = workflow.edges.map((edge, index) => ({
-    ...ORTHOGONAL_EDGE,
-    id: `${edge.from}->${edge.to}-${index}`,
-    source: edge.from,
-    target: edge.to,
-    label: edge.kind === "needs" ? undefined : edge.kind,
-    animated: byName.get(edge.from)?.status === "running",
-    style: {
-      stroke:
-        edge.kind === "error"
-          ? theme.palette.error.main
-          : edge.kind === "retry"
-            ? theme.palette.warning.main
-            : theme.palette.divider,
-      strokeDasharray: edge.kind === "needs" ? undefined : "5 4",
-      // An edge survives the dimming only if both ends did — so a focused
-      // node's steps keep the order between them, and everything else recedes.
-      opacity: focus.lit(edge.from) && focus.lit(edge.to) ? 1 : DIMMED,
-    },
-  }));
+  const edges: Edge[] = workflow.edges.map((edge, index) => {
+    // An edge survives the dimming only if both ends did — so a focused node's
+    // chain keeps the order between its steps, and everything else recedes.
+    const on = focus.lit(edge.from) && focus.lit(edge.to);
+    const stroke =
+      edge.kind === "error"
+        ? theme.palette.error.main
+        : edge.kind === "retry"
+          ? theme.palette.warning.main
+          : // `divider` is a hairline meant to separate panels, and on a graph
+            // with fifty edges it reads as grey noise rather than as fifty
+            // statements about what waits for what. This is the same neutral
+            // held to a contrast you can actually trace with your eye.
+            theme.palette.text.secondary;
+
+    return {
+      ...ORTHOGONAL_EDGE,
+      id: `${edge.from}->${edge.to}-${index}`,
+      source: edge.from,
+      target: edge.to,
+      label: edge.kind === "needs" ? undefined : edge.kind,
+      animated: byName.get(edge.from)?.status === "running",
+      // Lifted above its neighbours while it is part of what you asked about.
+      zIndex: on && focus.id !== null ? 1 : 0,
+      markerEnd: { ...ORTHOGONAL_EDGE.markerEnd, color: stroke },
+      style: {
+        stroke,
+        strokeWidth: on && focus.id !== null ? 2 : 1.2,
+        strokeDasharray: edge.kind === "needs" ? undefined : "5 4",
+        opacity: on ? 1 : DIMMED,
+      },
+    };
+  });
 
   if (showFiles) {
     const files = fileFlow(workflow, theme, positioned, groups, focus);

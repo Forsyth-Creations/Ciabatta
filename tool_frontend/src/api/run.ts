@@ -17,6 +17,15 @@ export interface StepView {
   needs: string[];
   on_error: string | null;
   logs: string[];
+  /**
+   * Lines the daemon dropped off the front of `logs` once its buffer filled.
+   *
+   * The buffer is capped because the stream sends the whole run state on every
+   * change, so an uncapped log made each frame bigger than the last. The count
+   * is sent so the viewer can say the log starts in the middle rather than
+   * letting it be read as the beginning.
+   */
+  dropped_logs: number;
 
   // Set when the run is a monorepo workflow graph, whose nodes come from
   // several packages at once and have to say which.
@@ -122,6 +131,8 @@ export interface WorkflowView {
   steps: StepView[];
   edges: EdgeView[];
   logs: string[];
+  /** As `StepView.dropped_logs`, for the workflow's combined output. */
+  dropped_logs: number;
   pending: PendingChoice | null;
   /**
    * The environment this run started with, resolved once when it was created:

@@ -10,10 +10,37 @@
 use anyhow::Result;
 use serde::Serialize;
 
+use std::collections::VecDeque;
+
 use crate::config::CiabattaConfig;
 use crate::runner::{ProgressUpdate, StageKind};
 
 use super::envdeps;
+
+/// How many lines of output are kept, per step and per workflow.
+///
+/// Unbounded before this, which is the state the browser could not survive: the
+/// SSE stream sends the whole view model on every change, so a step emitting a
+/// hundred thousand lines was sending a hundred thousand snapshots whose size
+/// grew with each one. Quadratic in the log length, and the tab stopped
+/// responding long before the build finished.
+///
+/// Five thousand lines is more scrollback than anyone reads in a browser and
+/// several times what a failing step's tail needs. The full output is on disk
+/// either way — this is the live view, not the record.
+const LOG_LIMIT: usize = 5_000;
+
+/// Append a line, dropping the oldest once the buffer is full.
+///
+/// The count of what was dropped is kept and sent to the viewer, because a log
+/// that silently begins in the middle is a log that gets read as the beginning.
+fn push_log(logs: &mut VecDeque<String>, dropped: &mut usize, line: String) {
+    logs.push_back(line);
+    while logs.len() > LOG_LIMIT {
+        logs.pop_front();
+        *dropped += 1;
+    }
+}
 
 // ─── Serializable live state ────────────────────────────────────────────────
 
@@ -34,7 +61,9 @@ pub struct WorkflowView {
     stages: Vec<StageView>,
     steps: Vec<StepView>,
     edges: Vec<EdgeView>,
-    logs: Vec<String>,
+    logs: VecDeque<String>,
+    /// Lines dropped off the front of `logs` once it hit [`LOG_LIMIT`].
+    dropped_logs: usize,
     pending: Option<PendingChoice>,
     /// Every environment variable this run depends on, with the value its steps
     /// will see and where that value came from. Resolved once, when the run is
@@ -58,7 +87,9 @@ pub struct StepView {
     action: Option<String>,
     needs: Vec<String>,
     on_error: Option<String>,
-    logs: Vec<String>,
+    logs: VecDeque<String>,
+    /// Lines dropped off the front of `logs` once it hit [`LOG_LIMIT`].
+    dropped_logs: usize,
 
     // ─── Provenance and behaviour ───────────────────────────────────────────
     // A workflow graph draws nodes from several sub-workspaces at once, so a
@@ -148,7 +179,7 @@ impl GuiState {
             }
             ProgressUpdate::Log(name, line) => {
                 if let Some(r) = self.recipe_mut(&name) {
-                    r.logs.push(line);
+                    push_log(&mut r.logs, &mut r.dropped_logs, line);
                 }
             }
             ProgressUpdate::StepStarted { workflow, step } => {
@@ -179,9 +210,14 @@ impl GuiState {
                 if let Some(r) = self.recipe_mut(&workflow) {
                     if let Some(s) = r.step_mut(&step) {
                         s.status = "skipped".into();
-                        s.logs.push(format!("skipped: {reason}"));
+                        push_log(
+                            &mut s.logs,
+                            &mut s.dropped_logs,
+                            format!("skipped: {reason}"),
+                        );
                     }
-                    r.logs.push(format!("[{step}] skipped: {reason}"));
+                    let line = format!("[{step}] skipped: {reason}");
+                    push_log(&mut r.logs, &mut r.dropped_logs, line);
                 }
             }
             ProgressUpdate::StepLog {
@@ -191,9 +227,10 @@ impl GuiState {
             } => {
                 if let Some(r) = self.recipe_mut(&workflow) {
                     if let Some(s) = r.step_mut(&step) {
-                        s.logs.push(line.clone());
+                        push_log(&mut s.logs, &mut s.dropped_logs, line.clone());
                     }
-                    r.logs.push(format!("[{step}] {line}"));
+                    let line = format!("[{step}] {line}");
+                    push_log(&mut r.logs, &mut r.dropped_logs, line);
                 }
             }
             ProgressUpdate::StepNeedsChoice {
@@ -227,11 +264,12 @@ impl GuiState {
                     r.status = outcome.into();
                     r.error = Some(err.clone());
                     r.pending = None;
-                    r.logs.push(if stopped {
+                    let line = if stopped {
                         format!("■ {err}")
                     } else {
                         format!("✗ {err}")
-                    });
+                    };
+                    push_log(&mut r.logs, &mut r.dropped_logs, line);
                     // Pin the blame on whichever stage was mid-flight, and mark
                     // any later stages as not reached.
                     let mut hit = false;
@@ -340,7 +378,8 @@ pub fn initial_state(
                 action: step.script.clone().or_else(|| step.run.clone()),
                 needs: step.needs.clone(),
                 on_error: step.on_error.clone(),
-                logs: Vec::new(),
+                logs: VecDeque::new(),
+                dropped_logs: 0,
                 workspace: step.workspace.clone(),
                 description: step.description.clone(),
                 owner: step.owner.clone(),
@@ -379,7 +418,8 @@ pub fn initial_state(
             stages,
             steps,
             edges,
-            logs: Vec::new(),
+            logs: VecDeque::new(),
+            dropped_logs: 0,
             pending: None,
             env: envdeps::collect(&resolved, root, env),
         });
@@ -389,4 +429,36 @@ pub fn initial_state(
         done: false,
         dry_run,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_log_buffer_keeps_the_tail_and_counts_what_it_dropped() {
+        let mut logs = VecDeque::new();
+        let mut dropped = 0;
+
+        for n in 0..LOG_LIMIT + 250 {
+            push_log(&mut logs, &mut dropped, format!("line {n}"));
+        }
+
+        assert_eq!(logs.len(), LOG_LIMIT);
+        assert_eq!(dropped, 250);
+        // The tail is what survives — the end of a build log is the half that
+        // says what went wrong.
+        assert_eq!(logs.back().unwrap(), &format!("line {}", LOG_LIMIT + 249));
+        assert_eq!(logs.front().unwrap(), "line 250");
+    }
+
+    #[test]
+    fn a_log_under_the_limit_is_untouched_and_reports_nothing_dropped() {
+        let mut logs = VecDeque::new();
+        let mut dropped = 0;
+        push_log(&mut logs, &mut dropped, "only line".into());
+
+        assert_eq!(logs.len(), 1);
+        assert_eq!(dropped, 0);
+    }
 }

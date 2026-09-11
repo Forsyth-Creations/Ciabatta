@@ -13,8 +13,8 @@
  * baked into the Rust binary for the graph of a feature this small.
  */
 
-import { useMemo } from "react";
-import { Box, useTheme } from "@mui/material";
+import { memo, useMemo, type CSSProperties } from "react";
+import { useTheme } from "@mui/material";
 
 /** A colour as written by the escape, resolved against the theme at render. */
 type AnsiColor =
@@ -278,7 +278,13 @@ function toCss(color: AnsiColor, mode: "light" | "dark"): string {
  * `fallbackColor` is what unstyled text uses — the caller's own colour for the
  * line (stderr is red here), which an escape then overrides.
  */
-export function AnsiText({ text, fallbackColor }: { text: string; fallbackColor?: string }) {
+export const AnsiText = memo(function AnsiText({
+  text,
+  fallbackColor,
+}: {
+  text: string;
+  fallbackColor?: string;
+}) {
   const theme = useTheme();
   const mode = theme.palette.mode;
   const segments = useMemo(() => parseAnsi(text), [text]);
@@ -292,37 +298,51 @@ export function AnsiText({ text, fallbackColor }: { text: string; fallbackColor?
 
   return (
     <>
-      {segments.map((segment, index) => {
-        const { style } = segment;
-        let fg = style.fg ? toCss(style.fg, mode) : undefined;
-        let bg = style.bg ? toCss(style.bg, mode) : undefined;
-        if (style.inverse) {
-          [fg, bg] = [bg ?? defaultBg, fg ?? defaultFg];
-        }
-
-        const decoration = [style.underline && "underline", style.strike && "line-through"]
-          .filter(Boolean)
-          .join(" ");
-
-        return (
-          <Box
-            key={index}
-            component="span"
-            sx={{
-              color: style.hidden ? "transparent" : fg,
-              bgcolor: bg,
-              fontWeight: style.bold ? 700 : undefined,
-              fontStyle: style.italic ? "italic" : undefined,
-              // Dim is a brightness reduction in a terminal; opacity is the
-              // equivalent that works whatever colour it lands on.
-              opacity: style.dim ? 0.65 : undefined,
-              textDecoration: decoration || undefined,
-            }}
-          >
-            {segment.text}
-          </Box>
-        );
-      })}
+      {segments.map((segment, index) => (
+        <span key={index} style={cssFor(segment.style, mode, defaultFg, defaultBg)}>
+          {segment.text}
+        </span>
+      ))}
     </>
   );
+});
+
+/**
+ * One segment's inline style.
+ *
+ * A plain `<span style>` rather than MUI's `<Box sx>`, which is what this was.
+ * `sx` runs the emotion pipeline per element — parse the style object, hash it,
+ * insert a rule into the stylesheet, attach a generated class — and a colourful
+ * build log is tens of thousands of segments. That cost is invisible on a
+ * dialog with six of them and is most of a frame on a log pane, which is
+ * exactly where the page had stopped responding. Inline styles skip the
+ * stylesheet entirely, and nothing here needs a breakpoint, a pseudo-class or a
+ * theme callback — the theme is already resolved by the time `toCss` returns.
+ */
+function cssFor(
+  style: SegmentStyle,
+  mode: "light" | "dark",
+  defaultFg: string,
+  defaultBg: string,
+): CSSProperties {
+  let fg = style.fg ? toCss(style.fg, mode) : undefined;
+  let bg = style.bg ? toCss(style.bg, mode) : undefined;
+  if (style.inverse) {
+    [fg, bg] = [bg ?? defaultBg, fg ?? defaultFg];
+  }
+
+  const decoration = [style.underline && "underline", style.strike && "line-through"]
+    .filter(Boolean)
+    .join(" ");
+
+  return {
+    color: style.hidden ? "transparent" : fg,
+    backgroundColor: bg,
+    fontWeight: style.bold ? 700 : undefined,
+    fontStyle: style.italic ? "italic" : undefined,
+    // Dim is a brightness reduction in a terminal; opacity is the equivalent
+    // that works whatever colour it lands on.
+    opacity: style.dim ? 0.65 : undefined,
+    textDecoration: decoration || undefined,
+  };
 }

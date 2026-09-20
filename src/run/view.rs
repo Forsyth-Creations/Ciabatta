@@ -8,7 +8,7 @@
 //! now lives in `crate::daemon::routes::run` instead of alongside it.
 
 use anyhow::Result;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use std::collections::VecDeque;
 
@@ -44,14 +44,14 @@ fn push_log(logs: &mut VecDeque<String>, dropped: &mut usize, line: String) {
 
 // ─── Serializable live state ────────────────────────────────────────────────
 
-#[derive(Serialize, Clone, Default)]
+#[derive(Serialize, Deserialize, Clone, Default)]
 pub struct GuiState {
     workflows: Vec<WorkflowView>,
     done: bool,
     dry_run: bool,
 }
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct WorkflowView {
     name: String,
     status: String,
@@ -72,19 +72,30 @@ pub struct WorkflowView {
     env: crate::run::envdeps::EnvReport,
 }
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct StageView {
     name: String,
     /// pending · running · success · skipped · failed
     status: String,
 }
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct StepView {
     name: String,
     status: String,
     recover: bool,
     action: Option<String>,
+    /// The directory this step's action runs from, relative to the run's root —
+    /// a sub-workspace's directory in a compiled graph, absent for a step that
+    /// runs from the root itself.
+    cwd: Option<String>,
+    /// The exact command the engine hands to the shell: an inline `run` as
+    /// written, or a `script` as the `bash <path>` it becomes.
+    ///
+    /// Separate from `action`, which is whichever of the two was written and so
+    /// can't say which it was. This is what the "recreate" view types out, and
+    /// it comes from the engine's own renderer so the two can't drift.
+    shell: Option<String>,
     needs: Vec<String>,
     on_error: Option<String>,
     logs: VecDeque<String>,
@@ -144,14 +155,14 @@ pub struct StepView {
     deps: crate::run::deps::TargetDeps,
 }
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct EdgeView {
     from: String,
     to: String,
     kind: String,
 }
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct PendingChoice {
     step: String,
     message: String,
@@ -322,6 +333,61 @@ impl GuiState {
     }
 }
 
+impl GuiState {
+    /// Whether every workflow has reached a terminal state.
+    pub fn done(&self) -> bool {
+        self.done
+    }
+
+    /// Mark a run nobody will hear from again as stopped.
+    ///
+    /// The engine reports every ending it knows about, but it can't report the
+    /// one where the daemon itself goes away: the run's processes died with it,
+    /// and the record left behind still says "running". Left alone, that record
+    /// comes back from disk with a Stop button on a run that stopped when the
+    /// machine rebooted.
+    pub fn interrupted(&mut self, reason: &str) {
+        for workflow in &mut self.workflows {
+            if matches!(workflow.status.as_str(), "success" | "failed" | "stopped") {
+                continue;
+            }
+            workflow.status = "stopped".into();
+            workflow.error = Some(reason.to_string());
+            workflow.pending = None;
+            for step in &mut workflow.steps {
+                if step.status == "running" {
+                    step.status = "stopped".into();
+                }
+            }
+            for stage in &mut workflow.stages {
+                if stage.status == "running" {
+                    stage.status = "stopped".into();
+                }
+            }
+        }
+        self.done = true;
+    }
+
+    /// The run's verdict in one word: `running` until every workflow has
+    /// finished, then the worst thing that happened to any of them.
+    ///
+    /// The list page shows a run as an icon, and "done" was never the
+    /// interesting half of that — a finished run and a failed one looked
+    /// identical until you opened them.
+    pub fn outcome(&self) -> &'static str {
+        if !self.done {
+            return "running";
+        }
+        if self.workflows.iter().any(|w| w.status == "failed") {
+            return "failed";
+        }
+        if self.workflows.iter().any(|w| w.status == "stopped") {
+            return "stopped";
+        }
+        "success"
+    }
+}
+
 /// Build the initial live state (all steps pending) from the resolved runs.
 ///
 /// `env` is what the run will start with — the daemon's own environment plus
@@ -376,6 +442,8 @@ pub fn initial_state(
                 status: "pending".into(),
                 recover: step.recover,
                 action: step.script.clone().or_else(|| step.run.clone()),
+                cwd: step.cwd.clone(),
+                shell: crate::run::engine::shell_form(step.script.as_deref(), step.run.as_deref()),
                 needs: step.needs.clone(),
                 on_error: step.on_error.clone(),
                 logs: VecDeque::new(),

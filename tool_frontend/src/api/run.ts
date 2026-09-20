@@ -6,7 +6,14 @@ import { ApiError, api } from "./client";
 import type { EnvReport } from "./types";
 import { useWorkspace } from "./workspace";
 
-export type StepStatus = "pending" | "running" | "success" | "failed" | "skipped";
+export type StepStatus =
+  | "pending"
+  | "running"
+  | "success"
+  | "failed"
+  | "skipped"
+  /** Cut short: the run was stopped, or the daemon restarted under it. */
+  | "stopped";
 
 export interface StepView {
   name: string;
@@ -14,6 +21,12 @@ export interface StepView {
   /** Recovery nodes are the "fix-it" branches a failure can divert into. */
   recover: boolean;
   action: string | null;
+  /** Where the step's action runs, relative to the run's root. Null means the
+   *  root itself. */
+  cwd: string | null;
+  /** The exact command the engine hands to a shell — an inline `run` as
+   *  written, a `script` as the `bash <path>` it becomes. */
+  shell: string | null;
   needs: string[];
   on_error: string | null;
   logs: string[];
@@ -147,6 +160,21 @@ export interface RunSummary {
   workflows: string[];
   created_at: string;
   done: boolean;
+  /** How it ended — or `running` while it hasn't. */
+  status: StepStatus | "stopped";
+  /** The directory its steps resolve their `cwd` against. */
+  root: string;
+  dry_run: boolean;
+  filter: string[];
+  only: string[];
+  isolated: boolean;
+}
+
+/** How long the daemon keeps a finished run and its logs. */
+export interface RunSettings {
+  /** Hours from the run's creation. Zero keeps them until deleted by hand. */
+  ttl_hours: number;
+  default_ttl_hours: number;
 }
 
 export interface RunState {
@@ -161,6 +189,7 @@ export const runKeys = {
   runs: ["run", "runs"] as const,
   run: (id: number) => ["run", "run", id] as const,
   workflows: (project: string) => ["run", "workflows", project] as const,
+  settings: ["run", "settings"] as const,
 };
 
 export function useRuns() {
@@ -293,5 +322,53 @@ export function useStopRun() {
   return useMutation({
     mutationFn: (runId: number) => api.post(`/api/run/runs/${runId}/stop`, {}),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: runKeys.runs }),
+  });
+}
+
+/**
+ * Start a previous run again, exactly as it was started.
+ *
+ * The daemon re-runs from the request it stored rather than from anything the
+ * page reconstructs, so the filters and the `--only` list come along. The one
+ * thing it can't keep is the variables somebody typed into the missing-variable
+ * prompt — those are never written to disk — so a re-run can come back with the
+ * same 422 the first launch did, and is answered the same way.
+ */
+export function useRerunRun() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, env }: { id: number; env?: Record<string, string> }) =>
+      api.post<RunSummary>(`/api/run/runs/${id}/rerun`, env ? { env } : {}),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: runKeys.runs }),
+  });
+}
+
+/** Delete a finished run and its logs. */
+export function useDeleteRun() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (id: number) => api.delete(`/api/run/runs/${id}`),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: runKeys.runs }),
+  });
+}
+
+export function useRunSettings() {
+  return useQuery({
+    queryKey: runKeys.settings,
+    queryFn: () => api.get<RunSettings>("/api/run/settings"),
+  });
+}
+
+export function useSetRunSettings() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (ttl_hours: number) =>
+      api.post<{ ttl_hours: number; pruned: number }>("/api/run/settings", { ttl_hours }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: runKeys.settings });
+      // Shortening the TTL deletes records immediately, so the list is stale
+      // the moment this returns.
+      queryClient.invalidateQueries({ queryKey: runKeys.runs });
+    },
   });
 }

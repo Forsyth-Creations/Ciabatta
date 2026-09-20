@@ -19,7 +19,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::cache::cli::WorkspaceContext;
 use crate::cache::graph::StepContext;
@@ -28,7 +28,7 @@ use crate::run::RunStep;
 use crate::workspace::Workspace;
 
 /// Everything one target depends on, and everything it produces.
-#[derive(Debug, Clone, Serialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct TargetDeps {
     /// The target's name in the graph.
     pub name: String,

@@ -161,6 +161,13 @@ export function GraphCanvas({
             zoomable
             nodeColor={nodeColor}
             nodeStrokeWidth={2}
+            // The area outside the viewport, which react-flow washes out with a
+            // near-white by default — on a dark canvas that turns the minimap
+            // into a bright grey slab covering the graph behind it.
+            maskColor={
+              theme.palette.mode === "dark" ? "rgba(0, 0, 0, 0.55)" : "rgba(240, 240, 240, 0.6)"
+            }
+            bgColor={theme.palette.background.default}
             // Explicitly small and see-through. react-flow's default is a fixed
             // 200×150 panel, which is a corner of a full-width canvas and most
             // of a half-width one — on the split run view it covered the part of

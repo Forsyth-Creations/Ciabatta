@@ -101,11 +101,42 @@ export function radialLayout(
   return nodes;
 }
 
+/** The id of the waypoint an edge takes through column `depth`. */
+const waypointId = (source: string, target: string, depth: number) =>
+  `wp::${source}->${target}::${depth}`;
+
+/** Whether a node is a routing waypoint rather than something in the graph. */
+export const isWaypoint = (id: string) => id.startsWith("wp::");
+
+/** The key a routed edge's waypoints are listed under. */
+export const routeKey = (source: string, target: string) => `${source}->${target}`;
+
+/** A laid-out graph: the nodes to draw, and the lanes long edges take. */
+export interface LayeredGraph {
+  nodes: Node[];
+  /**
+   * For each edge that spans more than one column, the waypoint ids it passes
+   * through in order — so the caller can draw it as a chain of segments
+   * instead of one stroke straight across the columns in between.
+   */
+  routes: Map<string, string[]>;
+}
+
 /**
  * Layered left-to-right layout by longest-path depth.
  *
  * Suits DAGs — a run flowchart or a dependency graph — where an edge means
  * "comes after" and depth is the meaningful axis.
+ *
+ * Edges that skip columns are **routed** rather than drawn through them. A
+ * `checkout → publish` edge across a six-column build is a straight line over
+ * every node between them, and the drawing then says two false things: that the
+ * edge has something to do with the nodes it crosses, and that a node with a
+ * line through it is connected to something. The fix is the standard one —
+ * dummy nodes at each intermediate column, which take part in the ordering and
+ * the spacing like any other node and so reserve a lane of their own for the
+ * wire to run down. The dummies are invisible; the caller draws the edge as the
+ * chain of segments between them.
  */
 export function layeredLayout(
   ids: string[],
@@ -114,6 +145,23 @@ export function layeredLayout(
   options: {
     columnWidth?: number;
     rowHeight?: number;
+    /**
+     * How tall a node is, used to centre a routed edge's lane on the gap
+     * between two rows rather than on their top edges — react-flow hangs a
+     * node's handles off the middle of its box but positions it by its corner.
+     */
+    nodeHeight?: number;
+    /**
+     * Force a node into a particular column, overriding its computed depth.
+     *
+     * For nodes that aren't steps in the flow but inputs to it — a variable, a
+     * set of files — which belong in a column of their own to the left rather
+     * than sharing the first wave with whatever happens to start the run.
+     * Pinning them to a negative depth gives them that column *and* keeps them
+     * inside the layering, so the edges leaving them are routed like every
+     * other edge instead of being drawn across the graph.
+     */
+    pin?: (id: string) => number | undefined;
     /**
      * Nodes to lift out of the layering and park in a row underneath it.
      *
@@ -124,20 +172,53 @@ export function layeredLayout(
      */
     bottom?: (id: string) => boolean;
   } = {},
-): Node[] {
-  const columnWidth = options.columnWidth ?? 260;
+): LayeredGraph {
+  const columnWidth = options.columnWidth ?? 300;
   const rowHeight = options.rowHeight ?? 76;
+  const nodeHeight = options.nodeHeight ?? 46;
   const isBottom = options.bottom ?? (() => false);
 
   const layered = ids.filter((id) => !isBottom(id));
   const parked = ids.filter(isBottom);
 
   const depth = computeDepths(layered, edges);
+  if (options.pin) {
+    for (const id of layered) {
+      const pinned = options.pin(id);
+      if (pinned !== undefined) depth.set(id, pinned);
+    }
+  }
+
+  // Replace every column-skipping edge with a chain through one waypoint per
+  // column it would otherwise have crossed. From here on the layout works on
+  // the expanded graph, which is what gives those waypoints rows of their own.
+  const routes = new Map<string, string[]>();
+  const waypointDepth = new Map<string, number>();
+  const routed: { source: string; target: string }[] = [];
+  for (const edge of edges) {
+    const from = depth.get(edge.source);
+    const to = depth.get(edge.target);
+    if (from === undefined || to === undefined || to - from <= 1) {
+      if (from !== undefined && to !== undefined) routed.push(edge);
+      continue;
+    }
+    const lane: string[] = [];
+    for (let d = from + 1; d < to; d++) {
+      const id = waypointId(edge.source, edge.target, d);
+      lane.push(id);
+      waypointDepth.set(id, d);
+    }
+    routes.set(routeKey(edge.source, edge.target), lane);
+    const chain = [edge.source, ...lane, edge.target];
+    for (let i = 0; i + 1 < chain.length; i++) {
+      routed.push({ source: chain[i], target: chain[i + 1] });
+    }
+  }
 
   // Bucket by depth, then stack each column.
   const columns = new Map<number, string[]>();
-  for (const id of layered) {
-    const d = depth.get(id) ?? 0;
+  for (const id of [...layered, ...waypointDepth.keys()]) {
+    const d = waypointDepth.get(id) ?? depth.get(id) ?? 0;
     const column = columns.get(d) ?? [];
     column.push(id);
     columns.set(d, column);
@@ -151,20 +232,33 @@ export function layeredLayout(
 
   // Only edges whose both ends are in the layering, since these drive both the
   // ordering and the positioning and an edge to a parked node would pull on a
-  // row that isn't there.
-  const inner = edges.filter((e) => depth.has(e.source) && depth.has(e.target));
+  // row that isn't there. Waypoints are in the layering by construction.
+  const placed = new Set([...depth.keys(), ...waypointDepth.keys()]);
+  const inner = routed.filter((e) => placed.has(e.source) && placed.has(e.target));
 
   reduceCrossings(order, inner);
-  const rows = assignRows(order, inner, rowHeight);
+  // A lane only has to clear the wires either side of it, so waypoints are
+  // packed closer than nodes: giving each one a full row would push a busy
+  // graph apart to make room for empty space.
+  const rows = assignRows(order, inner, rowHeight, (id) =>
+    isWaypoint(id) ? WAYPOINT_LANE : rowHeight,
+  );
 
   const nodes: Node[] = [];
   order.forEach((column, index) => {
     const d = depths[index];
     for (const id of column) {
+      const waypoint = isWaypoint(id);
       nodes.push({
         id,
-        data: data(id),
-        position: { x: d * columnWidth, y: rows.get(id) ?? 0 },
+        data: waypoint ? {} : data(id),
+        position: {
+          x: d * columnWidth + (waypoint ? columnWidth / 2 : 0),
+          // A node's handles hang off the middle of its box, a waypoint's off a
+          // point — so a lane between two rows has to be dropped half a node to
+          // line up with the handles it joins.
+          y: (rows.get(id) ?? 0) + (waypoint ? nodeHeight / 2 : 0),
+        },
         type: "default",
         // The graph runs left to right, so edges must leave the right side and
         // arrive at the left. With react-flow's default top/bottom handles
@@ -172,6 +266,17 @@ export function layeredLayout(
         // direction is exactly the thing that stops being readable.
         sourcePosition: Position.Right,
         targetPosition: Position.Left,
+        ...(waypoint
+          ? {
+              // Invisible, and inert: it is a bend in a wire, not something to
+              // click, select, or find in the minimap.
+              style: { width: 1, height: 1, opacity: 0, pointerEvents: "none" as const },
+              selectable: false,
+              focusable: false,
+              draggable: false,
+              deletable: false,
+            }
+          : {}),
       });
     }
   });
@@ -192,7 +297,33 @@ export function layeredLayout(
     });
   }
 
-  return nodes;
+  return { nodes, routes };
+}
+
+/** Vertical room a routed edge's lane takes in a column. */
+const WAYPOINT_LANE = 26;
+
+/**
+ * One logical edge as the chain of segments its route takes.
+ *
+ * An edge that skips no columns comes back as a single segment from its own
+ * ends, so callers draw every edge the same way whether it was routed or not.
+ * `last` marks the segment that gets the arrowhead: putting one on each would
+ * draw three arrows into the empty space where the lane bends.
+ */
+export function routeSegments(
+  routes: Map<string, string[]>,
+  source: string,
+  target: string,
+): { source: string; target: string; first: boolean; last: boolean }[] {
+  const lane = routes.get(routeKey(source, target)) ?? [];
+  const chain = [source, ...lane, target];
+  return chain.slice(0, -1).map((from, index) => ({
+    source: from,
+    target: chain[index + 1],
+    first: index === 0,
+    last: index === chain.length - 2,
+  }));
 }
 
 /** How many ordering sweeps to run before taking the best result. */
@@ -325,6 +456,7 @@ function assignRows(
   order: string[][],
   edges: { source: string; target: string }[],
   rowHeight: number,
+  heightOf: (id: string) => number = () => rowHeight,
 ): Map<string, number> {
   const rows = new Map<string, number>();
   for (const column of order) {
@@ -354,7 +486,7 @@ function assignRows(
 
     // Separate, in order, so the ordering the sweeps chose survives being
     // pulled around by the barycentres.
-    for (const column of order) separate(column, rows, rowHeight);
+    for (const column of order) separate(column, rows, heightOf);
   }
 
   // Centre the whole thing on zero, so the canvas opens on the graph rather
@@ -379,13 +511,20 @@ function assignRows(
  * upper branch. Shifting the column back by the average displacement undoes
  * exactly that bias without disturbing the order or the spacing.
  */
-function separate(column: string[], rows: Map<string, number>, rowHeight: number): void {
+function separate(
+  column: string[],
+  rows: Map<string, number>,
+  heightOf: (id: string) => number,
+): void {
   if (column.length < 2) return;
 
   const wanted = column.map((id) => rows.get(id)!);
   const placed = [...wanted];
   for (let index = 1; index < placed.length; index++) {
-    placed[index] = Math.max(placed[index], placed[index - 1] + rowHeight);
+    // The gap a pair needs is the taller of the two, so a wire lane squeezed
+    // between two nodes still clears both of them.
+    const gap = Math.max(heightOf(column[index - 1]), heightOf(column[index]));
+    placed[index] = Math.max(placed[index], placed[index - 1] + gap);
   }
 
   const drift = mean(placed) - mean(wanted);

@@ -64,6 +64,31 @@ export const brand = {
 } as const;
 
 /**
+ * The surfaces everything else sits on: neutral greys, not brand blues.
+ *
+ * A deliberate departure from the brand sheet, and the reason is what these
+ * pages hold. Dark mode used to be Midnight over Navy — a blue room — and every
+ * page in this app is mostly *content*: log output, ANSI colour, coloured graph
+ * nodes, status greens and reds. A tinted surface pulls all of it one way, and
+ * the blues that carry meaning (a dependency edge, an info chip, a link) end up
+ * competing with the wall behind them. Neutral grey keeps the meaning in the
+ * marks rather than the room, and the brand's blues still do the identity work
+ * where they belong: primary actions, links, the mascot.
+ *
+ * The steps are close together on purpose — the paper surface is a shade above
+ * the page and the lines a shade above that, so a card reads as raised without
+ * a border having to shout.
+ */
+const surface = {
+  /** The page. */
+  ink: "#151617",
+  /** Cards, panels, the app bar. */
+  graphite: "#1D1F21",
+  /** Hairlines and outlines. */
+  iron: "rgba(255, 255, 255, 0.13)",
+} as const;
+
+/**
  * Coral, taken down to a weight that can carry an error message on paper.
  *
  * The brand's only red is Coral, which is pitched for a dark background and
@@ -114,19 +139,19 @@ export function buildTheme(mode: "light" | "dark"): Theme {
         main: dark ? brand.sky : brand.forsythBlue,
         dark: dark ? brand.steel : brand.navy,
         light: dark ? "#8FB4DA" : brand.steel,
-        contrastText: dark ? brand.midnight : brand.cloud,
+        contrastText: dark ? surface.ink : brand.cloud,
       },
       secondary: {
         main: dark ? brand.gold : brand.amber,
-        contrastText: brand.midnight,
+        contrastText: dark ? surface.ink : brand.midnight,
       },
       background: dark
-        ? { default: brand.midnight, paper: brand.navy }
+        ? { default: surface.ink, paper: surface.graphite }
         : { default: brand.cloud, paper: "#FFFFFF" },
       text: dark
         ? { primary: brand.cloud, secondary: brand.mist }
         : { primary: brand.charcoal, secondary: brand.slate },
-      divider: dark ? "rgba(109, 155, 204, 0.24)" : brand.mist,
+      divider: dark ? surface.iron : brand.mist,
       success: { main: dark ? brand.spring : brand.pine },
       warning: { main: dark ? brand.gold : brand.amber },
       error: { main: dark ? brand.coral : DEEP_CORAL },
@@ -190,6 +215,15 @@ export function buildTheme(mode: "light" | "dark"): Theme {
       },
       MuiCard: {
         defaultProps: { variant: "outlined" },
+        styleOverrides: {
+          // MUI lifts a dark `paper` by laying a translucent white over it,
+          // which on a neutral surface reads as haze rather than as height.
+          // The outline does that job here.
+          root: { backgroundImage: "none" },
+        },
+      },
+      MuiPaper: {
+        styleOverrides: { root: { backgroundImage: "none" } },
       },
       MuiTooltip: {
         defaultProps: { arrow: true },

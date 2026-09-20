@@ -29,7 +29,7 @@ import type { Theme } from "@mui/material/styles";
 import type { Edge, Node } from "@xyflow/react";
 
 import { GraphCanvas } from "../components/GraphCanvas";
-import { ORTHOGONAL_EDGE, layeredLayout } from "../components/layout";
+import { ORTHOGONAL_EDGE, isWaypoint, layeredLayout, routeSegments } from "../components/layout";
 import { PageHeader } from "../components/Page";
 import { monoFontStack } from "../theme";
 
@@ -238,37 +238,50 @@ export function RunBuilderPage() {
   );
 }
 
+/** How wide a node is allowed to get, so it can't reach into the next column. */
+const NODE_WIDTH = 220;
+
 function buildPreview(steps: DraftStep[], theme: Theme) {
   const ids = steps.map((s) => s.name);
   const orderEdges = steps.flatMap((step) =>
     step.needs.map((need) => ({ source: need, target: step.name })),
   );
 
-  const positioned = layeredLayout(ids, orderEdges, (id) => ({ label: id }));
+  const { nodes: positioned, routes } = layeredLayout(ids, orderEdges, (id) => ({ label: id }));
 
   const byName = new Map(steps.map((s) => [s.name, s]));
-  const nodes: Node[] = positioned.map((node) => ({
-    ...node,
-    style: {
-      background: theme.palette.background.paper,
-      color: theme.palette.text.primary,
-      border: `2px ${byName.get(node.id)?.recover ? "dashed" : "solid"} ${
-        byName.get(node.id)?.recover ? theme.palette.warning.main : theme.palette.divider
-      }`,
-      borderRadius: 8,
-      fontSize: 12,
-      padding: "6px 12px",
-    },
-  }));
+  const nodes: Node[] = positioned.map((node) =>
+    // A routing waypoint is a bend in a wire: it arrives already styled to be
+    // invisible, and painting a border on it would draw a box in mid-air.
+    isWaypoint(node.id)
+      ? node
+      : {
+          ...node,
+          style: {
+            background: theme.palette.background.paper,
+            color: theme.palette.text.primary,
+            border: `2px ${byName.get(node.id)?.recover ? "dashed" : "solid"} ${
+              byName.get(node.id)?.recover ? theme.palette.warning.main : theme.palette.divider
+            }`,
+            borderRadius: 8,
+            fontSize: 12,
+            padding: "6px 12px",
+            maxWidth: NODE_WIDTH,
+          },
+        },
+  );
 
   const edges: Edge[] = [
-    ...orderEdges.map((e, i) => ({
-      ...ORTHOGONAL_EDGE,
-      id: `needs-${i}`,
-      source: e.source,
-      target: e.target,
-      style: { stroke: theme.palette.divider },
-    })),
+    ...orderEdges.flatMap((e, i) =>
+      routeSegments(routes, e.source, e.target).map((segment, part) => ({
+        ...ORTHOGONAL_EDGE,
+        id: `needs-${i}-${part}`,
+        source: segment.source,
+        target: segment.target,
+        markerEnd: segment.last ? ORTHOGONAL_EDGE.markerEnd : undefined,
+        style: { stroke: theme.palette.text.secondary },
+      })),
+    ),
     ...steps
       .filter((s) => s.onError)
       .map((s, i) => ({

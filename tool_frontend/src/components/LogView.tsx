@@ -16,7 +16,18 @@
  */
 
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { Box, Stack, ToggleButton, Tooltip, Typography, useTheme } from "@mui/material";
+import {
+  Box,
+  Dialog,
+  IconButton,
+  Stack,
+  ToggleButton,
+  Tooltip,
+  Typography,
+  useTheme,
+} from "@mui/material";
+import CloseFullscreenIcon from "@mui/icons-material/CloseFullscreen";
+import OpenInFullIcon from "@mui/icons-material/OpenInFull";
 import VerticalAlignBottomIcon from "@mui/icons-material/VerticalAlignBottom";
 import WrapTextIcon from "@mui/icons-material/WrapText";
 import { useVirtualizer } from "@tanstack/react-virtual";
@@ -48,9 +59,25 @@ interface LogViewProps {
   fill?: boolean;
   /** Fixed height when not filling. */
   height?: number;
+  /**
+   * What this output is, shown in the title bar when it's full screen.
+   *
+   * Only there: in the page the surrounding heading already says it, and full
+   * screen is precisely the state where that heading is gone.
+   */
+  title?: string;
+  /** Offer the full-screen button. On by default. */
+  expandable?: boolean;
 }
 
-export function LogView({ lines, dropped = 0, fill = false, height = 320 }: LogViewProps) {
+export function LogView({
+  lines,
+  dropped = 0,
+  fill = false,
+  height = 320,
+  title,
+  expandable = true,
+}: LogViewProps) {
   const theme = useTheme();
   // Resolved here rather than written as `"error.main"` per row: these are
   // inline styles, which take CSS colours and not theme tokens.
@@ -61,6 +88,10 @@ export function LogView({ lines, dropped = 0, fill = false, height = 320 }: LogV
   // something you watch — and turned off the moment you scroll away from the
   // bottom, because following is only helpful while you're reading the end.
   const [follow, setFollow] = useState(true);
+  // Half a screen is a poor terminal, and a build's output is the reason
+  // anybody is on this page. Full screen is the same view with the room it
+  // wants; Escape closes it.
+  const [full, setFull] = useState(false);
 
   const virtualizer = useVirtualizer({
     count: lines.length,
@@ -140,7 +171,7 @@ export function LogView({ lines, dropped = 0, fill = false, height = 320 }: LogV
 
   const items = virtualizer.getVirtualItems();
 
-  return (
+  const panel = (
     <Box
       sx={{
         border: 1,
@@ -150,7 +181,7 @@ export function LogView({ lines, dropped = 0, fill = false, height = 320 }: LogV
         display: "flex",
         flexDirection: "column",
         minHeight: 0,
-        ...(fill ? { flex: 1 } : { height }),
+        ...(fill || full ? { flex: 1 } : { height }),
       }}
     >
       <Stack
@@ -199,6 +230,23 @@ export function LogView({ lines, dropped = 0, fill = false, height = 320 }: LogV
             <VerticalAlignBottomIcon fontSize="small" />
           </ToggleButton>
         </Tooltip>
+
+        {expandable && (
+          <Tooltip title={full ? "Leave full screen (Esc)" : "Full screen"}>
+            <IconButton
+              size="small"
+              onClick={() => setFull((on) => !on)}
+              aria-label={full ? "Leave full screen" : "Show the output full screen"}
+              sx={{ p: 0.5 }}
+            >
+              {full ? (
+                <CloseFullscreenIcon fontSize="small" />
+              ) : (
+                <OpenInFullIcon fontSize="small" />
+              )}
+            </IconButton>
+          </Tooltip>
+        )}
       </Stack>
 
       <Box
@@ -264,5 +312,36 @@ export function LogView({ lines, dropped = 0, fill = false, height = 320 }: LogV
         </div>
       </Box>
     </Box>
+  );
+
+  if (!full) return panel;
+
+  return (
+    // The same panel, re-parented rather than rebuilt, so the wrap and follow
+    // settings — and the position you had scrolled to — come with it.
+    <Dialog fullScreen open onClose={() => setFull(false)}>
+      <Box
+        sx={{
+          display: "flex",
+          flexDirection: "column",
+          height: "100dvh",
+          p: 1.5,
+          gap: 1,
+          bgcolor: "background.paper",
+        }}
+      >
+        <Stack direction="row" alignItems="center" spacing={1}>
+          <Typography variant="h3" sx={{ flexGrow: 1, minWidth: 0 }}>
+            {title ?? "Output"}
+          </Typography>
+          <Tooltip title="Leave full screen (Esc)">
+            <IconButton onClick={() => setFull(false)} aria-label="Leave full screen">
+              <CloseFullscreenIcon />
+            </IconButton>
+          </Tooltip>
+        </Stack>
+        {panel}
+      </Box>
+    </Dialog>
   );
 }

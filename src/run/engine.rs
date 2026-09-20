@@ -1184,7 +1184,7 @@ fn step_env(step: &RunStep, env_vars: &HashMap<String, String>) -> HashMap<Strin
 /// Render a step's action as a single shell command. A `script` becomes
 /// `bash <path>` so both forms run through one code path — and so a script
 /// picks up its step's `cwd` the same way an inline command does.
-fn shell_form(script: Option<&str>, run: Option<&str>) -> Option<String> {
+pub(crate) fn shell_form(script: Option<&str>, run: Option<&str>) -> Option<String> {
     match (script, run) {
         (Some(script), _) => Some(format!("bash {}", shell_quote(script))),
         (None, Some(cmd)) => Some(cmd.to_string()),

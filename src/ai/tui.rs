@@ -10,6 +10,11 @@
 //! Keys:
 //!   Enter        send the typed question (or run a /command)
 //!   Alt/Shift-Enter   insert a newline (compose a multi-line message)
+//!   ←/→ · ^←/^→       move the cursor by a character / by a word
+//!   Home/End          start/end of the line the cursor is on
+//!   ↑/↓               move between the input's lines while composing one
+//!   ^W · ^U · ^K      delete the word before the cursor / to the line's
+//!                     start / to its end
 //!   Shift-Tab         cycle the mode: plan → edit → auto-accept
 //!   Ctrl-A / Ctrl-X   apply / reject the first pending change proposal
 //!   Ctrl-Z            undo the most recently applied change
@@ -115,6 +120,179 @@ struct ChatEntry {
     text: String,
 }
 
+/// The message being composed, and the cursor inside it.
+///
+/// The cursor is a *character* index rather than a byte offset: every edit and
+/// every movement below is expressed in characters, so one conversion at the
+/// point of mutation is cheaper to follow than char-boundary arithmetic spread
+/// across a dozen key handlers. The input is one message long, so walking it to
+/// convert costs nothing worth saving.
+#[derive(Default)]
+struct Input {
+    text: String,
+    /// Characters before the cursor. Always ≤ the input's length in chars.
+    cursor: usize,
+}
+
+impl Input {
+    fn text(&self) -> &str {
+        &self.text
+    }
+
+    fn is_empty(&self) -> bool {
+        self.text.is_empty()
+    }
+
+    /// Length in characters — the unit the cursor counts in.
+    fn len(&self) -> usize {
+        self.text.chars().count()
+    }
+
+    /// Byte offset of character index `at`, or the end of the string.
+    fn byte_of(&self, at: usize) -> usize {
+        self.text
+            .char_indices()
+            .nth(at)
+            .map(|(b, _)| b)
+            .unwrap_or(self.text.len())
+    }
+
+    fn chars(&self) -> Vec<char> {
+        self.text.chars().collect()
+    }
+
+    fn clear(&mut self) {
+        self.text.clear();
+        self.cursor = 0;
+    }
+
+    /// Replace the whole input and park the cursor at its end — what command
+    /// completion wants, so the arguments are typed straight after the name.
+    fn set(&mut self, text: impl Into<String>) {
+        self.text = text.into();
+        self.cursor = self.len();
+    }
+
+    fn insert_str(&mut self, s: &str) {
+        let at = self.byte_of(self.cursor);
+        self.text.insert_str(at, s);
+        self.cursor += s.chars().count();
+    }
+
+    fn insert_char(&mut self, c: char) {
+        let at = self.byte_of(self.cursor);
+        self.text.insert(at, c);
+        self.cursor += 1;
+    }
+
+    /// Delete the half-open character range, leaving the cursor at its start.
+    fn delete_range(&mut self, from: usize, to: usize) {
+        let (from, to) = (from.min(to), from.max(to).min(self.len()));
+        if from == to {
+            return;
+        }
+        let (a, b) = (self.byte_of(from), self.byte_of(to));
+        self.text.replace_range(a..b, "");
+        self.cursor = from;
+    }
+
+    /// Delete the character before the cursor.
+    fn backspace(&mut self) {
+        if self.cursor > 0 {
+            self.delete_range(self.cursor - 1, self.cursor);
+        }
+    }
+
+    /// Delete the character under the cursor.
+    fn delete(&mut self) {
+        self.delete_range(self.cursor, self.cursor + 1);
+    }
+
+    fn left(&mut self) {
+        self.cursor = self.cursor.saturating_sub(1);
+    }
+
+    fn right(&mut self) {
+        self.cursor = (self.cursor + 1).min(self.len());
+    }
+
+    /// Start of the word at or before the cursor: skip any whitespace, then the
+    /// word itself. Word-wise movement and `^W` share it so they always agree
+    /// about where a word begins.
+    fn word_start(&self) -> usize {
+        let chars = self.chars();
+        let mut at = self.cursor;
+        while at > 0 && chars[at - 1].is_whitespace() {
+            at -= 1;
+        }
+        while at > 0 && !chars[at - 1].is_whitespace() {
+            at -= 1;
+        }
+        at
+    }
+
+    /// End of the word at or after the cursor: skip any whitespace, then the
+    /// word itself.
+    fn word_end(&self) -> usize {
+        let chars = self.chars();
+        let len = chars.len();
+        let mut at = self.cursor;
+        while at < len && chars[at].is_whitespace() {
+            at += 1;
+        }
+        while at < len && !chars[at].is_whitespace() {
+            at += 1;
+        }
+        at
+    }
+
+    /// Start of the logical line (between newlines) the cursor sits on.
+    fn line_start(&self) -> usize {
+        let chars = self.chars();
+        let mut at = self.cursor;
+        while at > 0 && chars[at - 1] != '\n' {
+            at -= 1;
+        }
+        at
+    }
+
+    /// End of the logical line the cursor sits on.
+    fn line_end(&self) -> usize {
+        let chars = self.chars();
+        let mut at = self.cursor;
+        while at < chars.len() && chars[at] != '\n' {
+            at += 1;
+        }
+        at
+    }
+
+    /// Move the cursor one *wrapped* row up (`-1`) or down (`+1`), keeping the
+    /// column where the new row is long enough to hold it.
+    ///
+    /// Rows rather than logical lines, because rows are what is on screen: a
+    /// pasted paragraph is one logical line and a dozen rows, and pressing ↑
+    /// inside it should land on the row above, not skip the whole paragraph.
+    fn move_row(&mut self, delta: i32, width: usize) {
+        let rows = wrap_input(&self.text, width);
+        let (row, col) = cursor_rc(&rows, self.cursor, width);
+        let target = match row.checked_add_signed(delta as isize) {
+            Some(t) if t < rows.len() => t,
+            // Off the top or the bottom: fall back to the ends, which is what
+            // every other editor does with ↑ on the first row.
+            _ if delta < 0 => {
+                self.cursor = 0;
+                return;
+            }
+            _ => {
+                self.cursor = self.len();
+                return;
+            }
+        };
+        let row = &rows[target];
+        self.cursor = (row.start + col).min(drawn_end(row, width));
+    }
+}
+
 /// Live state for the burn-in progress panel: the latest structured progress
 /// plus when the run started, for an elapsed clock.
 struct BurnView {
@@ -205,7 +383,7 @@ const SLASH_COMMANDS: &[SlashCommand] = &[
 
 struct App {
     entries: Vec<ChatEntry>,
-    input: String,
+    input: Input,
     busy: bool,
     /// When the current `busy` request began, for the elapsed "thinking" clock.
     busy_since: Option<Instant>,
@@ -214,6 +392,9 @@ struct App {
     /// Topmost reachable `scroll_up`, measured on the last frame; scrolling is
     /// clamped to it so the view can't run past the oldest message.
     chat_top: u16,
+    /// Columns the conversation last wrapped at, so a resize can be told apart
+    /// from messages arriving.
+    chat_width: usize,
     /// Change proposals seen this session (newest last), for Ctrl-O.
     suggestions: Vec<ChangeSuggestion>,
     graph_url: Option<String>,
@@ -234,6 +415,13 @@ struct App {
     /// Live burn-in progress, driving the dedicated progress panel. `None` when
     /// no burn is running.
     burn: Option<BurnView>,
+    /// Columns the input box last drew into, stamped by `render_input`.
+    ///
+    /// Vertical cursor movement is defined in terms of wrapped rows, and rows
+    /// only exist relative to a width — so the key handler has to be told the
+    /// one the user is actually looking at, and be told again when the terminal
+    /// is resized under it.
+    input_width: usize,
 }
 
 impl App {
@@ -246,27 +434,29 @@ impl App {
         });
     }
 
-    /// Insert pasted text into the input at the (end-of-line) cursor. Newlines
-    /// are kept so multi-line code lands intact; CRLF/CR are normalized to LF so
-    /// it renders as clean lines. Ignored while a request is in flight.
+    /// Insert pasted text at the cursor. Newlines are kept so multi-line code
+    /// lands intact; CRLF/CR are normalized to LF so it renders as clean lines.
+    /// Ignored while a request is in flight.
     fn paste(&mut self, data: &str) {
         if self.busy {
             return;
         }
         self.input
-            .push_str(&data.replace("\r\n", "\n").replace('\r', "\n"));
+            .insert_str(&data.replace("\r\n", "\n").replace('\r', "\n"));
         self.slash_index = 0;
     }
 
     /// Whether the `/` command menu should be shown: the input is a bare command
     /// name being typed (a leading `/`, no whitespace yet) and we're idle.
     fn slash_active(&self) -> bool {
-        !self.busy && self.input.starts_with('/') && !self.input.contains(char::is_whitespace)
+        !self.busy
+            && self.input.text().starts_with('/')
+            && !self.input.text().contains(char::is_whitespace)
     }
 
     /// Commands matching the typed prefix, in menu order.
     fn slash_matches(&self) -> Vec<&'static SlashCommand> {
-        let token = self.input.trim_start_matches('/').to_lowercase();
+        let token = self.input.text().trim_start_matches('/').to_lowercase();
         SLASH_COMMANDS
             .iter()
             .filter(|c| c.name.starts_with(&token))
@@ -285,11 +475,15 @@ impl App {
     /// whitespace). The selectable menu is gone by now, but we keep the matched
     /// command's format on screen so the user can see the arguments it expects.
     fn slash_usage(&self) -> Option<&'static SlashCommand> {
-        if self.busy || !self.input.starts_with('/') || !self.input.contains(char::is_whitespace) {
+        if self.busy
+            || !self.input.text().starts_with('/')
+            || !self.input.text().contains(char::is_whitespace)
+        {
             return None;
         }
         let name = self
             .input
+            .text()
             .trim_start_matches('/')
             .split_whitespace()
             .next()
@@ -312,6 +506,12 @@ impl App {
     fn scroll_by(&mut self, delta: i32) {
         self.scroll_up =
             (i32::from(self.scroll_up) + delta).clamp(0, i32::from(self.chat_top)) as u16;
+    }
+
+    /// Whether the composed message occupies more than one row at the width the
+    /// box was last drawn at — the test for whether ↑/↓ belong to the text.
+    fn input_is_multirow(&self) -> bool {
+        wrap_input(self.input.text(), self.input_width).len() > 1
     }
 
     /// True while the newest answer is still wiping in — used to keep redraws
@@ -359,11 +559,12 @@ async fn chat_loop(
 ) -> Result<()> {
     let mut app = App {
         entries: Vec::new(),
-        input: String::new(),
+        input: Input::default(),
         busy: false,
         busy_since: None,
         scroll_up: 0,
         chat_top: 0,
+        chat_width: 0,
         suggestions: Vec::new(),
         graph_url,
         slash_index: 0,
@@ -373,6 +574,7 @@ async fn chat_loop(
         reveal_since: None,
         mouse_capture: true,
         burn: None,
+        input_width: 80,
     };
     app.push(
         Speaker::Status,
@@ -502,19 +704,63 @@ async fn chat_loop(
 
                     (KeyCode::PageUp, _) => app.scroll_by(5),
                     (KeyCode::PageDown, _) => app.scroll_by(-5),
-                    // Up/Down drive the slash menu when it's open, else scroll.
+
+                    // ── editing the typed message ───────────────────────────
+                    // Ctrl/Alt move by a word; bare arrows by a character.
+                    (KeyCode::Left, true) => app.input.cursor = app.input.word_start(),
+                    (KeyCode::Right, true) => app.input.cursor = app.input.word_end(),
+                    (KeyCode::Left, _) if key.modifiers.contains(KeyModifiers::ALT) => {
+                        app.input.cursor = app.input.word_start()
+                    }
+                    (KeyCode::Right, _) if key.modifiers.contains(KeyModifiers::ALT) => {
+                        app.input.cursor = app.input.word_end()
+                    }
+                    (KeyCode::Left, _) => app.input.left(),
+                    (KeyCode::Right, _) => app.input.right(),
+                    (KeyCode::Delete, _) => app.input.delete(),
+                    // Kill to the word before the cursor / to either end of the
+                    // line, the readline keys every shell already trains.
+                    (KeyCode::Char('w'), true) => {
+                        let to = app.input.cursor;
+                        app.input.delete_range(app.input.word_start(), to);
+                    }
+                    (KeyCode::Char('u'), true) => {
+                        let to = app.input.cursor;
+                        app.input.delete_range(app.input.line_start(), to);
+                    }
+                    (KeyCode::Char('k'), true) => {
+                        let from = app.input.cursor;
+                        app.input.delete_range(from, app.input.line_end());
+                    }
+
+                    // Up/Down drive the slash menu when it's open, step between
+                    // the input's rows while a multi-row message is being
+                    // composed, and scroll the conversation otherwise. The
+                    // wheel and PageUp/PageDown always scroll, so nothing is
+                    // out of reach mid-compose.
                     (KeyCode::Up, _) if app.slash_active() => app.slash_move(-1),
                     (KeyCode::Down, _) if app.slash_active() => app.slash_move(1),
+                    (KeyCode::Up, _) if app.input_is_multirow() => {
+                        app.input.move_row(-1, app.input_width)
+                    }
+                    (KeyCode::Down, _) if app.input_is_multirow() => {
+                        app.input.move_row(1, app.input_width)
+                    }
                     (KeyCode::Up, _) => app.scroll_by(1),
                     (KeyCode::Down, _) => app.scroll_by(-1),
-                    (KeyCode::Home, _) => app.scroll_up = app.chat_top,
-                    (KeyCode::End, _) => app.scroll_up = 0,
+                    // Home/End belong to the text while there is text: with the
+                    // input empty there is no line to jump around in, so they
+                    // stay the conversation's oldest/newest.
+                    (KeyCode::Home, _) if app.input.is_empty() => app.scroll_up = app.chat_top,
+                    (KeyCode::End, _) if app.input.is_empty() => app.scroll_up = 0,
+                    (KeyCode::Home, _) => app.input.cursor = app.input.line_start(),
+                    (KeyCode::End, _) => app.input.cursor = app.input.line_end(),
 
                     // Tab completes the highlighted command (with a trailing
                     // space) so arguments can be typed before sending.
                     (KeyCode::Tab, _) if app.slash_active() => {
                         if let Some(c) = app.slash_selected() {
-                            app.input = format!("/{} ", c.name);
+                            app.input.set(format!("/{} ", c.name));
                         }
                     }
 
@@ -524,14 +770,14 @@ async fn chat_loop(
                     (KeyCode::Enter, _)
                         if key.modifiers.intersects(KeyModifiers::ALT | KeyModifiers::SHIFT) =>
                     {
-                        app.input.push('\n');
+                        app.input.insert_char('\n');
                     }
                     (KeyCode::Enter, _) => {
                         // With the menu open, Enter runs the highlighted command;
                         // otherwise it sends whatever was typed.
                         let line = match app.slash_selected() {
                             Some(c) if app.slash_active() => format!("/{}", c.name),
-                            _ => app.input.trim().to_string(),
+                            _ => app.input.text().trim().to_string(),
                         };
                         if line.is_empty() || app.busy {
                             // nothing to send / still working
@@ -648,11 +894,11 @@ async fn chat_loop(
                         }
                     }
                     (KeyCode::Backspace, _) => {
-                        app.input.pop();
+                        app.input.backspace();
                         app.slash_index = 0;
                     }
                     (KeyCode::Char(c), false) => {
-                        app.input.push(c);
+                        app.input.insert_char(c);
                         app.slash_index = 0;
                     }
                     _ => {}
@@ -970,33 +1216,214 @@ fn rate(app: &mut App, assistant: &Assistant, positive: bool) {
     }
 }
 
+/// Columns the speaker prefix (`you ▸ `) occupies, and so the indent a wrapped
+/// message is held at.
+const PREFIX_WIDTH: usize = 6;
+
+/// One wrapped row of the input: the half-open *character* range of the input
+/// it draws.
+type Row = std::ops::Range<usize>;
+
+/// Wrap `text` the way the input box draws it: a new row at every newline, a
+/// break after the last space that fits, and a hard break through any word too
+/// long to fit a row at all.
+///
+/// Rows are contiguous and cover every character exactly once, so a character
+/// index maps to a screen position by subtraction — which is the whole point.
+/// The box renders these rows verbatim rather than handing ratatui a `Wrap`, so
+/// what the cursor is computed from and what is on screen are the same layout,
+/// and stay the same layout when the terminal is resized under them.
+///
+/// A row may run one character past `width` when that character is the space
+/// the break was taken at; `drawn_end` is where the drawing stops.
+fn wrap_input(text: &str, width: usize) -> Vec<Row> {
+    let width = width.max(1);
+    let chars: Vec<char> = text.chars().collect();
+    let mut rows: Vec<Row> = Vec::new();
+    let mut line_start = 0usize;
+
+    loop {
+        let line_end = chars[line_start..]
+            .iter()
+            .position(|&c| c == '\n')
+            .map(|i| line_start + i)
+            .unwrap_or(chars.len());
+
+        let mut start = line_start;
+        loop {
+            if line_end - start <= width {
+                rows.push(start..line_end);
+                break;
+            }
+            // One past the window, so a word ending exactly at the edge breaks
+            // after its own space rather than being split down the middle.
+            let limit = (start + width + 1).min(line_end);
+            let end = match chars[start..limit].iter().rposition(|&c| c == ' ') {
+                Some(i) if start + i + 1 > start => start + i + 1,
+                _ => start + width,
+            };
+            rows.push(start..end);
+            start = end;
+        }
+
+        if line_end >= chars.len() {
+            break;
+        }
+        line_start = line_end + 1;
+    }
+
+    rows
+}
+
+/// Where a row stops being drawn: its end, or the width, whichever comes first.
+fn drawn_end(row: &Row, width: usize) -> usize {
+    row.end.min(row.start + width)
+}
+
+/// The (row, column) a character index lands on in a wrapped layout.
+///
+/// A cursor sitting exactly at the right edge belongs at the start of the row
+/// below — the position every terminal puts it in, and the one that stays
+/// visible.
+fn cursor_rc(rows: &[Row], cursor: usize, width: usize) -> (usize, usize) {
+    let index = rows.iter().rposition(|r| r.start <= cursor).unwrap_or(0);
+    let column = rows.get(index).map(|r| cursor - r.start).unwrap_or(0);
+    if column >= width {
+        (index + 1, 0)
+    } else {
+        (index, column)
+    }
+}
+
+/// The text a row draws.
+fn row_text(chars: &[char], row: &Row, width: usize) -> String {
+    chars[row.start..drawn_end(row, width).min(chars.len())]
+        .iter()
+        .collect()
+}
+
+/// Split text into "word plus the spaces following it" chunks — the unit a
+/// greedy wrap moves between rows.
+fn split_words(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut chunk = String::new();
+    let mut spacing = false;
+    for c in text.chars() {
+        if c == ' ' {
+            spacing = true;
+        } else if spacing {
+            out.push(std::mem::take(&mut chunk));
+            spacing = false;
+        }
+        chunk.push(c);
+    }
+    if !chunk.is_empty() {
+        out.push(chunk);
+    }
+    out
+}
+
+/// Wrap one logical line of styled spans to `width`, indenting continuation
+/// rows by `indent` so a wrapped message stays under the message it belongs to
+/// rather than sliding back to the left margin.
+///
+/// The conversation wraps itself rather than handing ratatui a `Wrap` for two
+/// reasons: that indent, which `Wrap` has no notion of, and the row count — the
+/// scroll offset has to come from exactly the rows that get drawn, and a count
+/// re-derived separately from the drawing is how a resize ends up clipping the
+/// newest message off the bottom.
+fn wrap_spans(spans: Vec<Span<'static>>, width: usize, indent: usize) -> Vec<Line<'static>> {
+    let width = width.max(1);
+    // However deep the indent would like to be, a continuation row on a narrow
+    // terminal still needs room to say something.
+    let indent = indent.min(width.saturating_sub(4));
+
+    let mut rows: Vec<Vec<Span<'static>>> = Vec::new();
+    let mut current: Vec<Span<'static>> = Vec::new();
+    let mut used = 0usize;
+    // Whether this row holds anything but its indent — the test for "is it
+    // worth starting a new row for this word, or is the word simply too long?"
+    let mut filled = false;
+    // Set by a wrap, so the spaces a break was taken at don't reappear as a
+    // ragged left edge on the row below. The *first* row keeps its leading
+    // spaces: there, they're the message's own indentation.
+    let mut wrapped = false;
+
+    for span in spans {
+        let style = span.style;
+        for word in split_words(span.content.as_ref()) {
+            let mut pending = word;
+            loop {
+                if wrapped {
+                    pending = pending.trim_start().to_string();
+                    wrapped = false;
+                }
+                if pending.is_empty() {
+                    break;
+                }
+                let room = width.saturating_sub(used);
+                // Trailing spaces don't have to fit: they land at the edge,
+                // where they're invisible either way.
+                let needed = pending.trim_end_matches(' ').chars().count();
+                if needed <= room {
+                    used = (used + pending.chars().count()).min(width);
+                    current.push(Span::styled(pending, style));
+                    filled = true;
+                    break;
+                }
+                if filled {
+                    // Try the word again with a whole row to itself.
+                    rows.push(std::mem::take(&mut current));
+                    current.push(Span::raw(" ".repeat(indent)));
+                    used = indent;
+                    filled = false;
+                    wrapped = true;
+                    continue;
+                }
+                // A single word longer than a whole row — a path, a URL, a
+                // hash. Splitting it is ugly; letting it fall off the edge is
+                // worse.
+                let take = room.max(1);
+                current.push(Span::styled(
+                    pending.chars().take(take).collect::<String>(),
+                    style,
+                ));
+                pending = pending.chars().skip(take).collect();
+                rows.push(std::mem::take(&mut current));
+                current.push(Span::raw(" ".repeat(indent)));
+                used = indent;
+            }
+        }
+    }
+
+    rows.push(current);
+    rows.into_iter().map(Line::from).collect()
+}
+
 /// Most content rows the input box grows to before it scrolls internally, so a
 /// big paste can't crowd out the conversation.
 const MAX_INPUT_ROWS: u16 = 12;
 
-/// How many terminal rows a string occupies once wrapped to `inner_w` columns,
-/// counting each logical line as `floor(len / width) + 1` rows. With this
-/// convention the end-of-input cursor always sits at row `rows - 1`.
-fn wrapped_rows(text: &str, inner_w: usize) -> u16 {
-    let inner_w = inner_w.max(1);
-    text.split('\n')
-        .map(|l| l.chars().count() / inner_w + 1)
-        .sum::<usize>()
-        .min(u16::MAX as usize) as u16
+/// Rows the input box needs at this width — the wrapped message, and the row
+/// the cursor sits on when it has run past the last of them.
+fn input_rows(app: &App, width: usize) -> u16 {
+    let rows = wrap_input(app.input.text(), width);
+    let (cursor_row, _) = cursor_rc(&rows, app.input.cursor, width);
+    rows.len()
+        .max(cursor_row + 1)
+        .clamp(1, MAX_INPUT_ROWS as usize) as u16
 }
 
 fn render(f: &mut Frame, app: &mut App, assistant: &Assistant) {
     // Grow the input box to fit multi-line/pasted content, up to a cap.
-    let input_rows = wrapped_rows(&app.input, f.area().width.saturating_sub(2) as usize)
-        .clamp(1, MAX_INPUT_ROWS)
-        + 2; // borders
+    let input_height = input_rows(app, f.area().width.saturating_sub(2).max(1) as usize) + 2; // borders
     let [header, burn, chat, pending_area, menu, input, hints] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Length(burn_height(app)),
         Constraint::Min(3),
         Constraint::Length(pending_height(assistant)),
         Constraint::Length(slash_menu_height(app)),
-        Constraint::Length(input_rows),
+        Constraint::Length(input_height),
         Constraint::Length(1),
     ])
     .areas(f.area());
@@ -1202,8 +1629,15 @@ fn render_burn(f: &mut Frame, area: Rect, app: &App) {
 }
 
 fn render_header(f: &mut Frame, area: Rect, assistant: &Assistant) {
+    // The gauge is the first thing to go when the window narrows: the title
+    // carries the provider and the mode, which is the part you can't infer.
+    let gauge_width = match area.width {
+        w if w >= 64 => 34,
+        w if w >= 46 => 22,
+        _ => 0,
+    };
     let [title_area, gauge_area] =
-        Layout::horizontal([Constraint::Min(20), Constraint::Length(34)]).areas(area);
+        Layout::horizontal([Constraint::Min(16), Constraint::Length(gauge_width)]).areas(area);
 
     let mode = assistant.mode();
     let mode_color = match mode {
@@ -1228,6 +1662,10 @@ fn render_header(f: &mut Frame, area: Rect, assistant: &Assistant) {
         ),
     ]));
     f.render_widget(title, title_area);
+
+    if gauge_width == 0 {
+        return;
+    }
 
     let confidence = assistant.brain.confidence();
     let gauge = Gauge::default()
@@ -1388,7 +1826,9 @@ fn render_chat(f: &mut Frame, area: Rect, app: &mut App) {
         .rposition(|e| e.speaker == Speaker::Assistant);
     let reveal = app.reveal_since.map(|t| t.elapsed().as_secs_f32());
 
-    let mut lines: Vec<Line> = Vec::new();
+    // Each line is paired with whether it may be re-wrapped: the mascot is a
+    // drawing, and wrapping a drawing is just breaking it.
+    let mut lines: Vec<(Line<'static>, bool)> = Vec::new();
     for (idx, entry) in app.entries.iter().enumerate() {
         let (prefix, style) = match entry.speaker {
             Speaker::You => (
@@ -1451,21 +1891,24 @@ fn render_chat(f: &mut Frame, area: Rect, app: &mut App) {
                 // The loaf is colored per-character (crust / crumb / face).
                 let mut spans = vec![Span::raw(head)];
                 spans.extend(banner_spans(raw));
-                lines.push(Line::from(spans));
+                lines.push((Line::from(spans), false));
             } else if entry.speaker == Speaker::Assistant {
                 // The AI answers in Markdown — render its inline emphasis.
                 let mut spans = vec![Span::styled(head, style)];
                 spans.extend(render_markdown_line(raw, body_style));
-                lines.push(Line::from(spans));
+                lines.push((Line::from(spans), true));
             } else {
-                lines.push(Line::from(vec![
-                    Span::styled(head, style),
-                    Span::styled(raw.to_string(), body_style),
-                ]));
+                lines.push((
+                    Line::from(vec![
+                        Span::styled(head, style),
+                        Span::styled(raw.to_string(), body_style),
+                    ]),
+                    true,
+                ));
             }
         }
         if entry.speaker == Speaker::Assistant {
-            lines.push(Line::default());
+            lines.push((Line::default(), false));
         }
     }
     if app.busy && app.burn.is_none() {
@@ -1485,39 +1928,54 @@ fn render_chat(f: &mut Frame, area: Rect, app: &mut App) {
         } else {
             "thinking".to_string()
         };
-        lines.push(Line::from(vec![
-            Span::styled(
-                format!("   {spin}  "),
-                Style::default().fg(CRUST).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                text,
-                Style::default()
-                    .fg(Color::DarkGray)
-                    .add_modifier(Modifier::ITALIC),
-            ),
-        ]));
+        lines.push((
+            Line::from(vec![
+                Span::styled(
+                    format!("   {spin}  "),
+                    Style::default().fg(CRUST).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    text,
+                    Style::default()
+                        .fg(Color::DarkGray)
+                        .add_modifier(Modifier::ITALIC),
+                ),
+            ]),
+            true,
+        ));
     }
 
-    // Wrap-aware autoscroll: hold the view `scroll_up` lines above the bottom.
-    // The total height MUST match what ratatui actually renders, or the bottom
-    // lines get clipped — so we ask the Paragraph itself via `line_count`
-    // (accounting for the same `Wrap { trim: false }` word wrapping and the
-    // block's borders) rather than re-deriving the wrap by hand.
-    let inner_width = area.width.saturating_sub(2).max(1);
-    let chat = Paragraph::new(lines)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::DarkGray)),
-        )
-        .wrap(Wrap { trim: false });
-    // `line_count` includes the top+bottom border rows; drop them to get the
-    // number of text lines, then hold the view against the inner height.
-    let total = chat.line_count(inner_width).saturating_sub(2);
+    // Wrap here rather than leaving it to ratatui, so the rows the scroll is
+    // computed from are the rows that get drawn — the two drifting apart is
+    // what used to clip the newest message off the bottom — and so a wrapped
+    // message keeps its indent under the speaker that said it.
+    let inner_width = area.width.saturating_sub(2).max(1) as usize;
+    let wrapped: Vec<Line> = lines
+        .into_iter()
+        .flat_map(|(line, wrap)| {
+            if wrap {
+                wrap_spans(line.spans, inner_width, PREFIX_WIDTH)
+            } else {
+                vec![line]
+            }
+        })
+        .collect();
+
+    let total = wrapped.len();
     let visible = area.height.saturating_sub(2) as usize;
     let bottom = total.saturating_sub(visible).min(u16::MAX as usize) as u16;
-    if app.scroll_up > 0 {
+
+    if inner_width != app.chat_width {
+        // A resize reflows every message, so "lines from the bottom" measures a
+        // conversation that no longer exists. Rescaling it in proportion holds
+        // the reader roughly where they were, where leaving it alone would walk
+        // the view toward one end every time the window is dragged.
+        if app.scroll_up > 0 && app.chat_top > 0 {
+            let ratio = f64::from(app.scroll_up) / f64::from(app.chat_top);
+            app.scroll_up = ((ratio * f64::from(bottom)).round() as u16).min(bottom);
+        }
+        app.chat_width = inner_width;
+    } else if app.scroll_up > 0 {
         // The user is reading scrollback: grow `scroll_up` by however many
         // lines just arrived below, so the view stays anchored on the same
         // messages instead of drifting (or snapping) toward the bottom.
@@ -1526,7 +1984,14 @@ fn render_chat(f: &mut Frame, area: Rect, app: &mut App) {
     app.chat_top = bottom;
     let scroll = bottom.saturating_sub(app.scroll_up);
 
-    f.render_widget(chat.scroll((scroll, 0)), area);
+    let chat = Paragraph::new(wrapped)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::DarkGray)),
+        )
+        .scroll((scroll, 0));
+    f.render_widget(chat, area);
 }
 
 /// Pending banner height: one line per waiting change or tag proposal, capped.
@@ -1573,53 +2038,93 @@ fn render_pending(f: &mut Frame, area: Rect, assistant: &Assistant) {
     f.render_widget(Paragraph::new(lines), area);
 }
 
-fn render_input(f: &mut Frame, area: Rect, app: &App) {
+fn render_input(f: &mut Frame, area: Rect, app: &mut App) {
     let inner_w = area.width.saturating_sub(2).max(1) as usize;
-    let inner_h = area.height.saturating_sub(2).max(1);
+    let inner_h = area.height.saturating_sub(2).max(1) as usize;
+    // Vertical cursor movement is defined in rows, and rows only exist relative
+    // to a width — so tell the key handler the one it is looking at. A resize
+    // corrects it on the next frame, before any key can be pressed against it.
+    app.input_width = inner_w;
 
-    // Keep the newest line (and the cursor) in view when the input is taller
-    // than the box.
-    let content_rows = wrapped_rows(&app.input, inner_w);
-    let scroll = content_rows.saturating_sub(inner_h);
+    let chars: Vec<char> = app.input.text().chars().collect();
+    let rows = wrap_input(app.input.text(), inner_w);
+    let (cursor_row, cursor_col) = cursor_rc(&rows, app.input.cursor, inner_w);
 
-    let input = Paragraph::new(app.input.as_str())
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(if app.busy {
-                    " waiting for the model… "
-                } else {
-                    " ask "
-                })
-                .border_style(Style::default().fg(if app.busy {
-                    Color::DarkGray
-                } else {
-                    Color::Yellow
-                })),
-        )
-        .wrap(Wrap { trim: false })
-        .scroll((scroll, 0));
+    // Scroll to keep the *cursor's* row in view rather than the last one: with
+    // a long paste being edited from the top, the interesting row is the one
+    // being typed on.
+    let scroll = cursor_row.saturating_sub(inner_h - 1);
+
+    let lines: Vec<Line> = rows
+        .iter()
+        .skip(scroll)
+        .map(|row| Line::from(row_text(&chars, row, inner_w)))
+        .collect();
+
+    let input = Paragraph::new(lines).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(if app.busy {
+                " waiting for the model… "
+            } else {
+                " ask "
+            })
+            .border_style(Style::default().fg(if app.busy {
+                Color::DarkGray
+            } else {
+                Color::Yellow
+            })),
+    );
     f.render_widget(input, area);
 
     if !app.busy {
-        // Cursor sits at the end of the input: last logical line for the column,
-        // total wrapped rows for the row, adjusted by the internal scroll.
-        let last_len = app.input.rsplit('\n').next().unwrap_or("").chars().count();
-        let col = (last_len % inner_w) as u16;
-        let row = content_rows.saturating_sub(1).saturating_sub(scroll);
-        f.set_cursor_position((area.x + 1 + col, area.y + 1 + row));
+        f.set_cursor_position((
+            area.x + 1 + cursor_col as u16,
+            area.y + 1 + (cursor_row - scroll) as u16,
+        ));
     }
 }
 
 fn render_hints(f: &mut Frame, area: Rect, app: &App) {
-    let mut hint = String::from(
-        " Enter send · / commands · A-Enter newline · S-Tab mode · ^A/^X change · ^Z undo · ^S pdf · ^O vscode · ^Y/^N tags · ^T select · Esc quit",
-    );
+    // Most important first, and only as many as fit: a single row that gets
+    // sliced through the middle of a binding teaches nothing.
+    let mut hints: Vec<String> = [
+        "Enter send",
+        "/ commands",
+        "A-Enter newline",
+        "←→ move · ^←→ word",
+        "^W/^U/^K delete",
+        "S-Tab mode",
+        "^A/^X change",
+        "^Z undo",
+        "^S pdf",
+        "^O vscode",
+        "^Y/^N tags",
+        "^T select",
+        "Esc quit",
+    ]
+    .iter()
+    .map(|h| (*h).to_string())
+    .collect();
     if let Some(url) = &app.graph_url {
-        hint.push_str(&format!(" · map: {url}"));
+        hints.push(format!("map: {url}"));
     }
+
+    let mut line = String::new();
+    for hint in hints {
+        let candidate = if line.is_empty() {
+            format!(" {hint}")
+        } else {
+            format!("{line} · {hint}")
+        };
+        if candidate.chars().count() > area.width as usize {
+            break;
+        }
+        line = candidate;
+    }
+
     f.render_widget(
-        Paragraph::new(Span::styled(hint, Style::default().fg(Color::DarkGray))),
+        Paragraph::new(Span::styled(line, Style::default().fg(Color::DarkGray))),
         area,
     );
 }
@@ -1691,6 +2196,166 @@ mod tests {
         let code = spans.iter().find(|s| s.content.contains("cargo")).unwrap();
         assert_eq!(code.style.fg, Some(CODE));
         assert!(!code.style.add_modifier.contains(Modifier::BOLD));
+    }
+
+    /// The rows a wrap produced, as plain strings.
+    fn rows(text: &str, width: usize) -> Vec<String> {
+        let chars: Vec<char> = text.chars().collect();
+        wrap_input(text, width)
+            .iter()
+            .map(|row| row_text(&chars, row, width))
+            .collect()
+    }
+
+    /// An App with nothing in it, for the render tests.
+    fn test_app() -> App {
+        App {
+            entries: Vec::new(),
+            input: Input::default(),
+            busy: false,
+            busy_since: None,
+            scroll_up: 0,
+            chat_top: 0,
+            chat_width: 0,
+            suggestions: Vec::new(),
+            graph_url: None,
+            slash_index: 0,
+            last_answer: None,
+            report_pending: false,
+            last_report_days: 7,
+            reveal_since: None,
+            mouse_capture: true,
+            burn: None,
+            input_width: 80,
+        }
+    }
+
+    /// Draw the input box at a given size and report where the cursor landed.
+    fn draw_input(app: &mut App, width: u16, height: u16) -> (u16, u16) {
+        let mut terminal =
+            Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                render_input(f, area, app);
+            })
+            .unwrap();
+        let at = terminal.get_cursor_position().unwrap();
+        (at.x, at.y)
+    }
+
+    #[test]
+    fn the_drawn_cursor_follows_the_text_across_a_resize() {
+        let mut app = test_app();
+        app.input.set("alpha beta gamma");
+        app.input.cursor = 7; // just after "beta"'s b
+
+        // 20 columns wide: two borders leave 18, so the message is one row.
+        let (x, y) = draw_input(&mut app, 20, 5);
+        assert_eq!((x, y), (1 + 7, 1));
+
+        // Narrow it to eight usable columns and the message reflows to
+        // "alpha " / "beta " / "gamma": the same character is now the second on
+        // the second row. The box and the cursor wrap from one layout, so they
+        // can't disagree about that.
+        let (x, y) = draw_input(&mut app, 10, 5);
+        assert_eq!(app.input_width, 8);
+        assert_eq!((x, y), (1 + 1, 1 + 1));
+    }
+
+    #[test]
+    fn typing_and_deleting_happen_at_the_cursor() {
+        let mut input = Input::default();
+        for c in "hello world".chars() {
+            input.insert_char(c);
+        }
+        input.cursor = 5;
+        input.insert_str(" there");
+        assert_eq!(input.text(), "hello there world");
+        assert_eq!(input.cursor, 11);
+
+        input.backspace();
+        assert_eq!(input.text(), "hello ther world");
+        input.delete();
+        assert_eq!(input.text(), "hello therworld");
+    }
+
+    #[test]
+    fn word_movement_and_kills_agree_about_words() {
+        let mut input = Input::default();
+        input.set("one two three");
+        assert_eq!(input.cursor, 13);
+        assert_eq!(input.word_start(), 8);
+
+        let to = input.cursor;
+        input.delete_range(input.word_start(), to);
+        assert_eq!(input.text(), "one two ");
+        assert_eq!(input.cursor, 8);
+
+        // From inside the trailing space, `word_start` skips back over it.
+        input.set("alpha beta");
+        input.cursor = 0;
+        assert_eq!(input.word_end(), 5);
+    }
+
+    #[test]
+    fn home_and_end_stay_on_the_cursor_s_own_line() {
+        let mut input = Input::default();
+        input.set("first\nsecond");
+        input.cursor = 8; // inside "second"
+        assert_eq!(input.line_start(), 6);
+        assert_eq!(input.line_end(), 12);
+        input.cursor = 3; // inside "first"
+        assert_eq!(input.line_start(), 0);
+        assert_eq!(input.line_end(), 5);
+    }
+
+    #[test]
+    fn wrapping_breaks_at_spaces_and_splits_only_what_it_must() {
+        assert_eq!(rows("hello world", 5), vec!["hello", "world"]);
+        assert_eq!(rows("a b c", 5), vec!["a b c"]);
+        // A word with nowhere to break is split rather than dropped.
+        assert_eq!(
+            rows("supercalifragilistic", 6),
+            vec!["superc", "alifra", "gilist", "ic"]
+        );
+        // Newlines start a row of their own, including empty ones.
+        assert_eq!(rows("a\n\nb", 10), vec!["a", "", "b"]);
+    }
+
+    #[test]
+    fn the_cursor_follows_the_same_wrap_the_box_draws() {
+        let text = "hello world";
+        let wrapped = wrap_input(text, 5);
+        // Start of the second row.
+        assert_eq!(cursor_rc(&wrapped, 6, 5), (1, 0));
+        // A cursor at the right edge belongs at the start of the row below,
+        // which is where a terminal would put it.
+        assert_eq!(cursor_rc(&wrap_input("abcde", 5), 5, 5), (1, 0));
+    }
+
+    #[test]
+    fn wrapped_messages_keep_their_indent() {
+        let spans = vec![Span::raw("you ▸ "), Span::raw("alpha beta gamma delta")];
+        let lines = wrap_spans(spans, 16, PREFIX_WIDTH);
+        let text: Vec<String> = lines
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
+            .collect();
+        // The space the break was taken at rides along at the edge, where it
+        // isn't drawn.
+        assert_eq!(text[0].trim_end(), "you ▸ alpha beta");
+        // Continuation rows sit under the message, not against the margin.
+        for row in &text[1..] {
+            assert!(row.starts_with("      "), "{row:?}");
+        }
+        // Nothing is lost in the reflow.
+        let joined: String = text
+            .iter()
+            .map(|r| r.trim().to_string())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(joined.contains("alpha beta gamma delta"), "{joined:?}");
     }
 
     #[test]

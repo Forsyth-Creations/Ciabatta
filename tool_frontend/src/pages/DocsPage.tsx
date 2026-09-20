@@ -16,7 +16,6 @@
  * section can't be added to one and forgotten in the other.
  */
 
-import BoltIcon from "@mui/icons-material/Bolt";
 import CheckIcon from "@mui/icons-material/Check";
 import ContentCopyIcon from "@mui/icons-material/ContentCopy";
 import DownloadIcon from "@mui/icons-material/Download";
@@ -110,6 +109,46 @@ function Bullets({ items }: { items: ReactNode[] }) {
           {item}
         </Typography>
       ))}
+    </Box>
+  );
+}
+
+/**
+ * A two-column table of config fields and what they do.
+ *
+ * A bulleted list of twenty settings scans as prose and reads as none: the
+ * thing you came for is a name, and a name in a column is findable.
+ */
+function FieldTable({ rows }: { rows: [string, string][] }) {
+  return (
+    <Box sx={{ my: 2, maxWidth: "78ch", border: 1, borderColor: "divider", borderRadius: 1 }}>
+      <Table size="small">
+        <TableBody>
+          {rows.map(([field, meaning]) => (
+            <TableRow key={field}>
+              <TableCell
+                sx={{
+                  fontFamily: monoFontStack,
+                  fontSize: 13,
+                  fontWeight: 600,
+                  verticalAlign: "top",
+                  whiteSpace: "nowrap",
+                  // A literal 1 would be 100% in MUI's shorthand, which hands
+                  // the whole table to the names column.
+                  width: "1%",
+                }}
+              >
+                {field}
+              </TableCell>
+              <TableCell sx={{ verticalAlign: "top" }}>
+                <Typography variant="body2" color="text.secondary" sx={{ lineHeight: 1.6 }}>
+                  {meaning}
+                </Typography>
+              </TableCell>
+            </TableRow>
+          ))}
+        </TableBody>
+      </Table>
     </Box>
   );
 }
@@ -310,42 +349,39 @@ interface CommandGroup {
  */
 const COMMANDS: CommandGroup[] = [
   {
-    name: "Running things",
+    name: "Running a workflow",
     blurb:
-      "One command runs everything, because there is only one thing to run. A workflow is a named DAG of steps; every package that declares that name joins in, and the whole thing compiles to a single graph.",
+      "There is one thing to run, so there is nearly one command to run it. A workflow is a named DAG of steps; every package that declares that name joins in, and the whole thing compiles to a single graph.",
     commands: [
       {
         usage: "ciabatta <WORKFLOW> [ALSO…]",
-        note: "Compile every package's workflow of that name into one graph and run it in dependency order. Naming several folds them into the same graph, so shared dependencies run once.",
+        note: "Any name that isn't one of ciabatta's own commands is a workflow: `ciabatta build`, `ciabatta test`. Naming several folds them into one graph, so a dependency both of them need runs once.",
         flags: [
-          ["--filter TERM", "Run only the steps this selects. Repeatable. See below."],
-          ["--graph", "Explore the resolved graph interactively and run nothing."],
-          ["--dry-run", "Walk every step without executing it."],
-          ["--only MEMBER", "Start from these sub-workspaces; dependencies still come along."],
+          ["-f, --filter TERM", "Run only the steps this selects. Repeatable."],
+          ["--only MEMBER", "Start from these sub-workspaces; their dependencies still come along."],
           ["--isolated", "Don't follow dependencies into other sub-workspaces."],
-          ["--gui", "Watch it live in this app instead of the terminal."],
+          ["--graph", "Print the resolved graph and run nothing."],
+          ["--dry-run", "Walk every step, executing none of them."],
           ["-e KEY=VALUE", "Set a variable for every step. Beats .env and CI."],
-          ["--tui", "Watch it in the terminal TUI. Runs print plain text by default."],
+          ["--gui", "Watch it live in this app."],
+          ["--tui", "Watch it in the terminal UI. Runs print plain text by default."],
+          ["--authoritative", "Run each step against only the files it declared — the way to find an incomplete inputs list."],
         ],
       },
       {
-        usage: "ciabatta build",
-        note: "Any name ciabatta doesn't recognise as a command is a workflow, so this is the same as ciabatta run build. Use the longer ciabatta workflow <name> when a workflow's name collides with a real command.",
+        usage: "ciabatta workflow build",
+        note: "The same thing, spelled out. Use this longer form when a workflow's name collides with one of ciabatta's commands — a workflow called `list` or `watch` needs it. Alias: `ciabatta wf`.",
       },
       {
-        usage: "ciabatta run build test",
-        note: "Several targets compile into a single graph rather than running one after the other — a dependency both of them need runs once.",
-      },
-      {
-        usage: "ciabatta run --build",
-        note: "Open the visual flowchart builder. Designs a flowchart file; runs nothing.",
+        usage: "ciabatta dry-run build --diff",
+        note: "What a run would reuse and what it would rebuild, without running it. For a rebuild it names what changed: which input files (with the lines), which variables, which upstream steps.",
       },
     ],
   },
   {
-    name: "Seeing what exists",
+    name: "Seeing what exists, and why",
     blurb:
-      "The questions a monorepo usually can't answer: what is there to run, who owns it, and what will actually happen if I run it.",
+      "The questions a monorepo usually can't answer: what is there to run, who owns it, and why did that rebuild.",
     commands: [
       {
         usage: "ciabatta list",
@@ -356,12 +392,20 @@ const COMMANDS: CommandGroup[] = [
         ],
       },
       {
-        usage: "ciabatta run <target> --graph",
-        note: "The resolved graph: every step in wave order, and per step what it does, who owns it, what it waits for, what waits on it. Honours --filter. Add --tui to explore it interactively instead of printing it.",
+        usage: "ciabatta why api:build",
+        note: "Everything one target is defined by: the file it's declared in, the directory it runs in, what it needs, the files it reads and writes, the variables it keys on, the commands it runs, and what the cache would do with all of that.",
+        flags: [
+          ["-a, --all", "Name every input file instead of counting them — how you find the one that shouldn't be there."],
+          ["--json", "The same answer, for a script."],
+        ],
       },
       {
-        usage: "ciabatta config reference",
-        note: "The full config file schema.",
+        usage: "ciabatta build --graph",
+        note: "The resolved graph in wave order, and per step what it does, who owns it, what it waits for and what waits on it. Honours --filter.",
+      },
+      {
+        usage: "ciabatta config show | reference",
+        note: "The resolved configuration, and the full config file schema.",
       },
     ],
   },
@@ -391,14 +435,41 @@ const COMMANDS: CommandGroup[] = [
         usage: "ciabatta init",
         note: "A publishing-only config in the current directory — registries, no workspace identity.",
       },
+      {
+        usage: "ciabatta convert --script scripts/build.sh",
+        note: "Read an existing script, work out what it needs and what it produces, and write it into .ciabatta/ as a workflow so it can join the graph like everything else.",
+      },
       { usage: "ciabatta configure", note: "Set up registries interactively." },
       {
         usage: "ciabatta register",
-        note: "Tell the daemon this checkout exists, so it appears in the project switcher. Every web-facing command does this for the directory it ran in, and `init` does it for a new one — this is for a checkout nothing has been run in yet.",
+        note: "Tell the daemon this checkout exists, so it appears in the project switcher. Every web-facing command does this for the directory it ran in — this is for a checkout nothing has been run in yet.",
         flags: [
           ["--path DIR", "Register that directory instead of the current one."],
           ["--quiet", "Print just the project id, for a script."],
         ],
+      },
+    ],
+  },
+  {
+    name: "The cache",
+    blurb:
+      "Caching is off until a workspace opts in: a cache that turns itself on is a cache that will one day serve a stale artifact nobody asked it to keep.",
+    commands: [
+      {
+        usage: "ciabatta cache init [WORKFLOW]",
+        note: "Look at what is actually in the directory and write a `cache:` section into the workflow's file proposing its inputs and outputs — with the paths already rooted correctly.",
+      },
+      {
+        usage: "ciabatta cache status",
+        note: "What the local cache is holding, and what it has saved.",
+      },
+      {
+        usage: "ciabatta cache prune | clean",
+        note: "Apply a retention policy, or empty the store for this project.",
+      },
+      {
+        usage: "ciabatta remote-cache <init|start|login|status|add-user>",
+        note: "Run a shared cache for the team, or log this machine in to one. See the remote cache section.",
       },
     ],
   },
@@ -408,7 +479,7 @@ const COMMANDS: CommandGroup[] = [
       "Publishing is a step, not a command. A step with kind: push moves an artifact to a registry; it sits on the graph, declares what it needs, and so cannot run before the artifact exists.",
     commands: [
       {
-        usage: "ciabatta <WORKFLOW> --filter kind:push",
+        usage: "ciabatta release --filter kind:push",
         note: "Run only the transfer steps of a workflow, skipping the builds that feed them.",
         flags: [
           ["--dry-run", "Show what would move, and where, without moving it."],
@@ -462,6 +533,7 @@ const COMMANDS: CommandGroup[] = [
         usage: "ciabatta daemon <status|stop|restart|logs>",
         note: "Inspect or restart the background daemon serving this app. You rarely need it — any command with a web view starts it.",
       },
+      { usage: "ciabatta self update", note: "Update this binary from the remote cache serving it." },
     ],
   },
 ];
@@ -953,126 +1025,274 @@ interface DocSection {
   id: string;
   title: string;
   body: ReactNode;
+  /**
+   * Which half of the page this belongs to: the walkthrough, or the reference
+   * behind it.
+   *
+   * The page is a tutorial with a manual stapled to the back, and a flat
+   * contents list of fifteen entries hid that — somebody landing here could not
+   * tell "read this first" from "look this up when you need it".
+   */
+  group: "Start here" | "Reference";
 }
 
 const SECTIONS: DocSection[] = [
   {
-    id: "overview",
-    title: "What this is",
+    id: "inputs",
+    group: "Start here",
+    title: "Ciabatta cares about inputs",
     body: (
       <>
         <P>
-          One daemon, one web app. Ciabatta&apos;s tools used to be separate servers on separate
-          ports, each with its own layout and its own idea of what a project was; they are now
-          pages in this app, backed by a single local HTTP API.
+          Everything else in this tool follows from one idea: <strong>a step is defined by what
+          goes into it.</strong> Not by the command it runs — by the command <em>and</em> the files
+          that command reads <em>and</em> the environment variables it reads <em>and</em> whatever
+          had to happen first.
         </P>
-        <P>
-          The important consequence is <strong>ownership</strong>: the daemon owns the work, not
-          the terminal that asked for it. A watch session, a run, and a serial capture all outlive
-          the command that started them and the tab that is watching them. Close the browser, come
-          back tomorrow, and the session is still there with its logs intact. (A{" "}
-          <a href="#run">background task</a> is the one thing deliberately stopped when its run
-          ends — its <em>output</em> outlives the run, the process does not.)
-        </P>
-        <P>
-          The daemon starts on demand — any ciabatta command probes for one and launches it if
-          nothing answers — and you can drive it directly:
-        </P>
-        <Pre>{`ciabatta daemon serve            # run it in the foreground
-ciabatta daemon serve --port 9000
-ciabatta daemon stop             # ask it to exit`}</Pre>
-        <P>
-          It binds loopback by default. See <a href="#security">Tokens and access</a> before
-          changing that — this API can start processes.
-        </P>
-      </>
-    ),
-  },
-  {
-    id: "navigating",
-    title: "Finding your way around",
-    body: (
-      <>
+        <P>Ciabatta calls those the three inputs of a step, and a step has exactly three:</P>
         <Bullets
           items={[
             <>
-              <strong>Project switcher</strong> (top bar) — nearly everything except Todo is
-              per-checkout, and the switcher decides which one. Projects register themselves the
-              first time you run a ciabatta command inside them. Your choice is remembered, and
-              falls back to whichever project the daemon lists first.
+              <strong>Files</strong> — the sources it reads, declared as globs in{" "}
+              <C>cache.inputs</C>. Change one and the step runs again.
             </>,
             <>
-              <strong>Health chip</strong> — polls <C>/api/health</C> every ten seconds. If it goes
-              red the daemon is gone; if the version differs from what you just installed, an old
-              daemon is still holding the port.
+              <strong>Environment variables</strong> — the values it reads. Some decide{" "}
+              <em>whether</em> it can run at all (<C>REQUIRED_ENV</C>); some decide{" "}
+              <em>what it produces</em>, and those belong in <C>cache.env</C>.
             </>,
             <>
-              <strong>Navigation rail</strong> — collapsible, and the collapsed state is remembered
-              on wide screens. Below ~900px it becomes an overlay that closes when you pick a
-              destination, because the log and graph views want the width.
-            </>,
-            <>
-              <strong>Colour mode</strong> — the toggle sits next to the health chip and persists.
-            </>,
-            <>
-              <strong>Every view is a URL.</strong> <C>/watch/3</C> and <C>/run/12</C> are real
-              links you can bookmark or paste to a colleague on the same machine; the daemon serves
-              the app for any non-asset path, so reloading them works.
+              <strong>The steps it needs</strong> — named in <C>needs</C>. If one of them produced
+              something different, this step runs again too.
             </>,
           ]}
         />
+        <P>
+          Declare those and ciabatta can answer the questions a build system is actually asked:
+          why did this rebuild, what will this run do before I start it, what does this step need
+          that my machine doesn&apos;t have, and can we skip it. Leave them undeclared and it
+          can&apos;t — and worse, a step that quietly reads a file nobody listed will one day be
+          handed a stale result and nobody will notice for a week.
+        </P>
+        <Alert severity="info" sx={{ my: 2, maxWidth: "78ch" }}>
+          This page is the walkthrough: set a project up, make a run depend on files, make it
+          depend on variables, and write the workflow file that says so. Everything is a{" "}
+          <a href="#commands">command you can copy</a>.
+        </Alert>
+        <P>
+          The fastest way to see all of it working is to generate the worked example — four
+          packages that really depend on each other, every step of which runs on a bare machine:
+        </P>
+        <Pre>{`ciabatta init --example        # writes ./ciabatta-example
+cd ciabatta-example
+ciabatta list                  # what exists, and who owns it
+ciabatta build --graph         # the resolved graph, running nothing
+ciabatta build                 # actually run it`}</Pre>
       </>
     ),
   },
   {
-    id: "commands",
-    title: "Commands",
+    id: "setup",
+    group: "Start here",
+    title: "Set a project up",
     body: (
       <>
         <P>
-          What ciabatta can run. You are usually reading this because the next thing you want to do
-          happens in a terminal, so the reference lives here as well as in <C>--help</C> — which
-          remains the exhaustive list for any one command.
+          A ciabatta project is a directory with a <C>.ciabatta/</C> in it. A monorepo is several
+          of those, one per package, plus one at the root that owns the shared settings. Nothing
+          else is required — no central manifest listing the packages, because the packages say
+          who they are.
         </P>
-        <Alert severity="success" sx={{ mb: 2, maxWidth: "78ch" }}>
-          <strong>Everything is a workflow.</strong> A workflow is a named DAG of steps, declared
-          in a package&apos;s <C>.ciabatta/workflows/&lt;name&gt;.yaml</C> — the filename is the
-          name. Running it collects every package that declares that name, follows the
-          dependencies between them, and runs the result as one graph. Publishing an artifact is a
-          step on that graph (<C>kind: push</C>), not a separate command.
-        </Alert>
-        <CommandReference />
 
-        <SubHeading>Filtering a graph</SubHeading>
+        <SubHeading>1. Opt each package in</SubHeading>
         <P>
-          <C>--filter</C> narrows a run to the steps you care about, which is how you iterate on
-          one package without sitting through the whole monorepo:
+          Run this in each package. It writes the package&apos;s identity and a starter workflow,
+          and asks for a description and an owner — on purpose, because those are what make{" "}
+          <C>ciabatta list</C> worth reading six months later.
         </P>
-        <Pre>{`ciabatta run test --filter tag:fast              # only steps tagged fast
-ciabatta run test --filter '!tag:flaky'         # everything except the flaky ones
-ciabatta run build --filter workspace:api       # one package's steps
-ciabatta run release --filter kind:push         # just the publish, artifact in hand
-ciabatta run test --filter tag:fast --filter tag:smoke   # either one`}</Pre>
+        <Pre>{`cd packages/api
+ciabatta init --lib --depends-on proto:generate`}</Pre>
+        <P>Which leaves you with two files, and it is worth knowing which is which:</P>
+        <Bullets
+          items={[
+            <>
+              <C>.ciabatta/ciabatta.yaml</C> — <strong>who this package is.</strong> Its name,
+              owner, tags, which packages it depends on, its <C>.env</C> file, and (at the root)
+              the shared <C>toolchain:</C>, the registries, and the cache server.
+            </>,
+            <>
+              <C>{".ciabatta/workflows/<name>.yaml"}</C> — <strong>what it can do.</strong> One
+              file per workflow, and <em>the filename is the workflow&apos;s name</em>:{" "}
+              <C>build.yaml</C> is what <C>ciabatta build</C> runs.
+            </>,
+          ]}
+        />
+        <Pre>{`my-repo/
+  .ciabatta/ciabatta.yaml              # the root: umbrella: true, toolchain, shared env
+  packages/
+    proto/.ciabatta/ciabatta.yaml      # workspace: name: proto
+    proto/.ciabatta/workflows/generate.yaml
+    api/.ciabatta/ciabatta.yaml        # workspace: depends_on: [proto:generate, common]
+    api/.ciabatta/workflows/build.yaml
+    api/.ciabatta/workflows/test.yaml`}</Pre>
+
+        <SubHeading>2. Say what the package is</SubHeading>
+        <Pre>{`# packages/api/.ciabatta/ciabatta.yaml
+workspace:
+  name: api
+  description: The public REST/gRPC service
+  owner: API Team
+  tags: [backend, service]
+
+  # Cross-package dependencies, declared once for every workflow here:
+  # "<member>" means that member's workflow of the same name,
+  # "<member>:<workflow>" means one specific workflow.
+  depends_on: [proto:generate, common]
+
+  # Tools every workflow here needs on PATH. Missing ones are reported before
+  # anything runs, with the install command from the root's toolchain: section.
+  requires: [sh, cargo]`}</Pre>
         <P>
-          Selectors are <C>tag:</C>, <C>workspace:</C> (alias <C>member:</C>), <C>kind:</C>,{" "}
-          <C>owner:</C>, <C>step:</C>, or a bare word that searches all of them plus descriptions.
-          A leading <C>!</C> excludes, and exclusions beat matches. Positive terms are OR&apos;d —
-          a filter list reads as &quot;the things I want&quot;. Tags cascade from the sub-workspace
-          to the workflow to the step, so a step inherits every label above it.
+          The root config is the same file with <C>umbrella: true</C>, which says &quot;this
+          directory is not a package of its own&quot; — it is where the shared <C>toolchain:</C>{" "}
+          hints and the variables every package inherits live.
         </P>
+
+        <SubHeading>3. Write a workflow</SubHeading>
+        <P>
+          Steps declare order with <C>needs</C>, and the order in the file means nothing. This is
+          a complete, working file:
+        </P>
+        <Pre>{`# packages/api/.ciabatta/workflows/build.yaml
+description: Build the api binary
+owner: API Team
+requires: [sh]
+
+steps:
+  - name: compile
+    description: Compile the service binary into dist/api
+    run: cargo build --release
+    tags: [slow]
+    timeout: 10m
+
+  - name: package
+    description: Tar the binary up for publishing
+    run: tar czf dist/api.tgz -C target/release api
+    needs: [compile]`}</Pre>
+        <P>
+          Already got a shell script that does this? <C>ciabatta convert --script
+          scripts/build.sh</C> reads it, works out what it needs and what it produces, and writes
+          the workflow for you.
+        </P>
+
+        <SubHeading>4. Run it, and look at it</SubHeading>
+        <Pre>{`ciabatta list                  # every package, workflow, owner and dependency
+ciabatta build                 # run it across every package that defines build
+ciabatta build --graph         # …or just show me the graph
+ciabatta build --gui           # …or watch it in this app
+ciabatta register              # make this checkout appear in the project switcher`}</Pre>
+        <P>
+          From here the two things worth declaring are the inputs: the{" "}
+          <a href="#files">files</a> each step reads, and the{" "}
+          <a href="#env">variables</a> it depends on.
+        </P>
+      </>
+    ),
+  },
+  {
+    id: "files",
+    group: "Start here",
+    title: "Make a run depend on files",
+    body: (
+      <>
+        <P>
+          A step that declares the files it reads can be skipped when none of them changed, and
+          can explain itself when they did. That declaration is the <C>cache:</C> block, and it
+          lives in the workflow file rather than in the package config — because the files a{" "}
+          <C>build</C> reads are not the files a <C>test</C> reads.
+        </P>
+        <P>Let ciabatta propose it from what is actually in the directory:</P>
+        <Pre>{`cd packages/api
+ciabatta cache init build      # writes a cache: section into workflows/build.yaml`}</Pre>
+        <Pre>{`# packages/api/.ciabatta/workflows/build.yaml
+cache:
+  enabled: true
+  # Every path is relative to the WORKSPACE ROOT, not to this file — note the
+  # packages/api/ on each one.
+  inputs:  ["packages/api/src/**/*", "packages/api/Cargo.toml", "Cargo.lock"]
+  outputs: ["packages/api/target/release/api"]
+  exclude: ["packages/api/target"]   # its own output is not one of its inputs
+  env:     [PROFILE]                 # variables the RESULT depends on
+
+steps:
+  - name: compile
+    run: cargo build --release`}</Pre>
         <Alert severity="warning" sx={{ my: 2, maxWidth: "78ch" }}>
-          A filter <strong>prunes</strong> the graph rather than expanding a selection: the
-          surviving steps run without the dependencies you filtered away, on the assumption those
-          already happened. It is the fast debug loop, not how you build a fresh checkout.
-          Ciabatta reports every dependency edge it cut, so this is never silent.
+          <strong>Paths are relative to the workspace root, wherever the block is written.</strong>{" "}
+          One project is one cache, so one directory has to be what those paths mean. Getting the
+          prefix wrong is the single most common mistake here, and{" "}
+          <C>ciabatta why api:compile</C> is the fastest way to catch it — it prints what the
+          globs actually matched.
         </Alert>
 
-        <SubHeading>Environment variables</SubHeading>
+        <SubHeading>Then ask it what it thinks</SubHeading>
+        <Pre>{`ciabatta why api:compile        # where it's declared, what it reads, what it writes
+ciabatta why api:compile --all  # …naming every input file, in hash order
+ciabatta dry-run build --diff   # what would rebuild, and which lines changed
+ciabatta cache status           # what the local cache is holding, and what it saved`}</Pre>
         <P>
-          Precedence, weakest first: <C>.env</C> files → CI-derived → the ambient environment →{" "}
-          <C>-e KEY=VALUE</C>. A workflow can insist on variables with <C>REQUIRED_ENV</C>, checked
-          before anything runs rather than halfway through.
+          The <Link to="/cache">Cache page</Link> is the same information with the diffs already
+          expanded, and the <Link to="/run">Run page</Link>&apos;s <strong>Files</strong> toggle
+          draws the file sets as nodes feeding the steps that read them — which is the graph the
+          caching decision is actually made from.
         </P>
+
+        <SubHeading>Proving the list is complete</SubHeading>
+        <P>
+          An <C>inputs</C> list that is missing a file is worse than no list at all: the step gets
+          a cache hit it didn&apos;t earn. There is a flag that finds those, by running each step
+          against <em>only</em> what it declared:
+        </P>
+        <Pre>{`ciabatta build --authoritative`}</Pre>
+        <P>
+          A step that reads something it never declared can&apos;t find it there and fails now,
+          with its sandbox left on disk to look at — instead of quietly being handed a stale
+          result weeks later. Add <C>--sandbox-also node_modules</C> for the ambient state that
+          genuinely isn&apos;t a source file.
+        </P>
+      </>
+    ),
+  },
+  {
+    id: "env",
+    group: "Start here",
+    title: "Make a run depend on environment variables",
+    body: (
+      <>
+        <P>
+          Variables are the other half of what goes into a step, and there are three separate
+          questions about them. Keeping them apart is most of what makes this straightforward:
+        </P>
+        <Bullets
+          items={[
+            <>
+              <strong>Where does the value come from?</strong> — the <C>.env</C> chain, the
+              ambient environment, CI, <C>-e</C>.
+            </>,
+            <>
+              <strong>Must it be set?</strong> — <C>REQUIRED_ENV</C>, checked before anything
+              runs.
+            </>,
+            <>
+              <strong>Does the result depend on it?</strong> — <C>cache.env</C>, which folds it
+              into the cache key.
+            </>,
+          ]}
+        />
+
+        <SubHeading>Where values come from</SubHeading>
+        <P>Precedence, weakest first:</P>
+        <Pre>{`.env files  →  CI-derived  →  the ambient environment  →  -e KEY=VALUE`}</Pre>
         <P>
           <strong>Among the files themselves, nearest wins.</strong> A step in{" "}
           <C>packages/api</C> reads <C>packages/api/.env</C>; whatever that file doesn&apos;t set
@@ -1081,678 +1301,69 @@ ciabatta run test --filter tag:fast --filter tag:smoke   # either one`}</Pre>
           <Link to="/run">Run page</Link>, so &quot;which file did this value come from?&quot; has
           a visible answer.
         </P>
+        <Pre>{`# packages/api/.ciabatta/ciabatta.yaml
+workspace:
+  env_file: .env              # the default; set it to point somewhere else
+  env_default: .env.example   # the checked-in template .env is generated from
+  env:
+    LOG_LEVEL: info           # a plain value every step here starts with`}</Pre>
         <P>
-          A missing <C>.env</C> is generated from the checked-in template at the start of a run —
-          the declared <C>env_default</C>, or a conventional <C>.env.example</C> /{" "}
-          <C>.env.default</C> that is simply there — for the project and for every sub-workspace
-          the run touches. It never overwrites a file that exists.
-        </P>
-        <P>
-          Ciabatta snapshots the variables its <C>.env</C> files define — names and value{" "}
-          <em>hashes</em>, never the values — under <C>.ciabatta/cache/</C>. When they change,
-          because someone pulled a branch that adds a required variable, the next run says which
-          ones moved before it starts. The same drift is served at{" "}
-          <C>/api/workspace/env-drift</C>.
-        </P>
-      </>
-    ),
-  },
-  {
-    id: "editors",
-    title: "Editors",
-    body: <EditorSetup />,
-  },
-  {
-    id: "todo",
-    title: "Todo",
-    body: (
-      <>
-        <P>
-          A task list stored in <C>~/.ciabatta/todos.json</C>, scoped to the project you are looking
-          at. The switcher at the top of the page selects whose list you see, so notes written in
-          one repo do not clutter another.
-        </P>
-        <SubHeading>The global list</SubHeading>
-        <P>
-          Not everything you write down is about a repo. The globe button on a task makes it{" "}
-          <strong>global</strong>: it leaves the project&apos;s list and appears on the{" "}
-          <Link to="/">dashboard</Link>, where it stays whichever project you switch to. A global
-          task can be filed back under the selected project the same way. From a terminal,{" "}
-          <C>ciabatta todo --global &quot;…&quot;</C> adds one directly.
-        </P>
-        <P>
-          The two lists are deliberately disjoint — a global task appears on the dashboard and
-          nowhere else. Showing it under every project as well would turn the thing you set aside
-          into the thing you see most often. Tasks written before todos were scoped carry no
-          project, so they land on the global list, which is where something nobody attached to a
-          repo belongs anyway.
-        </P>
-        <P>
-          Removing a project from the switcher promotes its tasks to the global list rather than
-          leaving them attached to an id nothing resolves — which would be deletion without saying
-          so.
-        </P>
-        <P>
-          Click a task&apos;s text to edit it in place. The editor is multi-line, because a task is
-          often a paragraph and a box that scrolls sideways makes anything longer than a sentence
-          unreadable while you are writing it — so Enter inserts a newline, and{" "}
-          <C>⌘/Ctrl+Enter</C> saves. Clicking away saves too, because after typing that means
-          &ldquo;keep it&rdquo; far more often than it means the opposite; Escape abandons. An empty
-          edit is treated as a mis-key rather than a delete — the bin does that.
-        </P>
-        <P>
-          Tasks carry a priority (low, medium, high) and a done flag. <strong>Ship</strong> hands
-          the task to the assistant as a background job and returns its job number — the agent edits
-          files, so it needs to know whose. Follow it on the <Link to="/ai">AI page</Link>.
-        </P>
-      </>
-    ),
-  },
-  {
-    id: "watch",
-    title: "Watch",
-    body: (
-      <>
-        <P>
-          Run a command and stream its output into a live, searchable view. The daemon spawns the
-          process, so the session survives closing this tab or the terminal — including the
-          sessions a workflow&apos;s <a href="#run">background tasks</a> leave behind, which show
-          up here labelled with the graph node that started them. Those sessions stay readable
-          after their run has stopped the process behind them.
-        </P>
-        <SubHeading>In a session</SubHeading>
-        <Bullets
-          items={[
-            <>
-              <strong>Search</strong> covers the whole buffer on the daemon side, not just the lines
-              currently rendered. Choose <em>any</em> or <em>all</em> for multi-term queries, or
-              switch to regex.
-            </>,
-            <>
-              <strong>Bookmarks</strong> pin a line with a label and a snippet, so &quot;the point
-              where it broke&quot; is still findable after another 50,000 lines.
-            </>,
-            <>
-              <strong>Triggers</strong> are patterns (literal or regex) the daemon matches as output
-              arrives; each hit is recorded with its line, so you can start a long build and come
-              back to the list of matches for <C>error</C>.
-            </>,
-            <>
-              <strong>Stop</strong> ends the process but keeps the output. <strong>Discard</strong>{" "}
-              throws the session away entirely.
-            </>,
-            <>
-              <strong>Export</strong> (the share icon) saves the log to a file or copies it to the
-              clipboard, ready to send to someone else.
-            </>,
-          ]}
-        />
-        <SubHeading>Sending a log to someone</SubHeading>
-        <P>
-          The export button builds the transcript on the daemon, not from what this tab happens to
-          have streamed — so it is the <em>whole</em> buffer, with the command, the exit status,
-          and your bookmarks in the header, and <C>stderr</C> lines marked as such. If the ring
-          buffer dropped older output, the file says so rather than starting mid-story.
-        </P>
-        <Bullets
-          items={[
-            <>
-              <strong>Download as a file</strong> — a <C>.log</C> named after the step (or the
-              command), for attaching to a ticket.
-            </>,
-            <>
-              <strong>Download with timestamps</strong> — every line prefixed with when it arrived.
-              Reach for this when the question is <em>where did it stall</em>; skip it when you are
-              sending someone a stack trace.
-            </>,
-            <>
-              <strong>Copy to clipboard</strong> — straight into chat. Needs a secure context, so
-              it may be refused over plain HTTP on a non-loopback host; the download always works.
-            </>,
-          ]}
-        />
-        <P>
-          The same thing from a terminal is <C>ciabatta watch --attach ID {">"} out.log</C>.
-        </P>
-        <Alert severity="info" sx={{ my: 2, maxWidth: "78ch" }}>
-          There is no box here for typing a command to run. The daemon executes with your full
-          privileges, so a free-text shell field in a web page is a remote-execution surface for
-          anything that can reach the port. Start sessions from the CLI, where the person starting
-          one is the person at the keyboard.
-        </Alert>
-        <P>
-          Output arrives over SSE and is flushed on animation frames, and both the daemon and the
-          browser cap what they retain — a command emitting thousands of lines a second will drop
-          the oldest lines rather than lock the tab up.
-        </P>
-      </>
-    ),
-  },
-  {
-    id: "workspace",
-    title: "Workspace",
-    body: (
-      <>
-        <P>
-          The answer to &quot;what can I run in this monorepo, and what happens if I do&quot;. It
-          reads the <C>.ciabatta</C> declarations off disk — no scan — so the whole catalogue of
-          sub-workspaces, their workflows, owners, tags, and steps arrives in one request and
-          searching happens locally.
-        </P>
-        <P>
-          Search is deliberately generous: it matches names, descriptions, owners, tags,{" "}
-          <em>and the commands steps actually run</em>. &quot;Which package runs protoc?&quot; is
-          the question a monorepo otherwise can&apos;t answer.
-        </P>
-        <SubHeading>Graphing a workflow</SubHeading>
-        <P>
-          Pick a workflow name and the daemon compiles the graph that would run, following
-          cross-package dependencies. Nodes say which sub-workspace they came from, and are laid
-          out by dependency wave. Missing toolchain entries are called out separately — a build
-          that would fail for want of <C>protoc</C> says so before it starts.
-        </P>
-        <P>Step badges mean:</P>
-        <Bullets
-          items={[
-            <>
-              <Chip size="small" color="primary" label="push" /> — the special publishing phase,
-              identifiable so it can be skipped or required as a unit.
-            </>,
-            <>
-              <Chip size="small" variant="outlined" color="info" icon={<BoltIcon />} label="background" />{" "}
-              — from the workflow&apos;s <C>background:</C> array. Up before wave 1, gates nothing,
-              stopped when the run ends. Drawn in its own row at the bottom rather than in a wave.
-            </>,
-            <>
-              <Chip size="small" variant="outlined" color="info" label="persistent" /> — a step that
-              never exits and is <em>left</em> running when the run ends. Tail either under Watch.
-            </>,
-            <>
-              <Chip size="small" variant="outlined" label="timeout" /> — killed past its limit, and
-              the rest of the graph carries on.
-            </>,
-            <>
-              <Chip size="small" variant="outlined" label="non-blocking" /> — its failure skips
-              dependents but does not stop the run.
-            </>,
-          ]}
-        />
-        <P>
-          From here you can start the graph directly, with or without <strong>dry run</strong>. It
-          becomes an ordinary run on the <Link to="/run">Run page</Link>; the daemon compiles the
-          graph the same way <C>ciabatta build</C> does, so the UI and the CLI can&apos;t disagree
-          about what executes.
+          A missing <C>.env</C> is generated from that template at the start of a run, for the
+          project and for every sub-workspace the run touches. It never overwrites a file that
+          exists. Commit the template, never the <C>.env</C>.
         </P>
 
-        <SubHeading>Stale workflows</SubHeading>
-        <P>
-          A repository records everything about a workflow except the one thing that says whether it
-          still works: when anybody last ran it. So somebody adds <C>deploy-staging</C>, the staging
-          environment goes away, and the workflow stays — listed, documented, apparently a thing you
-          could run, and broken in a way nobody discovers until they try.
-        </P>
-        <P>
-          Every run writes down what it ran, how it went and how long it took, and each workflow
-          here carries a chip saying when it last ran. Anything past{" "}
-          <C>workspace.stale_after</C> in the root config (30 days by default) is flagged{" "}
-          <strong>stale</strong>. <C>ciabatta list</C> shows the same thing and names them all at
-          the end.
-        </P>
-        <Alert severity="info" sx={{ mb: 2, maxWidth: "78ch" }}>
-          <strong>&ldquo;Never run&rdquo; is not the same as stale</strong>, and is deliberately not
-          styled like a verdict. The history is per checkout and not committed — it is observation,
-          not configuration, and a file every run rewrites would conflict on every merge — so a
-          fresh clone starts out knowing nothing. That is an absence of evidence, not evidence the
-          workflow is dead.
-        </Alert>
-        <P>
-          Which is why it is shared. When the project has a{" "}
-          <a href="#remote-cache">remote cache</a>, each run reports what it ran and takes back what
-          everyone else has run, so the answer is &ldquo;when did <em>anyone</em> last run
-          this&rdquo; rather than &ldquo;when did I&rdquo;. A workflow you have not touched since
-          March may be the one CI runs hourly; one nobody anywhere has run since March is the one
-          worth deleting. Both directions happen at the end of a run, so reading this page never
-          waits on the network — a cache that is down costs you a stale picture, not a slow page.
-        </P>
-        <P>
-          The server sees every project at once, which no single checkout can. Its own{" "}
-          <C>stale_after</C> — a cache serving five teams may want to hear about a quarter of
-          silence where one team calls a fortnight stale — decides what it reports:
-        </P>
-        <Pre>{`$ ciabatta remote-cache status
-
-Projects:
-  api        3f2a…   412 hit / 38 miss  ·  2 stale workflow(s)
-
-Workflows: 24 tracked, 3 not run by anyone in over 30d
-  api        api:deploy-staging       94 days ago  (7 run(s) ever)`}</Pre>
-      </>
-    ),
-  },
-  {
-    id: "run",
-    title: "Run",
-    body: (
-      <>
-        <P>
-          Executes a step DAG live. Pick a workflow (or arrive from Workspace with one already
-          compiled), optionally tick <strong>dry run</strong>, and start. The daemon owns the run,
-          so it keeps going with the tab closed.
-        </P>
-        <SubHeading>Missing environment</SubHeading>
-        <P>
-          If a workflow declares variables the daemon&apos;s environment lacks, the start is rejected
-          with the list rather than begun and aborted halfway. The launcher prompts for those values
-          and retries — nothing half-executes because a variable was unset.
-        </P>
-        <SubHeading>Watching a run</SubHeading>
-        <Bullets
-          items={[
-            <>
-              Steps are drawn as a graph with their status. Solid edges are <C>needs</C>{" "}
-              dependencies; the others are failure branches and retries.
-            </>,
-            <>
-              <strong>Recovery steps</strong> are the fix-it branches a failure diverts into, rather
-              than a dead end.
-            </>,
-            <>
-              A step can <strong>ask a question</strong> mid-run; the prompt appears with its
-              options and the run waits for your answer.
-            </>,
-            <>Selecting any step shows its logs, streamed as they are produced.</>,
-          ]}
-        />
-        <SubHeading>Background tasks</SubHeading>
-        <P>
-          Some things a build needs are not steps in it. A mock API the integration tests talk to, a
-          database container, a bundler in watch mode — they have to be <em>running</em>, they never
-          finish, and waiting for one is waiting forever. Those go in the workflow&apos;s{" "}
-          <C>background:</C> array, alongside <C>steps:</C> rather than inside it.
-        </P>
-        <Pre>{`# packages/mock-api/.ciabatta/workflows/serve.yaml
-steps:
-  - name: api
-    run: node mock.js
-    persistent: true
-
-# packages/web/.ciabatta/workflows/test.yaml
-needs:
-  - proto:generate     # must finish first
-background:
-  - mock-api:serve     # must be running; nothing waits for it
-
-steps:
-  - name: integration
-    run: yarn test:integration`}</Pre>
-        <P>
-          Named exactly the way <C>needs</C> names things — <C>&quot;&lt;member&gt;&quot;</C> for
-          that sub-workspace&apos;s workflow of this name,{" "}
-          <C>&quot;&lt;member&gt;:&lt;workflow&gt;&quot;</C> for a specific one — because they are
-          the same kind of thing: a target that already exists, declared once, in its own package,
-          by whoever owns it. <strong>The only difference from <C>needs</C> is that a{" "}
-          <C>needs</C> target is waited for and a <C>background</C> target is merely started.</strong>{" "}
-          Its steps are started before the first wave, so they are up by the time anything wants
-          them, and <strong>gate nothing</strong> — no mistake in one can hold a build up. The graph
-          views say the same thing: background tasks are drawn in their own row at the bottom, under
-          a lightning bolt, because a wave means &ldquo;the next one waits for these&rdquo; and
-          nothing here waits.
-        </P>
-        <P>
-          A background target keeps the order its own steps declare among themselves — a database
-          has to be up before the app that talks to it — but it may not declare workflow-level{" "}
-          <C>needs</C>, because there is nowhere for those to run.
-        </P>
-        <Alert severity="info" sx={{ mb: 2, maxWidth: "78ch" }}>
-          <strong>Nothing waits for it, so nothing checks it either.</strong> Started before the
-          first wave is not the same as <em>ready</em> before the first wave — a step may still
-          reach the mock API before it is listening. If that race matters, have the step wait for
-          the port rather than assuming; the graph cannot do it for you, because
-          &ldquo;ready&rdquo; is a different question for every server.
-        </Alert>
-
-        <SubHeading>Background vs. persistent</SubHeading>
-        <P>
-          There are two ways to run something that never exits, and the only difference is{" "}
-          <strong>what happens when the run ends</strong>.
-        </P>
-        <Bullets
-          items={[
-            <>
-              A <C>background:</C> entry is <strong>stopped</strong> when every stage has succeeded
-              or failed. It existed to get this run through; leaving it up would hand you a process
-              still holding its port for the next run to collide with.
-            </>,
-            <>
-              A step with <C>persistent: true</C> is <strong>left running</strong>. The daemon takes
-              ownership, so <C>ciabatta dev</C> leaves you a dev server to work against — killing it
-              on the way out would make persistence pointless. Stop it yourself with{" "}
-              <C>ciabatta watch --stop &lt;id&gt;</C>.
-            </>,
-          ]}
-        />
-        <P>
-          Both run as <Link to="/watch">watch sessions</Link>, labelled with the node that started
-          them, so their output is readable live and afterwards — a stopped background task leaves
-          its session behind even though its process is gone. To follow either while a run is going:
-        </P>
-        <Pre>{`ciabatta watch --attach 3     # follow it
-ciabatta watch --stop 3       # stop it early`}</Pre>
-        <P>
-          If no daemon can be reached, either kind still runs — as a child of the run itself, still
-          blocking nothing — but it cannot outlive this process and its output goes to the run&apos;s
-          log rather than a session. The log says so at the time rather than leaving it to be
-          discovered.
-        </P>
-
-        <SubHeading>Stopping a run</SubHeading>
-        <P>
-          A run in flight has a <strong>Stop</strong> button beside its status. The daemon{" "}
-          <em>asks</em> the engine to stop rather than killing it: the step running now is killed,
-          nothing further is scheduled, and the background tasks the run started are stopped on the
-          way past. Killing the run outright would leave those behind, which is the state stopping
-          most needs to avoid.
-        </P>
-        <Alert severity="warning" sx={{ mb: 2, maxWidth: "78ch" }}>
-          <strong>What has already happened stays happened.</strong> Steps are side-effecting shell
-          work; stopping halfway can leave a migration applied and the deploy that follows it not.
-          Stopping is a way out of a run that is going nowhere, not an undo.
-        </Alert>
-        <P>
-          A stopped run is reported as stopped, not as a failed build — nobody should go looking for
-          a bug that isn&apos;t there. Its logs stay readable. Clicking Stop on a run that has
-          already finished does nothing.
-        </P>
-
-        <SubHeading>Flowchart builder</SubHeading>
-        <P>
-          <Link to="/run/builder">The builder</Link> is an authoring tool, not an executor. Lay out
-          steps, their <C>needs</C>, and their error branches, then copy the generated config into
-          your <C>ciabatta.yaml</C>. Nothing you build there runs until it is committed to the file.
-        </P>
-      </>
-    ),
-  },
-  {
-    id: "cache",
-    title: "Cache",
-    body: (
-      <>
-        <P>
-          Caching is off until a workspace opts in, because a cache that turns itself on is a cache
-          that will one day serve somebody a stale artifact they never asked it to keep. Opting in
-          is one line — and it is the same line where you say what your inputs are, which is the
-          part that actually has to be right.
-        </P>
-        <Pre>{`ciabatta cache init build      # propose inputs and outputs for the \`build\` workflow
-ciabatta dry-run build         # what would be reused, and why not
-ciabatta dry-run build --diff  # ...with the lines that changed`}</Pre>
-        <P>
-          The section lands in <C>.ciabatta/workflows/&lt;name&gt;.yaml</C>, next to the steps it
-          describes — what a build reads is a property of that build, and a <C>build</C> and a{" "}
-          <C>test</C> in one package read different files. A step can narrow it further with its
-          own <C>cache:</C>, layered over the workflow&apos;s field by field. The shared cache
-          server stays in <C>ciabatta.yaml</C>: that&apos;s one endpoint per checkout, not a
-          property of any one build.
-        </P>
-
-        <SubHeading>Three dependencies</SubHeading>
-        <P>
-          A stage depends on exactly three things, and any of them changing is a rebuild: its{" "}
-          <strong>input files</strong>, the <strong>environment variables</strong> it declared in{" "}
-          <C>cache.env</C>, and the <strong>outputs of the stages it needs</strong>. The third is
-          what makes a graph cacheable rather than just a directory — change a <C>.proto</C> file
-          and <C>proto:generate</C> misses, its outputs change, and everything downstream of it
-          misses too, each for a reason it can name.
-        </P>
-        <P>
-          The <Link to="/cache">Cache page</Link> shows all three. For every stage it prints the
-          decision, the input files it is judged on, the output files it produces, and — when the
-          answer is &ldquo;rebuild&rdquo; — a diff in the shape of a pull request: the changed
-          files with their lines, the variables that moved, and the upstream stages that produced
-          something different. The same view is attached to each node of the{" "}
-          <Link to="/workspace">workflow graph</Link>, with the graph&apos;s inputs above its first
-          wave and its outputs below the last.
-        </P>
-
-        <SubHeading>Two things worth knowing</SubHeading>
-        <P>
-          <strong>An undeclared input is a wrong answer, not a slow one.</strong> A build that reads
-          a file not listed in <C>inputs</C> will be handed a stale result when that file changes.
-          That is why <C>cache init</C> scaffolds the inputs from what is actually in the directory
-          rather than leaving them empty, and why the dry run exists at all.
-        </P>
-        <P>
-          <strong>Outputs are verified, not assumed.</strong> A key match says the inputs did not
-          change; it says nothing about whether somebody deleted <C>dist/</C> or hand-edited a
-          generated file. So the outputs are hashed too, and a mismatch is a restore or a rebuild —
-          the difference between &ldquo;we think this is current&rdquo; and &ldquo;this is
-          current&rdquo;.
-        </P>
-
-        <SubHeading>Proving the inputs are right</SubHeading>
-        <P>
-          A dry run shows what the cache <em>thinks</em>. <C>--authoritative</C> checks whether it
-          is entitled to think it.
-        </P>
-        <Pre>{`ciabatta build --authoritative`}</Pre>
-        <P>
-          Every step runs in its own directory holding the files it declared under <C>inputs</C>{" "}
-          and nothing else, laid out the way the project root is — so a path that reaches sideways
-          (<C>../schemas/*.json</C>) or writes upward (<C>../dist/thing.vsix</C>) still resolves. A
-          step that reads something it never declared cannot find it and fails, now, rather than
-          being handed a stale artifact weeks later when that file has changed and nothing noticed.
-          Declared outputs are copied back, so the run leaves the same artifacts an ordinary one
-          would.
-        </P>
-        <P>
-          The cache is switched off for these runs. A cache hit skips a step, and a step that does
-          not run is held to nothing — and the cache is the thing under suspicion to begin with.
-        </P>
-        <Alert severity="info" sx={{ my: 2, maxWidth: "90ch" }}>
-          Opt-in, and it stays that way. There is no hermetic toolchain and no attempt to isolate{" "}
-          <C>$HOME</C>, the network or the clock — the compiler and the package manager are
-          whatever the machine has. It answers one question: <em>are my inputs complete?</em>
-        </Alert>
-        <P>
-          Some steps need state that is not a source file. <C>yarn run check</C> has to sit inside
-          its yarn project; a cargo build wants the shared <C>target/</C>. Listing{" "}
-          <C>node_modules</C> under <C>inputs</C> would put a hundred thousand derived files into
-          the cache key and call them sources, so name them separately — symlinked in, and
-          explicitly outside what the run vouches for:
-        </P>
-        <Pre>{`ciabatta build --authoritative \\
-  --sandbox-also node_modules --sandbox-also .yarn \\
-  --sandbox-also package.json --sandbox-also yarn.lock`}</Pre>
-        <P>
-          A failed step keeps its sandbox, under <C>.ciabatta/.cache/authoritative/</C>, because
-          what the step could see when it failed is the whole question. A step that declares no{" "}
-          <C>inputs</C> is not isolated — an empty directory would fail it for reasons unrelated to
-          its declarations — and is listed at the end as unverified.
-        </P>
-      </>
-    ),
-  },
-  {
-    id: "cache-config",
-    title: "Configuring the cache",
-    body: (
-      <>
-        <P>
-          Cache settings live <strong>with the workflow they describe</strong>, in{" "}
-          <C>.ciabatta/workflows/&lt;name&gt;.yaml</C>, next to the steps. What a build reads is a
-          property of that build: a <C>build</C> and a <C>test</C> in the same package read
-          different files and produce different things, and they need to be able to say so
-          separately.
-        </P>
+        <SubHeading>Refusing to start without one</SubHeading>
         <Pre>{`# packages/api/.ciabatta/workflows/build.yaml
-description: Build the api binary
-
-cache:
-  enabled: true
-  inputs:  ["src/**/*", "Cargo.toml"]   # what the build READS
-  outputs: ["target/release/api"]       # what the build WRITES
-  exclude: [target]                     # never counted as an input
-  env:     [PROFILE]                    # variables the RESULT depends on
-
-steps:
-  - name: compile
-    run: cargo build --release`}</Pre>
-
-        <SubHeading>The five fields</SubHeading>
-        <Box sx={{ overflowX: "auto", mb: 2 }}>
-          <Table size="small" sx={{ minWidth: 620 }}>
-            <TableHead>
-              <TableRow>
-                <TableCell sx={{ width: 110 }}>Field</TableCell>
-                <TableCell>What it means</TableCell>
-              </TableRow>
-            </TableHead>
-            <TableBody>
-              <TableRow hover>
-                <TableCell>
-                  <C>enabled</C>
-                </TableCell>
-                <TableCell>
-                  Whether to cache at all. Off unless something says otherwise — see the layering
-                  rule below, which is why this is three-state rather than a plain boolean.
-                </TableCell>
-              </TableRow>
-              <TableRow hover>
-                <TableCell>
-                  <C>inputs</C>
-                </TableCell>
-                <TableCell>
-                  Globs for the files the build reads, relative to the package directory. Changing
-                  any of them changes the key, and so rebuilds. This is the field that has to be
-                  right.
-                </TableCell>
-              </TableRow>
-              <TableRow hover>
-                <TableCell>
-                  <C>outputs</C>
-                </TableCell>
-                <TableCell>
-                  Globs for what the build writes. These are what gets stored, restored on a hit,
-                  and verified before a hit is granted. Declare none and nothing can be restored,
-                  so every build runs.
-                </TableCell>
-              </TableRow>
-              <TableRow hover>
-                <TableCell>
-                  <C>env</C>
-                </TableCell>
-                <TableCell>
-                  Variables the <em>result</em> depends on. A build that produces something
-                  different under a different <C>PROFILE</C> must list it, or switching profiles
-                  will silently reuse the other one&apos;s artifacts.
-                </TableCell>
-              </TableRow>
-              <TableRow hover>
-                <TableCell>
-                  <C>exclude</C>
-                </TableCell>
-                <TableCell>
-                  Patterns never treated as inputs even when <C>inputs</C> would match them. The
-                  usual case is build output living under a source tree — without it, a build
-                  invalidates itself with its own results and never hits twice. A bare directory
-                  name is enough: <C>exclude: [target]</C> covers everything under it, no{" "}
-                  <C>/**/*</C> required.
-                </TableCell>
-              </TableRow>
-            </TableBody>
-          </Table>
-        </Box>
-
-        <SubHeading>Narrowing it for one step</SubHeading>
+REQUIRED_ENV: [API_URL, DATABASE_URL]`}</Pre>
         <P>
-          A step can declare its own <C>cache:</C>, layered over the workflow&apos;s{" "}
-          <strong>field by field</strong> — so it states only what differs and inherits the rest:
+          Checked before the first step runs, so a missing token fails in a second with the name
+          of what&apos;s missing, rather than fifteen minutes in with a stack trace. Starting the
+          run from this app asks you for the values instead of refusing — that is the same check,
+          answered in a dialog.
+        </P>
+
+        <SubHeading>Variables the result depends on</SubHeading>
+        <P>
+          This is the one people miss. A build whose output differs by <C>PROFILE</C> has to{" "}
+          <em>say</em> so, or switching profiles silently reuses the other one&apos;s artifacts:
         </P>
         <Pre>{`cache:
-  enabled: true
-  inputs:  ["src/**/*"]
-  outputs: ["dist/**/*"]
-
-steps:
-  - name: compile
-    run: make
-
-  - name: docs
-    run: make docs
-    cache:
-      inputs: ["docs/**/*"]   # its own sources…
-      # …and it still inherits outputs, env and exclude from above`}</Pre>
+  env: [PROFILE, TARGET_ARCH]`}</Pre>
         <P>
-          A list that a step <em>does</em> declare replaces the inherited one whole. Half-merged
-          input globs would be very hard to reason about, and reasoning about exactly which files a
-          build is judged on is the entire point.
-        </P>
-        <P>
-          Two asymmetries worth knowing, because both are easy to assume the other way around:{" "}
-          <C>exclude</C> filters <strong>inputs only</strong> — applying it to outputs would erase
-          the very files a hit is supposed to restore. And in a monorepo, a nested sub-workspace is
-          dropped from its parent&apos;s inputs automatically, so a package does not rebuild every
-          time one of its children changes.
-        </P>
-        <Alert severity="info" sx={{ mb: 2, maxWidth: "78ch" }}>
-          <strong>
-            Declaring a dependency never turns caching on or off — only an explicit{" "}
-            <C>enabled:</C> does.
-          </strong>{" "}
-          A step that writes <C>cache: {"{ env: [PROFILE] }"}</C> means &ldquo;I also depend on
-          PROFILE&rdquo;, not &ldquo;stop caching me&rdquo;. The most specific explicit{" "}
-          <C>enabled:</C> wins, so one step still opts out with <C>enabled: false</C>.
-        </Alert>
-        <P>
-          There is a third, outermost level: a <C>cache:</C> in the package&apos;s{" "}
-          <C>ciabatta.yaml</C> applies underneath every workflow in it. It is the right home for
-          something genuinely repo-wide — a shared <C>exclude</C>, say — and the wrong home for
-          inputs and outputs, which differ per build.
+          Ciabatta can tell you which ones you forgot. It records every variable a step actually
+          reads — from its command, its working directory and its conditions — and the{" "}
+          <Link to="/run">Run page</Link> flags any that are read but not declared, because those
+          are precisely the ones a change to which will not invalidate anything.
         </P>
 
-        <SubHeading>Letting ciabatta write it</SubHeading>
-        <P>
-          The proposal comes from the directory&apos;s real contents rather than a template,
-          because an empty <C>inputs</C> is the one failure mode that produces wrong answers rather
-          than slow ones:
-        </P>
-        <Pre>{`ciabatta cache init build          # scaffold it for the \`build\` workflow
-ciabatta cache init build --enable   # …and turn it on straight away`}</Pre>
-        <P>
-          With one workflow in the package the name is optional. With several you name the one you
-          mean — guessing would write one build&apos;s file list into another&apos;s.{" "}
-          <C>cache init</C> refuses to enable a proposal whose inputs or outputs are still{" "}
-          <C>TODO</C>, because caching that can never hit reads as the feature being broken.
-        </P>
+        <SubHeading>Using one in a step</SubHeading>
+        <Pre>{`steps:
+  - name: deploy
+    run: ./deploy.sh --to "$RUN_ENV"
+    # Only in production, and never from a developer's laptop:
+    when: env.RUN_ENV == prod
+    skip_if: env.IS_LOCAL
+    env:
+      DEPLOY_TIMEOUT: 600     # this step only, layered over the run's`}</Pre>
 
-        <SubHeading>What does not go here</SubHeading>
+        <SubHeading>When somebody changes the variables</SubHeading>
         <P>
-          The shared cache <em>server</em> stays in <C>ciabatta.yaml</C>. It is one endpoint per
-          checkout, not a property of any one build, and repeating it in four workflow files would
-          be four places to change when the server moves.
+          Ciabatta snapshots the names its <C>.env</C> files define, and value <em>hashes</em> —
+          never the values. When they move, because someone pulled a branch that adds a required
+          variable, the next run says which ones changed before it starts. The same drift shows as
+          a banner above the launcher on the <Link to="/run">Run page</Link>.
         </P>
-        <Pre>{`# .ciabatta/ciabatta.yaml
-cache:
-  remote:
-    url: http://cache.example.com:8380
-    project: 7f3a-…        # assigned on first contact — commit this`}</Pre>
-
-        <SubHeading>Checking you got it right</SubHeading>
-        <P>
-          Do not take the config&apos;s word for it. The <Link to="/cache">Cache page</Link> shows,
-          per step, the decision it reached and the exact input files it was judged on — so an{" "}
-          <C>inputs</C> glob that quietly matches nothing is visible rather than inferred. The same
-          view hangs off each node of the <Link to="/workspace">workflow graph</Link>. From a
-          terminal, <C>ciabatta dry-run &lt;workflow&gt;</C> prints the same answer and{" "}
-          <C>--diff</C> adds the lines that changed.
-        </P>
+        <Pre>{`ciabatta build -e API_URL=http://localhost:8080   # one run, one value
+eval "$(ciabatta source)"                        # load the CIABATTA_* vars into your shell`}</Pre>
       </>
     ),
   },
+
   {
     id: "features",
-    title: "Build features",
+    group: "Start here",
+    title: "Build features are inputs too",
     body: (
       <>
         <P>
@@ -1808,8 +1419,453 @@ cache:
       </>
     ),
   },
+{
+    id: "workflow-file",
+    group: "Start here",
+    title: "What goes in a workflow file",
+    body: (
+      <>
+        <P>
+          One file, one workflow, named after the file. Here is a realistic one using most of what
+          there is — a build with a slow step that can time out, retry, and fall through to a
+          recovery branch if it still fails:
+        </P>
+        <Pre>{`# packages/api/.ciabatta/workflows/build.yaml
+description: Build and package the api binary
+owner: API Team
+requires: [sh, cargo]            # checked before anything runs
+tags: [backend]                  # every step here inherits these
+
+REQUIRED_ENV: [API_URL]
+
+# Other packages' workflows that must finish first, on top of whatever
+# workspace.depends_on already says.
+needs: [proto:generate]
+
+# Started before the first wave and stopped when the run ends. Nothing waits
+# for these — they're the mock API the integration tests call.
+background: [mock-api:serve]
+
+cache:
+  enabled: true
+  inputs:  ["packages/api/src/**/*", "packages/api/Cargo.toml", "Cargo.lock"]
+  outputs: ["packages/api/target/release/api", "packages/api/dist/**/*"]
+  exclude: ["packages/api/target"]
+  env:     [PROFILE]
+
+steps:
+  - name: compile
+    description: Compile the service binary
+    run: cargo build --release
+    tags: [slow]
+    timeout: 10m
+    retries: 1                   # one more go, for a flaky mirror
+    on_error: fix-build          # and if it still fails, go here
+
+  - name: package
+    description: Tar the binary up for publishing
+    run: tar czf dist/api.tgz -C target/release api
+    needs: [compile]             # names a step in THIS file
+
+  - name: smoke
+    description: Hit the packaged service once
+    script: scripts/smoke.sh     # a bash script, path relative to the step's cwd
+    needs: [package]
+    continue_on_error: true      # report it, don't take the run down
+    when: env.RUN_SMOKE          # only when that's truthy
+
+  # A recovery node: not part of the success graph, entered only when compile
+  # fails. In a terminal you're offered the choice; in this app it's a button.
+  - name: fix-build
+    recover: true
+    retry: compile               # re-run this once a fix succeeds
+    message: "api failed to build. What should I try?"
+    options:
+      - label: Clean the output directory and rebuild
+        run: rm -rf target dist
+        default: true            # what CI picks, where nobody is watching
+      - label: Regenerate the stubs, in case they're stale
+        run: cd ../proto && sh scripts/generate.sh`}</Pre>
+
+        <SubHeading>The fields, in one place</SubHeading>
+        <P>Top of the file — these apply to every step in it:</P>
+        <FieldTable
+          rows={[
+            ["description", "What running this accomplishes. ciabatta list prints it."],
+            ["owner", "Who to ask. Falls back to the sub-workspace's owner."],
+            ["tags", "Labels for search and --filter tag:<name>. Steps inherit them."],
+            ["requires", "Executables that must be on PATH, checked before the run starts."],
+            ["needs", "Workflows in OTHER packages that must finish first."],
+            ["background", "Workflows that must be RUNNING for this one to finish — a mock API, a database. Started first, gate nothing, stopped at the end."],
+            ["REQUIRED_ENV", "Variables that must be set and non-empty, or the run is refused up front."],
+            ["env_file", ".env path(s) relative to the package, sourced before the graph runs."],
+            ["env", "Variables applied to every step here."],
+            ["cache", "What this workflow's builds read, write and key on."],
+            ["steps", "The steps. Order in the file doesn't matter — needs does."],
+          ]}
+        />
+        <P>And inside a step:</P>
+        <FieldTable
+          rows={[
+            ["name", "Unique; the target of needs, on_error and retry."],
+            ["run / script", "An inline shell command, or a bash script path. Exactly one."],
+            ["description", "One line. ciabatta list -v prints it, so nobody has to open the file."],
+            ["needs", "Steps in THIS file that must succeed first. Cross-package dependencies go on the workflow's needs."],
+            ["cwd", "Where the action runs, relative to the project root. Defaults to the package's own directory."],
+            ["env", "Variables for this step alone, layered over the run's."],
+            ["when / skip_if", "Conditions: VAR == value, VAR != value, VAR, !VAR. when must all hold; skip_if skips when any does."],
+            ["timeout", "Wall-clock limit — \"90s\", \"10m\", \"1h30m\". Past it the step is killed and the rest of the graph carries on."],
+            ["retries", "Extra attempts on failure, for transient errors. Default 0."],
+            ["continue_on_error", "Don't fail the run: skip this step's dependents, carry on elsewhere, report at the end."],
+            ["on_error", "Jump to this recovery node instead of aborting."],
+            ["persistent", "A process that never exits — a dev server. Its dependents are released immediately and it OUTLIVES the run, as a watch session."],
+            ["tags / owner", "Labels and ownership for this step alone."],
+            ["kind", "The phase this belongs to. Cosmetic, except push and pull, which select the registry action."],
+            ["cache", "Cache settings for this step alone, layered over the workflow's field by field."],
+          ]}
+        />
+        <Alert severity="info" sx={{ my: 2, maxWidth: "78ch" }}>
+          <strong>
+            <C>persistent</C> or <C>background</C>?
+          </strong> A <C>persistent: true</C> step is one you
+          want left running — <C>ciabatta dev</C> leaves you a server to work against, and you
+          stop it with <C>ciabatta watch --stop &lt;id&gt;</C>. A workflow in the{" "}
+          <C>background:</C> array exists only to get this run through, and is stopped when the
+          run ends.
+        </Alert>
+
+        <SubHeading>Publishing is a step too</SubHeading>
+        <P>
+          A step with <C>kind: push</C> moves an artifact to one of the registries declared in the
+          root config. It sits on the graph and declares what it needs, so it cannot run before
+          the artifact exists:
+        </P>
+        <Pre>{`  - name: publish
+    kind: push
+    registry: nexus
+    artifact: dist/api.tgz
+    publish_path: "team/api/{CIABATTA_COMMIT}/api.tgz"
+    needs: [package]`}</Pre>
+
+        <SubHeading>Checking it as you type</SubHeading>
+        <P>
+          The schemas that back all of this are served by this daemon and understood by VS Code
+          and Zed — see <a href="#editors">Editors</a> for the two-minute setup.{" "}
+          <C>ciabatta config reference</C> prints the same thing in a terminal.
+        </P>
+      </>
+    ),
+  },
+  {
+    id: "running",
+    group: "Start here",
+    title: "Run it, and watch it run",
+    body: (
+      <>
+        <Pre>{`ciabatta build                       # every package that defines build, in dependency order
+ciabatta build test                  # both, as ONE graph — shared dependencies run once
+ciabatta build --graph               # the resolved graph; runs nothing
+ciabatta dry-run build --diff        # what would rebuild, and why
+ciabatta build --gui                 # watch it here
+ciabatta build --tui                 # watch it in the terminal`}</Pre>
+        <P>
+          Any name that isn&apos;t one of ciabatta&apos;s own commands is a workflow name, which is
+          why <C>ciabatta build</C> works. When a workflow&apos;s name collides with a command —{" "}
+          <C>list</C>, <C>watch</C> — spell it <C>ciabatta workflow list</C>.
+        </P>
+
+        <SubHeading>Narrowing it down</SubHeading>
+        <Pre>{`ciabatta test --filter tag:fast              # only steps tagged fast
+ciabatta test --filter '!tag:flaky'         # everything except the flaky ones
+ciabatta build --filter workspace:api       # one package's steps
+ciabatta build --only api                   # start from api; its dependencies still come
+ciabatta build --only api --isolated        # …and don't follow them at all`}</Pre>
+        <P>
+          Selectors are <C>tag:</C>, <C>workspace:</C> (alias <C>member:</C>), <C>kind:</C>,{" "}
+          <C>owner:</C>, <C>step:</C>, or a bare word that searches all of them plus descriptions.
+          A leading <C>!</C> excludes, and exclusions beat matches. Positive terms are OR&apos;d.
+        </P>
+        <Alert severity="warning" sx={{ my: 2, maxWidth: "78ch" }}>
+          A filter <strong>prunes</strong> the graph rather than expanding a selection: the
+          surviving steps run without the dependencies you filtered away, on the assumption those
+          already happened. It is the fast debug loop, not how you build a fresh checkout.
+          Ciabatta reports every dependency edge it cut, so this is never silent.
+        </Alert>
+
+        <SubHeading>Reading the Run page</SubHeading>
+        <P>
+          <Link to="/run">Run</Link> lists everything the daemon has, and opening one gives you
+          the flowchart and the logs side by side. The graph reads left to right:
+        </P>
+        <Bullets
+          items={[
+            <>
+              <strong>Each column is a wave.</strong> An arrow means &quot;comes after&quot;.
+              Edges that skip columns are routed down lanes of their own, so a line crossing a
+              node never means the two are connected.
+            </>,
+            <>
+              <strong>The icon on a node is its status</strong> — not started, running, succeeded,
+              failed, skipped. A dashed border is a recovery branch, which only runs if something
+              fails.
+            </>,
+            <>
+              <strong>Dashed edges are dependencies rather than order</strong>: the{" "}
+              <strong>Environment</strong> and <strong>Files</strong> toggles draw the variables
+              and file sets feeding each step, in columns of their own on the left.
+            </>,
+            <>
+              <strong>Click a node to focus it.</strong> A step lights what it waits for; a
+              variable or file set lights every step that touches it — &quot;who reads
+              DATABASE_URL?&quot; answered by dimming everything that doesn&apos;t.
+            </>,
+            <>
+              <strong>Execution order</strong> numbers each node with its place in the sequence
+              the engine actually takes.
+            </>,
+          ]}
+        />
+
+        <SubHeading>Recreate, re-run, and full screen</SubHeading>
+        <Bullets
+          items={[
+            <>
+              <strong>Recreate</strong> opens the run as the commands that reproduce it: the{" "}
+              <C>cd</C> into each package, the variables each step sets, and the exact command the
+              engine handed to the shell — with the step in flight marked, so it doubles as a
+              position report while the run is going. There is a copy button.
+            </>,
+            <>
+              <strong>Run again</strong> starts the same run once it has finished: same workflows,
+              same filters, same flags. The graph is compiled fresh, so it picks up whatever
+              changed on disk. Variables you typed into the missing-variable prompt are never
+              stored, so it may ask for those again.
+            </>,
+            <>
+              <strong>Full screen</strong> on the log pane gives the output the whole window —
+              Escape comes back. Wrapping and follow-the-tail are next to it.
+            </>,
+          ]}
+        />
+
+        <SubHeading>History, and how long it&apos;s kept</SubHeading>
+        <P>
+          Runs and their logs are written to <C>~/.ciabatta/runs/</C>, so they survive restarting
+          the daemon, rebooting, and upgrading ciabatta. A run interrupted by the daemon going
+          away comes back marked <em>stopped</em> rather than pretending to still be running.
+        </P>
+        <P>
+          <strong>Keep run logs</strong> on the Run page sets how long a finished run is kept —
+          one day, a week (the default), thirty days, or forever. Shortening it deletes what it
+          just made stale, immediately. The bin icon on a run deletes that one; a run still going
+          has to be stopped first.
+        </P>
+      </>
+    ),
+  },
+  {
+    id: "tips",
+    group: "Start here",
+    title: "Common tips",
+    body: (
+      <>
+        <P>The things that bite people, in the order they usually bite:</P>
+        <Bullets
+          items={[
+            <>
+              <strong>Cache paths are relative to the workspace root</strong>, not to the file
+              you&apos;re writing them in. Let <C>ciabatta cache init</C> write them, then check
+              with <C>ciabatta why &lt;step&gt; --all</C>.
+            </>,
+            <>
+              <strong>Exclude your own output.</strong> A build that writes into a directory its
+              own <C>inputs</C> match will invalidate itself every single run.
+            </>,
+            <>
+              <strong>
+                An incomplete <C>inputs</C> list is worse than none.
+              </strong> Prove it with{" "}
+              <C>ciabatta build --authoritative</C> before you rely on the cache in CI.
+            </>,
+            <>
+              <strong>
+                A step&apos;s <C>needs</C> names steps in the same file.
+              </strong> Depending on
+              another package is the workflow&apos;s <C>needs:</C>, or the package&apos;s{" "}
+              <C>workspace.depends_on</C>. This is the most common &quot;why doesn&apos;t it wait
+              for that?&quot;.
+            </>,
+            <>
+              <strong>Declare the variables your output depends on</strong> in <C>cache.env</C>.
+              The Run page flags every variable a step reads without declaring — that list is your
+              to-do.
+            </>,
+            <>
+              <strong>
+                Commit <C>.env.example</C>, never <C>.env</C>.
+              </strong> Point{" "}
+              <C>workspace.env_default</C> at it and a fresh checkout generates the file on the
+              first run instead of failing.
+            </>,
+            <>
+              <strong>
+                Use <C>REQUIRED_ENV</C> freely.
+              </strong> Failing in one second with a name beats
+              failing in fifteen minutes with a stack trace.
+            </>,
+            <>
+              <strong>
+                Put a <C>timeout</C> on anything that touches a network.
+              </strong> A step that
+              hangs holds the whole branch; a step that times out is killed, reported, and the
+              rest of the graph carries on.
+            </>,
+            <>
+              <strong>
+                <C>--filter</C> prunes, it doesn&apos;t select.
+              </strong> Great for the inner
+              loop, wrong for a fresh checkout.
+            </>,
+            <>
+              <strong>
+                Steps run through <C>sh -c</C>, from their own package directory
+              </strong> — so{" "}
+              <C>./scripts/x.sh</C> means the one in that package. Set <C>cwd</C> to move it, and
+              remember each step starts in a new shell: a <C>cd</C> in one doesn&apos;t carry to
+              the next.
+            </>,
+            <>
+              <strong>Name things for the filter you&apos;ll want.</strong> <C>tags: [fast]</C> on
+              the cheap tests today is <C>--filter tag:fast</C> every day after.
+            </>,
+            <>
+              <strong>
+                Write the <C>description</C> and the <C>owner</C>.
+              </strong> They are what{" "}
+              <C>ciabatta list -s payments</C> searches, and the difference between a workflow
+              somebody can delete safely and one nobody dares touch.
+            </>,
+            <>
+              <strong>Stuck? Ask it.</strong> <C>ciabatta why &lt;target&gt;</C> for one step,{" "}
+              <C>ciabatta dry-run &lt;workflow&gt; --diff</C> for the whole run, and{" "}
+              <C>ciabatta config show</C> for what it thinks your configuration says.
+            </>,
+          ]}
+        />
+      </>
+    ),
+  },
+  {
+    id: "commands",
+    group: "Reference",
+    title: "Command reference",
+    body: (
+      <>
+        <P>
+          What ciabatta can run. You are usually reading this page <em>because</em> the next thing
+          you want to do happens in a terminal, so the reference lives here as well as in{" "}
+          <C>--help</C> — which remains the exhaustive list for any one command.
+        </P>
+        <CommandReference />
+      </>
+    ),
+  },
+  {
+    id: "editors",
+    group: "Reference",
+    title: "Editors",
+    body: <EditorSetup />,
+  },
+  {
+    id: "app",
+    group: "Reference",
+    title: "The rest of the app",
+    body: (
+      <>
+        <P>
+          One daemon, one web app. Every view is a real URL you can bookmark or paste to a
+          colleague on the same machine, and the daemon owns the work rather than the terminal
+          that asked for it: a watch session, a run, and a serial capture all outlive the command
+          that started them and the tab that is watching them.
+        </P>
+        <Bullets
+          items={[
+            <>
+              <strong>
+                <Link to="/">Dashboard</Link>
+              </strong>{" "}
+              — what this checkout is, what is running, and what changed recently.
+            </>,
+            <>
+              <strong>
+                <Link to="/workspace">Workspace</Link>
+              </strong>{" "}
+              — every package, its workflows, owners and dependencies, with the graph between
+              them. The visual answer to <C>ciabatta list</C>, and where a workflow nobody has run
+              for a month is flagged as stale.
+            </>,
+            <>
+              <strong>
+                <Link to="/cache">Cache</Link>
+              </strong>{" "}
+              — what is stored, what it saved you, and for a rebuild the diff that caused it. The
+              Remote tab is the shared cache, if you have one.
+            </>,
+            <>
+              <strong>
+                <Link to="/watch">Watch</Link>
+              </strong>{" "}
+              — <C>ciabatta watch &lt;command&gt;</C> streams any long-running command here, so
+              Ctrl-C detaches instead of killing it. Persistent steps end up here too.
+            </>,
+            <>
+              <strong>
+                <Link to="/analyze">Analyze</Link>
+              </strong>{" "}
+              — the codebase&apos;s own dependency graph from <C>ciabatta analyze</C>, optionally
+              with known vulnerabilities from the OSV database.
+            </>,
+            <>
+              <strong>
+                <Link to="/ai">AI</Link>
+              </strong>{" "}
+              — the assistant&apos;s live mind map of this codebase. Set it up with{" "}
+              <C>ciabatta ai setup</C>; talk to it with <C>ciabatta ai</C>.
+            </>,
+            <>
+              <strong>
+                <Link to="/todo">Todo</Link>
+              </strong>{" "}
+              — the task list. Global rather than per-checkout, but each task remembers the
+              project it belongs to.
+            </>,
+            <>
+              <strong>Project switcher</strong> (top bar) — everything except Todo is
+              per-checkout, and this decides which one. Projects register themselves the first
+              time you run a ciabatta command inside them, or with <C>ciabatta register</C>.
+            </>,
+            <>
+              <strong>Health chip</strong> — polls <C>/api/health</C> every ten seconds. Red means
+              the daemon is gone; a version that differs from what you just installed means an old
+              daemon is still holding the port.
+            </>,
+          ]}
+        />
+        <Pre>{`ciabatta daemon serve            # run it in the foreground
+ciabatta daemon serve --port 9000
+ciabatta daemon status | logs    # is it there, and what has it been doing
+ciabatta daemon stop             # ask it to exit`}</Pre>
+        <P>
+          It binds loopback and starts on demand — any ciabatta command probes for one and
+          launches it if nothing answers. See <a href="#security">Tokens and access</a> before
+          changing where it binds: this API can start processes.
+        </P>
+      </>
+    ),
+  },
   {
     id: "remote-cache",
+    group: "Reference",
     title: "Remote cache",
     body: (
       <>
@@ -1963,6 +2019,7 @@ ciabatta remote-cache status         # hit rate, storage, retention`}</Pre>
   },
   {
     id: "remote-cache-ldap",
+    group: "Reference",
     title: "LDAP for the remote cache",
     body: (
       <>
@@ -2257,53 +2314,8 @@ auth:
     ),
   },
   {
-    id: "analyze",
-    title: "Analyze",
-    body: (
-      <>
-        <P>
-          The project&apos;s dependency graph: internal packages, external dependencies, and where
-          artifacts get published. Filter nodes by name to cut a large graph down to the part you
-          care about.
-        </P>
-        <P>
-          Scans run on the daemon and are one-at-a-time per project — the page shows a scan in
-          flight rather than starting a second. Optionally the scan checks dependencies against the{" "}
-          <strong>OSV</strong> vulnerability database, which makes it slower and needs network
-          access.
-        </P>
-      </>
-    ),
-  },
-  {
-    id: "ai",
-    title: "AI",
-    body: (
-      <>
-        <SubHeading>Mind map</SubHeading>
-        <P>
-          The architecture map the assistant builds as it learns the codebase: architectures at the
-          centre, the files belonging to each around them, with a confidence score. Run{" "}
-          <C>ciabatta ai burn-in</C> to have it traverse the codebase up front, or just start asking
-          questions — it learns as it goes.
-        </P>
-        <P>
-          The assistant proposes tags rather than applying them. Pending proposals are listed under
-          the map to accept or reject, individually or in bulk, and selecting a node lets you{" "}
-          <strong>forget</strong> a file or an entire architecture when the map has learned
-          something wrong.
-        </P>
-        <SubHeading>Jobs</SubHeading>
-        <P>
-          Background tasks and their output. Ship one with <C>ciabatta ai ship &quot;…&quot;</C> or
-          from the <Link to="/todo">Todo page</Link>. Questions asked from here are serialized per
-          project, so two callers can&apos;t interleave one conversation.
-        </P>
-      </>
-    ),
-  },
-  {
     id: "api",
+    group: "Reference",
     title: "The HTTP API",
     body: (
       <>
@@ -2333,6 +2345,7 @@ curl -N -H "Authorization: Bearer $TOKEN" \\
   },
   {
     id: "security",
+    group: "Reference",
     title: "Tokens and access",
     body: (
       <>
@@ -2357,62 +2370,7 @@ curl -N -H "Authorization: Bearer $TOKEN" \\
       </>
     ),
   },
-  {
-    id: "development",
-    title: "Working on this app",
-    body: (
-      <>
-        <P>
-          The app is a Vite + React bundle in the <C>tool_frontend</C> workspace, compiled into the
-          Rust binary. A released ciabatta is still a single file with no asset directory beside it.
-        </P>
-        <SubHeading>Dev server</SubHeading>
-        <P>
-          Vite serves on 5173 and proxies <C>/api</C> to a real daemon on 8099 (override with{" "}
-          <C>CIABATTA_DAEMON_PORT</C>), so HMR runs against live data and everything stays
-          same-origin. Vite serves its own <C>index.html</C>, so there is no injected token — pass
-          it once as <C>?token=…</C> and it is remembered.
-        </P>
-        <Pre>{`ciabatta daemon serve --port 8099   # in one terminal
-yarn workspace ciabatta-tool-frontend dev
-
-# then open http://localhost:5173/?token=$(jq -r .token ~/.ciabatta/daemon.json)`}</Pre>
-        <SubHeading>Building</SubHeading>
-        <Pre>{`yarn install
-yarn turbo run build --filter=ciabatta-tool-frontend
-cargo build --release`}</Pre>
-        <P>
-          The Rust build embeds <C>tool_frontend/dist</C>. On a fresh clone that directory
-          doesn&apos;t exist, so <C>build.rs</C> substitutes a placeholder page rather than failing
-          the build — that way <C>cargo build</C> works without node installed. If you are reading a
-          page that says the web app isn&apos;t built, that is what happened: run the yarn build and
-          recompile. CI and the release workflow always build the bundle first.
-        </P>
-        <SubHeading>Adding a page</SubHeading>
-        <Bullets
-          items={[
-            <>
-              Routing is code-based in <C>src/router.tsx</C> — no codegen, because the bundle is
-              compiled into a binary and generated-file drift is not worth the convenience.
-            </>,
-            <>
-              Add the nav entry in <C>src/components/AppShell.tsx</C>, and use{" "}
-              <C>PageHeader</C> / <C>RequireProject</C> from <C>src/components/Page.tsx</C> so the
-              page looks like the others.
-            </>,
-            <>
-              Register more specific routes before parameterised ones — <C>/run/builder</C> has to
-              come before <C>/run/$runId</C>.
-            </>,
-            <>And add a section here, so the docs ship with the feature.</>,
-          ]}
-        />
-      </>
-    ),
-  },
 ];
-
-// ─── The page ───────────────────────────────────────────────────────────────
 
 export function DocsPage() {
   const { data: health } = useHealth();
@@ -2421,7 +2379,7 @@ export function DocsPage() {
     <Box>
       <PageHeader
         title="Docs"
-        description="How this app works, what each tool is for, and the API underneath it — shipped in the same binary, so it always matches what you're running."
+        description="Ciabatta cares about everything that goes into a step — the files it reads, the variables it reads, and what had to happen first. This is how to tell it: set a project up, declare those inputs, and run the thing. Shipped in the same binary as the app, so it always matches what you're running."
       />
 
       <Grid container spacing={4}>
@@ -2434,6 +2392,13 @@ export function DocsPage() {
               sx={{ scrollMarginTop: `${ANCHOR_OFFSET}px` }}
             >
               {index > 0 && <Divider sx={{ my: 4 }} />}
+              {/* The one place the page changes character — from a walkthrough
+                  to the manual behind it — says so out loud. */}
+              {section.group !== SECTIONS[index - 1]?.group && (
+                <Typography variant="overline" color="text.secondary">
+                  {section.group}
+                </Typography>
+              )}
               <Typography variant="h2" sx={{ mb: 1.5 }}>
                 {section.title}
               </Typography>
@@ -2453,22 +2418,29 @@ export function DocsPage() {
             sections are short enough to scroll. */}
         <Grid size={{ lg: 3 }} sx={{ display: { xs: "none", lg: "block" } }}>
           <Box sx={{ position: "sticky", top: ANCHOR_OFFSET }}>
-            <Typography variant="overline" color="text.secondary">
-              On this page
-            </Typography>
             <List dense disablePadding>
-              {SECTIONS.map((section) => (
-                <ListItemButton
-                  key={section.id}
-                  component="a"
-                  href={`#${section.id}`}
-                  sx={{ borderRadius: 1, py: 0.25 }}
-                >
-                  <ListItemText
-                    primary={section.title}
-                    primaryTypographyProps={{ variant: "body2" }}
-                  />
-                </ListItemButton>
+              {SECTIONS.map((section, index) => (
+                <Fragment key={section.id}>
+                  {section.group !== SECTIONS[index - 1]?.group && (
+                    <Typography
+                      variant="overline"
+                      color="text.secondary"
+                      sx={{ display: "block", mt: index === 0 ? 0 : 1.5 }}
+                    >
+                      {section.group}
+                    </Typography>
+                  )}
+                  <ListItemButton
+                    component="a"
+                    href={`#${section.id}`}
+                    sx={{ borderRadius: 1, py: 0.25 }}
+                  >
+                    <ListItemText
+                      primary={section.title}
+                      primaryTypographyProps={{ variant: "body2" }}
+                    />
+                  </ListItemButton>
+                </Fragment>
               ))}
             </List>
           </Box>

@@ -18,6 +18,7 @@ pub mod auth;
 pub mod extensions;
 pub mod projects;
 pub mod routes;
+pub mod run_store;
 pub mod schemas;
 
 use std::io::ErrorKind;

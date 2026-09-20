@@ -23,7 +23,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use futures::FutureExt;
 use futures::stream::Stream;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::sync::{broadcast, mpsc};
 
@@ -38,10 +38,12 @@ pub fn router() -> Router<AppState> {
         .route("/api/run/workflows", get(workflows))
         .route("/api/run/preflight", post(preflight))
         .route("/api/run/runs", get(list).post(create))
-        .route("/api/run/runs/{id}", get(detail))
+        .route("/api/run/runs/{id}", get(detail).delete(remove))
+        .route("/api/run/settings", get(settings).post(set_settings))
         .route("/api/run/runs/{id}/stream", get(stream))
         .route("/api/run/runs/{id}/choose", post(choose))
         .route("/api/run/runs/{id}/stop", post(stop))
+        .route("/api/run/runs/{id}/rerun", post(rerun))
 }
 
 /// Take a lock, surviving a poisoned one.
@@ -70,6 +72,17 @@ pub struct Run {
     pub project: String,
     pub workflows: Vec<String>,
     pub created_at: String,
+    /// The root the run's steps resolve their `cwd` against — the monorepo
+    /// root, which is not necessarily the registered project directory.
+    pub root: std::path::PathBuf,
+    /// The request that started it, kept so it can be started again *exactly*.
+    ///
+    /// Re-running from the stored payload rather than from a summary is what
+    /// makes "run it again" honest: the filters, the `--only` list and the
+    /// variables the caller supplied are all part of what ran, and a re-run
+    /// reconstructed from the fields a summary happens to expose would quietly
+    /// be a different run.
+    pub request: CreatePayload,
     pub state: Arc<Mutex<GuiState>>,
     /// Carries a browser's answer back to a waiting recovery step.
     pub choices: broadcast::Sender<StepChoice>,
@@ -91,6 +104,16 @@ impl Run {
             "workflows": self.workflows,
             "created_at": self.created_at,
             "done": serde_json::to_value(&*state).ok().and_then(|v| v["done"].as_bool()).unwrap_or(false),
+            // How it ended, not merely that it did: a list of runs that all say
+            // "finished" answers the one question nobody is asking.
+            "status": state.outcome(),
+            // What it took to start it, so the run page can print the command
+            // that reproduces it and say what it was narrowed to.
+            "root": self.root.display().to_string(),
+            "dry_run": self.request.dry_run,
+            "filter": self.request.filter,
+            "only": self.request.only,
+            "isolated": self.request.isolated,
         })
     }
 }
@@ -100,14 +123,121 @@ impl Run {
 pub struct Runs {
     inner: Mutex<HashMap<u64, Arc<Run>>>,
     next_id: AtomicU64,
+    /// The history on disk. `None` only if the state directory couldn't be
+    /// opened, in which case runs work exactly as they used to — in memory,
+    /// until the daemon exits.
+    store: Option<crate::daemon::run_store::RunStore>,
 }
 
 impl Runs {
+    /// Open the run list, restoring whatever the last daemon left behind.
     pub fn new() -> Arc<Self> {
+        let store = match crate::daemon::run_store::RunStore::open() {
+            Ok(store) => Some(store),
+            Err(err) => {
+                tracing::warn!("run history is disabled: {err:#}");
+                None
+            }
+        };
+
+        let mut inner = HashMap::new();
+        let mut highest = 0;
+        for stored in store.iter().flat_map(|s| s.load_all()) {
+            highest = highest.max(stored.id);
+            let mut state = stored.state;
+            // A run still marked running is one the last daemon was killed in
+            // the middle of. Its process is gone, so saying it is running would
+            // leave a Stop button on something that stopped when the daemon
+            // did.
+            if !state.done() {
+                state.interrupted("the daemon restarted while this run was in flight");
+            }
+            let (choices, _) = broadcast::channel(64);
+            inner.insert(
+                stored.id,
+                Arc::new(Run {
+                    id: stored.id,
+                    project: stored.project,
+                    workflows: stored.workflows,
+                    created_at: stored.created_at,
+                    root: stored.root,
+                    request: stored.request,
+                    state: Arc::new(Mutex::new(state)),
+                    choices,
+                    cancel: Arc::new(runner::Cancel::default()),
+                    seq: Arc::new(AtomicU64::new(0)),
+                    changed: Arc::new(tokio::sync::Notify::new()),
+                }),
+            );
+        }
+        if !inner.is_empty() {
+            tracing::info!(runs = inner.len(), "restored run history");
+        }
+
         Arc::new(Self {
-            inner: Mutex::new(HashMap::new()),
-            next_id: AtomicU64::new(1),
+            inner: Mutex::new(inner),
+            next_id: AtomicU64::new(highest + 1),
+            store,
         })
+    }
+
+    /// Write a run's current state to the history.
+    fn save(&self, run: &Run) {
+        let Some(store) = &self.store else { return };
+        store.save(&crate::daemon::run_store::StoredRun {
+            version: crate::daemon::run_store::version(),
+            id: run.id,
+            project: run.project.clone(),
+            workflows: run.workflows.clone(),
+            created_at: run.created_at.clone(),
+            root: run.root.clone(),
+            request: run.request.clone(),
+            state: lock(&run.state).clone(),
+        });
+    }
+
+    /// Write the current state of the run with this id, if it is still here.
+    fn save_id(&self, id: u64) {
+        let run = lock(&self.inner).get(&id).cloned();
+        if let Some(run) = run {
+            self.save(&run);
+        }
+    }
+
+    /// The TTL settings, or the defaults when there is no store.
+    fn ttl(&self) -> crate::daemon::run_store::Settings {
+        self.store
+            .as_ref()
+            .map(|s| s.settings())
+            .unwrap_or_default()
+    }
+
+    /// Change the TTL, dropping whatever it has just made stale — from memory
+    /// too, so the list agrees with the disk without a restart.
+    fn set_ttl(&self, next: crate::daemon::run_store::Settings) -> anyhow::Result<usize> {
+        let Some(store) = &self.store else {
+            return Ok(0);
+        };
+        let pruned = store.set_settings(next)?;
+        let kept: std::collections::HashSet<u64> =
+            store.load_all().iter().map(|run| run.id).collect();
+        lock(&self.inner).retain(|id, run| {
+            // A run in flight has no record on disk to keep it, and isn't
+            // history yet either.
+            kept.contains(id) || !lock(&run.state).done()
+        });
+        Ok(pruned)
+    }
+
+    /// Forget a run, in memory and on disk.
+    fn remove(&self, id: u64) -> Option<Arc<Run>> {
+        let run = lock(&self.inner).remove(&id);
+        if run.is_some()
+            && let Some(store) = &self.store
+        {
+            store.delete(id);
+        }
+        run
     }
 
     fn insert(&self, run: Run) -> Arc<Run> {
@@ -138,7 +268,7 @@ pub struct ProjectQuery {
     project: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize, Clone)]
 pub struct CreatePayload {
     project: String,
     /// A monorepo workflow name to run instead of workflows. The daemon compiles
@@ -160,7 +290,12 @@ pub struct CreatePayload {
     /// the CLI's `--filter`.
     #[serde(default)]
     filter: Vec<String>,
-    #[serde(default)]
+    /// Values for variables the run needs and the daemon's environment lacks.
+    ///
+    /// Never written to the run's stored record: these come from the "this run
+    /// needs a few variables" prompt, and what people type into it is usually a
+    /// token. A re-run of a restored run asks again.
+    #[serde(default, skip_serializing)]
     env: HashMap<String, String>,
     #[serde(default)]
     dry_run: bool,
@@ -198,6 +333,24 @@ async fn create(
     State(state): State<AppState>,
     Json(payload): Json<CreatePayload>,
 ) -> RouteResult<Json<Value>> {
+    start(state, payload).await
+}
+
+/// Start a previous run again, from the request that started it.
+///
+/// The graph is compiled fresh rather than replayed: the point of re-running is
+/// usually that something on disk changed, and a replay of the old graph would
+/// be the one thing that can't tell you whether the change helped.
+async fn rerun(State(state): State<AppState>, Path(id): Path<u64>) -> RouteResult<Json<Value>> {
+    let run = state
+        .runs
+        .get(id)
+        .ok_or_else(|| RouteError::not_found("No such run."))?;
+    let payload = run.request.clone();
+    start(state, payload).await
+}
+
+async fn start(state: AppState, payload: CreatePayload) -> RouteResult<Json<Value>> {
     let project_root = state.project_root(&payload.project)?;
     let config = crate::config::load_config(&project_root)?;
 
@@ -271,9 +424,11 @@ async fn create(
 
     let run = state.runs.insert(Run {
         id: state.runs.next_id(),
-        project: payload.project,
+        project: payload.project.clone(),
         workflows: names.clone(),
         created_at: chrono::Local::now().to_rfc3339(),
+        root: root.clone(),
+        request: payload.clone(),
         state: gui_state.clone(),
         choices: choice_tx.clone(),
         cancel: cancel.clone(),
@@ -282,6 +437,11 @@ async fn create(
     });
 
     let id = run.id;
+    // Written down before anything is spawned, so a daemon that dies mid-run
+    // still leaves a record of what it was doing — the next one marks it
+    // stopped rather than losing it.
+    state.runs.save(&run);
+
     tracing::info!(
         run = id,
         root = %root.display(),
@@ -302,6 +462,7 @@ async fn create(
         let changed = run.changed.clone();
         let stopped = stopped.clone();
         let expected = names.clone();
+        let runs = state.runs.clone();
         tokio::spawn(async move {
             let mut reported: Vec<String> = Vec::new();
             while let Some(update) = progress_rx.recv().await {
@@ -349,6 +510,10 @@ async fn create(
                     seq.fetch_add(1, Ordering::Relaxed);
                 }
             }
+
+            // The run is over and its logs are complete: this is the copy
+            // anyone will read tomorrow.
+            runs.save_id(id);
 
             // Wake subscribers one last time so they see the final state and
             // close.
@@ -623,6 +788,51 @@ async fn stop(State(state): State<AppState>, Path(id): Path<u64>) -> RouteResult
         run.cancel.stop();
     }
     Ok(Json(json!({ "ok": true, "already_finished": done })))
+}
+
+/// Delete a finished run and its logs.
+///
+/// Refused while the run is going: the record is the run, and deleting it out
+/// from under the engine would leave a build writing logs into nothing. Stop it
+/// first — the button for that is right there.
+async fn remove(State(state): State<AppState>, Path(id): Path<u64>) -> RouteResult<Json<Value>> {
+    let run = get_run(&state, id)?;
+    if !lock(&run.state).done() {
+        return Err(RouteError::bad_request(
+            "That run is still going. Stop it first, then delete it.",
+        ));
+    }
+    state.runs.remove(id);
+    Ok(Json(json!({ "ok": true })))
+}
+
+/// How long run history is kept.
+async fn settings(State(state): State<AppState>) -> Json<Value> {
+    let settings = state.runs.ttl();
+    Json(json!({
+        "ttl_hours": settings.ttl_hours,
+        "default_ttl_hours": crate::daemon::run_store::DEFAULT_TTL_HOURS,
+    }))
+}
+
+#[derive(Deserialize)]
+pub struct SettingsPayload {
+    /// Hours to keep a run's record for. Zero keeps them until they are
+    /// deleted by hand.
+    ttl_hours: u64,
+}
+
+async fn set_settings(
+    State(state): State<AppState>,
+    Json(payload): Json<SettingsPayload>,
+) -> RouteResult<Json<Value>> {
+    let next = crate::daemon::run_store::Settings {
+        ttl_hours: payload.ttl_hours,
+    };
+    let pruned = state.runs.set_ttl(next)?;
+    Ok(Json(
+        json!({ "ttl_hours": next.ttl_hours, "pruned": pruned }),
+    ))
 }
 
 /// Answer a waiting recovery prompt.

@@ -14,24 +14,33 @@ import {
   Card,
   CardContent,
   Chip,
-  Dialog,
-  DialogActions,
-  DialogContent,
-  DialogContentText,
-  DialogTitle,
   FormControlLabel,
+  IconButton,
   MenuItem,
   Stack,
   Switch,
   TextField,
+  Tooltip,
   Typography,
 } from "@mui/material";
 import AccountTreeIcon from "@mui/icons-material/AccountTree";
+import DeleteOutlineIcon from "@mui/icons-material/DeleteOutline";
 import PlayArrowIcon from "@mui/icons-material/PlayArrow";
 import { styled } from "@mui/material/styles";
 import { Link, useNavigate } from "@tanstack/react-router";
 
-import { missingEnvFrom, useRunTargets, useRuns, useStartRun } from "../api/run";
+import {
+  missingEnvFrom,
+  useDeleteRun,
+  useRunSettings,
+  useRunTargets,
+  useRuns,
+  useSetRunSettings,
+  useStartRun,
+  type RunSummary,
+} from "../api/run";
+import { EnvPrompt } from "../components/EnvPrompt";
+import { StatusIcon, statusLabel } from "../components/StatusIcon";
 import { EnvDriftBanner } from "../components/EnvDriftBanner";
 import { ErrorNote, Loading, PageHeader, RequireProject } from "../components/Page";
 import { monoFontStack } from "../theme";
@@ -219,9 +228,11 @@ function Launcher({ project }: { project: string }) {
       {start.error && !prompting && <ErrorNote error={start.error} />}
       {error && <ErrorNote error={error} />}
 
-      <Typography variant="h3" sx={{ mb: 1.5 }}>
-        Runs
-      </Typography>
+      <Stack direction="row" alignItems="baseline" spacing={2} sx={{ mb: 1.5 }}>
+        <Typography variant="h3">Runs</Typography>
+        <Box sx={{ flexGrow: 1 }} />
+        <RetentionControl />
+      </Stack>
 
       {isLoading ? (
         <Loading label="Loading runs…" />
@@ -232,24 +243,7 @@ function Launcher({ project }: { project: string }) {
       ) : (
         <Stack spacing={1} sx={{ maxWidth: 900 }}>
           {runs.map((run) => (
-            <Card key={run.id}>
-              <CardContent sx={{ py: 1.5, "&:last-child": { pb: 1.5 } }}>
-                <Stack direction="row" alignItems="center" spacing={2}>
-                  <Chip
-                    size="small"
-                    variant="outlined"
-                    color={run.done ? "default" : "success"}
-                    label={run.done ? "finished" : "running"}
-                  />
-                  <Box sx={{ flexGrow: 1, minWidth: 0 }}>
-                    <RunLink to={`/run/${run.id}`}>{run.workflows.join(", ") || "—"}</RunLink>
-                    <Typography variant="caption" color="text.secondary" sx={{ display: "block" }}>
-                      #{run.id} · started {new Date(run.created_at).toLocaleTimeString()}
-                    </Typography>
-                  </Box>
-                </Stack>
-              </CardContent>
-            </Card>
+            <RunRow key={run.id} run={run} />
           ))}
         </Stack>
       )}
@@ -258,67 +252,120 @@ function Launcher({ project }: { project: string }) {
 }
 
 /**
- * Ask for the variables a run can't start without.
+ * One run in the list: how it went, what it ran, and a way to be rid of it.
  *
- * The daemon already looked in its own environment and in whatever `.env` files
- * the workflow sources, so anything listed here genuinely has nowhere else to come
- * from. Values are used for this launch only — nothing is written to disk.
+ * The status is an icon rather than a "finished" chip. Every run in a list of
+ * fifty is finished; which of them *failed* is the only reason anyone is
+ * reading the list, and that was the one thing it didn't say.
  */
-function EnvPrompt({
-  variables,
-  initial,
-  pending,
-  onCancel,
-  onSubmit,
-}: {
-  variables: string[];
-  initial: Record<string, string>;
-  pending: boolean;
-  onCancel: () => void;
-  onSubmit: (values: Record<string, string>) => void;
-}) {
-  const [values, setValues] = useState<Record<string, string>>(() =>
-    Object.fromEntries(variables.map((name) => [name, initial[name] ?? ""])),
-  );
-
-  // Blank is the state the daemon already rejected, so requiring a value here
-  // saves a round trip that could only come back with the same question.
-  const complete = variables.every((name) => values[name]?.trim());
+function RunRow({ run }: { run: RunSummary }) {
+  const remove = useDeleteRun();
+  const [confirming, setConfirming] = useState(false);
 
   return (
-    <Dialog open fullWidth maxWidth="sm" onClose={onCancel}>
-      <DialogTitle>This run needs a few variables</DialogTitle>
-      <DialogContent>
-        <DialogContentText sx={{ mb: 2 }}>
-          {variables.length === 1
-            ? "One variable the run requires isn't set. Give it a value to continue."
-            : `${variables.length} variables the run requires aren't set. Give them values to continue.`}
-        </DialogContentText>
-        <Stack spacing={2}>
-          {variables.map((name) => (
-            <TextField
-              key={name}
-              label={name}
-              value={values[name] ?? ""}
-              onChange={(e) => setValues((prev) => ({ ...prev, [name]: e.target.value }))}
-              size="small"
-              fullWidth
-              autoFocus={name === variables[0]}
-              slotProps={{ input: { sx: { fontFamily: monoFontStack } } }}
-            />
-          ))}
+    <Card>
+      <CardContent sx={{ py: 1.5, "&:last-child": { pb: 1.5 } }}>
+        <Stack direction="row" alignItems="center" spacing={2}>
+          <StatusIcon status={run.status ?? (run.done ? "success" : "running")} size={20} />
+          <Box sx={{ flexGrow: 1, minWidth: 0 }}>
+            <RunLink to={`/run/${run.id}`}>{run.workflows.join(", ") || "—"}</RunLink>
+            <Typography variant="caption" color="text.secondary" sx={{ display: "block" }}>
+              #{run.id} · {statusLabel(run.status ?? (run.done ? "success" : "running"))} · started{" "}
+              {new Date(run.created_at).toLocaleString()}
+              {run.dry_run && " · dry run"}
+              {(run.filter ?? []).length > 0 && ` · ${run.filter.join(" ")}`}
+            </Typography>
+          </Box>
+
+          {confirming ? (
+            <Stack direction="row" spacing={1} alignItems="center">
+              <Typography variant="caption" color="text.secondary">
+                Delete this run and its logs?
+              </Typography>
+              <Button size="small" onClick={() => setConfirming(false)}>
+                Keep
+              </Button>
+              <Button
+                size="small"
+                color="error"
+                variant="contained"
+                disabled={remove.isPending}
+                onClick={() => remove.mutate(run.id)}
+              >
+                Delete
+              </Button>
+            </Stack>
+          ) : (
+            <Tooltip
+              title={
+                run.done
+                  ? "Delete this run and its logs"
+                  : "Still running — stop it first, from the run's own page"
+              }
+            >
+              {/* A disabled button swallows hover, so the tooltip hangs off a
+                  live wrapper instead. */}
+              <Box component="span">
+                <IconButton
+                  size="small"
+                  aria-label={`Delete run ${run.id}`}
+                  disabled={!run.done}
+                  onClick={() => setConfirming(true)}
+                >
+                  <DeleteOutlineIcon fontSize="small" />
+                </IconButton>
+              </Box>
+            </Tooltip>
+          )}
         </Stack>
-      </DialogContent>
-      <DialogActions>
-        <Button onClick={onCancel}>Cancel</Button>
-        <Button
-          variant="contained"
-          disabled={!complete || pending}
-          onClick={() => onSubmit(values)}
-        >
-          Run
-        </Button>
-      </DialogActions>
-    </Dialog>
+        {remove.error && <ErrorNote error={remove.error} />}
+      </CardContent>
+    </Card>
+  );
+}
+
+/** The retention choices offered, in hours. Zero is "keep them". */
+const RETENTIONS: { label: string; hours: number }[] = [
+  { label: "1 day", hours: 24 },
+  { label: "7 days", hours: 24 * 7 },
+  { label: "30 days", hours: 24 * 30 },
+  { label: "Forever", hours: 0 },
+];
+
+/**
+ * How long finished runs are kept.
+ *
+ * Runs survive a daemon restart now, which is the point — but it also means the
+ * history grows on its own, so there has to be somewhere to say how much of it
+ * you want. Shortening it takes effect immediately rather than at the next
+ * restart: a setting that quietly waits is a setting that looks broken.
+ */
+function RetentionControl() {
+  const { data } = useRunSettings();
+  const save = useSetRunSettings();
+  if (!data) return null;
+
+  return (
+    <Tooltip title="Finished runs and their logs are kept on disk, so they survive restarting the daemon. This is how long before one is deleted automatically. Changing it applies right away.">
+      <TextField
+        select
+        size="small"
+        label="Keep run logs"
+        value={data.ttl_hours}
+        onChange={(event) => save.mutate(Number(event.target.value))}
+        sx={{ minWidth: 150 }}
+      >
+        {RETENTIONS.map((option) => (
+          <MenuItem key={option.hours} value={option.hours}>
+            {option.label}
+          </MenuItem>
+        ))}
+        {/* A TTL set from elsewhere (or an older default) still has to have a
+            row, or the select shows blank. */}
+        {!RETENTIONS.some((option) => option.hours === data.ttl_hours) && (
+          <MenuItem value={data.ttl_hours}>{data.ttl_hours} hours</MenuItem>
+        )}
+      </TextField>
+    </Tooltip>
   );
 }

@@ -15,12 +15,12 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use super::{ResolvedRun, RunStep, parse_env_content, prepare_env};
 
 /// Where a variable's effective value comes from.
-#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum Origin {
     /// The environment ciabatta itself was launched with — your shell, the CI
@@ -47,7 +47,7 @@ impl Origin {
 }
 
 /// One environment variable a run depends on.
-#[derive(Serialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct EnvVar {
     pub key: String,
     /// The value the steps will see, masked when the name says it's a secret.
@@ -68,7 +68,7 @@ pub struct EnvVar {
 
 /// Every environment variable a run depends on, resolved as far as the inputs
 /// allow.
-#[derive(Serialize, Clone, Debug, Default)]
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct EnvReport {
     /// The `.env` files sourced, in application order.
     pub files: Vec<String>,

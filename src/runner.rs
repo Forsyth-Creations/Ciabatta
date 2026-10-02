@@ -202,6 +202,9 @@ pub struct RunCtl {
     /// Extra paths to stage into each `authoritative` sandbox, from
     /// `--sandbox-also`. Symlinked, and explicitly outside the guarantee.
     pub sandbox_also: Vec<String>,
+    /// `--force`: ignore what the cache holds and run every step. Results are
+    /// still stored, so the next ordinary run can reuse them.
+    pub force: bool,
     /// The run's stop switch, when something is in a position to ask — the
     /// daemon holds one per run so the Stop button in the web app can reach it.
     /// `None` for a run nobody can interrupt.
@@ -216,6 +219,7 @@ impl Default for RunCtl {
             persist_via_daemon: true,
             authoritative: false,
             sandbox_also: Vec::new(),
+            force: false,
             cancel: None,
         }
     }

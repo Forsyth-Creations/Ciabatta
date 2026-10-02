@@ -747,6 +747,12 @@ pub struct WorkflowArgs {
     #[arg(long)]
     pub dry_run: bool,
 
+    /// Ignore the cache and run every step, even ones whose outputs are up to
+    /// date. What each step produces is still stored, so this is also how to
+    /// refresh entries you don't trust.
+    #[arg(long)]
+    pub force: bool,
+
     /// Hold every step to the files it declared: run it in an isolated copy of
     /// the tree containing only its `cache.inputs`, then take its declared
     /// outputs back.

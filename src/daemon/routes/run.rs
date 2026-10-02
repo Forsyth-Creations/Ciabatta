@@ -119,6 +119,7 @@ impl Run {
             // that reproduces it and say what it was narrowed to.
             "root": self.root.display().to_string(),
             "dry_run": self.request.dry_run,
+            "force": self.request.force,
             "filter": self.request.filter,
             "only": self.request.only,
             "isolated": self.request.isolated,
@@ -307,6 +308,9 @@ pub struct CreatePayload {
     env: HashMap<String, String>,
     #[serde(default)]
     dry_run: bool,
+    /// Ignore the cache and run every step. Results are still stored.
+    #[serde(default)]
+    force: bool,
 }
 
 #[derive(Deserialize)]
@@ -535,6 +539,7 @@ async fn start(state: AppState, payload: CreatePayload) -> RouteResult<Json<Valu
         interactive: true,
         choices: Some(choice_tx),
         cancel: Some(cancel),
+        force: payload.force,
         ..Default::default()
     };
     tokio::spawn(async move {

@@ -56,6 +56,9 @@ pub struct Session {
     /// in it. So the uses it can't see are collected here and reported once,
     /// when the run finishes.
     reused_locally: Vec<String>,
+    /// `--force`: treat every entry as missing, so each step runs. Results are
+    /// still stored, so the run leaves the cache refreshed rather than cold.
+    force: bool,
     /// What happened, for the summary at the end.
     pub stats: Stats,
 }
@@ -159,8 +162,17 @@ impl Session {
             unaccounted: BTreeSet::new(),
             remote: None,
             reused_locally: Vec::new(),
+            force: false,
             stats: Stats::default(),
         })
+    }
+
+    /// Run every step regardless of what the cache holds (`--force`).
+    ///
+    /// Only lookups are skipped. What each step produces is still stored, so a
+    /// forced run is also how to replace entries you no longer trust.
+    pub fn force(&mut self) {
+        self.force = true;
     }
 
     /// Resolve this project's identity on its configured remote cache, if it
@@ -297,9 +309,22 @@ impl Session {
             };
         }
 
+        // Forced: whatever the store says, this step runs. Decided before the
+        // remote is asked, so a shared entry can't hand back what was refused.
+        if self.force
+            && decision.is_reuse()
+            && let Some(key) = decision.key().map(str::to_string)
+        {
+            decision = Decision::Rebuild {
+                key,
+                reason: Reason::Forced,
+            };
+        }
+
         // Nothing local. Before rebuilding, ask the shared cache — somebody
         // else may already have built exactly this.
         if reran.is_empty()
+            && !self.force
             && let (Decision::Rebuild { key, .. }, Some(remote)) = (&decision, &self.remote)
         {
             let key = key.clone();
@@ -817,6 +842,47 @@ mod tests {
         assert!(
             build.contains("generate") && build.contains("cache.outputs"),
             "the reason must name the step and what it's missing: {build}"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `--force` reruns what the cache would have skipped, and stores what it
+    /// produces, so the ordinary run after it reuses everything again.
+    #[tokio::test]
+    async fn a_forced_run_reruns_everything_and_still_stores_it() {
+        let root = scratch("forced");
+        write(&root, "src/a.rs", "fn a() {}");
+        write(&root, "gen/stub.rs", "// generated");
+        write(&root, "dist/out", "built");
+        let (cached, _) = configs();
+        let generates = CacheConfig {
+            outputs: vec!["gen/**/*".into()],
+            exclude: vec!["dist".into(), "gen".into()],
+            ..cached.clone()
+        };
+        let steps = vec![
+            step("generate", &[], generates),
+            step("build", &["generate"], cached),
+        ];
+
+        let mut session = Session::open(&root, &CiabattaConfig::default()).unwrap();
+        run_all(&mut session, &steps).await;
+
+        let mut session = Session::open(&root, &CiabattaConfig::default()).unwrap();
+        session.force();
+        let notes = run_all(&mut session, &steps).await;
+        assert!(
+            notes.iter().all(|n| n.is_some()),
+            "a forced run must run every step on a warm cache: {notes:?}"
+        );
+        assert_eq!(session.stats.rebuilt, 2);
+
+        let mut session = Session::open(&root, &CiabattaConfig::default()).unwrap();
+        let notes = run_all(&mut session, &steps).await;
+        assert!(
+            notes.iter().all(|n| n.is_none()),
+            "what the forced run produced must be reusable: {notes:?}"
         );
 
         let _ = std::fs::remove_dir_all(&root);

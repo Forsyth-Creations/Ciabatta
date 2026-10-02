@@ -179,6 +179,8 @@ export interface RunSummary extends Timed {
   /** The directory its steps resolve their `cwd` against. */
   root: string;
   dry_run: boolean;
+  /** Started with `--force`: the cache was ignored and every step ran. */
+  force?: boolean;
   filter: string[];
   only: string[];
   isolated: boolean;
@@ -267,6 +269,8 @@ export function useRunTargets(project: string) {
 export interface StartRunBody {
   project: string;
   dry_run: boolean;
+  /** Ignore the cache and run every step; results are still stored. */
+  force?: boolean;
   /** Values for variables the run needs but the daemon's environment lacks. */
   env?: Record<string, string>;
   /**

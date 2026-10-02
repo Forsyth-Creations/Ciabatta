@@ -29,8 +29,7 @@ pub async fn run(
     root: &std::path::Path,
     env_vars: &HashMap<String, String>,
     dry_run: bool,
-    authoritative: bool,
-    sandbox_also: &[String],
+    ctl: runner::RunCtl,
 ) -> Result<bool> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -46,8 +45,7 @@ pub async fn run(
         root,
         env_vars,
         dry_run,
-        authoritative,
-        sandbox_also,
+        ctl,
     )
     .await;
 
@@ -67,8 +65,7 @@ async fn tui_loop(
     root: &std::path::Path,
     env_vars: &HashMap<String, String>,
     dry_run: bool,
-    authoritative: bool,
-    sandbox_also: &[String],
+    ctl: runner::RunCtl,
 ) -> Result<bool> {
     let mut app = App::new(name, dry_run);
     let (tx, mut rx) = mpsc::channel::<ProgressUpdate>(256);
@@ -79,7 +76,6 @@ async fn tui_loop(
     let root_clone = root.to_path_buf();
     let vars_clone = env_vars.clone();
     let tx_clone = tx.clone();
-    let sandbox_also = sandbox_also.to_vec();
 
     tokio::spawn(async move {
         let _ = runner::run_workflow_ctl(
@@ -89,11 +85,7 @@ async fn tui_loop(
             &root_clone,
             &vars_clone,
             dry_run,
-            runner::RunCtl {
-                authoritative,
-                sandbox_also,
-                ..Default::default()
-            },
+            ctl,
             tx_clone,
         )
         .await;

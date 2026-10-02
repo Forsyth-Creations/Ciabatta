@@ -439,8 +439,12 @@ async fn cmd_workflow(args: cli::WorkflowArgs, bare_name: bool) -> Result<()> {
         &vars,
         args.dry_run,
         args.use_tui(),
-        args.authoritative,
-        &args.sandbox_also,
+        runner::RunCtl {
+            authoritative: args.authoritative,
+            sandbox_also: args.sandbox_also.clone(),
+            force: args.force,
+            ..Default::default()
+        },
     )
     .await
 }
@@ -527,6 +531,7 @@ async fn cmd_workflow_gui(
             "filter": args.filter,
             "env": vars,
             "dry_run": args.dry_run,
+            "force": args.force,
         }))
         .send()
         .await?;
@@ -1634,8 +1639,7 @@ async fn execute_workflow(
     vars: &HashMap<String, String>,
     dry_run: bool,
     use_tui: bool,
-    authoritative: bool,
-    sandbox_also: &[String],
+    ctl: runner::RunCtl,
 ) -> Result<()> {
     // What the run depends on, environment-wise, before a step touches it. It
     // goes to stderr when the TUI is about to take the screen, so it survives
@@ -1664,29 +1668,9 @@ async fn execute_workflow(
     });
 
     if !use_tui {
-        run_plain(
-            name,
-            resolved,
-            cfg,
-            root,
-            vars,
-            dry_run,
-            authoritative,
-            sandbox_also,
-        )
-        .await
+        run_plain(name, resolved, cfg, root, vars, dry_run, ctl).await
     } else {
-        let success = tui::run(
-            name,
-            resolved,
-            cfg,
-            root,
-            vars,
-            dry_run,
-            authoritative,
-            sandbox_also,
-        )
-        .await?;
+        let success = tui::run(name, resolved, cfg, root, vars, dry_run, ctl).await?;
         if !success {
             bail!("The workflow failed.");
         }
@@ -1702,8 +1686,7 @@ async fn run_plain(
     root: &Path,
     vars: &HashMap<String, String>,
     dry_run: bool,
-    authoritative: bool,
-    sandbox_also: &[String],
+    ctl: runner::RunCtl,
 ) -> Result<()> {
     use runner::ProgressUpdate;
     use tokio::sync::mpsc;
@@ -1715,7 +1698,6 @@ async fn run_plain(
     let cfg_clone = cfg.clone();
     let root_clone = root.to_path_buf();
     let vars_clone = vars.clone();
-    let sandbox_also = sandbox_also.to_vec();
 
     tokio::spawn(async move {
         let _ = runner::run_workflow_ctl(
@@ -1725,11 +1707,7 @@ async fn run_plain(
             &root_clone,
             &vars_clone,
             dry_run,
-            runner::RunCtl {
-                authoritative,
-                sandbox_also,
-                ..Default::default()
-            },
+            ctl,
             tx,
         )
         .await;

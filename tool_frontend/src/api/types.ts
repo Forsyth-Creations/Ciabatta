@@ -96,7 +96,8 @@ export type RebuildReason =
   | { kind: "outputs_missing"; missing: string[] }
   | { kind: "outputs_modified"; modified: string[] }
   | { kind: "no_outputs" }
-  | { kind: "upstream_reran"; steps: string[] };
+  | { kind: "upstream_reran"; steps: string[] }
+  | { kind: "forced" };
 
 export type ChangeKind = "added" | "removed" | "modified";
 

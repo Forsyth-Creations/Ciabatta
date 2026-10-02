@@ -36,8 +36,11 @@ import { type Edge, type Node } from "@xyflow/react";
 
 import { streamUrl } from "../api/client";
 import {
+  clockTime,
+  elapsedOf,
   missingEnvFrom,
   useChoose,
+  useNow,
   useRerunRun,
   useStopRun,
   undeclaredEnv,
@@ -46,6 +49,7 @@ import {
   type StepStatus,
   type StepView,
   type TargetDeps,
+  type Timed,
 } from "../api/run";
 import { humanizeBytes } from "../api/cache";
 import type { EnvVar } from "../api/types";
@@ -58,13 +62,14 @@ import {
   EnvVarChip,
   StepEnvChips,
   envValueText,
+  unsetProblem,
 } from "../components/EnvVars";
 import {
-  ORTHOGONAL_EDGE,
+  ROUTED_EDGE,
   executionOrder,
-  isWaypoint,
   layeredLayout,
-  routeSegments,
+  routeKey,
+  type LayoutEdge,
 } from "../components/layout";
 import { StatusIcon, statusColour, statusLabel } from "../components/StatusIcon";
 import { ErrorNote, Loading } from "../components/Page";
@@ -113,6 +118,37 @@ const DIMMED = 0.18;
  */
 const NODE_WIDTH = 210;
 
+/**
+ * The lines a step node is built from, each a fixed height.
+ *
+ * Fixed because the layout has to know each node's height before react-flow
+ * has drawn it: handles hang off the middle of a node, and a wire routed to
+ * where the layout *thought* the middle was arrives a few pixels off it and
+ * kinks. And fixed per node rather than measured, so a node doesn't grow when
+ * its step finishes and gains a time — which shoved the rest of its column
+ * down mid-run.
+ */
+const LINE = { name: 16, small: 14 } as const;
+/** A step node's border and padding, top and bottom together. */
+const STEP_CHROME = 2 * 2 + 6 * 2;
+/** A variable or file-set node: two lines, and its chrome. */
+const DEPENDENCY_HEIGHT = 46;
+
+/** How tall a node is drawn — what `layeredLayout` centres its wires on. */
+function nodeHeight(id: string, byName: Map<string, StepView>): number {
+  const step = byName.get(id);
+  if (!step) return DEPENDENCY_HEIGHT;
+  return (
+    STEP_CHROME +
+    LINE.name +
+    // The timing line is always there, so a step's node is the same height
+    // before it runs as after.
+    LINE.small +
+    (step.workspace ? LINE.small : 0) +
+    (step.background ? LINE.small : 0)
+  );
+}
+
 /** Height of the graph and log panes, which are the same so they line up when
  *  they sit side by side. */
 const PANE_HEIGHT = 460;
@@ -136,6 +172,29 @@ interface Focus {
 /** No focus: every node is lit, which is the graph's resting state. */
 const NO_FOCUS: Focus = { id: null, lit: () => true };
 
+/**
+ * "started 14:03:20 · finished 14:03:22" — for a tooltip on something whose
+ * label already says how long it took. Null when it never started.
+ */
+function timeline(timed: Timed): string | null {
+  if (!timed.started_at) return null;
+  const started = `started ${clockTime(timed.started_at)}`;
+  return timed.finished_at ? `${started} · finished ${clockTime(timed.finished_at)}` : started;
+}
+
+/** The header's " · started 14:03:20 · took 2m05s", ticking while it runs. */
+function RunClock({ timing, live }: { timing: Timed; live: boolean }) {
+  const now = useNow(live);
+  const took = elapsedOf(timing, now);
+  return (
+    <>
+      {` · started ${clockTime(timing.started_at!)}`}
+      {took && (timing.finished_at ? ` · took ${took}` : ` · running ${took}`)}
+      {timing.finished_at && ` · finished ${clockTime(timing.finished_at)}`}
+    </>
+  );
+}
+
 export function RunDetailPage() {
   const { runId } = useParams({ from: "/run/$runId" });
   const id = Number(runId);
@@ -153,6 +212,7 @@ export function RunDetailPage() {
 
   const workflow = state.workflows[workflowIndex];
   const status = state.run.status ?? (state.done ? "success" : "running");
+  const timing = state.run.started_at ? state.run : null;
 
   const again = (env?: Record<string, string>) =>
     rerun.mutate(
@@ -186,6 +246,7 @@ export function RunDetailPage() {
           <Typography variant="caption" color="text.secondary">
             {state.run.workflows.join(", ")}
             {state.dry_run && " · dry run"}
+            {timing && <RunClock timing={timing} live={!state.done} />}
             {(state.run.filter ?? []).length > 0 &&
               ` · filtered: ${state.run.filter.join(" ")}`}
           </Typography>
@@ -296,90 +357,44 @@ function WorkflowPanel({
     [workflow, theme, showOrder, showEnv, showFiles, focused],
   );
   const step = workflow.steps.find((s) => s.name === selectedStep);
+  // Ticks only while the workflow is running, so a running phase or step
+  // shows its time so far; a finished one's times are fixed.
+  const now = useNow(workflow.status === "running");
+
+  // Clicking a node focuses the graph on it. For a step that also opens its
+  // logs and details; for a dependency — a variable, or a set of files read or
+  // written — it lights the steps that touch it. Clicking the same node again
+  // puts the whole graph back.
+  const clickNode = (id: string) => {
+    const again = focused === id;
+    setFocused(again ? null : id);
+    onSelectStep(again || isDependencyNode(id) ? null : id);
+  };
+  const clearSelection = () => {
+    setFocused(null);
+    onSelectStep(null);
+  };
 
   return (
     <>
-      <Stack
-        direction="row"
-        spacing={1}
-        sx={{ mb: 1.5 }}
-        flexWrap="wrap"
-        useFlexGap
-        alignItems="center"
-      >
-        {workflow.stages.map((stage) => (
-          <Chip
-            key={stage.name}
-            size="small"
-            variant="outlined"
-            color={stageColor(stage.status)}
-            label={`${stage.name}: ${stage.status}`}
-          />
-        ))}
-        <Box sx={{ flexGrow: 1 }} />
-        <Tooltip title="Draw each environment variable as what it is — a dependency, feeding into every step that reads it. Values come from the run's resolved environment.">
-          <FormControlLabel
-            control={
-              <Switch
+      {/* The run's phases. Each chip's text changes as the run goes, but the
+          strip itself is always there and always one row. */}
+      <Stack direction="row" spacing={1} sx={{ mb: 1.5 }} flexWrap="wrap" useFlexGap>
+        {workflow.stages.map((stage) => {
+          // A phase that fell through to its default did nothing, and "0.0s"
+          // next to it would only suggest it did something quickly.
+          const took = stage.status === "skipped" ? null : elapsedOf(stage, now);
+          return (
+            <Tooltip key={stage.name} title={timeline(stage) ?? "Not reached"}>
+              <Chip
                 size="small"
-                checked={showEnv}
-                onChange={(_, checked) => {
-                  setShowEnv(checked);
-                  // Focusing a node and then hiding it would dim the graph with
-                  // nothing left lit to explain why.
-                  if (!checked && focused !== null && envKeyOf(focused) !== null) {
-                    setFocused(null);
-                  }
-                }}
+                variant="outlined"
+                color={stageColor(stage.status)}
+                label={`${stage.name}: ${stage.status}${took ? ` · ${took}` : ""}`}
               />
-            }
-            label={
-              <Typography variant="caption" color="text.secondary">
-                Environment
-              </Typography>
-            }
-            sx={{ mr: 0 }}
-          />
-        </Tooltip>
-        <Tooltip title="Draw the files each target reads and writes as nodes of their own: inputs feeding in from the left, outputs produced on the right. These are the file sets the cache keys on, so this is the graph the caching decision is actually made from.">
-          <FormControlLabel
-            control={
-              <Switch
-                size="small"
-                checked={showFiles}
-                onChange={(_, checked) => {
-                  setShowFiles(checked);
-                  if (!checked && focused !== null && isFileNode(focused)) {
-                    setFocused(null);
-                  }
-                }}
-              />
-            }
-            label={
-              <Typography variant="caption" color="text.secondary">
-                Files
-              </Typography>
-            }
-            sx={{ mr: 0 }}
-          />
-        </Tooltip>
-        <Tooltip title="Number each node with its place in the run's sequence. Recovery steps aren't numbered — they only run if something fails.">
-          <FormControlLabel
-            control={
-              <Switch
-                size="small"
-                checked={showOrder}
-                onChange={(_, checked) => setShowOrder(checked)}
-              />
-            }
-            label={
-              <Typography variant="caption" color="text.secondary">
-                Execution order
-              </Typography>
-            }
-            sx={{ mr: 0 }}
-          />
-        </Tooltip>
+            </Tooltip>
+          );
+        })}
       </Stack>
 
       {workflow.error && (
@@ -423,16 +438,49 @@ function WorkflowPanel({
         breakpoint is `lg` because the graph needs real width before splitting
         it helps: narrower than that, a half-width flowchart is worse than a
         full-width one above the logs.
+
+        Both panes are fixed: a header of fixed height, then a body of fixed
+        height. Selecting a step changes what they show, never where they are —
+        what a click adds goes in the inspector underneath, so the log you were
+        reading doesn't jump down the page to make room for it.
       */}
       <Box
         sx={{
           display: "grid",
-          gap: 2,
-          alignItems: "stretch",
+          columnGap: 2,
+          rowGap: 1,
           gridTemplateColumns: { xs: "1fr", lg: "minmax(0, 1fr) minmax(0, 1fr)" },
         }}
       >
-        <Box sx={{ minWidth: 0, display: "flex", flexDirection: "column", gap: 1 }}>
+        <Box sx={{ minWidth: 0 }}>
+          <PaneHeader title="Graph">
+            <GraphToggle
+              label="Environment"
+              hint="Draw each environment variable as what it is — a dependency, feeding into every step that reads it. Values come from the run's resolved environment."
+              checked={showEnv}
+              onChange={(checked) => {
+                setShowEnv(checked);
+                // Focusing a node and then hiding it would dim the graph with
+                // nothing left lit to explain why.
+                if (!checked && focused !== null && envKeyOf(focused) !== null) setFocused(null);
+              }}
+            />
+            <GraphToggle
+              label="Files"
+              hint="Draw the files each target reads and writes as nodes of their own: inputs feeding in from the left, outputs produced on the right. These are the file sets the cache keys on, so this is the graph the caching decision is actually made from."
+              checked={showFiles}
+              onChange={(checked) => {
+                setShowFiles(checked);
+                if (!checked && focused !== null && isFileNode(focused)) setFocused(null);
+              }}
+            />
+            <GraphToggle
+              label="Order"
+              hint="Number each node with its place in the run's sequence. Recovery steps aren't numbered — they only run if something fails."
+              checked={showOrder}
+              onChange={setShowOrder}
+            />
+          </PaneHeader>
           <GraphCanvas
             nodes={nodes}
             edges={edges}
@@ -440,52 +488,20 @@ function WorkflowPanel({
             // Turning the environment column on and off changes the graph's
             // extent, so the view has to be re-fitted around it.
             fitKey={`${showEnv ? "env" : ""}${showFiles ? "+files" : ""}` || "steps-only"}
-            // Clicking a node focuses the graph on what it depends on. For a
-            // step that means the chain it waits for; for a dependency node — a
-            // variable, or a set of files read or written — it means the steps
-            // that touch it. Clicking the same node again, or the canvas, puts
-            // the whole graph back.
-            onNodeClick={(_, node) => {
-              // A waypoint is drawn inert, but nothing downstream should depend
-              // on that: it names no step, and focusing it would dim the graph
-              // with nothing lit to explain why.
-              if (isWaypoint(node.id)) return;
-              setFocused((current) => (current === node.id ? null : node.id));
-              if (!isDependencyNode(node.id)) onSelectStep(node.id);
-              else onSelectStep(null);
-            }}
+            onNodeClick={(_, node) => clickNode(node.id)}
             onPaneClick={() => setFocused(null)}
             nodeColor={(node) => statusColor(node.data?.status as StepStatus, theme)}
           />
-
-          {focused !== null && (
-            <FocusNote
-              workflow={workflow}
-              focused={focused}
-              onClear={() => setFocused(null)}
-            />
-          )}
         </Box>
 
-        <Box sx={{ minWidth: 0, display: "flex", flexDirection: "column", minHeight: 0 }}>
-          <Typography variant="h3" sx={{ mb: 1 }}>
-            {step ? `${step.name} logs` : "Workflow logs"}
-          </Typography>
-          {step && (
-            <StepDetails
-              step={step}
-              env={workflow.env.vars.filter((variable) => variable.steps.includes(step.name))}
-            />
-          )}
-          {step?.action && (
-            <Typography
-              variant="caption"
-              color="text.secondary"
-              sx={{ display: "block", mb: 1, fontFamily: monoFontStack }}
-            >
-              {step.action}
-            </Typography>
-          )}
+        <Box sx={{ minWidth: 0 }}>
+          <PaneHeader title={step ? `${step.name} logs` : "Workflow logs"}>
+            {step && (
+              <Button size="small" onClick={clearSelection}>
+                All logs
+              </Button>
+            )}
+          </PaneHeader>
           <LogView
             // Keyed by what is being shown, so switching steps starts the new
             // log at its end rather than inheriting the old one's scroll.
@@ -495,22 +511,186 @@ function WorkflowPanel({
             height={PANE_HEIGHT}
             title={step ? `${step.name} — run #${runId}` : `${workflow.name} — run #${runId}`}
           />
-          {step && (
-            <Button
-              size="small"
-              sx={{ mt: 1, alignSelf: "flex-start" }}
-              onClick={() => onSelectStep(null)}
-            >
-              Show all workflow logs
-            </Button>
-          )}
         </Box>
       </Box>
+
+      <Inspector
+        workflow={workflow}
+        step={step ?? null}
+        focused={focused}
+        now={now}
+        onClear={clearSelection}
+      />
 
       <Box sx={{ mt: 2 }}>
         <EnvPanel report={workflow.env} title="Environment this run started with" />
       </Box>
     </>
+  );
+}
+
+/** How tall a pane's header is — the same for both, so the panes line up. */
+const PANE_HEADER = 36;
+
+/**
+ * A pane's title row: one line, a fixed height, controls on the right.
+ *
+ * Fixed so the two panes stay level whatever their headers say. The log pane's
+ * title changes with every step selected; if its header grew or shrank, the
+ * log underneath would move with it.
+ */
+function PaneHeader({ title, children }: { title: string; children?: React.ReactNode }) {
+  return (
+    <Stack
+      direction="row"
+      alignItems="center"
+      spacing={1.5}
+      sx={{ height: PANE_HEADER, mb: 0.5, minWidth: 0 }}
+    >
+      <Typography variant="h3" noWrap sx={{ flexGrow: 1, minWidth: 0 }} title={title}>
+        {title}
+      </Typography>
+      {children}
+    </Stack>
+  );
+}
+
+/** A switch in the graph's header. */
+function GraphToggle({
+  label,
+  hint,
+  checked,
+  onChange,
+}: {
+  label: string;
+  hint: string;
+  checked: boolean;
+  onChange: (checked: boolean) => void;
+}) {
+  return (
+    <Tooltip title={hint}>
+      <FormControlLabel
+        control={
+          <Switch size="small" checked={checked} onChange={(_, value) => onChange(value)} />
+        }
+        label={
+          <Typography variant="caption" color="text.secondary" noWrap>
+            {label}
+          </Typography>
+        }
+        sx={{ mr: 0, flexShrink: 0 }}
+      />
+    </Tooltip>
+  );
+}
+
+/**
+ * Everything about what was clicked, under the graph and the logs.
+ *
+ * This used to be spread across three places: a step's details pushed in
+ * above its logs, a "what it waits for" note pushed in under the graph, and a
+ * "show all logs" button pushed in under the logs. Each click moved the panes
+ * a different distance, so the line you were reading jumped. Now the panes
+ * stay put and this one place fills in — always present, so even the first
+ * click only changes what it says.
+ */
+function Inspector({
+  workflow,
+  step,
+  focused,
+  now,
+  onClear,
+}: {
+  workflow: WorkflowView;
+  step: StepView | null;
+  focused: string | null;
+  now: number;
+  onClear: () => void;
+}) {
+  const body = step ? (
+    <StepInspector workflow={workflow} step={step} now={now} onClear={onClear} />
+  ) : focused !== null && isDependencyNode(focused) ? (
+    <FocusNote workflow={workflow} focused={focused} onClear={onClear} />
+  ) : null;
+
+  return (
+    <Box
+      sx={{
+        mt: 1.5,
+        px: 1.5,
+        py: 1,
+        minHeight: 48,
+        border: 1,
+        borderColor: "divider",
+        borderRadius: 1,
+        display: "flex",
+        flexDirection: "column",
+        justifyContent: "center",
+      }}
+    >
+      {body ?? (
+        <Typography variant="caption" color="text.secondary">
+          Click a step to see its logs, what it waits for and why it ran. Click a
+          variable or a file set to light up the steps that read it.
+        </Typography>
+      )}
+    </Box>
+  );
+}
+
+/** A selected step: what it is, what it waits for, and its command. */
+function StepInspector({
+  workflow,
+  step,
+  now,
+  onClear,
+}: {
+  workflow: WorkflowView;
+  step: StepView;
+  now: number;
+  onClear: () => void;
+}) {
+  const upstream = [...dependencyClosure(workflow, step.name)].filter(
+    (id) => id !== step.name && !isDependencyNode(id),
+  );
+  return (
+    <Stack spacing={0.75}>
+      <Stack direction="row" spacing={1} alignItems="center" sx={{ minWidth: 0 }}>
+        <StatusIcon status={step.status} />
+        <Typography
+          variant="body2"
+          sx={{ fontFamily: monoFontStack, fontWeight: 600, minWidth: 0 }}
+          noWrap
+          title={step.name}
+        >
+          {step.name}
+        </Typography>
+        <Typography variant="caption" color="text.secondary" noWrap sx={{ flexGrow: 1, minWidth: 0 }}>
+          {upstream.length === 0
+            ? "depends on nothing — it can start immediately"
+            : `waits for ${upstream.length} step${upstream.length === 1 ? "" : "s"}: ${upstream.join(", ")}`}
+        </Typography>
+        <Button size="small" onClick={onClear} sx={{ flexShrink: 0 }}>
+          Clear
+        </Button>
+      </Stack>
+      {/* The commands are listed under "runs" when the step is a target; only
+          a step without one (a recovery branch) needs its action said here. */}
+      {step.action && (step.deps?.commands.length ?? 0) === 0 && (
+        <Typography
+          variant="caption"
+          color="text.secondary"
+          sx={{ display: "block", fontFamily: monoFontStack, wordBreak: "break-all" }}
+        >
+          $ {step.action}
+        </Typography>
+      )}
+      <StepDetails
+        step={step}
+        now={now}
+        env={workflow.env.vars.filter((variable) => variable.steps.includes(step.name))}
+      />
+    </Stack>
   );
 }
 
@@ -537,7 +717,7 @@ function NodeLabel({ step, order }: { step: StepView; order: number | null }) {
       : step.name;
 
   return (
-    <Stack direction="row" spacing={0.75} alignItems="center" sx={{ minWidth: 0 }}>
+    <Stack direction="row" spacing={0.75} alignItems="center" sx={{ minWidth: 0, width: "100%" }}>
       {order !== null && (
         <Box
           sx={{
@@ -562,19 +742,40 @@ function NodeLabel({ step, order }: { step: StepView; order: number | null }) {
       )}
       {/* No tooltip: the node has its own hover, and two would fight. */}
       <StatusIcon status={step.status} title={null} />
-      <Box sx={{ minWidth: 0, textAlign: "left", overflowWrap: "anywhere" }}>
+      {/* Every line is one line high, cut off rather than wrapped: the node's
+          height is fixed (see `nodeHeight`), and the full name is in the
+          title and the step panel. */}
+      <Box sx={{ minWidth: 0, flexGrow: 1, textAlign: "left" }} title={step.name}>
         {step.workspace && (
-          <Box sx={{ fontSize: 10, opacity: 0.75, fontFamily: monoFontStack }}>
+          <Box sx={{ ...oneLine(LINE.small), fontSize: 10, opacity: 0.75, fontFamily: monoFontStack }}>
             {step.workspace}
           </Box>
         )}
-        <Box sx={{ fontWeight: 600 }}>{short}</Box>
+        <Box sx={{ ...oneLine(LINE.name), fontWeight: 600 }}>{short}</Box>
+        <Box sx={{ ...oneLine(LINE.small), fontSize: 10, opacity: 0.7, fontFamily: monoFontStack }}>
+          {step.started_at && step.finished_at
+            ? `${elapsedOf(step, 0)} · ${clockTime(step.finished_at)}`
+            : statusLabel(step.status).toLowerCase()}
+        </Box>
         {step.background && (
-          <Box sx={{ fontSize: 10, opacity: 0.7 }}>background · nothing waits for it</Box>
+          <Box sx={{ ...oneLine(LINE.small), fontSize: 10, opacity: 0.7 }}>
+            background · nothing waits for it
+          </Box>
         )}
       </Box>
     </Stack>
   );
+}
+
+/** One line of text at exactly `height`, ending in an ellipsis if it's long. */
+function oneLine(height: number) {
+  return {
+    height,
+    lineHeight: `${height}px`,
+    overflow: "hidden",
+    whiteSpace: "nowrap",
+    textOverflow: "ellipsis",
+  } as const;
 }
 
 /**
@@ -638,8 +839,11 @@ function StopRunButton({ id }: { id: number }) {
 
 /** What a selected step is, beyond its command: where it's from, how it
  *  behaves, and the variables it depends on. */
-function StepDetails({ step, env }: { step: StepView; env: EnvVar[] }) {
+function StepDetails({ step, env, now }: { step: StepView; env: EnvVar[]; now: number }) {
   const badges: string[] = [];
+  const took = elapsedOf(step, now);
+  if (took) badges.push(step.finished_at ? `took ${took}` : `running ${took}`);
+  if (step.finished_at) badges.push(`finished ${clockTime(step.finished_at)}`);
   if (step.push) badges.push("push");
   else if (step.kind) badges.push(step.kind);
   if (step.background) badges.push("⚡ background");
@@ -665,7 +869,7 @@ function StepDetails({ step, env }: { step: StepView; env: EnvVar[] }) {
   if (bare) return null;
 
   return (
-    <Stack spacing={1} sx={{ mb: 1 }}>
+    <Stack spacing={1}>
       <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap alignItems="center">
         {step.workspace && <Chip size="small" color="secondary" label={step.workspace} />}
         {badges.map((badge) => (
@@ -791,50 +995,11 @@ function FocusNote({
 }) {
   const groups = useMemo(() => inputGroups(workflow), [workflow]);
 
-  // A focused *step* says what it waits for, which is the answer the dimming
-  // is drawing. Held separately from the dependency-node cases below because
-  // it is a different sentence about a different kind of thing.
-  const step = isDependencyNode(focused)
-    ? null
-    : (workflow.steps.find((s) => s.name === focused) ?? null);
-
   const key = envKeyOf(focused);
   const variable = key === null ? null : (workflow.env.vars.find((v) => v.key === key) ?? null);
   const writer = outputStepOf(focused);
   const producer = writer === null ? null : (workflow.steps.find((s) => s.name === writer) ?? null);
   const group = groups.get(focused) ?? null;
-
-  if (step) {
-    const upstream = [...dependencyClosure(workflow, focused)].filter(
-      (id) => id !== focused && !isDependencyNode(id),
-    );
-    return (
-      <Stack
-        direction="row"
-        spacing={1}
-        sx={{ mt: 1 }}
-        alignItems="center"
-        flexWrap="wrap"
-        useFlexGap
-      >
-        <Chip
-          size="small"
-          variant="outlined"
-          color="secondary"
-          label={step.name}
-          sx={{ fontFamily: monoFontStack, maxWidth: 420 }}
-        />
-        <Typography variant="caption" color="text.secondary">
-          {upstream.length === 0
-            ? "depends on nothing — it can start immediately"
-            : `waits for ${upstream.length} step${upstream.length === 1 ? "" : "s"}: ${upstream.join(", ")}`}
-        </Typography>
-        <Button size="small" onClick={onClear}>
-          Clear
-        </Button>
-      </Stack>
-    );
-  }
 
   // The run's shape can change under a focus — a workflow recompiles, a step
   // is filtered out. A node that isn't there any more has nothing to say.
@@ -847,9 +1012,9 @@ function FocusNote({
       : group!.deps.inputs.join(", ");
 
   const detail = variable
-    ? variable.steps.length > 0
-      ? `read by ${variable.steps.join(", ")}`
-      : "no step reads this"
+    ? `${variable.purpose ? `${variable.purpose} — ` : ""}${
+        variable.steps.length > 0 ? `read by ${variable.steps.join(", ")}` : "no step reads this"
+      }`
     : producer
       ? `${producer.deps.output_files} file(s), ${humanizeBytes(
           producer.deps.output_bytes,
@@ -859,14 +1024,7 @@ function FocusNote({
         )} — read by ${group!.steps.join(", ")}`;
 
   return (
-    <Stack
-      direction="row"
-      spacing={1}
-      sx={{ mt: 1 }}
-      alignItems="center"
-      flexWrap="wrap"
-      useFlexGap
-    >
+    <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
       {variable ? (
         <EnvVarChip variable={variable} />
       ) : (
@@ -1101,9 +1259,31 @@ function buildFlow(
     ...producers.map((step) => outputNodeId(step.name)),
   ];
 
+  // What the layout routes. Each family is its own group, so wires only share
+  // a trunk with wires drawn the same way; solid `needs` wires may also share
+  // the last run into a step they converge on (see `LayoutEdge.merge`).
+  //
+  // `error` edges rank: a recovery step goes a column after the step that
+  // falls into it, which is where it happens. `retry` edges don't — they point
+  // back at the step they re-run, and ranking them would make a cycle.
+  const layoutEdges: LayoutEdge[] = [
+    ...orderEdges.map((e) => ({ ...e, group: "needs", merge: true })),
+    ...workflow.edges
+      .filter((e) => e.kind !== "needs")
+      .map((e) => ({
+        source: e.from,
+        target: e.to,
+        group: e.kind,
+        rank: e.kind !== "retry",
+      })),
+    ...envEdges.map((e) => ({ ...e, group: "env" })),
+    ...inputEdges.map((e) => ({ ...e, group: "in" })),
+    ...outputEdges.map((e) => ({ ...e, group: "out" })),
+  ];
+
   const { nodes: positioned, routes } = layeredLayout(
     ids,
-    [...orderEdges, ...envEdges, ...inputEdges, ...outputEdges],
+    layoutEdges,
     (id) => nodeData(id, byName, groups, sequence, showOrder, workflow),
     {
       // A column has to be wider than the widest node it can hold, or a long
@@ -1111,8 +1291,9 @@ function buildFlow(
       // there run over it. `NODE_WIDTH` caps the node; this leaves a gap the
       // wires can turn in.
       columnWidth: NODE_WIDTH + 130,
-      rowHeight: 84,
-      nodeHeight: 52,
+      nodeWidth: NODE_WIDTH,
+      rowGap: 26,
+      heightOf: (id) => nodeHeight(id, byName),
       // Variables and input files are inputs to the run, not steps of it, so
       // they take columns of their own to the left — variables outside the
       // files, so the two kinds read as two columns rather than one pile.
@@ -1129,15 +1310,16 @@ function buildFlow(
     },
   );
 
-  const nodes: Node[] = positioned.map((node) => {
-    // A waypoint is a bend in a wire: it arrives already styled to be
-    // invisible, and painting a border on it would draw a box in mid-air.
-    if (isWaypoint(node.id)) return node;
-    return { ...node, style: nodeStyle(node.id, byName, theme, focus) };
+  const nodes: Node[] = positioned.map((node) => ({
+    ...node,
+    style: nodeStyle(node.id, byName, theme, focus),
+  }));
+  const route = (source: string, target: string) => ({
+    route: routes.get(routeKey(source, target)),
   });
 
   // ── the edges ────────────────────────────────────────────────────────────
-  const edges: Edge[] = workflow.edges.flatMap((edge, index) => {
+  const edges: Edge[] = workflow.edges.map((edge, index) => {
     // An edge survives the dimming only if both ends did — so a focused node's
     // chain keeps the order between its steps, and everything else recedes.
     const on = focus.lit(edge.from) && focus.lit(edge.to);
@@ -1152,17 +1334,13 @@ function buildFlow(
             // held to a contrast you can actually trace with your eye.
             theme.palette.text.secondary;
 
-    // A `needs` edge that skips columns is drawn as the chain of segments the
-    // layout reserved a lane for, rather than as one stroke over whatever
-    // happens to be in between. Everything else is a single segment.
-    return routeSegments(routes, edge.from, edge.to).map((segment, part) => ({
-      ...ORTHOGONAL_EDGE,
-      id: `${edge.from}->${edge.to}-${index}-${part}`,
-      source: segment.source,
-      target: segment.target,
-      // The label belongs on the first segment, where the edge leaves the step
-      // it is a statement about.
-      label: edge.kind === "needs" || !segment.first ? undefined : edge.kind,
+    return {
+      ...ROUTED_EDGE,
+      id: `${edge.from}->${edge.to}-${index}`,
+      source: edge.from,
+      target: edge.to,
+      data: route(edge.from, edge.to),
+      label: edge.kind === "needs" ? undefined : edge.kind,
       // react-flow's label is white-on-white in dark mode; these follow the
       // page instead.
       labelStyle: { fill: theme.palette.text.secondary, fontSize: 10 },
@@ -1172,16 +1350,14 @@ function buildFlow(
       animated: byName.get(edge.from)?.status === "running",
       // Lifted above its neighbours while it is part of what you asked about.
       zIndex: on && focus.id !== null ? 1 : 0,
-      // One arrowhead, at the end: a marker on each segment would plant arrows
-      // in the empty space where the lane bends.
-      markerEnd: segment.last ? { ...ORTHOGONAL_EDGE.markerEnd, color: stroke } : undefined,
+      markerEnd: { ...ROUTED_EDGE.markerEnd, color: stroke },
       style: {
         stroke,
         strokeWidth: on && focus.id !== null ? 2 : 1.4,
         strokeDasharray: edge.kind === "needs" ? undefined : "5 4",
         opacity: on ? 1 : DIMMED,
       },
-    }));
+    };
   });
 
   // A dependency edge is dashed and thin: it is a precondition, not a step that
@@ -1195,20 +1371,24 @@ function buildFlow(
   ): Edge[] => {
     const lit = focus.lit(source) && focus.lit(target);
     const picked = focus.id === source || focus.id === target;
-    return routeSegments(routes, source, target).map((segment, part) => ({
-      ...ORTHOGONAL_EDGE,
-      id: `dep:${source}->${target}-${part}`,
-      source: segment.source,
-      target: segment.target,
-      animated: picked || (extra.animated ?? false),
-      markerEnd: segment.last ? { ...ORTHOGONAL_EDGE.markerEnd, color: colour } : undefined,
-      style: {
-        stroke: colour,
-        strokeDasharray: "2 4",
-        strokeWidth: picked ? 2 : 1,
-        opacity: lit ? 0.75 : DIMMED,
+    return [
+      {
+        ...ROUTED_EDGE,
+        id: `dep:${source}->${target}`,
+        source,
+        target,
+        data: route(source, target),
+        animated: picked || (extra.animated ?? false),
+        zIndex: picked ? 1 : 0,
+        markerEnd: { ...ROUTED_EDGE.markerEnd, color: colour },
+        style: {
+          stroke: colour,
+          strokeDasharray: "2 4",
+          strokeWidth: picked ? 2 : 1,
+          opacity: lit ? 0.75 : DIMMED,
+        },
       },
-    }));
+    ];
   };
 
   for (const variable of variables) {
@@ -1235,7 +1415,10 @@ function buildFlow(
 
 /** The colour a variable is drawn in: unset is a problem, the rest are inputs. */
 function envColour(variable: EnvVar, theme: Theme): string {
-  return variable.origin === "unset" ? theme.palette.error.main : theme.palette.secondary.main;
+  if (unsetProblem(variable)) return theme.palette.error.main;
+  // An optional variable nobody set is a fact, not a fault: drawn quietly.
+  if (variable.origin === "unset") return theme.palette.text.disabled;
+  return theme.palette.secondary.main;
 }
 
 /** What each kind of node puts on the canvas. */
@@ -1298,6 +1481,13 @@ function nodeStyle(
     // Bounded, so a node can't grow across the gap the wires route through. A
     // long name wraps inside the box instead of widening it.
     width: NODE_WIDTH,
+    height: nodeHeight(id, byName),
+    // Border-box, so a border thickening on focus eats into the node rather
+    // than growing it off the height the wires were routed to.
+    boxSizing: "border-box" as const,
+    display: "flex",
+    alignItems: "center",
+    overflow: "hidden",
     textAlign: "left" as const,
     opacity: focus.lit(id) ? 1 : DIMMED,
     boxShadow: picked ? `0 0 0 3px ${theme.palette.secondary.main}55` : undefined,
@@ -1313,7 +1503,6 @@ function nodeStyle(
       }`,
       fontSize: 12,
       padding: "6px 12px",
-      minWidth: 150,
     };
   }
 
@@ -1331,7 +1520,7 @@ function nodeStyle(
     border: `${picked ? 2 : 1}px ${picked ? "solid" : "dashed"} ${colour}`,
     borderRadius: envKeyOf(id) !== null ? 18 : 8,
     fontSize: 11,
-    padding: "5px 10px",
+    padding: "0 10px",
     cursor: "pointer",
   };
 }
@@ -1367,8 +1556,11 @@ function FileNodeLabel({ deps, kind }: { deps: TargetDeps; kind: "reads" | "writ
   const bytes = kind === "reads" ? deps.input_bytes : deps.output_bytes;
 
   return (
-    <Box sx={{ textAlign: "left" }}>
-      <Typography variant="caption" sx={{ display: "block", color: "text.secondary" }}>
+    <Box sx={{ textAlign: "left", minWidth: 0, flexGrow: 1 }}>
+      <Typography
+        variant="caption"
+        sx={{ display: "block", color: "text.secondary", ...oneLine(LINE.name) }}
+      >
         {kind === "reads" ? "reads" : "writes"} · {count} file{count === 1 ? "" : "s"} ·{" "}
         {humanizeBytes(bytes)}
       </Typography>
@@ -1379,9 +1571,7 @@ function FileNodeLabel({ deps, kind }: { deps: TargetDeps; kind: "reads" | "writ
           fontFamily: monoFontStack,
           // The globs are the declaration; a long list is truncated rather than
           // allowed to stretch the node across the canvas.
-          overflow: "hidden",
-          textOverflow: "ellipsis",
-          whiteSpace: "nowrap",
+          ...oneLine(LINE.name),
         }}
         title={patterns.join(", ")}
       >
@@ -1394,16 +1584,16 @@ function FileNodeLabel({ deps, kind }: { deps: TargetDeps; kind: "reads" | "writ
 /** A variable on the canvas: its name, and underneath it the value. */
 function EnvNodeLabel({ variable }: { variable: EnvVar }) {
   return (
-    <Box sx={{ fontFamily: monoFontStack, lineHeight: 1.35 }}>
-      <Box sx={{ fontWeight: 700 }}>{variable.key}</Box>
+    <Box
+      sx={{ fontFamily: monoFontStack, minWidth: 0, flexGrow: 1 }}
+      title={variable.purpose ? `${variable.key} — ${variable.purpose}` : variable.key}
+    >
+      <Box sx={{ ...oneLine(LINE.name), fontWeight: 700 }}>{variable.key}</Box>
       <Box
         sx={{
+          ...oneLine(LINE.name),
           opacity: 0.75,
           fontStyle: variable.value === null ? "italic" : "normal",
-          maxWidth: 200,
-          overflow: "hidden",
-          textOverflow: "ellipsis",
-          whiteSpace: "nowrap",
         }}
       >
         {envValueText(variable)}

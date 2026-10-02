@@ -228,10 +228,24 @@ pub async fn execute(
                 } else {
                     let mut session = super::cached::Session::open(root, config);
                     if let Some(session) = session.as_mut() {
+                        if ctl.force {
+                            session.force();
+                        }
                         session.connect_remote().await;
                     }
                     session
                 };
+
+                if ctl.force && !dry_run && cache.is_some() {
+                    let _ = tx
+                        .send(ProgressUpdate::Log(
+                            name.to_string(),
+                            "force: the cache is ignored, so every step runs; what they \
+                             produce is still stored"
+                                .to_string(),
+                        ))
+                        .await;
+                }
 
                 if ctl.authoritative && !dry_run {
                     let _ = tx
@@ -1631,6 +1645,7 @@ mod tests {
             persist_via_daemon: false,
             authoritative: false,
             sandbox_also: Vec::new(),
+            force: false,
             cancel,
         };
         let env: HashMap<String, String> = std::env::vars().collect();

@@ -117,6 +117,12 @@ fn render_recipe_list(f: &mut Frame, area: Rect, app: &App) {
                 format!("{sym}{label}"),
                 Style::default().fg(color),
             ));
+            if let Some(time) = workflow.stage_times[idx].label() {
+                spans.push(Span::styled(
+                    format!(" {time}"),
+                    Style::default().fg(Color::DarkGray),
+                ));
+            }
         }
         let strip = Paragraph::new(Line::from(spans));
         f.render_widget(

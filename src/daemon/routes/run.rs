@@ -98,6 +98,7 @@ pub struct Run {
 impl Run {
     fn summary(&self) -> Value {
         let state = lock(&self.state);
+        let (done, total, running) = state.progress();
         json!({
             "id": self.id,
             "project": self.project,
@@ -107,10 +108,18 @@ impl Run {
             // How it ended, not merely that it did: a list of runs that all say
             // "finished" answers the one question nobody is asking.
             "status": state.outcome(),
+            // When it actually ran, as opposed to `created_at` (when it was
+            // asked for), so the list can say how long each run took.
+            "started_at": state.started_at(),
+            "finished_at": state.finished_at(),
+            // How far along it is, for an indicator that has no room for the
+            // graph — the editor's status bar.
+            "progress": { "done": done, "total": total, "running": running },
             // What it took to start it, so the run page can print the command
             // that reproduces it and say what it was narrowed to.
             "root": self.root.display().to_string(),
             "dry_run": self.request.dry_run,
+            "force": self.request.force,
             "filter": self.request.filter,
             "only": self.request.only,
             "isolated": self.request.isolated,
@@ -299,6 +308,9 @@ pub struct CreatePayload {
     env: HashMap<String, String>,
     #[serde(default)]
     dry_run: bool,
+    /// Ignore the cache and run every step. Results are still stored.
+    #[serde(default)]
+    force: bool,
 }
 
 #[derive(Deserialize)]
@@ -527,6 +539,7 @@ async fn start(state: AppState, payload: CreatePayload) -> RouteResult<Json<Valu
         interactive: true,
         choices: Some(choice_tx),
         cancel: Some(cancel),
+        force: payload.force,
         ..Default::default()
     };
     tokio::spawn(async move {

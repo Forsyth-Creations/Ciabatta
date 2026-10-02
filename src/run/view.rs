@@ -42,6 +42,22 @@ fn push_log(logs: &mut VecDeque<String>, dropped: &mut usize, line: String) {
     }
 }
 
+/// The moment an update was folded in, as the view model records it.
+///
+/// Stamped here rather than carried on `ProgressUpdate`, because the view is
+/// fed live as the engine reports: the gap between the two is a channel hop,
+/// and every other consumer of the updates would have to ignore a field only
+/// this one reads.
+fn now() -> String {
+    chrono::Local::now().to_rfc3339()
+}
+
+/// A stamp as an instant, so two can be compared across UTC offsets. One that
+/// doesn't parse sorts first rather than failing the comparison.
+fn parse_time(at: &str) -> Option<chrono::DateTime<chrono::FixedOffset>> {
+    chrono::DateTime::parse_from_rfc3339(at).ok()
+}
+
 // ─── Serializable live state ────────────────────────────────────────────────
 
 #[derive(Serialize, Deserialize, Clone, Default)]
@@ -51,7 +67,7 @@ pub struct GuiState {
     dry_run: bool,
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Default)]
 pub struct WorkflowView {
     name: String,
     status: String,
@@ -70,16 +86,30 @@ pub struct WorkflowView {
     /// created — it is what the run started with, not a live view of the
     /// daemon's environment.
     env: crate::run::envdeps::EnvReport,
+    /// When it started and finished, RFC 3339 in local time — so the viewer can
+    /// say how long it took and when it ended. Defaulted so a run recorded
+    /// before these existed still loads from disk.
+    #[serde(default)]
+    started_at: Option<String>,
+    #[serde(default)]
+    finished_at: Option<String>,
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Default)]
 pub struct StageView {
     name: String,
     /// pending · running · success · skipped · failed
     status: String,
+    /// When it started and finished, RFC 3339 in local time — so the viewer can
+    /// say how long it took and when it ended. Defaulted so a run recorded
+    /// before these existed still loads from disk.
+    #[serde(default)]
+    started_at: Option<String>,
+    #[serde(default)]
+    finished_at: Option<String>,
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Default)]
 pub struct StepView {
     name: String,
     status: String,
@@ -153,6 +183,13 @@ pub struct StepView {
     /// ever visible by opening the config, which is precisely when somebody is
     /// asking why a step rebuilt — so the answer belongs next to the step.
     deps: crate::run::deps::TargetDeps,
+    /// When it started and finished, RFC 3339 in local time — so the viewer can
+    /// say how long it took and when it ended. Defaulted so a run recorded
+    /// before these existed still loads from disk.
+    #[serde(default)]
+    started_at: Option<String>,
+    #[serde(default)]
+    finished_at: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -186,6 +223,7 @@ impl GuiState {
             ProgressUpdate::Started(name) => {
                 if let Some(r) = self.recipe_mut(&name) {
                     r.status = "running".into();
+                    r.started_at = Some(now());
                 }
             }
             ProgressUpdate::Log(name, line) => {
@@ -199,6 +237,10 @@ impl GuiState {
                     r.pending = None;
                     if let Some(s) = r.step_mut(&step) {
                         s.status = "running".into();
+                        // A step can run more than once — a retry routes back
+                        // to it — and the time that matters is the latest go.
+                        s.started_at = Some(now());
+                        s.finished_at = None;
                     }
                 }
             }
@@ -211,6 +253,7 @@ impl GuiState {
                     } else {
                         "failed".into()
                     };
+                    s.finished_at = Some(now());
                 }
             }
             ProgressUpdate::StepSkipped {
@@ -221,6 +264,7 @@ impl GuiState {
                 if let Some(r) = self.recipe_mut(&workflow) {
                     if let Some(s) = r.step_mut(&step) {
                         s.status = "skipped".into();
+                        s.finished_at = Some(now());
                         push_log(
                             &mut s.logs,
                             &mut s.dropped_logs,
@@ -262,6 +306,7 @@ impl GuiState {
                 if let Some(r) = self.recipe_mut(&name) {
                     r.status = "success".into();
                     r.pending = None;
+                    r.finished_at = Some(now());
                 }
             }
             ProgressUpdate::Failed(name, err) => {
@@ -275,6 +320,8 @@ impl GuiState {
                     r.status = outcome.into();
                     r.error = Some(err.clone());
                     r.pending = None;
+                    let at = now();
+                    r.finished_at = Some(at.clone());
                     let line = if stopped {
                         format!("■ {err}")
                     } else {
@@ -287,6 +334,7 @@ impl GuiState {
                     for st in &mut r.stages {
                         if st.status == "running" {
                             st.status = outcome.into();
+                            st.finished_at = Some(at.clone());
                             hit = true;
                         } else if hit && st.status == "pending" {
                             st.status = "skipped".into();
@@ -300,6 +348,7 @@ impl GuiState {
                     && let Some(s) = r.stages.iter_mut().find(|s| s.name == label)
                 {
                     s.status = "running".into();
+                    s.started_at = Some(now());
                 }
             }
             ProgressUpdate::StageFinished {
@@ -318,6 +367,7 @@ impl GuiState {
                     } else {
                         "skipped".into()
                     };
+                    s.finished_at = Some(now());
                 }
             }
             // Runs don't emit stage-file-transfer progress.
@@ -366,6 +416,53 @@ impl GuiState {
             }
         }
         self.done = true;
+    }
+
+    /// How far along the run is: steps finished, steps in all, and the ones
+    /// running right now — what an editor's progress indicator can say about
+    /// a run without being sent its logs.
+    ///
+    /// Recovery steps count only once they've been entered: they run when
+    /// something fails, and a success that never touches them is not "7 of 9".
+    pub fn progress(&self) -> (usize, usize, Vec<String>) {
+        let steps = self
+            .workflows
+            .iter()
+            .flat_map(|w| &w.steps)
+            .filter(|s| !s.recover || s.status != "pending");
+        let (mut done, mut total, mut running) = (0, 0, Vec::new());
+        for step in steps {
+            total += 1;
+            match step.status.as_str() {
+                "pending" => {}
+                "running" => running.push(step.name.clone()),
+                _ => done += 1,
+            }
+        }
+        (done, total, running)
+    }
+
+    /// When the run started: its first workflow to start. None until one has.
+    pub fn started_at(&self) -> Option<&str> {
+        self.workflows
+            .iter()
+            .filter_map(|w| w.started_at.as_deref())
+            .min_by_key(|at| parse_time(at))
+    }
+
+    /// When the run finished: its last workflow to finish — and None while any
+    /// of them is still going, or ended without a time (the daemon went away
+    /// under it), since the run's end is then unknown.
+    pub fn finished_at(&self) -> Option<&str> {
+        if !self.done {
+            return None;
+        }
+        let ends: Option<Vec<&str>> = self
+            .workflows
+            .iter()
+            .map(|w| w.finished_at.as_deref())
+            .collect();
+        ends?.into_iter().max_by_key(|at| parse_time(at))
     }
 
     /// The run's verdict in one word: `running` until every workflow has
@@ -468,6 +565,8 @@ pub fn initial_state(
                 // default is the honest empty answer rather than a missing key
                 // the viewer would have to special-case.
                 deps: deps.remove(&step.name).unwrap_or_default(),
+                started_at: None,
+                finished_at: None,
             });
         }
 
@@ -476,6 +575,8 @@ pub fn initial_state(
             .map(|s| StageView {
                 name: s.label().to_string(),
                 status: "pending".into(),
+                started_at: None,
+                finished_at: None,
             })
             .collect();
 
@@ -489,7 +590,9 @@ pub fn initial_state(
             logs: VecDeque::new(),
             dropped_logs: 0,
             pending: None,
-            env: envdeps::collect(&resolved, root, env),
+            env: envdeps::collect(&resolved, root, env, Some(config)),
+            started_at: None,
+            finished_at: None,
         });
     }
     Ok(GuiState {
@@ -528,5 +631,155 @@ mod tests {
 
         assert_eq!(logs.len(), 1);
         assert_eq!(dropped, 0);
+    }
+
+    fn one_step_run() -> GuiState {
+        GuiState {
+            workflows: vec![WorkflowView {
+                name: "build".into(),
+                status: "pending".into(),
+                stages: StageKind::ALL
+                    .iter()
+                    .map(|s| StageView {
+                        name: s.label().into(),
+                        status: "pending".into(),
+                        ..Default::default()
+                    })
+                    .collect(),
+                steps: vec![StepView {
+                    name: "compile".into(),
+                    status: "pending".into(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_run_records_when_each_phase_and_step_started_and_finished() {
+        let mut state = one_step_run();
+        let workflow = || "build".to_string();
+        state.apply(ProgressUpdate::Started(workflow()));
+        state.apply(ProgressUpdate::StageStarted {
+            workflow: workflow(),
+            stage: StageKind::Main,
+        });
+        state.apply(ProgressUpdate::StepStarted {
+            workflow: workflow(),
+            step: "compile".into(),
+        });
+
+        let w = &state.workflows[0];
+        assert!(w.started_at.is_some() && w.finished_at.is_none());
+        assert!(w.steps[0].started_at.is_some() && w.steps[0].finished_at.is_none());
+        let main = &w.stages[StageKind::Main.index()];
+        assert!(main.started_at.is_some() && main.finished_at.is_none());
+        // A phase that hasn't been reached has no times at all.
+        assert!(w.stages[StageKind::Post.index()].started_at.is_none());
+
+        state.apply(ProgressUpdate::StepFinished {
+            workflow: workflow(),
+            step: "compile".into(),
+            ok: true,
+        });
+        state.apply(ProgressUpdate::StageFinished {
+            workflow: workflow(),
+            stage: StageKind::Main,
+            ran: true,
+        });
+        state.apply(ProgressUpdate::Completed(workflow()));
+
+        let w = &state.workflows[0];
+        assert!(w.finished_at.is_some());
+        assert!(w.steps[0].finished_at.is_some());
+        assert!(w.stages[StageKind::Main.index()].finished_at.is_some());
+    }
+
+    #[test]
+    fn a_failed_run_closes_the_phase_it_failed_in() {
+        let mut state = one_step_run();
+        state.apply(ProgressUpdate::Started("build".into()));
+        state.apply(ProgressUpdate::StageStarted {
+            workflow: "build".into(),
+            stage: StageKind::Pre,
+        });
+        state.apply(ProgressUpdate::Failed("build".into(), "boom".into()));
+
+        let w = &state.workflows[0];
+        assert!(w.finished_at.is_some());
+        assert!(w.stages[StageKind::Pre.index()].finished_at.is_some());
+        assert!(w.stages[StageKind::Main.index()].finished_at.is_none());
+    }
+
+    #[test]
+    fn a_run_recorded_before_timestamps_still_loads() {
+        let mut json = serde_json::to_value(one_step_run()).unwrap();
+        let workflow = &mut json["workflows"][0];
+        workflow.as_object_mut().unwrap().remove("started_at");
+        workflow["steps"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("started_at");
+        workflow["stages"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("finished_at");
+
+        let state: GuiState = serde_json::from_value(json).expect("old records deserialize");
+        assert!(state.workflows[0].started_at.is_none());
+    }
+
+    #[test]
+    fn progress_counts_finished_steps_and_names_running_ones() {
+        let mut state = one_step_run();
+        let mut more = state.workflows[0].steps[0].clone();
+        more.name = "link".into();
+        let mut recovery = more.clone();
+        recovery.name = "fix".into();
+        recovery.recover = true;
+        state.workflows[0].steps.extend([more, recovery]);
+        assert_eq!(state.progress(), (0, 2, vec![]));
+
+        state.apply(ProgressUpdate::StepStarted {
+            workflow: "build".into(),
+            step: "compile".into(),
+        });
+        assert_eq!(state.progress(), (0, 2, vec!["compile".to_string()]));
+
+        state.apply(ProgressUpdate::StepFinished {
+            workflow: "build".into(),
+            step: "compile".into(),
+            ok: false,
+        });
+        // The recovery branch joins the count once the run goes into it.
+        state.apply(ProgressUpdate::StepStarted {
+            workflow: "build".into(),
+            step: "fix".into(),
+        });
+        assert_eq!(state.progress(), (1, 3, vec!["fix".to_string()]));
+    }
+
+    #[test]
+    fn a_run_spans_its_first_start_to_its_last_finish() {
+        let mut state = one_step_run();
+        let mut second = state.workflows[0].clone();
+        second.name = "test".into();
+        state.workflows.push(second);
+        state.workflows[0].started_at = Some("2026-09-27T10:00:05-04:00".into());
+        state.workflows[1].started_at = Some("2026-09-27T14:00:00+00:00".into());
+        assert_eq!(state.started_at(), Some("2026-09-27T14:00:00+00:00"));
+        // Not finished until every workflow has.
+        assert_eq!(state.finished_at(), None);
+
+        state.workflows[0].finished_at = Some("2026-09-27T10:01:00-04:00".into());
+        state.workflows[1].finished_at = Some("2026-09-27T14:00:30+00:00".into());
+        state.done = true;
+        assert_eq!(state.finished_at(), Some("2026-09-27T10:01:00-04:00"));
+
+        // A run the daemon lost track of has no known end.
+        state.workflows[1].finished_at = None;
+        assert_eq!(state.finished_at(), None);
     }
 }

@@ -24,3 +24,4 @@ ciabatta-analyze.json
 .key
 editors/vscode/schemas/
 editors/zed/target/
+editors/zed/extension.wasm

@@ -78,6 +78,7 @@ export function runCommand(state: RunState): string {
   for (const term of run.filter ?? []) parts.push("--filter", quote(term));
   for (const member of run.only ?? []) parts.push("--only", quote(member));
   if (run.isolated) parts.push("--isolated");
+  if (run.force) parts.push("--force");
   if (state.dry_run) parts.push("--dry-run");
   return parts.join(" ");
 }

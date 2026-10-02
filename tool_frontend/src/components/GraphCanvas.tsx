@@ -10,10 +10,13 @@
  * shared positioning strategy. See `layout.ts` for the helpers.
  */
 
-import { useCallback, useMemo, useRef } from "react";
+import { useCallback, useEffect, useMemo, useRef } from "react";
 import { Box, useTheme } from "@mui/material";
 import {
   Background,
+  useNodesInitialized,
+  useReactFlow,
+  useStore,
   BackgroundVariant,
   Controls,
   MiniMap,
@@ -24,6 +27,12 @@ import {
   type OnNodesChange,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
+
+import { RoutedEdge } from "./RoutedEdge";
+
+/** Defined once, outside the component: react-flow warns, and re-mounts every
+ *  edge, if it is handed a new object on each render. */
+const EDGE_TYPES = { routed: RoutedEdge };
 
 interface GraphCanvasProps {
   nodes: Node[];
@@ -140,10 +149,12 @@ export function GraphCanvas({
         key={fitKey}
         nodes={sized}
         edges={edges}
+        edgeTypes={EDGE_TYPES}
         onNodesChange={onNodesChange}
         onNodeClick={onNodeClick}
         onPaneClick={onPaneClick}
         fitView
+        fitViewOptions={{ padding: 0.08 }}
         // These are views of computed state, not editors: dragging a node
         // around would imply the position means something and survives a
         // refresh, and neither is true.
@@ -154,7 +165,8 @@ export function GraphCanvas({
         minZoom={0.05}
       >
         <Background variant={BackgroundVariant.Dots} gap={18} size={1} />
-        <Controls showInteractive={false} />
+        <ReadableFit />
+        <Controls showInteractive={false} fitViewOptions={{ padding: 0.08 }} />
         {(minimap ?? (typeof height === "number" && height >= 400)) && (
           <MiniMap
             pannable
@@ -178,4 +190,44 @@ export function GraphCanvas({
       </ReactFlow>
     </Box>
   );
+}
+
+/** The smallest zoom a graph is first shown at. */
+const READABLE_ZOOM = 0.6;
+
+/**
+ * Open a graph readable rather than complete.
+ *
+ * Fitting a twelve-column run into half a screen draws every label a few
+ * pixels high: you see the graph's shape and none of what it says. So when the
+ * fit would go below a readable zoom, this holds the zoom there and anchors the
+ * view on the graph's left edge, where the run starts and its inputs come in,
+ * instead of on its middle, which cut off both ends. The rest is a pan away,
+ * and the fit button still shows the whole thing.
+ *
+ * Runs once per mount; `GraphCanvas` re-mounts the flow when the graph's shape
+ * changes, which is exactly when the view should be chosen again.
+ */
+function ReadableFit() {
+  const initialized = useNodesInitialized();
+  const flow = useReactFlow();
+  const height = useStore((state) => state.height);
+  const done = useRef(false);
+
+  useEffect(() => {
+    if (!initialized || done.current) return;
+    done.current = true;
+    // After react-flow's own fit, which runs on the same signal.
+    requestAnimationFrame(() => {
+      if (flow.getViewport().zoom >= READABLE_ZOOM) return;
+      const bounds = flow.getNodesBounds(flow.getNodes());
+      flow.setViewport({
+        zoom: READABLE_ZOOM,
+        x: 24 - bounds.x * READABLE_ZOOM,
+        y: height / 2 - (bounds.y + bounds.height / 2) * READABLE_ZOOM,
+      });
+    });
+  }, [initialized, flow, height]);
+
+  return null;
 }

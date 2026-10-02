@@ -362,6 +362,7 @@ const COMMANDS: CommandGroup[] = [
           ["--isolated", "Don't follow dependencies into other sub-workspaces."],
           ["--graph", "Print the resolved graph and run nothing."],
           ["--dry-run", "Walk every step, executing none of them."],
+          ["--force", "Ignore the cache and run every step. Results are still stored, so the next run reuses them."],
           ["-e KEY=VALUE", "Set a variable for every step. Beats .env and CI."],
           ["--gui", "Watch it live in this app."],
           ["--tui", "Watch it in the terminal UI. Runs print plain text by default."],

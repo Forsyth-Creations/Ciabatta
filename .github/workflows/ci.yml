@@ -128,7 +128,7 @@ jobs:
       - name: Build the Zed extension
         if: matrix.os == 'ubuntu-latest'
         run: |
-          rustup target add wasm32-wasip1
+          rustup target add wasm32-wasip2
           ciabatta package --only zed-extension
 
       # Built on every push, not just releases: a PR that changes the extension

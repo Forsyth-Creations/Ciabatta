@@ -752,6 +752,8 @@ pub enum Reason {
     /// telling whether what this step consumes moved. See
     /// [`CacheConfig::accounts_for_its_outputs`].
     UpstreamReran { steps: Vec<String> },
+    /// The run was started with `--force`, which ignores the cache.
+    Forced,
 }
 
 impl Reason {
@@ -781,6 +783,7 @@ impl Reason {
                  this step consumes changed",
                 steps.join(", ")
             ),
+            Reason::Forced => "the run was started with --force".to_string(),
         }
     }
 }

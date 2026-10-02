@@ -19,7 +19,10 @@
 //!   Ctrl-A / Ctrl-X   apply / reject the first pending change proposal
 //!   Ctrl-Z            undo the most recently applied change
 //!   Ctrl-O            open the suggested changes as diffs in VS Code
-//!   Ctrl-T            release/recapture the mouse for text selection & copy
+//!   drag              select text in the conversation or the input box;
+//!                     letting go copies it to the clipboard
+//!   Ctrl-T            release/recapture the mouse, for the terminal's own
+//!                     selection
 //!
 //! Typed `/commands`: /help, /new, /clear, /plan, /edit, /auto, /mode, /map.
 //!   Ctrl-Y / Ctrl-N   accept / reject the first pending tag proposal
@@ -36,7 +39,7 @@ use anyhow::Result;
 use crossterm::{
     event::{
         DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-        Event, EventStream, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind,
+        Event, EventStream, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
     },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
@@ -45,7 +48,7 @@ use futures::StreamExt;
 use ratatui::{
     Frame, Terminal,
     backend::CrosstermBackend,
-    layout::{Constraint, Layout, Rect},
+    layout::{Constraint, Layout, Margin, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Gauge, Paragraph, Wrap},
@@ -422,6 +425,19 @@ struct App {
     /// one the user is actually looking at, and be told again when the terminal
     /// is resized under it.
     input_width: usize,
+    /// The text being selected with the mouse, and once let go, the text that
+    /// was copied — left highlighted until the next click, key or scroll, the
+    /// way a terminal leaves its own selection.
+    selection: Option<super::select::Selection>,
+    /// The panes a selection may start in (the conversation's and the input's
+    /// insides), stamped by `render` so a drag knows what it is over.
+    panes: Vec<Rect>,
+    /// The last frame drawn, which is what a selection's text is read from:
+    /// the words on screen, wrapped exactly as the user saw them.
+    frame: Option<ratatui::buffer::Buffer>,
+    /// A short-lived note for the hint bar — "copied 42 characters" — that
+    /// would be clutter as a chat message.
+    notice: Option<(String, Instant)>,
 }
 
 impl App {
@@ -575,6 +591,10 @@ async fn chat_loop(
         mouse_capture: true,
         burn: None,
         input_width: 80,
+        selection: None,
+        panes: Vec::new(),
+        frame: None,
+        notice: None,
     };
     app.push(
         Speaker::Status,
@@ -621,7 +641,8 @@ async fn chat_loop(
     let mut event_stream = EventStream::new();
 
     loop {
-        terminal.draw(|f| render(f, &mut app, &assistant))?;
+        let drawn = terminal.draw(|f| render(f, &mut app, &assistant))?;
+        app.frame = Some(drawn.buffer.clone());
 
         // Redraw briskly while something is animating (the thinking spinner or a
         // fresh answer wiping in), and idle back to a slow tick otherwise.
@@ -641,9 +662,27 @@ async fn chat_loop(
                         continue;
                     }
                     Event::Mouse(mouse) => {
+                        let at = ratatui::layout::Position { x: mouse.column, y: mouse.row };
                         match mouse.kind {
-                            MouseEventKind::ScrollUp => app.scroll_by(3),
-                            MouseEventKind::ScrollDown => app.scroll_by(-3),
+                            // Scrolling moves the text out from under a
+                            // highlight, which would then mark the wrong words.
+                            MouseEventKind::ScrollUp => {
+                                app.selection = None;
+                                app.scroll_by(3)
+                            }
+                            MouseEventKind::ScrollDown => {
+                                app.selection = None;
+                                app.scroll_by(-3)
+                            }
+                            MouseEventKind::Down(MouseButton::Left) => {
+                                app.selection = super::select::Selection::start(&app.panes, at);
+                            }
+                            MouseEventKind::Drag(MouseButton::Left) => {
+                                if let Some(selection) = app.selection.as_mut() {
+                                    selection.extend(at);
+                                }
+                            }
+                            MouseEventKind::Up(MouseButton::Left) => copy_selection(&mut app),
                             _ => {}
                         }
                         continue;
@@ -653,6 +692,8 @@ async fn chat_loop(
                 if key.kind != KeyEventKind::Press {
                     continue;
                 }
+                // Typing is moving on from whatever was highlighted.
+                app.selection = None;
                 let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
                 match (key.code, ctrl) {
                     (KeyCode::Esc, _) | (KeyCode::Char('c'), true) => break,
@@ -683,8 +724,8 @@ async fn chat_loop(
                                 "mouse captured — wheel scrolls the chat; Ctrl-T to release for \
                                  text selection".to_string()
                             } else {
-                                "mouse released — drag to select & copy; Ctrl-T to re-enable wheel \
-                                 scroll (Shift-drag also selects while captured)".to_string()
+                                "mouse released — the terminal's own selection works now; Ctrl-T to \
+                                 re-enable wheel scroll and drag-to-copy".to_string()
                             },
                         );
                     }
@@ -1435,6 +1476,41 @@ fn render(f: &mut Frame, app: &mut App, assistant: &Assistant) {
     render_slash_menu(f, menu, app);
     render_input(f, input, app);
     render_hints(f, hints, app);
+
+    // Inside the borders: a drag that starts on a border has nothing to copy,
+    // and one that strays onto it shouldn't copy the line-drawing characters.
+    app.panes = vec![
+        chat.inner(Margin::new(1, 1)),
+        input.inner(Margin::new(1, 1)),
+    ];
+    if let Some(selection) = &app.selection {
+        selection.highlight(f.buffer_mut());
+    }
+}
+
+/// On letting go of a drag: copy what it covered, and say so in the hint bar.
+fn copy_selection(app: &mut App) {
+    let Some(selection) = app.selection.filter(|s| s.dragged) else {
+        // A click, not a drag: nothing selected, and nothing left highlighted.
+        app.selection = None;
+        return;
+    };
+    let Some(frame) = &app.frame else { return };
+    let text = selection.text(frame);
+    if text.is_empty() {
+        return;
+    }
+    let tried = super::select::copy(&text);
+    let count = text.chars().count();
+    let note = if tried.is_empty() {
+        "couldn't reach a clipboard — Ctrl-T hands the mouse back to the terminal".to_string()
+    } else {
+        format!(
+            "copied {count} character{}",
+            if count == 1 { "" } else { "s" }
+        )
+    };
+    app.notice = Some((note, Instant::now()));
 }
 
 /// Height of the `/` command area: one row per match (capped) plus a border
@@ -2086,6 +2162,20 @@ fn render_input(f: &mut Frame, area: Rect, app: &mut App) {
 }
 
 fn render_hints(f: &mut Frame, area: Rect, app: &App) {
+    // A fresh notice takes the bar for a moment, then the hints come back.
+    if let Some((note, at)) = &app.notice
+        && at.elapsed() < Duration::from_millis(2500)
+    {
+        f.render_widget(
+            Paragraph::new(Span::styled(
+                format!(" ✓ {note}"),
+                Style::default().fg(Color::Green),
+            )),
+            area,
+        );
+        return;
+    }
+
     // Most important first, and only as many as fit: a single row that gets
     // sliced through the middle of a binding teaches nothing.
     let mut hints: Vec<String> = [
@@ -2100,7 +2190,8 @@ fn render_hints(f: &mut Frame, area: Rect, app: &App) {
         "^S pdf",
         "^O vscode",
         "^Y/^N tags",
-        "^T select",
+        "drag copies",
+        "^T mouse",
         "Esc quit",
     ]
     .iter()
@@ -2227,6 +2318,10 @@ mod tests {
             mouse_capture: true,
             burn: None,
             input_width: 80,
+            selection: None,
+            panes: Vec::new(),
+            frame: None,
+            notice: None,
         }
     }
 

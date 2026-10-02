@@ -466,6 +466,12 @@ impl Workspace {
 /// The git root wins even when it has no `.ciabatta/` of its own — running
 /// `ciabatta build` from inside one package should still see its siblings,
 /// which is the entire point of a monorepo-wide graph.
+///
+/// Only a `.ciabatta/` that holds a project counts — a config or a workflows
+/// directory. The daemon keeps its own state in `~/.ciabatta/`, and counting
+/// that made every project under the home directory that isn't a git checkout
+/// (`ciabatta init --example`, for one) resolve to the home directory itself:
+/// its run history was written there, and editors looked for it there.
 pub fn find_workspace_root(start: &Path) -> Option<PathBuf> {
     let start = std::fs::canonicalize(start).unwrap_or_else(|_| start.to_path_buf());
     let mut highest_ciabatta: Option<PathBuf> = None;
@@ -473,7 +479,7 @@ pub fn find_workspace_root(start: &Path) -> Option<PathBuf> {
 
     let mut current = start.clone();
     loop {
-        if current.join(CIABATTA_DIR).is_dir() {
+        if holds_project(&current) {
             highest_ciabatta = Some(current.clone());
         }
         if current.join(".git").exists() && git_root.is_none() {
@@ -485,6 +491,14 @@ pub fn find_workspace_root(start: &Path) -> Option<PathBuf> {
     }
 
     git_root.or(highest_ciabatta)
+}
+
+/// Whether `dir/.ciabatta/` describes a project, rather than being ciabatta's
+/// own state directory (or an empty one left behind).
+fn holds_project(dir: &Path) -> bool {
+    let ciabatta = dir.join(CIABATTA_DIR);
+    ciabatta.is_dir()
+        && (crate::config::config_path(dir).is_some() || ciabatta.join("workflows").is_dir())
 }
 
 /// Every directory at or below `root` that holds a ciabatta config, in path
@@ -807,6 +821,23 @@ mod tests {
     use super::*;
 
     /// Build a throwaway monorepo on disk and load it.
+    #[test]
+    fn the_daemons_state_directory_is_not_a_workspace_root() {
+        // A home directory holding the daemon's `~/.ciabatta/`, and a project
+        // under it that isn't a git checkout.
+        let home = scratch("state_dir_home");
+        std::fs::create_dir_all(home.join(".ciabatta/runs")).unwrap();
+        std::fs::write(home.join(".ciabatta/daemon.json"), "{}").unwrap();
+        let project = home.join("example");
+        std::fs::create_dir_all(project.join(".ciabatta")).unwrap();
+        std::fs::write(project.join(".ciabatta/ciabatta.yaml"), "workspace: {}\n").unwrap();
+        std::fs::create_dir_all(project.join("packages/api")).unwrap();
+
+        let found = find_workspace_root(&project.join("packages/api")).unwrap();
+        assert_eq!(found, project.canonicalize().unwrap());
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
     fn scratch(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("ciab_ws_{name}_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);

@@ -1,4 +1,4 @@
-# Deliberately not called `build`: this needs the wasm32-wasip1 target
+# Deliberately not called `build`: this needs the wasm32-wasip2 target
 # installed, and `ciabatta build` at the repo root should not fail for someone
 # who has never touched the editor extensions. Run it on its own:
 #
@@ -19,10 +19,10 @@ cache:
     - "editors/zed/Cargo.lock"
     - "editors/zed/extension.toml"
   outputs:
-    - "editors/zed/target/wasm32-wasip1/release/zed_ciabatta.wasm"
+    - "editors/zed/target/wasm32-wasip2/release/zed_ciabatta.wasm"
 
 steps:
   - name: wasm
     description: Build the extension for Zed's WASM host
-    run: cargo build --release --target wasm32-wasip1
+    run: cargo build --release --target wasm32-wasip2
     timeout: 10m

@@ -20,6 +20,7 @@ pub mod edit;
 pub mod jobs;
 pub mod pdf;
 pub mod provider;
+pub mod select;
 
 pub mod session;
 pub mod tools;
@@ -154,6 +155,32 @@ pub struct Assistant {
     /// Cap on model⇄tool round trips per question (from `[ai] max_tool_rounds`,
     /// default [`DEFAULT_MAX_TOOL_ROUNDS`]).
     max_rounds: usize,
+    /// Where inside the project the user started ciabatta, when that isn't the
+    /// root itself — `packages/api` — so "this package" has a referent.
+    launched_from: Option<String>,
+}
+
+/// `dir` relative to `root`, when it is strictly inside it — where a user who
+/// started ciabatta from a sub-package was standing. None at the root itself,
+/// or outside it (the daemon serving a project from wherever it was started).
+fn launched_within(root: &Path, dir: &Path) -> Option<String> {
+    let root = root.canonicalize().ok()?;
+    let dir = dir.canonicalize().ok()?;
+    let rel = dir.strip_prefix(&root).ok()?;
+    // Forward slashes on every platform: it's read as a repo-relative path.
+    (!rel.as_os_str().is_empty()).then(|| rel.to_string_lossy().replace('\\', "/"))
+}
+
+/// The checked-out branch, or None outside a repository or on a detached HEAD.
+fn git_branch(root: &Path) -> Option<String> {
+    let out = std::process::Command::new("git")
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .current_dir(root)
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    let branch = String::from_utf8(out.stdout).ok()?.trim().to_string();
+    (out.status.success() && !branch.is_empty() && branch != "HEAD").then_some(branch)
 }
 
 /// Default cap on model⇄tool round trips per question, so a confused model can't
@@ -203,6 +230,9 @@ impl Assistant {
             conversation: tokio::sync::Mutex::new(conversation),
             activity: std::sync::Mutex::new(None),
             max_rounds,
+            launched_from: std::env::current_dir()
+                .ok()
+                .and_then(|dir| launched_within(root, &dir)),
         }))
     }
 
@@ -330,9 +360,53 @@ impl Assistant {
              === Current session context ===\n\
              {mode_rules}\n\
              \n\
+             {environment}\n\
+             \n\
              Architecture map:\n{map}",
+            environment = self.environment(),
             map = self.brain.summary_for_prompt(),
         )
+    }
+
+    /// Where the assistant is working, said outright.
+    ///
+    /// Left unsaid, a model fills it in: it assumes a container's `/workspace`
+    /// or `/app`, or a home directory it has seen in some other project, and
+    /// then reasons about — and writes absolute paths into — a tree that isn't
+    /// there. Every fact here is cheap to state and expensive to guess.
+    fn environment(&self) -> String {
+        let root = &self.toolbox.root;
+        let mut lines = vec![
+            "Environment (facts — do not assume otherwise):".to_string(),
+            format!(
+                "- Working directory: {} — this is the project root. Relative paths in every \
+                 tool resolve against it, and `run_command` starts here on every call (a `cd` \
+                 does not persist; pass `cwd` instead).",
+                root.display()
+            ),
+        ];
+        if let Some(dir) = &self.launched_from {
+            lines.push(format!(
+                "- The user started ciabatta in `{dir}` inside it, so \"here\" or \"this \
+                 package\" most likely means `{dir}`."
+            ));
+        }
+        if let Some(branch) = git_branch(root) {
+            lines.push(format!("- Git branch: {branch}"));
+        }
+        lines.push(format!(
+            "- Platform: {} ({}); today is {}.",
+            std::env::consts::OS,
+            std::env::consts::ARCH,
+            chrono::Local::now().format("%Y-%m-%d")
+        ));
+        lines.push(
+            "- If you are unsure where a file is, look it up with a tool rather than guessing \
+             a path. Never invent locations such as /workspace, /app, /src or another user's \
+             home directory."
+                .to_string(),
+        );
+        lines.join("\n")
     }
 
     /// Answer one question, streaming progress over `events`. Tool calls are
@@ -1224,6 +1298,23 @@ mod tests {
     use super::*;
 
     const TOML_BLOCK: &str = "[ai]\nprovider = \"claude\"\n";
+
+    #[test]
+    fn launched_within_names_a_subdirectory_and_nothing_else() {
+        let root = std::env::temp_dir().join(format!("ciabatta-launch-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("packages/api")).unwrap();
+
+        assert_eq!(
+            launched_within(&root, &root.join("packages/api")).as_deref(),
+            Some("packages/api")
+        );
+        // At the root there is nothing to add to "the working directory".
+        assert_eq!(launched_within(&root, &root), None);
+        // Outside it — the daemon, started from wherever — says nothing at all.
+        assert_eq!(launched_within(&root.join("packages"), &root), None);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     fn yaml_block(provider: &str) -> String {
         format!("ai:\n  provider: {provider}\n")

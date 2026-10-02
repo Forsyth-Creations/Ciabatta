@@ -328,6 +328,8 @@ function rebuildLabel(reason: RebuildReason): string {
       return "no outputs declared, so there's nothing to restore";
     case "upstream_reran":
       return `${reason.steps.join(", ")} ran and declares no outputs, so there's no telling whether what this stage consumes changed`;
+    case "forced":
+      return "the run was started with --force";
   }
 }
 

@@ -303,6 +303,106 @@ pub fn registry_credentials(
     Some((user, pass))
 }
 
+/// One environment variable a registry transfer reads, and why.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegistryEnv {
+    pub key: String,
+    /// What it's for, in the words the graph puts next to it.
+    pub purpose: String,
+    /// Whether the transfer goes ahead without it — unauthenticated, or with
+    /// credentials found some other way — rather than failing.
+    pub optional: bool,
+}
+
+/// The environment variables a transfer through `registry_name` reads.
+///
+/// These are what decides whether a push works, and none of them appear in the
+/// workflow file: the credentials are looked up by a name derived from the
+/// registry's, and the AWS kinds read the AWS SDK's own variables. So a push
+/// step could fail on a missing variable that nothing on screen mentioned.
+/// Listing them here, beside [`registry_credentials`] and [`default_login`]
+/// which read them, keeps the list from drifting away from the code.
+///
+/// `env` is consulted only to tell which of the AWS credential routes is in
+/// use, so a run on a profile isn't shown as missing access keys.
+pub fn credential_env(
+    registry_name: &str,
+    registry_config: Option<&RegistryConfig>,
+    env: &HashMap<String, String>,
+) -> Vec<RegistryEnv> {
+    let kind = match registry_config {
+        Some(config) => infer_registry_kind(registry_name, config),
+        None => RegistryKind::from(registry_name),
+    };
+    // A registry that declares `needs_auth` fails without its credentials;
+    // otherwise they're applied if present.
+    let optional = !registry_config.is_some_and(|c| c.needs_auth);
+    let var = |key: String, purpose: String, optional: bool| RegistryEnv {
+        key,
+        purpose,
+        optional,
+    };
+    let set = |key: &str| env.get(key).is_some_and(|v| !v.trim().is_empty());
+
+    match kind {
+        RegistryKind::Nexus
+        | RegistryKind::Artifactory
+        | RegistryKind::Generic
+        | RegistryKind::Docker => {
+            let key = cred_key(registry_name);
+            let how = if kind == RegistryKind::Docker {
+                "docker login"
+            } else {
+                "HTTP basic auth"
+            };
+            vec![
+                var(
+                    format!("CIABATTA_{key}_USER"),
+                    format!("{how} user for registry '{registry_name}'"),
+                    optional,
+                ),
+                var(
+                    format!("CIABATTA_{key}_PASS"),
+                    format!("{how} password for registry '{registry_name}'"),
+                    optional,
+                ),
+            ]
+        }
+        RegistryKind::S3 | RegistryKind::Ecr => {
+            // The AWS credential chain: a named profile, or keys in the
+            // environment. Neither is strictly required — an instance role or
+            // SSO session also works — so both are shown as optional, and only
+            // the route actually in use is shown at all.
+            let mut vars = Vec::new();
+            let purpose = |what: &str| format!("AWS {what} for registry '{registry_name}'");
+            if set("AWS_PROFILE") {
+                vars.push(var("AWS_PROFILE".into(), purpose("profile"), true));
+            } else {
+                vars.push(var("AWS_ACCESS_KEY_ID".into(), purpose("access key"), true));
+                vars.push(var(
+                    "AWS_SECRET_ACCESS_KEY".into(),
+                    purpose("secret key"),
+                    true,
+                ));
+                if set("AWS_SESSION_TOKEN") {
+                    vars.push(var(
+                        "AWS_SESSION_TOKEN".into(),
+                        purpose("session token"),
+                        true,
+                    ));
+                }
+            }
+            let region = if !set("AWS_REGION") && set("AWS_DEFAULT_REGION") {
+                "AWS_DEFAULT_REGION"
+            } else {
+                "AWS_REGION"
+            };
+            vars.push(var(region.into(), purpose("region"), true));
+            vars
+        }
+    }
+}
+
 /// The default `login` stage: used when a workflow defines neither a `login`
 /// override nor a registry `login_script`.
 ///

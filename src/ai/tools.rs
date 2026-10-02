@@ -421,19 +421,23 @@ impl ToolBox {
             },
             ToolSpec {
                 name: "run_command",
-                description: "Run a shell command locally in the project root, on the user's \
-                              machine, with the real installed toolchains (cargo, rustc, python, \
-                              pip, node, npm, pytest, make, git, …). Use this to build, test, \
-                              lint, or run the project for real — e.g. `cargo build`, `cargo \
-                              test`, `python -m pytest`, `npm run build`. Combined stdout+stderr \
-                              and the exit status are returned. Commands run with your own \
-                              permissions and can modify the working tree, so prefer `sandbox_run` \
-                              for anything untrusted or throwaway. Times out after 300s."
+                description: "Run a shell command locally on the user's machine, with the real \
+                              installed toolchains (cargo, rustc, python, pip, node, npm, pytest, \
+                              make, git, …). Use this to build, test, lint, or run the project for \
+                              real — e.g. `cargo build`, `cargo test`, `python -m pytest`, `npm run \
+                              build`. Every call starts fresh in the project root (or in `cwd`, if \
+                              given): a `cd` in one call does NOT carry over to the next, so pass \
+                              `cwd` rather than prefixing `cd`. Combined stdout+stderr, the \
+                              directory it ran in, and the exit status are returned. Commands run \
+                              with your own permissions and can modify the working tree, so prefer \
+                              `sandbox_run` for anything untrusted or throwaway. Times out after \
+                              300s."
                     .to_string(),
                 parameters: json!({
                     "type": "object",
                     "properties": {
-                        "command": {"type": "string", "description": "Shell command to run in the project root"}
+                        "command": {"type": "string", "description": "Shell command to run"},
+                        "cwd": {"type": "string", "description": "Directory to run it in, relative to the project root (e.g. `packages/api`). Defaults to the project root."}
                     },
                     "required": ["command"]
                 }),
@@ -1224,13 +1228,50 @@ impl ToolBox {
         let command = args["command"]
             .as_str()
             .context("run_command needs a 'command'")?;
-        let (success, output) = self.shell(command).await?;
+        let dir = match args["cwd"].as_str().map(str::trim) {
+            None | Some("") | Some(".") => self.root.clone(),
+            Some(cwd) => {
+                let dir = self.resolve(cwd)?;
+                if !dir.is_dir() {
+                    bail!("cwd '{cwd}' is not a directory");
+                }
+                dir
+            }
+        };
+        let (success, output) = self.shell_in(command, &dir).await?;
         // Remember tooling commands (builds, lints, formats, tests, …) so later
-        // sessions know how this project is built and checked.
+        // sessions know how this project is built and checked — including where,
+        // since `cargo test` in a sub-package is a different command from
+        // `cargo test` at the root.
+        let shown = self.shown_dir(&dir);
+        let remembered = if shown == "." {
+            command.to_string()
+        } else {
+            format!("cd {shown} && {command}")
+        };
         let _ = self
             .brain
-            .record_command(command, classify_command(command), success);
-        Ok(output)
+            .record_command(&remembered, classify_command(command), success);
+        // Said with the output, so a model that lost track of where it is reads
+        // the answer next to the result it is reasoning about.
+        Ok(format!("[ran in {shown}]\n{output}"))
+    }
+
+    /// A directory as the assistant should see it: relative to the project
+    /// root (`.` for the root itself), or absolute when outside it (/tmp).
+    fn shown_dir(&self, dir: &Path) -> String {
+        let root = self
+            .root
+            .canonicalize()
+            .unwrap_or_else(|_| self.root.clone());
+        match dir
+            .strip_prefix(&root)
+            .or_else(|_| dir.strip_prefix(&self.root))
+        {
+            Ok(rel) if rel.as_os_str().is_empty() => ".".to_string(),
+            Ok(rel) => rel.display().to_string(),
+            Err(_) => dir.display().to_string(),
+        }
     }
 
     /// Run a shell command from the project root via `sh -c`, capping runtime so
@@ -1239,6 +1280,11 @@ impl ToolBox {
     /// output, with the exit status appended. Shared by `run_command` and the
     /// loop's verification gate (`run_verify`).
     async fn shell(&self, command: &str) -> Result<(bool, String)> {
+        self.shell_in(command, &self.root.clone()).await
+    }
+
+    /// [`Self::shell`], from `dir` rather than the project root.
+    async fn shell_in(&self, command: &str, dir: &Path) -> Result<(bool, String)> {
         // Run through the user's LOGIN shell (`-l`) so their profile is sourced
         // and PATH additions for tools installed via nvm / asdf / corepack /
         // `~/.local/bin` / `~/.yarn/bin` are present. A bare `sh -c` inherits the
@@ -1248,7 +1294,7 @@ impl ToolBox {
             .arg("-l")
             .arg("-c")
             .arg(command)
-            .current_dir(&self.root)
+            .current_dir(dir)
             .output();
         // Cap runtime so a hung build/test can't wedge the whole agent loop.
         let output = match tokio::time::timeout(std::time::Duration::from_secs(300), fut).await {
@@ -1778,6 +1824,36 @@ mod tests {
         let brain = Arc::new(Brain::open(&root).unwrap());
         let tb = ToolBox::new(root.clone(), brain, CiabattaConfig::default());
         (root, tb)
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn run_command_says_where_it_ran_and_honours_cwd() {
+        let (root, tb) = toolbox();
+
+        let at_root = tb.run_command(&json!({"command": "pwd"})).await.unwrap();
+        assert!(at_root.starts_with("[ran in .]"), "{at_root}");
+
+        let in_src = tb
+            .run_command(&json!({"command": "pwd", "cwd": "src"}))
+            .await
+            .unwrap();
+        assert!(in_src.starts_with("[ran in src]"), "{in_src}");
+        assert!(in_src.contains("/src\n"), "{in_src}");
+
+        // Confined like every other path: no running from outside the project.
+        assert!(
+            tb.run_command(&json!({"command": "pwd", "cwd": "/etc"}))
+                .await
+                .is_err()
+        );
+        // And a file is not somewhere to run from.
+        assert!(
+            tb.run_command(&json!({"command": "pwd", "cwd": "src/a.rs"}))
+                .await
+                .is_err()
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     // Unix-only: the /tmp scratch space and /etc refusal cases are Unix paths.

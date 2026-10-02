@@ -21,22 +21,31 @@
 //! * [`index`] — the repository, cached between keystrokes.
 //! * [`complete`] — cursor plus repository to a list of suggestions.
 //! * [`diagnostics`] — the references that don't resolve.
+//! * [`runs`] — how the project's runs are going, live and last time.
 
 mod complete;
 mod context;
 mod diagnostics;
 mod index;
 mod rpc;
+mod runs;
 mod schema;
 
 use std::collections::HashMap;
 use std::io::{BufReader, Write};
 use std::path::PathBuf;
+use std::sync::mpsc;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use serde_json::{Value, json};
 
-use index::{Cache, Location, classify};
+use index::{Cache, Location, Role, classify};
+use runs::RunWatch;
+
+/// How often the server looks at the project's runs. Often enough that a
+/// progress bar moves while you watch; rarely enough to cost nothing.
+const RUN_POLL: Duration = Duration::from_secs(2);
 
 /// Documents the client has open, by URI. The client owns their contents once
 /// it opens them, so this is the only place to read from — the file on disk is
@@ -49,23 +58,60 @@ type Documents = HashMap<String, String>;
 /// server. Nothing else may write to stdout for the duration — a stray
 /// `println!` would be read as a malformed message — so diagnostics about the
 /// server itself go to stderr, where editors collect them into a log.
+///
+/// Messages are read on a thread of their own, so the loop can also wake on a
+/// timer: run status has to reach the editor when a run moves, not only when
+/// the user next types something.
 pub fn serve() -> Result<()> {
-    let stdin = std::io::stdin();
-    let mut input = BufReader::new(stdin.lock());
+    let (messages, inbox) = mpsc::channel::<Result<Option<rpc::Message>>>();
+    std::thread::spawn(move || {
+        let stdin = std::io::stdin();
+        let mut input = BufReader::new(stdin.lock());
+        loop {
+            let message = rpc::read(&mut input);
+            let more = matches!(message, Ok(Some(_)));
+            if messages.send(message).is_err() || !more {
+                break;
+            }
+        }
+    });
+
     let stdout = std::io::stdout();
     let mut output = stdout.lock();
 
     let mut documents = Documents::new();
     let mut cache = Cache::default();
+    let mut watch = RunWatch::new();
+    let mut initialized = false;
     let mut shutting_down = false;
+    let mut last_poll = Instant::now();
 
-    while let Some(message) = rpc::read(&mut input)? {
+    loop {
+        // Look at the runs when it's time, whether or not a message is waiting
+        // — an editor busy sending keystrokes would otherwise starve it.
+        if initialized && last_poll.elapsed() >= RUN_POLL {
+            last_poll = Instant::now();
+            if watch.tick(&mut output)? {
+                // A run finished: the open workflows' "last run" is stale.
+                for (uri, text) in &documents {
+                    publish(&mut output, uri, text, &mut cache, &watch)?;
+                }
+            }
+        }
+        let message = match inbox.recv_timeout(RUN_POLL.saturating_sub(last_poll.elapsed())) {
+            Ok(message) => message,
+            Err(mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        };
+        let Some(message) = message? else { break };
+
         match message.method.as_str() {
             "initialize" => {
                 let id = message.id.expect("initialize is a request");
+                watch.initialize(&message.params);
                 rpc::respond(&mut output, &id, capabilities())?;
             }
-            "initialized" => {}
+            "initialized" => initialized = true,
 
             "textDocument/didOpen" => {
                 let uri = uri_of(&message.params);
@@ -74,7 +120,10 @@ pub fn serve() -> Result<()> {
                     .unwrap_or_default()
                     .to_string();
                 if let Some(uri) = uri {
-                    publish(&mut output, &uri, &text, &mut cache)?;
+                    if let Some((path, _)) = locate(&uri) {
+                        watch.adopt(&path);
+                    }
+                    publish(&mut output, &uri, &text, &mut cache, &watch)?;
                     documents.insert(uri, text);
                 }
             }
@@ -92,7 +141,7 @@ pub fn serve() -> Result<()> {
                     continue;
                 };
                 let text = text.to_string();
-                publish(&mut output, &uri, &text, &mut cache)?;
+                publish(&mut output, &uri, &text, &mut cache, &watch)?;
                 documents.insert(uri, text);
             }
             "textDocument/didSave" => {
@@ -102,7 +151,7 @@ pub fn serve() -> Result<()> {
                 if let Some(uri) = uri_of(&message.params)
                     && let Some(text) = documents.get(&uri).cloned()
                 {
-                    publish(&mut output, &uri, &text, &mut cache)?;
+                    publish(&mut output, &uri, &text, &mut cache, &watch)?;
                 }
             }
             "textDocument/didClose" => {
@@ -124,6 +173,11 @@ pub fn serve() -> Result<()> {
                 let result = completion(&message.params, &documents, &mut cache);
                 rpc::respond(&mut output, &id, result)?;
             }
+            "textDocument/hover" => {
+                let id = message.id.expect("hover is a request");
+                let result = hover(&message.params, &documents, &mut cache, &watch);
+                rpc::respond(&mut output, &id, result)?;
+            }
 
             "shutdown" => {
                 shutting_down = true;
@@ -131,7 +185,6 @@ pub fn serve() -> Result<()> {
                 rpc::respond(&mut output, &id, Value::Null)?;
             }
             "exit" => {
-                rpc::drain(&mut input);
                 // A client that exits without shutting down first is telling us
                 // something went wrong; the protocol asks us to say so.
                 return if shutting_down {
@@ -175,6 +228,8 @@ fn capabilities() -> Value {
                 // `{` opens a `{CIABATTA_*}` substitution.
                 "triggerCharacters": ["-", " ", ":", "{"],
             },
+            // How a workflow's runs are going — see `runs`.
+            "hoverProvider": true,
         },
         "serverInfo": { "name": "ciabatta", "version": env!("CARGO_PKG_VERSION") },
     })
@@ -204,12 +259,27 @@ fn member_of(location: &Location, index: &index::Index) -> Option<String> {
         .or_else(|| Some(dir.file_name()?.to_str()?.to_string()))
 }
 
-fn publish(output: &mut impl Write, uri: &str, text: &str, cache: &mut Cache) -> Result<()> {
+fn publish(
+    output: &mut impl Write,
+    uri: &str,
+    text: &str,
+    cache: &mut Cache,
+    watch: &RunWatch,
+) -> Result<()> {
     let diagnostics = match locate(uri) {
         Some((_, location)) => {
             let index = cache.get(&location.member_dir);
             let lines: Vec<&str> = text.lines().collect();
-            diagnostics::check(&lines, &location.role, &index)
+            let mut found = diagnostics::check(&lines, &location.role, &index);
+            // A workflow whose last run failed says so on its first line.
+            if let Role::Workflow(name) = &location.role
+                && let Some(failed) =
+                    watch.diagnostic(member_of(&location, &index).as_deref(), name)
+                && let Some(list) = found.as_array_mut()
+            {
+                list.push(failed);
+            }
+            found
         }
         None => json!([]),
     };
@@ -218,6 +288,36 @@ fn publish(output: &mut impl Write, uri: &str, text: &str, cache: &mut Cache) ->
         "textDocument/publishDiagnostics",
         json!({ "uri": uri, "diagnostics": diagnostics }),
     )
+}
+
+/// What a workflow file's top-level lines say on hover: how its runs are going.
+///
+/// Only the top-level lines (`description:`, `steps:` …), which are about the
+/// workflow as a whole; a hover on a step or a value would be answering a
+/// question nobody asked there.
+fn hover(params: &Value, documents: &Documents, cache: &mut Cache, watch: &RunWatch) -> Value {
+    let Some(uri) = uri_of(params) else {
+        return Value::Null;
+    };
+    let Some((_, location)) = locate(&uri) else {
+        return Value::Null;
+    };
+    let Role::Workflow(name) = &location.role else {
+        return Value::Null;
+    };
+    let line = params["position"]["line"].as_u64().unwrap_or(0) as usize;
+    let top_level = documents
+        .get(&uri)
+        .and_then(|text| text.lines().nth(line))
+        .is_some_and(|l| !l.is_empty() && !l.starts_with([' ', '\t', '#', '-']));
+    if !top_level {
+        return Value::Null;
+    }
+    let index = cache.get(&location.member_dir);
+    match watch.hover(member_of(&location, &index).as_deref(), name) {
+        Some(text) => json!({ "contents": { "kind": "markdown", "value": text } }),
+        None => Value::Null,
+    }
 }
 
 fn completion(params: &Value, documents: &Documents, cache: &mut Cache) -> Value {

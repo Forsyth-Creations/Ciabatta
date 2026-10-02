@@ -1,10 +1,21 @@
 /** Types and queries for runs. */
 
+import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { ApiError, api } from "./client";
 import type { EnvReport } from "./types";
 import { useWorkspace } from "./workspace";
+
+/**
+ * When something in a run started and finished, as RFC 3339 timestamps. Both
+ * are null until it gets there — and stay null on a run recorded before the
+ * daemon kept them.
+ */
+export interface Timed {
+  started_at?: string | null;
+  finished_at?: string | null;
+}
 
 export type StepStatus =
   | "pending"
@@ -15,7 +26,7 @@ export type StepStatus =
   /** Cut short: the run was stopped, or the daemon restarted under it. */
   | "stopped";
 
-export interface StepView {
+export interface StepView extends Timed {
   name: string;
   status: StepStatus;
   /** Recovery nodes are the "fix-it" branches a failure can divert into. */
@@ -125,7 +136,7 @@ export interface EdgeView {
   kind: "needs" | "error" | "retry";
 }
 
-export interface StageView {
+export interface StageView extends Timed {
   name: string;
   status: string;
 }
@@ -136,7 +147,7 @@ export interface PendingChoice {
   options: string[];
 }
 
-export interface WorkflowView {
+export interface WorkflowView extends Timed {
   name: string;
   status: string;
   error: string | null;
@@ -154,7 +165,10 @@ export interface WorkflowView {
   env: EnvReport;
 }
 
-export interface RunSummary {
+/** `started_at` is when the run's first workflow started, which can lag
+ *  `created_at` (when it was asked for); `finished_at` stays null until every
+ *  workflow has ended. */
+export interface RunSummary extends Timed {
   id: number;
   project: string;
   workflows: string[];
@@ -371,4 +385,50 @@ export function useSetRunSettings() {
       queryClient.invalidateQueries({ queryKey: runKeys.runs });
     },
   });
+}
+
+/**
+ * How long something took, precise enough to compare two runs of it: tenths of
+ * a second while that still matters, whole units once it doesn't. The same
+ * shape the terminal prints, so the two read alike.
+ */
+export function formatElapsed(ms: number): string {
+  if (ms < 60_000) return `${(Math.max(ms, 0) / 1000).toFixed(1)}s`;
+  const seconds = Math.floor(ms / 1000);
+  const minutes = Math.floor(seconds / 60);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  if (minutes < 60) return `${minutes}m${pad(seconds % 60)}s`;
+  return `${Math.floor(minutes / 60)}h${pad(minutes % 60)}m`;
+}
+
+/** A timestamp as a wall-clock time — `14:03:22` — for "when did it finish". */
+export function clockTime(at: string): string {
+  return new Date(at).toLocaleTimeString([], { hour12: false });
+}
+
+/**
+ * How long a timed thing has taken: to its finish once it has one, to `now`
+ * while it's still going. Null when it never started.
+ */
+export function elapsedOf(timed: Timed, now: number): string | null {
+  if (!timed.started_at) return null;
+  const began = Date.parse(timed.started_at);
+  const ended = timed.finished_at ? Date.parse(timed.finished_at) : now;
+  return formatElapsed(ended - began);
+}
+
+/**
+ * The current time, re-read every `ms` while `live` — so a running phase's
+ * clock ticks between updates from the daemon, which only arrive when
+ * something changes. Stops ticking once nothing is running.
+ */
+export function useNow(live: boolean, ms = 1_000): number {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!live) return;
+    setNow(Date.now());
+    const timer = window.setInterval(() => setNow(Date.now()), ms);
+    return () => window.clearInterval(timer);
+  }, [live, ms]);
+  return now;
 }

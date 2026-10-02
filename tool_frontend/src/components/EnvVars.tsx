@@ -29,7 +29,19 @@ import { monoFontStack } from "../theme";
 /** The value as text, including the two cases where there isn't one. */
 export function envValueText(variable: EnvVar): string {
   if (variable.value !== null) return variable.value;
-  return variable.varies ? "set per step" : "unset";
+  if (variable.varies) return "set per step";
+  return variable.optional ? "unset · optional" : "unset";
+}
+
+/**
+ * Whether a variable being unset is a problem worth colouring red.
+ *
+ * Not for an optional one — a registry credential a push does without, an AWS
+ * key when a profile or role supplies the access — where red would send
+ * somebody hunting for a fault that isn't there.
+ */
+export function unsetProblem(variable: EnvVar): boolean {
+  return variable.origin === "unset" && !variable.optional;
 }
 
 /** Where the value came from, in the words the config uses. */
@@ -53,12 +65,14 @@ export function originText(variable: EnvVar): string {
  * shell prints and a truncated value is worse than a wrapped one.
  */
 export function EnvVarChip({ variable }: { variable: EnvVar }) {
-  const unset = variable.origin === "unset";
+  const unset = unsetProblem(variable);
   return (
     <Tooltip
       title={
         <>
+          {variable.purpose && `${variable.purpose} · `}
           {originText(variable)}
+          {variable.optional && " · optional"}
           {variable.required && " · REQUIRED_ENV"}
           {variable.secret && " · value hidden because the name looks like a secret"}
           {variable.steps.length > 0 && ` · used by ${variable.steps.join(", ")}`}

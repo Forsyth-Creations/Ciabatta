@@ -1,3 +1,6 @@
+use std::collections::HashMap;
+use std::time::{Duration, Instant};
+
 use crate::runner::{ProgressUpdate, StageKind};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -34,6 +37,38 @@ pub struct WorkflowState {
     /// For multi-file workflows: (files done, total files) reported during the
     /// main push/pull stage. `None` for single-file workflows.
     pub transfer: Option<(usize, usize)>,
+    /// When each phase started, and — once it has — how long it took, so the
+    /// stage strip can show a running clock and then the final time.
+    pub stage_times: [StageTime; 4],
+    /// When each step in flight started, keyed by name.
+    pub step_started: HashMap<String, Instant>,
+}
+
+/// A phase's clock: not started, running since an instant, or finished.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum StageTime {
+    #[default]
+    NotStarted,
+    Since(Instant),
+    Took(Duration),
+}
+
+impl StageTime {
+    /// What the strip shows: the time so far for a running phase, the final
+    /// time for a finished one, nothing for one that hasn't started.
+    pub fn label(self) -> Option<String> {
+        match self {
+            StageTime::NotStarted => None,
+            StageTime::Since(began) => Some(crate::runner::elapsed(began.elapsed())),
+            StageTime::Took(d) => Some(crate::runner::elapsed(d)),
+        }
+    }
+
+    fn stop(&mut self) {
+        if let StageTime::Since(began) = *self {
+            *self = StageTime::Took(began.elapsed());
+        }
+    }
 }
 
 impl WorkflowState {
@@ -92,6 +127,8 @@ impl App {
                 stages: [StageStatus::Pending; 4],
                 logs: Vec::new(),
                 transfer: None,
+                stage_times: Default::default(),
+                step_started: HashMap::new(),
             }],
             selected: 0,
             all_done: false,
@@ -109,6 +146,7 @@ impl App {
             ProgressUpdate::StageStarted { workflow, stage } => {
                 if let Some(r) = self.find_mut(&workflow) {
                     r.stages[stage.index()] = StageStatus::Running;
+                    r.stage_times[stage.index()] = StageTime::Since(Instant::now());
                 }
             }
             ProgressUpdate::StageFinished {
@@ -122,6 +160,7 @@ impl App {
                     } else {
                         StageStatus::Skipped
                     };
+                    r.stage_times[stage.index()].stop();
                 }
             }
             ProgressUpdate::TransferProgress {
@@ -141,12 +180,21 @@ impl App {
             ProgressUpdate::StepStarted { workflow, step } => {
                 if let Some(r) = self.find_mut(&workflow) {
                     r.logs.push(format!("▶ {step}"));
+                    r.step_started.insert(step, Instant::now());
                 }
             }
             ProgressUpdate::StepFinished { workflow, step, ok } => {
                 if let Some(r) = self.find_mut(&workflow) {
-                    r.logs
-                        .push(format!("{} {step}", if ok { "✓" } else { "✗" }));
+                    let mark = if ok { "✓" } else { "✗" };
+                    let at = chrono::Local::now().format("%H:%M:%S");
+                    let line = match r.step_started.remove(&step) {
+                        Some(began) => format!(
+                            "{mark} {step} ({} · {at})",
+                            crate::runner::elapsed(began.elapsed())
+                        ),
+                        None => format!("{mark} {step} ({at})"),
+                    };
+                    r.logs.push(line);
                 }
             }
             ProgressUpdate::StepSkipped {
@@ -192,6 +240,7 @@ impl App {
                     // Mark the stage that was in flight as failed.
                     if let Some(idx) = r.stages.iter().position(|s| *s == StageStatus::Running) {
                         r.stages[idx] = StageStatus::Failed;
+                        r.stage_times[idx].stop();
                     }
                     r.logs.push(format!("✗ failed: {err}"));
                     r.status = WorkflowStatus::Failed(err);
@@ -257,6 +306,8 @@ mod tests {
             stages: [StageStatus::Pending; 4],
             logs: Vec::new(),
             transfer: None,
+            stage_times: Default::default(),
+            step_started: HashMap::new(),
         }
     }
 
@@ -286,5 +337,43 @@ mod tests {
         assert_eq!(r.transfer_label(), None);
         r.transfer = Some((3, 10));
         assert_eq!(r.transfer_label().as_deref(), Some("3/10 files"));
+    }
+
+    #[test]
+    fn a_phase_keeps_its_time_once_it_finishes() {
+        let mut app = App::new("r", false);
+        let at = |app: &App| app.workflows[0].stage_times[StageKind::Pre.index()];
+        assert_eq!(at(&app).label(), None);
+
+        app.apply_update(ProgressUpdate::StageStarted {
+            workflow: "r".into(),
+            stage: StageKind::Pre,
+        });
+        assert!(matches!(at(&app), StageTime::Since(_)));
+
+        app.apply_update(ProgressUpdate::StageFinished {
+            workflow: "r".into(),
+            stage: StageKind::Pre,
+            ran: true,
+        });
+        assert!(matches!(at(&app), StageTime::Took(_)));
+        assert!(at(&app).label().is_some());
+    }
+
+    #[test]
+    fn a_finished_step_says_how_long_it_took() {
+        let mut app = App::new("r", false);
+        app.apply_update(ProgressUpdate::StepStarted {
+            workflow: "r".into(),
+            step: "compile".into(),
+        });
+        app.apply_update(ProgressUpdate::StepFinished {
+            workflow: "r".into(),
+            step: "compile".into(),
+            ok: true,
+        });
+        let last = app.workflows[0].logs.last().unwrap();
+        assert!(last.starts_with("✓ compile (0."), "{last}");
+        assert!(app.workflows[0].step_started.is_empty());
     }
 }

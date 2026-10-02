@@ -244,6 +244,7 @@ async fn graph(
         },
         &workspace.root,
         &std::env::vars().collect(),
+        crate::config::load_config(&workspace.root).ok().as_ref(),
     );
 
     Ok(Json(json!({

@@ -479,7 +479,7 @@ fn report_run_dependencies(
     if let Some(text) = run::deps::report(&cfg, root, name, &resolved.steps, vars) {
         say(text);
     }
-    if let Some(text) = run::envdeps::collect(resolved, root, vars).render(name) {
+    if let Some(text) = run::envdeps::collect(resolved, root, vars, Some(&cfg)).render(name) {
         say(text);
     }
 }
@@ -1740,11 +1740,33 @@ async fn run_plain(
     // colour gets the same text with no escapes at all — see [`color`].
     let tag = |name: &str| format!("[{name}]").style(color::faint()).to_string();
 
+    // When each workflow, phase and step started, so its finish line can say
+    // how long it took. Keyed by name: a step that runs again (a retry routes
+    // back to it) restarts its own clock.
+    let mut clocks: HashMap<String, std::time::Instant> = HashMap::new();
+    let start = |clocks: &mut HashMap<String, std::time::Instant>, key: String| {
+        clocks.insert(key, std::time::Instant::now());
+    };
+    // "(1.2s · 14:03:22)": how long, and when it ended — dimmed, since it's
+    // bookkeeping next to the outcome rather than the outcome itself.
+    let took = |clocks: &mut HashMap<String, std::time::Instant>, key: &str| {
+        let at = chrono::Local::now().format("%H:%M:%S");
+        let text = match clocks.remove(key) {
+            Some(began) => format!("({} · {at})", runner::elapsed(began.elapsed())),
+            None => format!("({at})"),
+        };
+        text.style(color::faint()).to_string()
+    };
+
     let mut any_failed = false;
     while let Some(update) = rx.recv().await {
         match update {
-            ProgressUpdate::Started(name) => println!("{} started", tag(&name)),
+            ProgressUpdate::Started(name) => {
+                start(&mut clocks, format!("workflow:{name}"));
+                println!("{} started", tag(&name))
+            }
             ProgressUpdate::StageStarted { workflow, stage } => {
+                start(&mut clocks, format!("stage:{workflow}:{}", stage.label()));
                 println!(
                     "{} {} {}",
                     tag(&workflow),
@@ -1757,7 +1779,15 @@ async fn run_plain(
                 stage,
                 ran,
             } => {
-                if !ran {
+                let time = took(&mut clocks, &format!("stage:{workflow}:{}", stage.label()));
+                if ran {
+                    println!(
+                        "{}   {} {} {time}",
+                        tag(&workflow),
+                        "✓".style(color::good()),
+                        stage.label()
+                    );
+                } else {
                     println!(
                         "{}   {}",
                         tag(&workflow),
@@ -1775,6 +1805,7 @@ async fn run_plain(
             }
             ProgressUpdate::Log(name, line) => println!("{} {line}", tag(&name)),
             ProgressUpdate::StepStarted { workflow, step } => {
+                start(&mut clocks, format!("step:{workflow}:{step}"));
                 println!(
                     "{} {} step: {step}",
                     tag(&workflow),
@@ -1787,7 +1818,8 @@ async fn run_plain(
                 } else {
                     "✗".style(color::bad())
                 };
-                println!("{}   {mark} step: {step}", tag(&workflow))
+                let time = took(&mut clocks, &format!("step:{workflow}:{step}"));
+                println!("{}   {mark} step: {step} {time}", tag(&workflow))
             }
             ProgressUpdate::StepSkipped {
                 workflow,
@@ -1829,10 +1861,20 @@ async fn run_plain(
                 }
             }
             ProgressUpdate::Completed(name) => {
-                println!("{} {} completed", tag(&name), "✓".style(color::good()))
+                let time = took(&mut clocks, &format!("workflow:{name}"));
+                println!(
+                    "{} {} completed {time}",
+                    tag(&name),
+                    "✓".style(color::good())
+                )
             }
             ProgressUpdate::Failed(name, err) => {
-                eprintln!("{} {} failed: {err}", tag(&name), "✗".style(color::bad()));
+                let time = took(&mut clocks, &format!("workflow:{name}"));
+                eprintln!(
+                    "{} {} failed {time}: {err}",
+                    tag(&name),
+                    "✗".style(color::bad())
+                );
                 any_failed = true;
             }
         }

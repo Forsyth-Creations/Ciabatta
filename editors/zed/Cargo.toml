@@ -1,11 +1,13 @@
 [package]
 name = "zed_ciabatta"
-version = "0.3.7"
-edition = "2024"
+version = "0.3.6"
+# 2021, not the CLI's 2024: Zed compiles a dev extension with whatever Rust the
+# user happens to have, so the lower the floor the fewer people it fails for.
+edition = "2021"
 publish = false
 license = "MIT"
 
-# Standalone on purpose: this compiles to wasm32-wasip1 for Zed's extension
+# Standalone on purpose: this compiles to wasm32-wasip2 for Zed's extension
 # host, and has nothing to do with the CLI it launches. The empty table keeps
 # it out of any workspace the parent directory might grow later.
 [workspace]
@@ -14,4 +16,4 @@ license = "MIT"
 crate-type = ["cdylib"]
 
 [dependencies]
-zed_extension_api = "0.1"
+zed_extension_api = "0.6"

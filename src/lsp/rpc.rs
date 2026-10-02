@@ -6,7 +6,7 @@
 //! rather than through a generated model of the whole LSP surface. What we do
 //! not understand, we ignore — which is also what the protocol asks of us.
 
-use std::io::{BufRead, Read, Write};
+use std::io::{BufRead, Write};
 
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
@@ -122,6 +122,16 @@ pub fn notify<W: Write>(output: &mut W, method: &str, params: Value) -> Result<(
 }
 
 /// `MethodNotFound`, the one JSON-RPC error code this server returns.
+/// Send a request to the client. Its answer arrives later as a message with
+/// no method, which the server's loop drops — every request this server makes
+/// is one whose answer it doesn't need.
+pub fn request<W: Write>(output: &mut W, id: &Value, method: &str, params: Value) -> Result<()> {
+    send(
+        output,
+        &json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }),
+    )
+}
+
 pub const METHOD_NOT_FOUND: i64 = -32601;
 
 /// Turn a `file://` URI into a path.
@@ -161,12 +171,6 @@ pub fn uri_to_path(uri: &str) -> Option<std::path::PathBuf> {
         _ => decoded,
     };
     Some(std::path::PathBuf::from(decoded))
-}
-
-/// Drain and discard stdin. Used when the client sends `exit` without a
-/// preceding `shutdown` and we want to leave the pipe in a sane state.
-pub fn drain<R: Read>(input: &mut R) {
-    let _ = std::io::copy(input, &mut std::io::sink());
 }
 
 #[cfg(test)]

@@ -1,9 +1,9 @@
-id = "ciabatta"
+id = "ciabatta-lsp"
 name = "Ciabatta"
-version = "0.3.7"
+version = "0.4.1"
 schema_version = 1
-authors = ["Henry Forsyth"]
-description = "Repository-aware completion and reference checking for .ciabatta/ workspace and workflow files."
+authors = ["Henry Forsyth <robert.h.forsyth@gmail.com>"]
+description = "Repository-aware completion, reference checking and live run status for .ciabatta/ workspace and workflow files."
 repository = "https://github.com/forsyth-creations/ciabatta"
 
 # Ciabatta's config files are YAML, so this attaches to the YAML language

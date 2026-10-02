@@ -18,6 +18,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use super::{ResolvedRun, RunStep, parse_env_content, prepare_env};
+use crate::config::CiabattaConfig;
 
 /// Where a variable's effective value comes from.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
@@ -64,6 +65,16 @@ pub struct EnvVar {
     pub steps: Vec<String>,
     /// Set by several steps to different values, so there is no single one.
     pub varies: bool,
+    /// Why a step needs it, when that isn't visible in the step itself — a
+    /// registry credential, a placeholder in a publish path. Defaulted so a run
+    /// recorded before this existed still loads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub purpose: Option<String>,
+    /// Whether every step that needs it carries on without it, so being unset
+    /// is a fact rather than a problem: a push that goes unauthenticated, an
+    /// AWS credential found another way.
+    #[serde(default, skip_serializing_if = "crate::format::is_false")]
+    pub optional: bool,
 }
 
 /// Every environment variable a run depends on, resolved as far as the inputs
@@ -134,6 +145,12 @@ impl EnvReport {
             if var.required {
                 notes.push("REQUIRED_ENV".to_string());
             }
+            if let Some(purpose) = &var.purpose {
+                notes.push(purpose.clone());
+            }
+            if var.optional {
+                notes.push("optional".to_string());
+            }
             if !var.steps.is_empty() {
                 notes.push(format!("used by {}", var.steps.join(", ")));
             }
@@ -163,7 +180,16 @@ impl EnvReport {
 /// whatever CI, git, and `-e` resolved. Never fails: an unreadable `.env` file
 /// (which the engine reports properly a moment later) degrades the report
 /// rather than replacing the real error with one about drawing a table.
-pub fn collect(resolved: &ResolvedRun, root: &Path, base: &HashMap<String, String>) -> EnvReport {
+///
+/// `config` is the run's configuration, for the registries its push and pull
+/// steps go through: what they read from the environment is decided there, not
+/// in the step. Without it, a registry's kind is guessed from its name.
+pub fn collect(
+    resolved: &ResolvedRun,
+    root: &Path,
+    base: &HashMap<String, String>,
+    config: Option<&CiabattaConfig>,
+) -> EnvReport {
     // The engine's own resolution, so the values reported are the values the
     // steps will actually see.
     let prepared = prepare_env(resolved, root, base).ok();
@@ -220,9 +246,27 @@ pub fn collect(resolved: &ResolvedRun, root: &Path, base: &HashMap<String, Strin
     // stable, so the report doesn't reshuffle between two identical runs.
     let mut users: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut declared: BTreeMap<String, HashSet<String>> = BTreeMap::new();
+    // For variables a step needs without saying so: why, and whether *every*
+    // step needing it could do without. A variable some step reads outright is
+    // never optional, however many others treat it as a nice-to-have.
+    let mut purposes: BTreeMap<String, String> = BTreeMap::new();
+    let mut needed: HashSet<String> = HashSet::new();
     for step in &resolved.steps {
         for key in step_refs(step) {
+            needed.insert(key.clone());
             let list = users.entry(key).or_default();
+            if !list.contains(&step.name) {
+                list.push(step.name.clone());
+            }
+        }
+        for implied in implied_refs(step, config, &env) {
+            if !implied.optional {
+                needed.insert(implied.key.clone());
+            }
+            purposes
+                .entry(implied.key.clone())
+                .or_insert(implied.purpose);
+            let list = users.entry(implied.key).or_default();
             if !list.contains(&step.name) {
                 list.push(step.name.clone());
             }
@@ -312,10 +356,16 @@ pub fn collect(resolved: &ResolvedRun, root: &Path, base: &HashMap<String, Strin
             };
 
             let secret = value.is_some() && looks_secret(&key);
+            let required = resolved.required_env.contains(&key);
             EnvVar {
+                purpose: purposes.get(&key).cloned(),
+                optional: purposes.contains_key(&key)
+                    && !needed.contains(&key)
+                    && !required
+                    && !declared.contains_key(&key),
                 value: value.map(|v| if secret { mask(&v) } else { v }),
                 secret,
-                required: resolved.required_env.contains(&key),
+                required,
                 origin,
                 file,
                 steps: users.get(&key).cloned().unwrap_or_default(),
@@ -335,6 +385,83 @@ pub fn collect(resolved: &ResolvedRun, root: &Path, base: &HashMap<String, Strin
         missing,
         vars,
     }
+}
+
+/// A variable a step needs that its own text doesn't mention.
+pub struct Implied {
+    pub key: String,
+    pub purpose: String,
+    pub optional: bool,
+}
+
+/// What a step needs from the environment beyond what [`step_refs`] can see.
+///
+/// A push or pull step with no command of its own runs the built-in registry
+/// transfer, and that reads variables the workflow file never names: the
+/// credentials the registry is configured to use, and the `{CIABATTA_*}`
+/// placeholders in where it publishes to. A step that only says
+/// `registry: nexus` used to show no dependencies at all, and then failed on
+/// one.
+pub fn implied_refs(
+    step: &RunStep,
+    config: Option<&CiabattaConfig>,
+    env: &HashMap<String, String>,
+) -> Vec<Implied> {
+    let Some(transfer) = step.transfer() else {
+        return Vec::new();
+    };
+    // A transfer step that names a `run`/`script` runs that instead of the
+    // built-in move, and that command's references are already counted.
+    if step.run.is_some() || step.script.is_some() {
+        return Vec::new();
+    }
+
+    let mut out: Vec<Implied> = Vec::new();
+    let mut add = |key: String, purpose: String, optional: bool| {
+        if !out.iter().any(|i| i.key == key) {
+            out.push(Implied {
+                key,
+                purpose,
+                optional,
+            });
+        }
+    };
+
+    let direction = transfer.direction.label();
+    match transfer.publish_path {
+        Some(crate::config::PublishPath::Single(path)) => {
+            for key in placeholder_refs(path) {
+                add(key, format!("substituted into the {direction} path"), false);
+            }
+        }
+        // Each glob is uploaded under `{CIABATTA_PATH}`.
+        Some(crate::config::PublishPath::Many(_)) => add(
+            "CIABATTA_PATH".into(),
+            format!("where each file is {direction}ed under"),
+            false,
+        ),
+        None => {}
+    }
+    for text in [transfer.artifact, transfer.local_image]
+        .into_iter()
+        .flatten()
+    {
+        for key in placeholder_refs(text) {
+            add(
+                key,
+                format!("substituted into the {direction}ed artifact"),
+                false,
+            );
+        }
+    }
+
+    if let Some(name) = transfer.registry {
+        let registry = config.and_then(|c| c.registries.get(name));
+        for var in crate::registry::credential_env(name, registry, env) {
+            add(var.key, var.purpose, var.optional);
+        }
+    }
+    out
 }
 
 /// Every variable one step reads: in its command, the script path, its working
@@ -435,7 +562,11 @@ pub fn looks_secret(key: &str) -> bool {
         "APIKEY",
         "AUTH",
     ];
+    // `_PASS` and `_PWD` as suffixes only: as substrings they'd catch
+    // `BYPASS_CACHE` and `PWD`, which are neither.
     NEEDLES.iter().any(|needle| key.contains(needle))
+        || key.ends_with("_PASS")
+        || key.ends_with("_PWD")
         || key.ends_with("_KEY")
         || key.ends_with("_PASS")
         || key == "KEY"
@@ -521,7 +652,7 @@ mod tests {
             ..Default::default()
         };
         let base = env(&[("AWS_REGION", "eu-west-1"), ("API_TOKEN", "s3cret")]);
-        let report = collect(&resolved, Path::new("."), &base);
+        let report = collect(&resolved, Path::new("."), &base, None);
 
         let region = find(&report, "AWS_REGION");
         assert_eq!(region.value.as_deref(), Some("eu-west-1"));
@@ -542,7 +673,7 @@ mod tests {
             steps: vec![step("build", "true")],
             ..Default::default()
         };
-        let report = collect(&resolved, Path::new("."), &env(&[]));
+        let report = collect(&resolved, Path::new("."), &env(&[]), None);
 
         let stage = find(&report, "STAGE");
         assert_eq!(stage.origin, Origin::Unset);
@@ -566,6 +697,7 @@ mod tests {
             },
             Path::new("."),
             &env(&[]),
+            None,
         );
         let profile = find(&one, "PROFILE");
         assert_eq!(profile.origin, Origin::Config);
@@ -579,6 +711,7 @@ mod tests {
             },
             Path::new("."),
             &env(&[]),
+            None,
         );
         let profile = find(&both, "PROFILE");
         assert!(profile.varies && profile.value.is_none());
@@ -596,7 +729,7 @@ mod tests {
             steps: vec![step("migrate", "psql $DATABASE_URL")],
             ..Default::default()
         };
-        let report = collect(&resolved, &root, &env(&[]));
+        let report = collect(&resolved, &root, &env(&[]), None);
 
         let url = find(&report, "DATABASE_URL");
         assert_eq!(url.origin, Origin::EnvFile);
@@ -620,5 +753,98 @@ mod tests {
         for key in ["AWS_REGION", "STAGE", "CIABATTA_BRANCH", "PASSENGERS"] {
             assert!(!looks_secret(key), "{key} should not be masked");
         }
+    }
+
+    fn push(registry: &str, publish_path: &str) -> RunStep {
+        RunStep {
+            name: "publish".into(),
+            kind: Some("push".into()),
+            registry: Some(registry.into()),
+            artifact: Some("dist/app.tgz".into()),
+            publish_path: Some(crate::config::PublishPath::Single(publish_path.into())),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_push_depends_on_its_registry_credentials_and_path_placeholders() {
+        let resolved = ResolvedRun {
+            steps: vec![push("nexus", "app/{CIABATTA_COMMIT}/app.tgz")],
+            ..Default::default()
+        };
+        let base = env(&[("CIABATTA_COMMIT", "abc123"), ("CIABATTA_NEXUS_USER", "ci")]);
+        let report = collect(&resolved, Path::new("."), &base, None);
+
+        let commit = find(&report, "CIABATTA_COMMIT");
+        assert_eq!(commit.steps, vec!["publish".to_string()]);
+        assert!(!commit.optional, "the path can't be built without it");
+
+        let user = find(&report, "CIABATTA_NEXUS_USER");
+        assert_eq!(user.value.as_deref(), Some("ci"));
+        assert!(user.purpose.as_deref().unwrap().contains("nexus"));
+
+        // Unset, but the push goes ahead unauthenticated: a fact, not a fault.
+        let pass = find(&report, "CIABATTA_NEXUS_PASS");
+        assert_eq!(pass.origin, Origin::Unset);
+        assert!(pass.optional);
+    }
+
+    #[test]
+    fn a_registry_that_needs_auth_makes_its_credentials_required() {
+        let mut config = CiabattaConfig::default();
+        config.registries.insert(
+            "artifacts".into(),
+            crate::config::RegistryConfig {
+                url: "https://repo.example".into(),
+                tls_verify: true,
+                needs_auth: true,
+                login_script: None,
+                registry_type: Some("nexus".into()),
+                repository: None,
+                base_path: None,
+                format: None,
+            },
+        );
+        let resolved = ResolvedRun {
+            steps: vec![push("artifacts", "app.tgz")],
+            ..Default::default()
+        };
+        let report = collect(&resolved, Path::new("."), &env(&[]), Some(&config));
+        assert!(!find(&report, "CIABATTA_ARTIFACTS_PASS").optional);
+    }
+
+    #[test]
+    fn an_aws_registry_shows_only_the_credential_route_in_use() {
+        let resolved = ResolvedRun {
+            steps: vec![push("s3-releases", "app.tgz")],
+            ..Default::default()
+        };
+        let report = collect(
+            &resolved,
+            Path::new("."),
+            &env(&[("AWS_PROFILE", "ci"), ("AWS_DEFAULT_REGION", "eu-west-1")]),
+            None,
+        );
+        assert_eq!(find(&report, "AWS_PROFILE").value.as_deref(), Some("ci"));
+        assert!(find(&report, "AWS_DEFAULT_REGION").optional);
+        assert!(report.vars.iter().all(|v| v.key != "AWS_ACCESS_KEY_ID"));
+    }
+
+    #[test]
+    fn a_push_with_its_own_command_is_judged_by_that_command() {
+        let mut step = push("nexus", "app/{CIABATTA_COMMIT}");
+        step.run = Some("./publish.sh $RELEASE_CHANNEL".into());
+        let resolved = ResolvedRun {
+            steps: vec![step],
+            ..Default::default()
+        };
+        let report = collect(&resolved, Path::new("."), &env(&[]), None);
+        find(&report, "RELEASE_CHANNEL");
+        assert!(
+            report
+                .vars
+                .iter()
+                .all(|v| !v.key.starts_with("CIABATTA_NEXUS"))
+        );
     }
 }

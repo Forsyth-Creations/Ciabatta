@@ -20,6 +20,9 @@ Inside `.ciabatta/ciabatta.yaml` and `.ciabatta/workflows/*.yaml`:
 - **Typo detection.** `needs: [protos]` is flagged where you typed it, with
   "Did you mean `proto`?", rather than at build time in someone else's
   terminal.
+- **Run status.** A run in flight shows as progress in the status bar, a
+  failure raises a notification, a workflow whose last run failed is flagged on
+  its file, and hovering a workflow's top-level lines says how its runs went.
 
 ## Installing
 

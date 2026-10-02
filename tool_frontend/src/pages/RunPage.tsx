@@ -34,6 +34,9 @@ import {
   useDeleteRun,
   useRunSettings,
   useRunTargets,
+  clockTime,
+  elapsedOf,
+  useNow,
   useRuns,
   useSetRunSettings,
   useStartRun,
@@ -277,6 +280,8 @@ function RunRow({ run }: { run: RunSummary }) {
             </Typography>
           </Box>
 
+          <RunTook run={run} />
+
           {confirming ? (
             <Stack direction="row" spacing={1} alignItems="center">
               <Typography variant="caption" color="text.secondary">
@@ -321,6 +326,42 @@ function RunRow({ run }: { run: RunSummary }) {
         {remove.error && <ErrorNote error={remove.error} />}
       </CardContent>
     </Card>
+  );
+}
+
+/**
+ * The row's "took" column: how long the run ran, ticking while it still is.
+ *
+ * Fixed-width and right-aligned so the durations line up down the list and can
+ * be compared at a glance. A run from before the daemon kept times, or one it
+ * lost track of, shows a dash rather than a guess.
+ */
+function RunTook({ run }: { run: RunSummary }) {
+  const now = useNow(!run.done);
+  const took = elapsedOf(run, now);
+  const hint = !run.started_at
+    ? "No timing recorded for this run"
+    : run.finished_at
+      ? `Ran ${clockTime(run.started_at)} – ${clockTime(run.finished_at)}`
+      : run.done
+        ? "Ended without a recorded finish time"
+        : `Running since ${clockTime(run.started_at)}`;
+
+  return (
+    <Tooltip title={hint}>
+      <Box sx={{ width: 88, flexShrink: 0, textAlign: "right" }}>
+        <Typography
+          variant="caption"
+          color="text.secondary"
+          sx={{ display: "block", lineHeight: 1.2 }}
+        >
+          {run.done ? "took" : "running"}
+        </Typography>
+        <Typography variant="body2" sx={{ fontFamily: monoFontStack }}>
+          {took && (run.finished_at || !run.done) ? took : "—"}
+        </Typography>
+      </Box>
+    </Tooltip>
   );
 }
 

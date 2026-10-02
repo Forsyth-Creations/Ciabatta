@@ -42,6 +42,14 @@ export interface EnvVar {
   steps: string[];
   /** Set by several steps to different values, so there's no single one. */
   varies: boolean;
+  /**
+   * Why a step needs it, when the step's own text doesn't say — a registry
+   * credential, a placeholder in a publish path. Absent otherwise, and on runs
+   * recorded before the daemon reported it.
+   */
+  purpose?: string;
+  /** Every step needing it carries on without it, so unset isn't a fault. */
+  optional?: boolean;
 }
 
 export interface EnvReport {

@@ -29,7 +29,7 @@ import type { Theme } from "@mui/material/styles";
 import type { Edge, Node } from "@xyflow/react";
 
 import { GraphCanvas } from "../components/GraphCanvas";
-import { ORTHOGONAL_EDGE, isWaypoint, layeredLayout, routeSegments } from "../components/layout";
+import { ROUTED_EDGE, layeredLayout, routeKey } from "../components/layout";
 import { PageHeader } from "../components/Page";
 import { monoFontStack } from "../theme";
 
@@ -240,6 +240,7 @@ export function RunBuilderPage() {
 
 /** How wide a node is allowed to get, so it can't reach into the next column. */
 const NODE_WIDTH = 220;
+const NODE_HEIGHT = 36;
 
 function buildPreview(steps: DraftStep[], theme: Theme) {
   const ids = steps.map((s) => s.name);
@@ -247,51 +248,67 @@ function buildPreview(steps: DraftStep[], theme: Theme) {
     step.needs.map((need) => ({ source: need, target: step.name })),
   );
 
-  const { nodes: positioned, routes } = layeredLayout(ids, orderEdges, (id) => ({ label: id }));
+  const errorEdges = steps
+    .filter((s) => s.onError)
+    .map((s) => ({ source: s.name, target: s.onError }));
 
-  const byName = new Map(steps.map((s) => [s.name, s]));
-  const nodes: Node[] = positioned.map((node) =>
-    // A routing waypoint is a bend in a wire: it arrives already styled to be
-    // invisible, and painting a border on it would draw a box in mid-air.
-    isWaypoint(node.id)
-      ? node
-      : {
-          ...node,
-          style: {
-            background: theme.palette.background.paper,
-            color: theme.palette.text.primary,
-            border: `2px ${byName.get(node.id)?.recover ? "dashed" : "solid"} ${
-              byName.get(node.id)?.recover ? theme.palette.warning.main : theme.palette.divider
-            }`,
-            borderRadius: 8,
-            fontSize: 12,
-            padding: "6px 12px",
-            maxWidth: NODE_WIDTH,
-          },
-        },
+  const { nodes: positioned, routes } = layeredLayout(
+    ids,
+    [
+      ...orderEdges.map((e) => ({ ...e, group: "needs", merge: true })),
+      // A recovery node sits a column after the step that falls into it.
+      ...errorEdges.map((e) => ({ ...e, group: "error" })),
+    ],
+    (id) => ({ label: id }),
+    { columnWidth: NODE_WIDTH + 110, nodeWidth: NODE_WIDTH, nodeHeight: NODE_HEIGHT },
   );
 
+  const byName = new Map(steps.map((s) => [s.name, s]));
+  const nodes: Node[] = positioned.map((node) => ({
+    ...node,
+    style: {
+      background: theme.palette.background.paper,
+      color: theme.palette.text.primary,
+      border: `2px ${byName.get(node.id)?.recover ? "dashed" : "solid"} ${
+        byName.get(node.id)?.recover ? theme.palette.warning.main : theme.palette.divider
+      }`,
+      borderRadius: 8,
+      fontSize: 12,
+      padding: "0 12px",
+      // Fixed, because the layout routes wires to where it expects the
+      // handles to be — half this height down each node.
+      width: NODE_WIDTH,
+      height: NODE_HEIGHT,
+      boxSizing: "border-box" as const,
+      display: "flex",
+      alignItems: "center",
+      overflow: "hidden",
+      whiteSpace: "nowrap" as const,
+      textOverflow: "ellipsis",
+    },
+  }));
+
   const edges: Edge[] = [
-    ...orderEdges.flatMap((e, i) =>
-      routeSegments(routes, e.source, e.target).map((segment, part) => ({
-        ...ORTHOGONAL_EDGE,
-        id: `needs-${i}-${part}`,
-        source: segment.source,
-        target: segment.target,
-        markerEnd: segment.last ? ORTHOGONAL_EDGE.markerEnd : undefined,
-        style: { stroke: theme.palette.text.secondary },
-      })),
-    ),
-    ...steps
-      .filter((s) => s.onError)
-      .map((s, i) => ({
-        ...ORTHOGONAL_EDGE,
-        id: `error-${i}`,
-        source: s.name,
-        target: s.onError,
-        label: "on_error",
-        style: { stroke: theme.palette.error.main, strokeDasharray: "5 4" },
-      })),
+    ...orderEdges.map((e, i) => ({
+      ...ROUTED_EDGE,
+      id: `needs-${i}`,
+      source: e.source,
+      target: e.target,
+      data: { route: routes.get(routeKey(e.source, e.target)) },
+      style: { stroke: theme.palette.text.secondary },
+    })),
+    ...errorEdges.map((e, i) => ({
+      ...ROUTED_EDGE,
+      id: `error-${i}`,
+      source: e.source,
+      target: e.target,
+      data: { route: routes.get(routeKey(e.source, e.target)) },
+      label: "on_error",
+      labelStyle: { fill: theme.palette.text.secondary, fontSize: 10 },
+      labelBgStyle: { fill: theme.palette.background.paper },
+      markerEnd: { ...ROUTED_EDGE.markerEnd, color: theme.palette.error.main },
+      style: { stroke: theme.palette.error.main, strokeDasharray: "5 4" },
+    })),
   ];
 
   return { nodes, edges };

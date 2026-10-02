@@ -5,6 +5,11 @@
 //! CLI as `ciabatta lsp` and is shared with the VS Code extension. All this
 //! does is find the binary and hand Zed a command to run.
 //!
+//! The same goes for run status. Zed gives an extension no status bar of its
+//! own, but it draws a language server's progress there, its messages as
+//! notifications, and its diagnostics and hovers on the file — so the server
+//! reports runs through those, and they appear in Zed with nothing here.
+//!
 //! It deliberately does not download anything. `ciabatta lsp` is the same
 //! binary that runs the builds, and an editor quietly fetching a *second* copy
 //! at some other version is how you end up with completions that disagree with
@@ -35,15 +40,16 @@ impl zed::Extension for CiabattaExtension {
     ) -> Result<Command> {
         // An explicit `binary` setting wins: someone who has said which one to
         // run has a reason, usually that they are working on ciabatta itself.
-        if let Ok(settings) = settings::LspSettings::for_worktree(SETTINGS_KEY, worktree)
-            && let Some(binary) = settings.binary
-            && let Some(path) = binary.path
-        {
-            return Ok(Command {
-                command: path,
-                args: binary.arguments.unwrap_or_else(|| vec!["lsp".into()]),
-                env: worktree.shell_env(),
-            });
+        if let Ok(settings) = settings::LspSettings::for_worktree(SETTINGS_KEY, worktree) {
+            if let Some(binary) = settings.binary {
+                if let Some(path) = binary.path {
+                    return Ok(Command {
+                        command: path,
+                        args: binary.arguments.unwrap_or_else(|| vec!["lsp".into()]),
+                        env: worktree.shell_env(),
+                    });
+                }
+            }
         }
 
         let Some(path) = worktree.which("ciabatta") else {

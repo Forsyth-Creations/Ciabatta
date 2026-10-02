@@ -277,8 +277,9 @@ fn build_client(tls_verify: bool) -> Result<reqwest::Client> {
 }
 
 /// Minimal standard-alphabet base64 encoder (no padding shortcuts), used for
-/// npm basic-auth `_auth` tokens without pulling in a crate.
-fn base64_encode(input: &[u8]) -> String {
+/// npm basic-auth `_auth` tokens — and by the AI chat's clipboard, which
+/// hands the terminal its text base64-encoded — without pulling in a crate.
+pub(crate) fn base64_encode(input: &[u8]) -> String {
     const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
     for chunk in input.chunks(3) {

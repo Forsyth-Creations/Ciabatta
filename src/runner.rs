@@ -329,9 +329,39 @@ async fn record_run(
     crate::remote_cache::workflows::sync(config, root, &records).await;
 }
 
+/// How long something took, precise enough to compare two runs of it: tenths
+/// of a second while that still matters, whole units once it doesn't.
+///
+/// Distinct from the engine's timeout formatter, which renders a limit the way
+/// it was written; this renders a measurement, where `0s` for a 400ms step would
+/// be a lie.
+pub fn elapsed(d: std::time::Duration) -> String {
+    let ms = d.as_millis();
+    if ms < 60_000 {
+        return format!("{:.1}s", ms as f64 / 1000.0);
+    }
+    let secs = d.as_secs();
+    let (h, m, s) = (secs / 3600, (secs % 3600) / 60, secs % 60);
+    if h > 0 {
+        format!("{h}h{m:02}m")
+    } else {
+        format!("{m}m{s:02}s")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn elapsed_times_read_the_way_people_say_them() {
+        use std::time::Duration;
+        assert_eq!(elapsed(Duration::from_millis(0)), "0.0s");
+        assert_eq!(elapsed(Duration::from_millis(420)), "0.4s");
+        assert_eq!(elapsed(Duration::from_millis(12_345)), "12.3s");
+        assert_eq!(elapsed(Duration::from_secs(65)), "1m05s");
+        assert_eq!(elapsed(Duration::from_secs(3_725)), "1h02m");
+    }
 
     #[test]
     fn stage_order_and_indices() {

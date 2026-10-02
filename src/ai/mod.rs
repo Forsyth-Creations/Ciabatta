@@ -167,7 +167,8 @@ fn launched_within(root: &Path, dir: &Path) -> Option<String> {
     let root = root.canonicalize().ok()?;
     let dir = dir.canonicalize().ok()?;
     let rel = dir.strip_prefix(&root).ok()?;
-    (!rel.as_os_str().is_empty()).then(|| rel.display().to_string())
+    // Forward slashes on every platform: it's read as a repo-relative path.
+    (!rel.as_os_str().is_empty()).then(|| rel.to_string_lossy().replace('\\', "/"))
 }
 
 /// The checked-out branch, or None outside a repository or on a detached HEAD.

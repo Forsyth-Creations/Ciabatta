@@ -786,9 +786,23 @@ steps:
     needs: [migrate]
 ```
 
-Steps whose `needs` are all satisfied become eligible to run; the graph is
-validated up front (missing edges, non-recovery `on_error` targets, and cycles
-are rejected before anything runs).
+Steps whose `needs` are all satisfied **run in parallel** — every one that can
+start does, up to `--jobs` (default: `CIABATTA_JOBS`, then the CPU count), and
+the next starts as soon as one finishes. `-j 1` runs them one at a time. The
+graph is validated up front (missing edges, non-recovery `on_error` targets, and
+cycles are rejected before anything runs).
+
+**Custom arguments.** Everything after a bare `...` belongs to the workflow, not
+to ciabatta, and each becomes a `CIABATTA_ARG_<NAME>` variable for the steps:
+
+```bash
+ciabatta deploy --force ... --target=arm64 --region eu --verbose
+#   CIABATTA_ARG_TARGET=arm64  CIABATTA_ARG_REGION=eu  CIABATTA_ARG_VERBOSE=true
+```
+
+They're listed apart, in yellow, in the environment summary before the run, in
+the TUI log, and on the run's page — with a nudge to move them into an env
+profile if the run needs them every time.
 
 **`REQUIRED_ENV`** lists variables the workflow needs. Before anything runs,
 each is checked; if one is empty or unset the run is aborted — the missing
@@ -982,6 +996,22 @@ that moved, and the upstream stages that produced something different. The same
 view is on the **Cache** page of the web app, and on each node of the workflow
 graph.
 
+**Steps that write nothing.** A step with no `outputs` — a lint, a test — can't
+be accounted for, so it reruns every time and forces every step that needs it to
+rebuild too. If it genuinely writes nothing a later step reads, say so:
+
+```yaml
+cache:
+  enabled: true
+  inputs: ["packages/api/src/**/*"]
+  no_outputs: true     # skipped on unchanged inputs; holds nothing back
+```
+
+**Why didn't it hit?** A reused step shows a cache icon on the run page's
+graph; click it for the entry it used. *Inspect cache*, in a run's header,
+shows what the cache decided for every step — reused, missed and why, or blocked
+by an upstream step — with what to change for each.
+
 ### Proving the inputs are right: `--authoritative`
 
 `dry-run` shows you what the cache *thinks*. `--authoritative` checks whether it
@@ -1069,9 +1099,21 @@ must never end up silently sharing a cache, and the id is what prevents it.
 ### The server's own page
 
 The cache server serves a small admin page at its root — open
-`http://cache.example.com:8380/` in a browser. It shows the hit rate, what's
-stored, and the ciabatta builds it hands out, and it does the one thing the CLI
-does badly: **minting credentials**.
+`http://cache.example.com:8380/` in a browser — light or dark, following the
+system or picked in its header. It shows when the cache was **last used and
+last saved to**, what's stored against the size limit, every project with its
+targets ranked by misses, recent traffic, and what retention will evict next.
+Those counts are kept per project and per target, and survive restarts.
+
+From them the server derives **insights** — the few things worth changing,
+each phrased as the change: a target uploaded again and again but never reused
+(its key isn't stable), one that keeps missing but nobody uploads (every client
+is read-only, or it has no outputs), one that hits only a fraction of lookups
+(machines key it differently), a cache nothing has written to in a week, a store
+near its limit. `ciabatta remote-cache status` and the web app's Remote tab show
+the same.
+
+And it does the one thing the CLI does badly: **minting credentials**.
 
 `ciabatta remote-cache add-user` prints a hash for you to paste into the config
 and restart around, which is fine once and tiresome forever. The page writes the
@@ -1098,10 +1140,26 @@ neither shadow nor delete them.
 
 ### TLS
 
-The server speaks HTTP. Put it behind a reverse proxy with TLS for anything
-beyond a trusted network. If that proxy uses a self-signed certificate, or an
-internal CA a machine doesn't have installed, that machine can opt out of
-verification:
+The server serves HTTPS itself when given a certificate and key:
+
+```yaml
+server:
+  tls:
+    cert: tls/cert.pem    # relative to the config file
+    key:  tls/key.pem
+```
+
+`ciabatta remote-cache init --tls [--tls-host cache.internal]` generates a
+self-signed pair and writes that section; the server prints the certificate's
+SHA-256 fingerprint on start. Clients trust it without turning verification off:
+
+```bash
+ciabatta remote-cache login https://cache.internal:8380 --ca-cert cert.pem
+export CIABATTA_REMOTE_CA=/path/to/cert.pem   # CI, without a login
+```
+
+Behind a reverse proxy that already terminates TLS, leave `server.tls` out. A
+machine that can't be given the certificate can opt out of verification:
 
 ```yaml
 cache:
@@ -1316,6 +1374,21 @@ a repo where the answer lives in somebody's shell history.
 `ciabatta watch` sources the same files a run would and prints exactly what it
 resolved before the command starts, so a watched dev server and a `dev` workflow
 step can't quietly see different environments.
+
+### Env profiles
+
+A profile is a file next to a `.env`, named after it — `.env.staging`,
+`packages/api/.env.ci`. `--env-profile staging` (or `--env_profile`) sources each
+`.env` the run already reads and then its `.staging` sibling on top, so a profile
+only holds what differs:
+
+```bash
+ciabatta env list                        # the profiles here, and their files
+ciabatta build --env-profile staging
+```
+
+The profile in force reaches the steps as `CIABATTA_ENV_PROFILE`. Templates
+(`.env.example`, `.env.default`, …) are never profiles.
 
 ## Build features
 

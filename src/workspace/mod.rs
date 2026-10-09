@@ -573,6 +573,7 @@ fn load_member(root: &Path, dir: &Path) -> Result<Member> {
                 .map(|s| s.to_string())
         })
         .unwrap_or_else(|| rel.clone());
+    check_member_name(&name, meta.name.is_some(), &config_file)?;
 
     let workflows = load_workflows(dir, &config, &name)?;
 
@@ -584,6 +585,41 @@ fn load_member(root: &Path, dir: &Path) -> Result<Member> {
         config,
         workflows,
     })
+}
+
+/// The character that joins a sub-workspace to a step or workflow name:
+/// `api:compile`, `api:build:compile`.
+pub const NAME_SEPARATOR: char = ':';
+
+/// Refuse a sub-workspace name that contains the separator.
+///
+/// `:` is how every step is addressed — `api:compile` is the `compile` step
+/// of `api` — so a workspace called `api:v2` would make `api:v2:compile`
+/// mean either `compile` in `api:v2` or the `v2:compile` sub-workflow of
+/// `api`. The name is refused here, where it is read, rather than left to
+/// produce a graph that resolves the wrong way.
+fn check_member_name(name: &str, declared: bool, config_file: &Path) -> Result<()> {
+    if !name.contains(NAME_SEPARATOR) {
+        return Ok(());
+    }
+    if declared {
+        bail!(
+            "The workspace name '{name}' in {} contains '{NAME_SEPARATOR}', which ciabatta \
+             reserves for addressing steps and sub-workflows (`{}:build`).\n\
+             Pick a name without it — `{}`, say.",
+            config_file.display(),
+            name.split(NAME_SEPARATOR).next().unwrap_or(name),
+            name.replace(NAME_SEPARATOR, "-"),
+        )
+    }
+    bail!(
+        "The directory '{name}' would give its workspace a name containing \
+         '{NAME_SEPARATOR}', which ciabatta reserves for addressing steps and \
+         sub-workflows.\n\
+         Set `workspace.name` in {} to a name without it — `{}`, say.",
+        config_file.display(),
+        name.replace(NAME_SEPARATOR, "-"),
+    )
 }
 
 /// Collect a member's workflows from both places they can be written: one file
@@ -964,6 +1000,28 @@ mod tests {
         assert_eq!(ws.member("api").unwrap().rel, "packages/api");
 
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// `:` addresses steps (`api:compile`), so a workspace may not use it in
+    /// its own name — that would make `api:v2:compile` ambiguous.
+    #[test]
+    fn a_workspace_name_with_a_colon_is_refused() {
+        let root = scratch("colon");
+        write_member_as(
+            &root,
+            "api",
+            "ciabatta.yaml",
+            "workspace:\n  name: \"api:v2\"\n",
+        );
+
+        let err = format!("{:#}", Workspace::load(&root).unwrap_err());
+        assert!(err.contains("'api:v2'"), "{err}");
+        assert!(
+            err.contains("api-v2"),
+            "the error suggests a usable name: {err}"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

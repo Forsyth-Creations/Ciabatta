@@ -702,6 +702,14 @@ pub fn prepare_env(
         });
     }
 
+    // An env profile layers each file's `.<profile>` sibling straight after
+    // it, so the profile wins where it says something and the ordinary file
+    // answers everything else.
+    let profile = active_profile(base);
+    if let Some(profile) = profile.as_deref() {
+        files = with_profile(&files, root, profile);
+    }
+
     let env = if files.is_empty() {
         base.clone()
     } else {
@@ -733,6 +741,9 @@ pub fn prepare_env(
                     chain.push(path);
                 }
             }
+        }
+        if let Some(profile) = profile.as_deref() {
+            chain = with_profile(&chain, root, profile);
         }
         steps.insert(
             step.name.clone(),
@@ -780,6 +791,39 @@ pub fn prepare_env(
         missing_required,
         features,
     })
+}
+
+/// The env profile a run was started with, when it was started with one.
+fn active_profile(base: &HashMap<String, String>) -> Option<String> {
+    base.get(crate::environment::profiles::PROFILE_VAR)
+        .map(|p| p.trim().to_string())
+        .filter(|p| crate::environment::profiles::valid_name(p))
+}
+
+/// `files` with each one's profile overlay inserted after it, where there is
+/// one — and the root's own overlay first, when the root sources no `.env` of
+/// its own for it to sit beside.
+fn with_profile(files: &[String], root: &Path, profile: &str) -> Vec<String> {
+    use crate::environment::files::DEFAULT_ENV_FILE;
+    use crate::environment::profiles::overlay;
+
+    let mut out: Vec<String> = Vec::with_capacity(files.len() * 2);
+    // Only when the root has no `.env` at all: if it has one, the overlay
+    // belongs after it, which the loop below sees to wherever it's sourced.
+    let root_overlay = overlay(DEFAULT_ENV_FILE, profile);
+    if !root.join(DEFAULT_ENV_FILE).is_file() && root.join(&root_overlay).is_file() {
+        out.push(root_overlay);
+    }
+    for file in files {
+        if !out.contains(file) {
+            out.push(file.clone());
+        }
+        let layered = overlay(file, profile);
+        if root.join(&layered).is_file() && !out.contains(&layered) {
+            out.push(layered);
+        }
+    }
+    out
 }
 
 /// Return the names from `required` that are absent from `env` or present but
@@ -1164,6 +1208,39 @@ mod tests {
     fn steps_from(toml_str: &str) -> Vec<RunStep> {
         let list: StepList = toml::from_str(toml_str).expect("steps parse");
         list.steps
+    }
+
+    /// A profile overlays each env file with its sibling, after it, so the
+    /// profile wins where it speaks and the base answers everything else.
+    #[test]
+    fn an_env_profile_layers_each_file_with_its_sibling() {
+        let root =
+            std::env::temp_dir().join(format!("ciab_profile_overlay_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("api")).unwrap();
+        std::fs::write(root.join(".env"), "REGION=us\nTIER=dev\n").unwrap();
+        std::fs::write(root.join(".env.staging"), "REGION=eu\n").unwrap();
+        std::fs::write(root.join("api/.env"), "PORT=1\n").unwrap();
+
+        let files = vec![".env".to_string(), "api/.env".to_string()];
+        assert_eq!(
+            with_profile(&files, &root, "staging"),
+            [".env", ".env.staging", "api/.env"],
+        );
+
+        let base: HashMap<String, String> = HashMap::new();
+        let merged = load_env_files(&with_profile(&files, &root, "staging"), &root, &base).unwrap();
+        assert_eq!(merged["REGION"], "eu");
+        assert_eq!(merged["TIER"], "dev");
+
+        // No root `.env`: the root's overlay still applies, first.
+        std::fs::remove_file(root.join(".env")).unwrap();
+        assert_eq!(
+            with_profile(&["api/.env".to_string()], &root, "staging"),
+            [".env.staging", "api/.env"],
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

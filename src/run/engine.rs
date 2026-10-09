@@ -161,6 +161,43 @@ pub async fn execute(
         let _ = tx.send(ProgressUpdate::Log(name.to_string(), line)).await;
     }
 
+    // Likewise the profile and any custom arguments: both change what the
+    // steps see, and the arguments exist nowhere but in the command that was
+    // typed — so they're marked (⚑, drawn in yellow) and the log says where
+    // they'd be better kept.
+    if let Some(profile) = env_vars.get(crate::environment::profiles::PROFILE_VAR) {
+        let _ = tx
+            .send(ProgressUpdate::Log(
+                name.to_string(),
+                format!("env profile: {profile}"),
+            ))
+            .await;
+    }
+    let mut custom: Vec<(&String, &String)> = prepared
+        .env
+        .iter()
+        .filter(|(key, _)| key.starts_with(crate::cli::CUSTOM_ARG_PREFIX))
+        .collect();
+    custom.sort();
+    for (key, value) in &custom {
+        let _ = tx
+            .send(ProgressUpdate::Log(
+                name.to_string(),
+                format!("⚑ custom argument {key}={value}"),
+            ))
+            .await;
+    }
+    if !custom.is_empty() {
+        let _ = tx
+            .send(ProgressUpdate::Log(
+                name.to_string(),
+                "⚑ tip: if this run needs these every time, put them in .env.<name> and run \
+                 with --env-profile <name>"
+                    .to_string(),
+            ))
+            .await;
+    }
+
     if !prepared.is_ready() {
         let list = prepared.missing().join(", ");
         // Console: printed directly so it shows even in `--gui` mode, where

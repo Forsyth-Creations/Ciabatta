@@ -33,7 +33,7 @@ use owo_colors::OwoColorize;
 
 use cli::{
     AiCommand, CacheCommand, Cli, Commands, ConfigCommand, ConfigureCommand, DaemonCommand,
-    RemoteCacheCommand, SelfCommand,
+    EnvCommand, RemoteCacheCommand, SelfCommand,
 };
 use config::{CiabattaConfig, find_root, load_config, load_config_file};
 use environment::CiabattaEnv;
@@ -41,7 +41,18 @@ use std::collections::BTreeMap;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let cli = Cli::parse();
+    // Everything after a bare `...` belongs to the workflow, not to ciabatta:
+    // it's split off before clap can mistake a custom `--force` for its own.
+    let (argv, custom_args) = cli::split_custom_args(std::env::args_os());
+    let cli = Cli::parse_from(argv);
+    if !custom_args.is_empty()
+        && !matches!(cli.command, Commands::Workflow(_) | Commands::External(_))
+    {
+        bail!(
+            "Arguments after `...` are passed to a workflow run (as CIABATTA_ARG_* variables), \
+             and this command isn't one."
+        );
+    }
 
     // `daemon serve` installs its own subscriber, writing to
     // ~/.ciabatta/daemon.log. It has to be the only one: `try_init` cannot
@@ -75,8 +86,12 @@ async fn main() -> Result<()> {
         }
 
         Commands::Workflow(args) => {
-            cmd_workflow(args, false).await?;
+            cmd_workflow(args, false, &custom_args).await?;
         }
+
+        Commands::Env { subcommand } => match subcommand {
+            EnvCommand::List => cmd_env_list()?,
+        },
 
         // An unrecognized subcommand is a workflow name. Re-parse the raw argv
         // through the very same parser `ciabatta workflow` uses, so the flags
@@ -86,7 +101,7 @@ async fn main() -> Result<()> {
                 std::iter::once("ciabatta".to_string()).chain(argv),
             )
             .map_err(|e| anyhow::anyhow!(e.to_string()))?;
-            cmd_workflow(invocation.args, true).await?;
+            cmd_workflow(invocation.args, true, &custom_args).await?;
         }
 
         Commands::List {
@@ -312,7 +327,11 @@ fn unknown_workflow(err: &anyhow::Error) -> bool {
 /// after `ciabatta workflow`. That's also how a mistyped command arrives here,
 /// so an unknown name gets an extra line pointing at `--help` — otherwise
 /// `ciabatta pusj` would only ever complain about workflows.
-async fn cmd_workflow(args: cli::WorkflowArgs, bare_name: bool) -> Result<()> {
+async fn cmd_workflow(
+    args: cli::WorkflowArgs,
+    bare_name: bool,
+    custom_args: &[String],
+) -> Result<()> {
     let cwd = env::current_dir().context("Failed to get current directory")?;
 
     // No workflow named: show what there is to run rather than erroring out.
@@ -419,6 +438,15 @@ async fn cmd_workflow(args: cli::WorkflowArgs, bare_name: bool) -> Result<()> {
     let announce = !args.use_tui() && !args.gui;
     let mut vars = build_env_vars(&cfg, &args.env, args.local, &ws.root, announce)?;
     source_ciabatta_vars(&mut vars, &ws.root, announce);
+    // Custom arguments last: they were typed for this run, so they win.
+    vars.extend(cli::parse_custom_args(custom_args)?);
+    if let Some(profile) = &args.env_profile {
+        environment::profiles::require(&ws.root, profile)?;
+        vars.insert(
+            environment::profiles::PROFILE_VAR.to_string(),
+            profile.clone(),
+        );
+    }
     report_env_drift(&ws.root, &graph.env_files, announce);
 
     let name = graph.label();
@@ -428,7 +456,7 @@ async fn cmd_workflow(args: cli::WorkflowArgs, bare_name: bool) -> Result<()> {
         // The daemon owns the run, so it compiles the graph itself from the
         // same declarations rather than being handed our copy.
         report_run_dependencies(&resolved, &name, &ws.root, &vars, false);
-        return cmd_workflow_gui(&args, &workflows, &ws.root, vars).await;
+        return cmd_workflow_gui(&args, &workflows, &ws.root, vars, custom_args).await;
     }
 
     execute_workflow(
@@ -484,9 +512,66 @@ fn report_run_dependencies(
     if let Some(text) = run::deps::report(&cfg, root, name, &resolved.steps, vars) {
         say(text);
     }
-    if let Some(text) = run::envdeps::collect(resolved, root, vars, Some(&cfg)).render(name) {
+    let report = run::envdeps::collect(resolved, root, vars, Some(&cfg));
+    if let Some(text) = report.render(name) {
         say(text);
     }
+    // Custom arguments are set apart, in yellow: they exist for this run only,
+    // and a run that needs them every time is one that should say so in a
+    // file instead.
+    if let Some(text) = report.render_arguments() {
+        for line in text.lines() {
+            say(format!("{}", line.style(color::warn())));
+        }
+    }
+}
+
+/// `ciabatta env list`: every env profile this workspace has.
+fn cmd_env_list() -> Result<()> {
+    let cwd = env::current_dir().context("Failed to get current directory")?;
+    let root = workspace::Workspace::discover(&cwd)
+        .map(|ws| ws.root)
+        .or_else(|_| find_root(&cwd).context("Not inside a ciabatta project"))?;
+    let dirs = environment::profiles::workspace_dirs(&root);
+    let profiles = environment::profiles::list(&root, &dirs);
+
+    // The base the profiles overlay, so it's clear what "no profile" means.
+    let base: Vec<String> = dirs
+        .iter()
+        .map(|rel| environment::files::join_rel(rel, environment::files::DEFAULT_ENV_FILE))
+        .filter(|path| root.join(path).is_file())
+        .collect();
+    println!(
+        "Default environment: {}",
+        if base.is_empty() {
+            "no .env files — just the shell's environment".to_string()
+        } else {
+            base.join(", ")
+        }
+    );
+    println!();
+
+    if profiles.is_empty() {
+        println!("No env profiles yet.");
+        println!(
+            "Create one by putting the variables that differ in `.env.<name>` next to a `.env` \
+             (e.g. `.env.staging`), then run `ciabatta <workflow> --env-profile <name>`."
+        );
+        return Ok(());
+    }
+
+    println!("Env profiles (run with --env-profile <name>):");
+    let width = profiles.iter().map(|p| p.name.len()).max().unwrap_or(0);
+    for profile in &profiles {
+        println!(
+            "  {:width$}  {} variable(s) · {}",
+            profile.name.style(color::active()),
+            profile.vars,
+            profile.files.join(", "),
+            width = width,
+        );
+    }
+    Ok(())
 }
 
 /// Tell the operator when the `.env` files a run depends on have moved since
@@ -517,6 +602,7 @@ async fn cmd_workflow_gui(
     workflows: &[String],
     root: &Path,
     vars: HashMap<String, String>,
+    custom_args: &[String],
 ) -> Result<()> {
     let session = daemon::connect(args.port).await?;
 
@@ -533,6 +619,10 @@ async fn cmd_workflow_gui(
             "env": vars,
             "dry_run": args.dry_run,
             "force": args.force,
+            // Sent as typed, not only as the variables they became: the daemon
+            // keeps them with the run, so "run again" repeats them.
+            "args": custom_args,
+            "env_profile": args.env_profile,
         }))
         .send()
         .await?;

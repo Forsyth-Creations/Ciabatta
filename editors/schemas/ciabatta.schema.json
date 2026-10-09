@@ -40,7 +40,8 @@
       "properties": {
         "name": {
           "type": "string",
-          "description": "This sub-workspace's name across the monorepo. Defaults to the directory name."
+          "pattern": "^[^:]+$",
+          "description": "This sub-workspace's name across the monorepo. Defaults to the directory name. May not contain ':', which addresses steps and sub-workflows (`api:build`)."
         },
         "description": {
           "type": "string",

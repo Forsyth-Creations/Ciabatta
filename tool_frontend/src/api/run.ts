@@ -247,6 +247,10 @@ export interface RunSummary extends Timed {
   filter: string[];
   only: string[];
   isolated: boolean;
+  /** Custom arguments, as typed after `...`. */
+  args?: string[];
+  /** The env profile it ran under. */
+  env_profile?: string | null;
 }
 
 /** How long the daemon keeps a finished run and its logs. */
@@ -360,6 +364,29 @@ export interface StartRunBody {
   isolated?: boolean;
   /** With `workflow`: run only the steps these terms select (CLI `--filter`). */
   filter?: string[];
+  /** Custom arguments, as after `...` on the CLI: each becomes CIABATTA_ARG_*. */
+  args?: string[];
+  /** Run under this env profile (`--env-profile`). */
+  env_profile?: string;
+}
+
+/** An env profile: every `.env.<name>` in the workspace. */
+export interface EnvProfile {
+  name: string;
+  files: string[];
+  vars: number;
+}
+
+/** The env profiles a project has, for the launcher. */
+export function useEnvProfiles(project: string) {
+  return useQuery({
+    queryKey: ["run", "env-profiles", project] as const,
+    queryFn: () =>
+      api.get<{ profiles: EnvProfile[] }>(
+        `/api/run/env-profiles?project=${encodeURIComponent(project)}`,
+      ),
+    select: (data) => data.profiles,
+  });
 }
 
 /** One thing this project can run. */

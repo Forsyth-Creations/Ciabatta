@@ -32,6 +32,7 @@ import { Link, useNavigate } from "@tanstack/react-router";
 import {
   missingEnvFrom,
   useDeleteRun,
+  useEnvProfiles,
   useRunSettings,
   useRunTargets,
   clockTime,
@@ -84,6 +85,9 @@ function Launcher({ project }: { project: string }) {
   const [selected, setSelected] = useState<string>("");
   const [dryRun, setDryRun] = useState(false);
   const [filter, setFilter] = useState("");
+  const [profile, setProfile] = useState("");
+  const [customArgs, setCustomArgs] = useState("");
+  const { data: profiles } = useEnvProfiles(project);
 
   // Values typed into the missing-variable prompt. They persist across
   // attempts, so answering a second round of prompts doesn't lose the first.
@@ -101,15 +105,29 @@ function Launcher({ project }: { project: string }) {
       .split(/\s+/)
       .map((term) => term.trim())
       .filter(Boolean);
+    // Split like a shell would, near enough: on spaces, keeping quoted runs.
+    const args = (customArgs.match(/"[^"]*"|'[^']*'|\S+/g) ?? []).map((part) =>
+      part.replace(/^(["'])(.*)\1$/, "$2"),
+    );
+    const extras = { args, env_profile: profile || undefined };
     const body =
       target?.kind === "workflow"
-        ? { project, workflows: [], workflow: selected, filter: terms, dry_run: dryRun, env: withEnv }
+        ? {
+            project,
+            workflows: [],
+            workflow: selected,
+            filter: terms,
+            dry_run: dryRun,
+            env: withEnv,
+            ...extras,
+          }
         : {
             project,
             workflows: selected ? [selected] : [],
             filter: terms,
             dry_run: dryRun,
             env: withEnv,
+            ...extras,
           };
 
     start.mutate(body, {
@@ -186,6 +204,40 @@ function Launcher({ project }: { project: string }) {
               onChange={(e) => setFilter(e.target.value)}
               sx={{ minWidth: 240, "& input": { fontFamily: monoFontStack } }}
             />
+
+            <Tooltip title="Overlay each .env with its .env.<profile> sibling for this run. `ciabatta env list` shows the same list.">
+              <TextField
+                select
+                size="small"
+                label="Env profile"
+                value={profile}
+                onChange={(e) => setProfile(e.target.value)}
+                sx={{ minWidth: 160 }}
+              >
+                <MenuItem value="">
+                  <em>Default (.env)</em>
+                </MenuItem>
+                {(profiles ?? []).map((p) => (
+                  <MenuItem key={p.name} value={p.name}>
+                    {p.name}
+                    <Typography component="span" variant="caption" color="text.secondary" sx={{ ml: 1 }}>
+                      {p.vars} var{p.vars === 1 ? "" : "s"}
+                    </Typography>
+                  </MenuItem>
+                ))}
+              </TextField>
+            </Tooltip>
+
+            <Tooltip title="What you'd type after `...` on the command line: --name=value, --name value, --flag, or name=value. Each becomes $CIABATTA_ARG_<NAME> for the steps.">
+              <TextField
+                size="small"
+                label="Custom arguments"
+                placeholder="--target=arm64 region=eu"
+                value={customArgs}
+                onChange={(e) => setCustomArgs(e.target.value)}
+                sx={{ minWidth: 240, "& input": { fontFamily: monoFontStack } }}
+              />
+            </Tooltip>
 
             <FormControlLabel
               control={

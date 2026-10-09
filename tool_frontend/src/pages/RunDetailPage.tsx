@@ -262,8 +262,22 @@ export function RunDetailPage() {
             {timing && <RunClock timing={timing} live={!state.done} />}
             {(state.run.filter ?? []).length > 0 &&
               ` · filtered: ${state.run.filter.join(" ")}`}
+            {state.run.env_profile && ` · profile: ${state.run.env_profile}`}
           </Typography>
         </Box>
+        {(state.run.args ?? []).length > 0 && (
+          <Tooltip
+            title={`Custom arguments, given after \`...\` for this run only: ${state.run.args!.join(" ")}. They're listed with the run's environment below.`}
+          >
+            <Chip
+              size="small"
+              color="warning"
+              variant="outlined"
+              label={`⚑ ${state.run.args!.join(" ")}`}
+              sx={{ maxWidth: 320, fontFamily: monoFontStack }}
+            />
+          </Tooltip>
+        )}
         <Chip
           size="small"
           variant="outlined"
@@ -1707,6 +1721,8 @@ function envColour(variable: EnvVar, theme: Theme): string {
   if (unsetProblem(variable)) return theme.palette.error.main;
   // An optional variable nobody set is a fact, not a fault: drawn quietly.
   if (variable.origin === "unset") return theme.palette.text.disabled;
+  // A custom argument: typed for this run only, in the colour it has elsewhere.
+  if (variable.origin === "argument") return theme.palette.warning.main;
   return theme.palette.secondary.main;
 }
 

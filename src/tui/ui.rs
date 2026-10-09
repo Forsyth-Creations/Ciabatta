@@ -207,7 +207,8 @@ fn render_logs(f: &mut Frame, area: Rect, app: &App) {
                 || l.contains("Error")
             {
                 Style::default().fg(Color::Red)
-            } else if l.starts_with("[dry-run]") {
+            } else if l.starts_with("[dry-run]") || l.starts_with('⚑') {
+                // ⚑ marks a custom argument from `...`: for this run only.
                 Style::default().fg(Color::Yellow)
             } else if l.starts_with('+') || l.starts_with('$') {
                 Style::default().fg(Color::Cyan)

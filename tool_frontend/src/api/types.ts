@@ -20,7 +20,7 @@ export interface Project {
 }
 
 /** Where an environment variable's effective value comes from. */
-export type EnvOrigin = "environment" | "env_file" | "config" | "unset";
+export type EnvOrigin = "environment" | "env_file" | "config" | "argument" | "unset";
 
 /**
  * One environment variable a graph depends on.
@@ -58,6 +58,8 @@ export interface EnvReport {
   required: string[];
   /** Required variables still empty or unset. */
   missing: string[];
+  /** The env profile the run was started with (`--env-profile`). */
+  profile?: string | null;
   vars: EnvVar[];
 }
 

@@ -80,6 +80,8 @@ export function runCommand(state: RunState): string {
   if (run.isolated) parts.push("--isolated");
   if (run.force) parts.push("--force");
   if (state.dry_run) parts.push("--dry-run");
+  if (run.env_profile) parts.push("--env-profile", quote(run.env_profile));
+  if ((run.args ?? []).length > 0) parts.push("...", ...run.args!.map(quote));
   return parts.join(" ");
 }
 

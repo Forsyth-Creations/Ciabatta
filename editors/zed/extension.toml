@@ -1,6 +1,6 @@
 id = "ciabatta-lsp"
 name = "Ciabatta"
-version = "0.5.0"
+version = "0.5.1"
 schema_version = 1
 authors = ["Henry Forsyth <robert.h.forsyth@gmail.com>"]
 description = "Repository-aware completion, reference checking and live run status for .ciabatta/ workspace and workflow files."

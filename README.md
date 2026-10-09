@@ -101,6 +101,13 @@ block so you can call it with arguments:
 `CIABATTA_VERSION` and `CIABATTA_INSTALL_DIR` do the same thing for callers that
 find environment variables easier to set; an explicit flag wins over them.
 
+Both installers, and the `install.sh` / `install.ps1` inside each release
+archive, also add **`oven`** as a shorter name for `ciabatta` — `oven build` is
+`ciabatta build`. On Linux and macOS it's a symlink beside the binary; on
+Windows it's an `oven.cmd` shim. An existing `oven` that isn't ciabatta's is
+left alone. `cargo install` doesn't create it; add `alias oven=ciabatta` to
+your shell profile instead.
+
 ### From crates.io
 
 ```bash

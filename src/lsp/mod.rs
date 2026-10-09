@@ -225,8 +225,9 @@ fn capabilities() -> Value {
             "textDocumentSync": { "openClose": true, "change": 1, "save": true },
             "completionProvider": {
                 // `:` opens the `<member>:<workflow>` half of a reference;
-                // `{` opens a `{CIABATTA_*}` substitution.
-                "triggerCharacters": ["-", " ", ":", "{"],
+                // `{` opens a `{CIABATTA_*}` substitution; `[` and `,` start
+                // the next entry of an inline list like `needs: [a, b]`.
+                "triggerCharacters": ["-", " ", ":", "{", "[", ","],
             },
             // How a workflow's runs are going — see `runs`.
             "hoverProvider": true,

@@ -53,6 +53,17 @@ pub struct RunWatch {
     runtime: Option<tokio::runtime::Runtime>,
 }
 
+impl Drop for RunWatch {
+    /// `ciabatta lsp` runs inside the CLI's own runtime, and dropping a runtime
+    /// from there panics — on every editor shutdown, after a clean `exit`.
+    /// Shutting it down in the background is the form tokio allows there.
+    fn drop(&mut self) {
+        if let Some(runtime) = self.runtime.take() {
+            runtime.shutdown_background();
+        }
+    }
+}
+
 impl RunWatch {
     pub fn new() -> Self {
         Self {

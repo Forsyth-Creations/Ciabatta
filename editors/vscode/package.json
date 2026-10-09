@@ -2,7 +2,7 @@
   "name": "ciabatta-vscode",
   "displayName": "Ciabatta",
   "description": "Completion, documentation and reference checking for .ciabatta/ workspace and workflow files.",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "private": true,
   "license": "MIT",
   "publisher": "forsyth-creations",
@@ -67,6 +67,11 @@
           "type": "boolean",
           "default": true,
           "markdownDescription": "Run `ciabatta lsp` for repository-aware completion and reference checking. Turn it off to keep only the JSON Schema, which needs no binary."
+        },
+        "ciabatta.completion.autoTrigger": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Open the suggestion list when accepting a field name leaves the cursor where a value goes (`needs:`, `kind:`, a new `- ` entry), if there is anything to suggest there."
         },
         "ciabatta.trace.server": {
           "type": "string",

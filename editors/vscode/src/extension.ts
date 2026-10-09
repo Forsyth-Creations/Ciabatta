@@ -42,6 +42,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     }),
   );
 
+  context.subscriptions.push(suggestAfterInsertedKeys());
+
   await start(context, false);
 }
 
@@ -127,4 +129,53 @@ async function serverVersion(command: string): Promise<string | undefined> {
   } catch {
     return undefined;
   }
+}
+
+/** Whether a document is one of ciabatta's own files. */
+function isCiabattaFile(document: vscode.TextDocument): boolean {
+  const path = document.uri.path;
+  return /\/\.ciabatta\/(ciabatta|workflows\/[^/]+)\.ya?ml$/.test(path);
+}
+
+/**
+ * Reopen the suggestion list when an edit leaves the cursor where a value
+ * goes.
+ *
+ * Typing is already covered: the server's trigger characters open the list
+ * after `- `, `: ` and the rest. What they can't cover is an edit that lands
+ * the cursor there in one go — a field name accepted from the schema's list,
+ * which inserts `needs:\n  - ` and then sits silently at the one position
+ * where the repo's workflows are worth showing.
+ *
+ * The providers are asked first, and the list only opens if one of them has
+ * something: an explicit trigger on `run: ` would otherwise flash "No
+ * suggestions" at every free-form field.
+ */
+function suggestAfterInsertedKeys(): vscode.Disposable {
+  return vscode.workspace.onDidChangeTextDocument((event) => {
+    const editor = vscode.window.activeTextEditor;
+    if (!editor || editor.document !== event.document || !isCiabattaFile(event.document)) return;
+    if (!vscode.workspace.getConfiguration("ciabatta").get<boolean>("completion.autoTrigger", true)) {
+      return;
+    }
+    // One character is typing, which the trigger characters handle.
+    if (event.contentChanges.length !== 1 || event.contentChanges[0].text.length < 2) return;
+
+    // After the edit settles, so the cursor (and any snippet) is in place.
+    setTimeout(async () => {
+      if (vscode.window.activeTextEditor !== editor || !editor.selection.isEmpty) return;
+      const position = editor.selection.active;
+      const before = editor.document.lineAt(position.line).text.slice(0, position.character);
+      if (!/(^\s*-|[\w-]:)\s$/.test(before)) return;
+
+      const list = await vscode.commands.executeCommand<vscode.CompletionList>(
+        "vscode.executeCompletionItemProvider",
+        editor.document.uri,
+        position,
+      );
+      if (list?.items.length && editor.selection.active.isEqual(position)) {
+        void vscode.commands.executeCommand("editor.action.triggerSuggest");
+      }
+    }, 0);
+  });
 }

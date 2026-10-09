@@ -5,6 +5,13 @@
   "description": "A named, described, owned set of steps — build, test, lint, deploy, whatever the repo agrees on. Lives at .ciabatta/workflows/<name>.yaml; the workflow's name is the filename.",
   "type": "object",
   "additionalProperties": false,
+  "defaultSnippets": [
+    {
+      "label": "workflow",
+      "description": "A described, owned workflow with one step.",
+      "body": { "description": "${1:What running this accomplishes}", "steps": [{ "name": "${2:build}", "run": "${3:make}" }] }
+    }
+  ],
   "properties": {
     "description": {
       "type": "string",

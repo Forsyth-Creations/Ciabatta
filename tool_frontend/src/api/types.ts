@@ -208,11 +208,52 @@ export interface RemoteCounters {
   bytes_stored: number;
 }
 
+/** One target's traffic on the remote cache. */
+export interface RemoteTarget {
+  name: string;
+  hits: number;
+  misses: number;
+  uploads: number;
+  bytes_stored: number;
+  last_hit_at: string | null;
+  last_miss_at: string | null;
+  last_upload_at: string | null;
+}
+
 export interface RemoteProject {
   project: { id: string; name: string; created_at: string; created_by: string | null };
   counters: RemoteCounters;
   hit_rate: number | null;
   entries: number;
+  /** Absent from servers older than 0.5. */
+  bytes?: number;
+  last_used_at?: string | null;
+  last_hit_at?: string | null;
+  last_miss_at?: string | null;
+  last_saved_at?: string | null;
+  newest_entry_at?: string | null;
+  /** The targets that miss most, worst first. */
+  targets?: RemoteTarget[];
+}
+
+/** Something the remote cache thinks is worth changing. */
+export interface RemoteInsight {
+  severity: "warn" | "info";
+  project?: string;
+  target?: string;
+  message: string;
+  action: string;
+}
+
+export interface RemoteEvent {
+  at: string;
+  project: string;
+  project_name: string;
+  kind: "hit" | "miss" | "upload" | "touch";
+  target: string | null;
+  user: string | null;
+  bytes: number;
+  count: number;
 }
 
 /** The ciabatta build a remote cache hands out for one platform. */
@@ -236,9 +277,24 @@ export interface RemoteStats {
     oldest: string | null;
     newest: string | null;
     path: string;
+    /** The retention size limit, and how full the store is, when one is set. */
+    max_bytes?: number | null;
+    percent?: number | null;
   };
   counters: RemoteCounters;
   hit_rate: number | null;
+  /** Absent from servers older than 0.5. */
+  activity?: {
+    since: string | null;
+    last_used_at: string | null;
+    last_hit_at: string | null;
+    last_miss_at: string | null;
+    last_saved_at: string | null;
+    last_eviction: { at: string; removed: number; freed: number } | null;
+    recent: RemoteEvent[];
+  };
+  insights?: RemoteInsight[];
+  tls?: boolean;
   retention: { description: string };
   sessions: number;
   release: Release;

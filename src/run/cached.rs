@@ -535,10 +535,14 @@ impl Session {
         }
 
         // Nothing local. Before rebuilding, ask the shared cache — somebody
-        // else may already have built exactly this.
+        // else may already have built exactly this. Not for a step with no
+        // outputs, though: there is nothing a remote entry could restore, and
+        // asking anyway only filled the server's stats with misses nobody can
+        // do anything about.
         if reran.is_empty()
             && !self.force
-            && let (Decision::Rebuild { key, .. }, Some(remote)) = (&decision, &self.remote)
+            && let (Decision::Rebuild { key, reason }, Some(remote)) = (&decision, &self.remote)
+            && !matches!(reason, Reason::NoOutputs)
         {
             let key = key.clone();
             if let Some(entry) = crate::remote_cache::client::try_restore(

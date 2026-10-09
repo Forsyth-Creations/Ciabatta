@@ -57,6 +57,9 @@ pub struct AppState {
     /// What every checkout of every project has run, merged — see
     /// [`super::workflows`].
     pub workflows: Arc<super::workflows::Store>,
+    /// Who used what, and when — persisted, unlike the counters it replaced.
+    /// See [`super::activity`].
+    pub activity: Arc<super::activity::Activity>,
     pub started_at: String,
 }
 
@@ -73,6 +76,7 @@ impl AppState {
         let projects = Registry::open(&config.server.storage)?;
         let users = Users::open(&config.server.storage)?;
         let workflows = super::workflows::Store::open(&config.server.storage)?;
+        let activity = super::activity::Activity::open(&config.server.storage)?;
         let release = config.releases.scan();
 
         Ok(AppState {
@@ -80,6 +84,7 @@ impl AppState {
             projects: Arc::new(projects),
             users: Arc::new(users),
             workflows: Arc::new(workflows),
+            activity: Arc::new(activity),
             sessions: Arc::new(Sessions::open(&config.server.storage)),
             release: Arc::new(std::sync::RwLock::new(release)),
             started_at: crate::cache::store::now(),
@@ -503,7 +508,12 @@ async fn me(
     Ok(Json(state.identify(&headers)?))
 }
 
-/// What the cache is holding and how well it's doing.
+/// What the cache is holding, how well it's doing, and what to do about it.
+///
+/// Built for acting on rather than admiring: alongside the totals it says
+/// when the cache was last used and last saved to (overall and per project),
+/// which targets keep missing, what happened recently, and — as `insights` —
+/// the few things worth changing, each phrased as the change.
 async fn stats(
     State(state): State<AppState>,
     headers: header::HeaderMap,
@@ -511,7 +521,8 @@ async fn stats(
     state.identify(&headers)?;
 
     let store = state.store.stats()?;
-    let totals = state.projects.totals();
+    let totals = state.activity.totals();
+    let recorded = state.activity.snapshot();
     // The whole point of reporting history here: one machine can only say what
     // *it* ran, and the server is the only thing that sees everybody.
     let workflows = state.workflows.all();
@@ -533,18 +544,60 @@ async fn stats(
                 })
         })
         .collect();
-    let projects: Vec<serde_json::Value> = state
-        .projects
-        .list()
+
+    let entries = state.store.list().unwrap_or_default();
+    let registered = state.projects.list();
+    let names: std::collections::BTreeMap<String, String> = registered
+        .iter()
+        .map(|p| (p.id.clone(), p.name.clone()))
+        .collect();
+
+    let projects: Vec<serde_json::Value> = registered
         .into_iter()
         .map(|project| {
-            let counters = state.projects.counters(&project.id);
+            let activity = recorded
+                .projects
+                .get(&project.id)
+                .cloned()
+                .unwrap_or_default();
+            let counters = activity.counters.clone();
             let runs = workflows.get(&project.id);
+            let mine: Vec<&Entry> = entries
+                .iter()
+                .filter(|e| e.workspace == project.id)
+                .collect();
+            // The targets worth a look, worst first: the ones that miss most.
+            let mut targets: Vec<(&String, &super::activity::TargetActivity)> =
+                activity.targets.iter().collect();
+            targets.sort_by(|a, b| {
+                b.1.misses
+                    .cmp(&a.1.misses)
+                    .then(b.1.uploads.cmp(&a.1.uploads))
+                    .then(a.0.cmp(b.0))
+            });
             json!({
                 "project": project,
                 "counters": counters,
                 "hit_rate": counters.hit_rate(),
                 "entries": store.by_workspace.get(&project.id).copied().unwrap_or(0),
+                "bytes": mine.iter().map(|e| e.size).sum::<u64>(),
+                "last_used_at": activity.last_used_at(),
+                "last_hit_at": activity.last_hit_at,
+                "last_miss_at": activity.last_miss_at,
+                "last_saved_at": activity.last_upload_at,
+                // Not every entry arrived through this server's counters (a
+                // store older than them, or a restored backup), so the newest
+                // manifest is the honest fallback for "last saved".
+                "newest_entry_at": mine.iter().map(|e| e.created_at.as_str()).max(),
+                "targets": targets
+                    .into_iter()
+                    .take(15)
+                    .map(|(name, t)| {
+                        let mut value = serde_json::to_value(t).unwrap_or_default();
+                        value["name"] = json!(name);
+                        value
+                    })
+                    .collect::<Vec<_>>(),
                 "workflows": runs.map(Vec::len).unwrap_or(0),
                 "stale_workflows": runs
                     .map(|records| {
@@ -555,20 +608,75 @@ async fn stats(
         })
         .collect();
 
+    // The entries taking the most room, and the ones nobody has wanted for
+    // longest — the two lists somebody tidying a cache reaches for.
+    let summary = |e: &Entry| {
+        json!({
+            "project": names.get(&e.workspace).cloned().unwrap_or_else(|| e.workspace.clone()),
+            "target": e.target,
+            "size": e.size,
+            "created_at": e.created_at,
+            "last_used_at": e.last_touched(),
+        })
+    };
+    let mut by_size: Vec<&Entry> = entries.iter().collect();
+    by_size.sort_by_key(|e| std::cmp::Reverse(e.size));
+    let mut by_age: Vec<&Entry> = entries.iter().collect();
+    by_age.sort_by(|a, b| a.last_touched().cmp(b.last_touched()));
+
+    let max_bytes = state.config.retention.max_size_bytes().ok().flatten();
+    let retention = state.config.retention.describe();
+    let insights = super::activity::insights(
+        &recorded,
+        &super::activity::InsightContext {
+            names: &names,
+            stored_bytes: store.size,
+            max_bytes,
+            retention: &retention,
+        },
+    );
+
+    let last = |pick: fn(&super::activity::ProjectActivity) -> Option<&str>| {
+        recorded
+            .projects
+            .values()
+            .filter_map(pick)
+            .max()
+            .map(str::to_string)
+    };
+
     Ok(Json(json!({
         "storage": {
             "entries": store.entries,
             "bytes": store.size,
             "human": crate::cache::store::human_size(store.size),
+            "max_bytes": max_bytes,
+            "percent": max_bytes.filter(|m| *m > 0).map(|m| store.size as f64 * 100.0 / m as f64),
             "oldest": store.oldest,
             "newest": store.newest,
             "path": state.config.server.storage,
         },
         "counters": totals,
         "hit_rate": totals.hit_rate(),
+        "activity": {
+            "since": recorded.since,
+            "last_used_at": last(|p| p.last_used_at()),
+            "last_hit_at": last(|p| p.last_hit_at.as_deref()),
+            "last_miss_at": last(|p| p.last_miss_at.as_deref()),
+            "last_saved_at": last(|p| p.last_upload_at.as_deref()),
+            "last_eviction": recorded.last_eviction,
+            "recent": recorded.recent.iter().take(40).map(|event| {
+                let mut value = serde_json::to_value(event).unwrap_or_default();
+                value["project_name"] = json!(names.get(&event.project).cloned().unwrap_or_else(|| event.project.clone()));
+                value
+            }).collect::<Vec<_>>(),
+        },
+        "insights": insights,
+        "largest": by_size.into_iter().take(8).map(summary).collect::<Vec<_>>(),
+        "least_recently_used": by_age.into_iter().take(8).map(summary).collect::<Vec<_>>(),
         "retention": {
             "policy": state.config.retention,
-            "description": state.config.retention.describe(),
+            "description": retention,
         },
         "workflows": {
             "tracked": workflows.values().map(Vec::len).sum::<usize>(),
@@ -578,6 +686,7 @@ async fn stats(
         "sessions": state.sessions.live_count(),
         "release": *state.release.read().unwrap(),
         "started_at": state.started_at,
+        "tls": state.config.server.tls.is_some(),
         "projects": projects,
     })))
 }
@@ -639,6 +748,7 @@ async fn forget_project(
     if let Err(e) = state.workflows.forget(&id) {
         tracing::warn!("couldn't forget {id}'s workflow history: {e:#}");
     }
+    state.activity.forget(&id);
 
     if !state.projects.forget(&id)? {
         return Err(ApiError::not_found(format!("No project {id}")));
@@ -657,13 +767,23 @@ fn require_project(state: &AppState, id: &str) -> ApiResult<()> {
         .ok_or_else(|| ApiError::not_found(format!("Unknown project '{id}'")))
 }
 
+/// What a lookup may say about itself.
+#[derive(Deserialize)]
+struct LookupQuery {
+    /// The step the key belongs to. Optional — older clients don't send it —
+    /// but it is what lets the stats say *which* target keeps missing.
+    #[serde(default)]
+    target: Option<String>,
+}
+
 /// Look a key up. A miss is a 404 — that's the whole protocol.
 async fn get_entry(
     State(state): State<AppState>,
     headers: header::HeaderMap,
     Path((id, key)): Path<(String, String)>,
+    Query(query): Query<LookupQuery>,
 ) -> ApiResult<Json<Entry>> {
-    state.identify(&headers)?;
+    let identity = state.identify(&headers)?;
     require_project(&state, &id)?;
 
     let scoped = scoped_key(&id, &key);
@@ -671,12 +791,26 @@ async fn get_entry(
         // An entry whose artifacts have gone is a miss, not a hit that fails
         // halfway through a download.
         Some(entry) if state.store.has_artifacts(&scoped)? => {
-            state.projects.record_hit(&id, entry.size);
+            state.activity.record(super::activity::Traffic {
+                project: &id,
+                kind: super::activity::Kind::Hit,
+                target: Some(&entry.target),
+                key: Some(&key),
+                user: Some(&identity.name),
+                bytes: entry.size,
+            });
             state.store.touch(&scoped)?;
             Ok(Json(entry))
         }
         _ => {
-            state.projects.record_miss(&id);
+            state.activity.record(super::activity::Traffic {
+                project: &id,
+                kind: super::activity::Kind::Miss,
+                target: query.target.as_deref(),
+                key: Some(&key),
+                user: Some(&identity.name),
+                bytes: 0,
+            });
             Err(ApiError::not_found(format!("No cache entry for {key}")))
         }
     }
@@ -718,7 +852,7 @@ async fn touch_entries(
     Path(id): Path<String>,
     Json(payload): Json<TouchPayload>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    state.identify(&headers)?;
+    let identity = state.identify(&headers)?;
     require_project(&state, &id)?;
 
     // A key this server doesn't have is not an error: the client is reporting
@@ -730,6 +864,17 @@ async fn touch_entries(
             state.store.touch(&scoped)?;
             refreshed += 1;
         }
+    }
+
+    if refreshed > 0 {
+        state.activity.record(super::activity::Traffic {
+            project: &id,
+            kind: super::activity::Kind::Touch(refreshed as u64),
+            target: None,
+            key: None,
+            user: Some(&identity.name),
+            bytes: 0,
+        });
     }
 
     Ok(Json(json!({ "ok": true, "refreshed": refreshed })))
@@ -791,7 +936,7 @@ async fn put_entry(
     Path((id, key)): Path<(String, String)>,
     Json(mut entry): Json<Entry>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    state.identify_writer(&headers)?;
+    let identity = state.identify_writer(&headers)?;
     require_project(&state, &id)?;
 
     let scoped = scoped_key(&id, &key);
@@ -817,7 +962,14 @@ async fn put_entry(
     }
 
     state.store.write_manifest(&entry)?;
-    state.projects.record_upload(&id, entry.size);
+    state.activity.record(super::activity::Traffic {
+        project: &id,
+        kind: super::activity::Kind::Upload,
+        target: Some(&entry.target),
+        key: Some(&key),
+        user: Some(&identity.name),
+        bytes: entry.size,
+    });
     Ok(Json(json!({ "ok": true, "key": key })))
 }
 
@@ -1087,40 +1239,87 @@ pub async fn serve(config: ServerConfig) -> Result<()> {
         .parse()
         .with_context(|| format!("Invalid bind address {}", state.config.address()))?;
 
+    // Read the certificate before binding, so a bad one stops the server
+    // before anything has had a chance to connect to it.
+    let acceptor = match &state.config.server.tls {
+        Some(tls) => Some(tls.acceptor()?),
+        None => None,
+    };
+
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .with_context(|| format!("Failed to bind {addr}"))?;
 
     announce(&state, &listen);
     tokio::spawn(sweeper(state.clone(), listen.sweep_every.clone()));
+    tokio::spawn(flusher(state.clone()));
+
+    let shutdown = async {
+        let _ = tokio::signal::ctrl_c().await;
+        tracing::info!("shutting the remote cache down");
+    };
 
     // `into_make_service_with_connect_info` rather than a plain service: the
     // peer address is half of what makes a request log worth having, since
     // "which runner is doing this?" is the first question about any of it.
-    axum::serve(
-        listener,
-        router(state).into_make_service_with_connect_info::<SocketAddr>(),
-    )
-    .with_graceful_shutdown(async {
-        let _ = tokio::signal::ctrl_c().await;
-        tracing::info!("shutting the remote cache down");
-    })
-    .await
-    .context("The remote cache server stopped unexpectedly")
+    // The TLS path attaches it the same way, by hand.
+    let served = match acceptor {
+        Some(acceptor) => {
+            super::tls::serve(listener, router(state.clone()), acceptor, shutdown).await
+        }
+        None => axum::serve(
+            listener,
+            router(state.clone()).into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .with_graceful_shutdown(shutdown)
+        .await
+        .map_err(anyhow::Error::from),
+    };
+
+    // The counters since the last flush, so a restart loses nothing.
+    if let Err(e) = state.activity.flush() {
+        tracing::warn!("couldn't save the cache's activity record: {e:#}");
+    }
+    served.context("The remote cache server stopped unexpectedly")
+}
+
+/// Write the activity record every few seconds, when it has changed.
+async fn flusher(state: AppState) {
+    let mut ticker = tokio::time::interval(std::time::Duration::from_secs(10));
+    loop {
+        ticker.tick().await;
+        if let Err(e) = state.activity.flush() {
+            tracing::warn!("couldn't save the cache's activity record: {e:#}");
+        }
+    }
 }
 
 /// Print what an operator needs to see on startup, including the two things
 /// most likely to be wrong: an open server on a public interface, and a
 /// retention policy that will never evict anything.
 fn announce(state: &AppState, listen: &Listen) {
+    let scheme = if listen.tls.is_some() {
+        "https"
+    } else {
+        "http"
+    };
     println!(
-        "ciabatta remote cache listening on http://{}",
+        "ciabatta remote cache listening on {scheme}://{}",
         state.config.address()
     );
     println!("  storage:   {}", listen.storage.display());
     println!("  retention: {}", state.config.retention.describe());
     println!("  auth:      {}", state.config.auth.mode);
     println!("  logging:   {}", describe_logging(&state.config.log));
+    match &listen.tls {
+        Some(tls) => {
+            println!("  tls:       {}", tls.cert.display());
+            if let Some(fingerprint) = tls.fingerprint() {
+                println!("  sha-256:   {fingerprint}");
+            }
+        }
+        None => println!("  tls:       off — plain HTTP (see server.tls, or `init --tls`)"),
+    }
 
     let release = state.release.read().unwrap();
     if release.is_empty() {
@@ -1144,8 +1343,14 @@ fn announce(state: &AppState, listen: &Listen) {
     }
     println!();
     println!(
-        "Connect with: ciabatta remote-cache login http://<this-host>:{}",
-        listen.port
+        "Connect with: ciabatta remote-cache login {scheme}://<this-host>:{}{}",
+        listen.port,
+        match &listen.tls {
+            // A self-signed certificate isn't in anybody's trust store, so the
+            // way to trust it goes in the instructions.
+            Some(tls) => format!(" --ca-cert {}", tls.cert.display()),
+            None => String::new(),
+        }
     );
 }
 
@@ -1177,11 +1382,16 @@ async fn sweeper(state: AppState, every: String) {
         ticker.tick().await;
 
         match state.store.prune(&state.config.retention) {
-            Ok(pruned) if !pruned.is_empty() => tracing::info!(
-                "retention: evicted {} entr(ies), reclaimed {}",
-                pruned.removed.len(),
-                crate::cache::store::human_size(pruned.freed)
-            ),
+            Ok(pruned) if !pruned.is_empty() => {
+                tracing::info!(
+                    "retention: evicted {} entr(ies), reclaimed {}",
+                    pruned.removed.len(),
+                    crate::cache::store::human_size(pruned.freed)
+                );
+                state
+                    .activity
+                    .record_eviction(pruned.removed.len(), pruned.freed);
+            }
             Ok(_) => {}
             Err(e) => tracing::warn!("retention sweep failed: {e:#}"),
         }

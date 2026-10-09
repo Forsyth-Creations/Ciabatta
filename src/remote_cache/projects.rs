@@ -14,7 +14,6 @@
 //! repo and every CI runner then resolves to the same project without anyone
 //! configuring anything, which is the whole point.
 
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -39,15 +38,21 @@ pub struct Project {
 }
 
 /// Running counts, so the status page can say whether the cache is earning its
-/// keep. Hits and misses are per-process — they reset with the server, which is
-/// the honest thing for a "how is it doing right now" number.
+/// keep. Kept by [`super::activity::Activity`], which persists them — they used
+/// to reset with the server, which made "how is it doing" mean "how has it done
+/// since Tuesday's restart".
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct Counters {
+    #[serde(default)]
     pub hits: u64,
+    #[serde(default)]
     pub misses: u64,
+    #[serde(default)]
     pub uploads: u64,
     /// Bytes served from the cache — the bandwidth a hit saved re-uploading.
+    #[serde(default)]
     pub bytes_served: u64,
+    #[serde(default)]
     pub bytes_stored: u64,
 }
 
@@ -68,7 +73,6 @@ impl Counters {
 pub struct Registry {
     path: PathBuf,
     inner: Mutex<Vec<Project>>,
-    counters: Mutex<BTreeMap<String, Counters>>,
 }
 
 impl Registry {
@@ -85,7 +89,6 @@ impl Registry {
         Ok(Registry {
             path,
             inner: Mutex::new(projects),
-            counters: Mutex::new(BTreeMap::new()),
         })
     }
 
@@ -163,61 +166,8 @@ impl Registry {
 
         if removed {
             save(&self.path, &snapshot)?;
-            self.counters.lock().unwrap().remove(id);
         }
         Ok(removed)
-    }
-
-    /// Record a cache lookup that found something.
-    pub fn record_hit(&self, project: &str, bytes: u64) {
-        let mut guard = self.counters.lock().unwrap();
-        let counters = guard.entry(project.to_string()).or_default();
-        counters.hits += 1;
-        counters.bytes_served += bytes;
-    }
-
-    /// Record a cache lookup that didn't.
-    pub fn record_miss(&self, project: &str) {
-        self.counters
-            .lock()
-            .unwrap()
-            .entry(project.to_string())
-            .or_default()
-            .misses += 1;
-    }
-
-    /// Record an artifact being stored.
-    pub fn record_upload(&self, project: &str, bytes: u64) {
-        let mut guard = self.counters.lock().unwrap();
-        let counters = guard.entry(project.to_string()).or_default();
-        counters.uploads += 1;
-        counters.bytes_stored += bytes;
-    }
-
-    /// One project's counters.
-    pub fn counters(&self, project: &str) -> Counters {
-        self.counters
-            .lock()
-            .unwrap()
-            .get(project)
-            .cloned()
-            .unwrap_or_default()
-    }
-
-    /// Every project's counters, summed.
-    pub fn totals(&self) -> Counters {
-        self.counters
-            .lock()
-            .unwrap()
-            .values()
-            .fold(Counters::default(), |mut acc, c| {
-                acc.hits += c.hits;
-                acc.misses += c.misses;
-                acc.uploads += c.uploads;
-                acc.bytes_served += c.bytes_served;
-                acc.bytes_stored += c.bytes_stored;
-                acc
-            })
     }
 }
 
@@ -305,35 +255,6 @@ mod tests {
         let dir = scratch("unnamed");
         let registry = Registry::open(&dir).unwrap();
         assert!(registry.resolve(None, "   ", None).is_err());
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn counters_track_per_project_and_in_total() {
-        let dir = scratch("counters");
-        let registry = Registry::open(&dir).unwrap();
-
-        assert!(registry.counters("a").hit_rate().is_none());
-
-        registry.record_hit("a", 1000);
-        registry.record_hit("a", 500);
-        registry.record_miss("a");
-        registry.record_upload("a", 2000);
-        registry.record_miss("b");
-
-        let a = registry.counters("a");
-        assert_eq!(a.hits, 2);
-        assert_eq!(a.misses, 1);
-        assert_eq!(a.uploads, 1);
-        assert_eq!(a.bytes_served, 1500);
-        assert_eq!(a.bytes_stored, 2000);
-        assert!((a.hit_rate().unwrap() - 66.666).abs() < 0.01);
-
-        let totals = registry.totals();
-        assert_eq!(totals.hits, 2);
-        assert_eq!(totals.misses, 2);
-        assert_eq!(totals.hit_rate().unwrap(), 50.0);
-
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

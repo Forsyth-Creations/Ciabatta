@@ -595,6 +595,18 @@ pub enum RemoteCacheCommand {
         #[arg(long, value_name = "DIR", default_value = "storage")]
         storage: String,
 
+        /// Serve HTTPS: generate a self-signed certificate under `tls/` and
+        /// point the config at it. Swap in a certificate from your own CA by
+        /// editing `server.tls`.
+        #[arg(long)]
+        tls: bool,
+
+        /// A hostname or IP clients will use to reach the server, added to the
+        /// generated certificate. Repeatable. `localhost` and this machine's
+        /// hostname are always included.
+        #[arg(long = "tls-host", value_name = "HOST", requires = "tls")]
+        tls_hosts: Vec<String>,
+
         /// Overwrite an existing config.
         #[arg(long)]
         force: bool,
@@ -627,6 +639,14 @@ pub enum RemoteCacheCommand {
         /// the network.
         #[arg(long)]
         no_tls_verify: bool,
+
+        /// Trust this PEM certificate for the server — the one `remote-cache
+        /// init --tls` generated, or your internal CA's. Remembered for later
+        /// commands, and a safer answer to a self-signed certificate than
+        /// `--no-tls-verify`. On a machine that never logs in (a CI runner),
+        /// set `CIABATTA_REMOTE_CA` instead.
+        #[arg(long, value_name = "FILE", conflicts_with = "no_tls_verify")]
+        ca_cert: Option<std::path::PathBuf>,
 
         /// Username. Prompted for when the server needs one and it's omitted.
         #[arg(short, long)]

@@ -4,10 +4,10 @@
  *
  * Off, the run page shows what ran. On, it shows what the cache made of each
  * step — reused, rebuilt and why, or never consulted — and lights the
- * upstream steps that forced a rebuild. A context rather than page state,
- * because the switch lives in the top bar (so it's in the same place on every
- * run) and is remembered between visits: somebody chasing a cache problem
- * wants it on for the next run too.
+ * upstream steps that forced a rebuild. The switch is in the run page's
+ * header; the state is a context rather than that page's own so it survives
+ * moving from one run to the next, and is remembered between visits —
+ * somebody chasing a cache problem wants it on for the next run too.
  */
 
 import { createContext, useContext, useMemo, useState } from "react";

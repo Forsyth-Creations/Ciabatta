@@ -65,18 +65,22 @@ export function wasReused(report: CacheReport | null | undefined): boolean {
   return report?.outcome === "fresh" || report?.outcome === "hit";
 }
 
-/** "3 minutes ago", "2 days ago" — how old a timestamp is, the way it's said. */
-export function ago(at: string | null | undefined, now = Date.now()): string {
-  if (!at) return "—";
-  const seconds = Math.max(0, Math.round((now - Date.parse(at)) / 1000));
+/**
+ * "3 minutes ago", "2 days ago" — how old a timestamp is, the way it's said.
+ * `short` gives "3m ago", for a figure that has to fit a stat tile.
+ */
+export function ago(at: string | null | undefined, short = false): string {
+  if (!at) return short ? "never" : "—";
+  const seconds = Math.max(0, Math.round((Date.now() - Date.parse(at)) / 1000));
   if (Number.isNaN(seconds)) return "—";
   if (seconds < 60) return "just now";
+  const unit = (n: number, long: string, abbreviation: string) =>
+    short ? `${n}${abbreviation} ago` : `${n} ${long}${n === 1 ? "" : "s"} ago`;
   const minutes = Math.round(seconds / 60);
-  if (minutes < 60) return `${minutes} minute${minutes === 1 ? "" : "s"} ago`;
+  if (minutes < 60) return unit(minutes, "minute", "m");
   const hours = Math.round(minutes / 60);
-  if (hours < 48) return `${hours} hour${hours === 1 ? "" : "s"} ago`;
-  const days = Math.round(hours / 24);
-  return `${days} day${days === 1 ? "" : "s"} ago`;
+  if (hours < 48) return unit(hours, "hour", "h");
+  return unit(Math.round(hours / 24), "day", "d");
 }
 
 /** The colour inspect mode paints a step: reused, rebuilt, blocked, or ignored. */

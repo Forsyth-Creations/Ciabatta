@@ -55,6 +55,11 @@ pub struct Credential {
     /// the login so later commands reach it the same way.
     #[serde(default = "yes")]
     pub tls_verify: bool,
+    /// A certificate to trust for this server, from `login --ca-cert` — how a
+    /// cache with a self-signed certificate is reached *with* verification,
+    /// rather than by switching it off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ca_cert: Option<std::path::PathBuf>,
 }
 
 fn yes() -> bool {
@@ -121,6 +126,19 @@ impl Credentials {
             .get(normalize(url).as_str())
             .map(|c| c.tls_verify)
             .unwrap_or(true)
+    }
+
+    /// The extra certificate to trust for `url`: the one saved at login, or
+    /// `CIABATTA_REMOTE_CA` for a machine (a CI runner) that never logged in.
+    pub fn ca_cert(&self, url: &str) -> Option<std::path::PathBuf> {
+        self.servers
+            .get(normalize(url).as_str())
+            .and_then(|c| c.ca_cert.clone())
+            .or_else(|| {
+                std::env::var_os("CIABATTA_REMOTE_CA")
+                    .filter(|v| !v.is_empty())
+                    .map(std::path::PathBuf::from)
+            })
     }
 
     /// Other saved logins that are almost certainly the *same server* under a
@@ -212,6 +230,22 @@ impl Client {
     /// purpose: turning certificate checking off is a decision, and a default
     /// that call sites can forget to override is a decision nobody made.
     pub fn new(url: &str, tls_verify: bool) -> Result<Self> {
+        let credentials = Credentials::load();
+        let base = normalize(url);
+        Self::build(
+            url,
+            tls_verify,
+            credentials.ca_cert(&base).as_deref(),
+            credentials.get(&base).map(|c| c.token.clone()),
+        )
+    }
+
+    fn build(
+        url: &str,
+        tls_verify: bool,
+        ca_cert: Option<&Path>,
+        token: Option<String>,
+    ) -> Result<Self> {
         let base = normalize(url);
         anyhow::ensure!(!base.is_empty(), "a remote cache needs a URL");
 
@@ -219,9 +253,18 @@ impl Client {
         if !tls_verify {
             builder = builder.danger_accept_invalid_certs(true);
         }
+        if let Some(path) = ca_cert {
+            let pem = std::fs::read(path)
+                .with_context(|| format!("Failed to read the CA certificate {}", path.display()))?;
+            for cert in reqwest::Certificate::from_pem_bundle(&pem)
+                .with_context(|| format!("{} is not a PEM certificate", path.display()))?
+            {
+                builder = builder.add_root_certificate(cert);
+            }
+        }
 
         Ok(Client {
-            token: Credentials::load().get(&base).map(|c| c.token.clone()),
+            token,
             base,
             http: builder.build().context("Failed to build the HTTP client")?,
         })
@@ -237,10 +280,13 @@ impl Client {
     }
 
     /// A client with an explicit token, for the login flow itself.
-    pub fn with_token(url: &str, tls_verify: bool, token: Option<String>) -> Result<Self> {
-        let mut client = Self::new(url, tls_verify)?;
-        client.token = token;
-        Ok(client)
+    pub fn with_token(
+        url: &str,
+        tls_verify: bool,
+        ca_cert: Option<&Path>,
+        token: Option<String>,
+    ) -> Result<Self> {
+        Self::build(url, tls_verify, ca_cert, token)
     }
 
     fn url(&self, path: &str) -> String {
@@ -717,6 +763,7 @@ mod tests {
                 expires_at: None,
                 release: None,
                 tls_verify: true,
+                ca_cert: None,
             },
         );
         // Saved with a trailing slash, found without one.
@@ -740,6 +787,7 @@ mod tests {
                 expires_at: Some(past),
                 release: None,
                 tls_verify: true,
+                ca_cert: None,
             },
         );
         credentials.set(
@@ -750,6 +798,7 @@ mod tests {
                 expires_at: Some(future),
                 release: None,
                 tls_verify: true,
+                ca_cert: None,
             },
         );
         credentials.set(
@@ -761,6 +810,7 @@ mod tests {
                 expires_at: None,
                 release: None,
                 tls_verify: true,
+                ca_cert: None,
             },
         );
 
@@ -796,6 +846,7 @@ mod tests {
                 expires_at: None,
                 release: None,
                 tls_verify: false,
+                ca_cert: None,
             },
         );
         assert!(!credentials.tls_verify("https://self-signed"));
@@ -814,6 +865,7 @@ mod tests {
             expires_at: None,
             release: None,
             tls_verify: true,
+            ca_cert: None,
         };
         credentials.set("http://127.0.0.1:8380", credential.clone());
         credentials.set("http://cache.example.com:8380", credential.clone());

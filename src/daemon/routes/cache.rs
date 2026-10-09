@@ -92,6 +92,22 @@ fn resolve_targets(
     targets: &[String],
     workspace: &Option<crate::workspace::Workspace>,
 ) -> anyhow::Result<(Vec<crate::run::RunStep>, Option<crate::cache::CacheConfig>)> {
+    // Nothing named means everything: every workflow the project declares,
+    // compiled into one graph — what the page's "every runnable workflow"
+    // offers, and what used to come back as "'(nothing named)' is not a
+    // workflow here".
+    if targets.is_empty()
+        && let Some(ws) = workspace.as_ref()
+    {
+        let all = ws.workflow_names();
+        if all.is_empty() {
+            return Ok((Vec::new(), None));
+        }
+        let selection = crate::workspace::graph::Selection::default();
+        let (_, graph) = crate::workspace::graph::prepare_many(root, &all, &selection)?;
+        return Ok((graph.steps, None));
+    }
+
     if let (Some(ws), Some(first)) = (workspace.as_ref(), targets.first())
         && ws.workflow_names().iter().any(|name| name == first)
     {

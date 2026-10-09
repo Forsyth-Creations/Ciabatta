@@ -1879,6 +1879,8 @@ async fn cmd_remote_cache(subcommand: RemoteCacheCommand) -> Result<()> {
             into,
             port,
             storage,
+            tls,
+            tls_hosts,
             force,
         } => {
             let dir =
@@ -1901,10 +1903,34 @@ async fn cmd_remote_cache(subcommand: RemoteCacheCommand) -> Result<()> {
                 remote_cache::CONFIG_STEM,
                 format::YAML_EXT
             ));
-            std::fs::write(&path, remote_cache::starter_config(port, &storage))
+            let generated = if tls {
+                let mut hosts = tls_hosts;
+                if let Some(host) = this_hostname() {
+                    hosts.push(host);
+                }
+                Some(remote_cache::tls::generate_self_signed(
+                    &dir.join("tls"),
+                    &hosts,
+                )?)
+            } else {
+                None
+            };
+
+            std::fs::write(&path, remote_cache::starter_config(port, &storage, tls))
                 .with_context(|| format!("Failed to write {}", path.display()))?;
 
             println!("Wrote {}", path.display());
+            let scheme = if tls { "https" } else { "http" };
+            let trust = match &generated {
+                Some(pair) => {
+                    println!("Wrote {} and {}", pair.cert.display(), pair.key.display());
+                    if let Some(fingerprint) = pair.fingerprint() {
+                        println!("  sha-256 {fingerprint}");
+                    }
+                    format!(" --ca-cert {}", pair.cert.display())
+                }
+                None => String::new(),
+            };
             println!();
             println!("Next:");
             println!("  1. Read it — `auth.mode` is `open`, which means anyone who can reach");
@@ -1912,8 +1938,15 @@ async fn cmd_remote_cache(subcommand: RemoteCacheCommand) -> Result<()> {
             println!("     network; set `token` or `ldap` before exposing it further.");
             println!("  2. ciabatta remote-cache start");
             println!("  3. On each developer's machine:");
-            println!("       ciabatta remote-cache login http://<this-host>:{port}");
-            println!("       ciabatta cache init --remote http://<this-host>:{port}");
+            println!("       ciabatta remote-cache login {scheme}://<this-host>:{port}{trust}");
+            println!("       ciabatta cache init --remote {scheme}://<this-host>:{port}");
+            if generated.is_some() {
+                println!();
+                println!("The certificate is self-signed: copy cert.pem (never key.pem) to");
+                println!(
+                    "each machine for --ca-cert, or set CIABATTA_REMOTE_CA to its path in CI."
+                );
+            }
             Ok(())
         }
 
@@ -1942,7 +1975,16 @@ async fn cmd_remote_cache(subcommand: RemoteCacheCommand) -> Result<()> {
             username,
             password_env,
             no_tls_verify,
+            ca_cert,
         } => {
+            // Stored absolute: a login is remembered machine-wide, and a
+            // relative path would only mean something from one directory.
+            let ca_cert = ca_cert
+                .map(|path| {
+                    std::fs::canonicalize(&path)
+                        .with_context(|| format!("--ca-cert {} doesn't exist", path.display()))
+                })
+                .transpose()?;
             let tls_verify = !no_tls_verify;
             if !tls_verify {
                 eprintln!(
@@ -1952,7 +1994,7 @@ async fn cmd_remote_cache(subcommand: RemoteCacheCommand) -> Result<()> {
                 );
             }
 
-            let client = Client::with_token(&url, tls_verify, None)?;
+            let client = Client::with_token(&url, tls_verify, ca_cert.as_deref(), None)?;
 
             // Ask the server what it wants before prompting for anything, so an
             // open cache doesn't demand credentials it will ignore.
@@ -1993,6 +2035,7 @@ async fn cmd_remote_cache(subcommand: RemoteCacheCommand) -> Result<()> {
                     expires_at: session.expires_at.clone(),
                     release: health.release.clone(),
                     tls_verify,
+                    ca_cert,
                 },
             );
             credentials.save()?;
@@ -2117,6 +2160,32 @@ async fn cmd_remote_cache(subcommand: RemoteCacheCommand) -> Result<()> {
     }
 }
 
+/// "3h ago", "never" — how long since an RFC 3339 timestamp.
+fn when_ago(at: Option<&str>) -> String {
+    let Some(when) = at.and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok()) else {
+        return "never".to_string();
+    };
+    let seconds = (chrono::Utc::now() - when.with_timezone(&chrono::Utc))
+        .num_seconds()
+        .max(0);
+    match seconds {
+        0..60 => "just now".to_string(),
+        60..3600 => format!("{}m ago", seconds / 60),
+        3600..172_800 => format!("{}h ago", seconds / 3600),
+        _ => format!("{}d ago", seconds / 86_400),
+    }
+}
+
+/// This machine's hostname, for the certificate `init --tls` generates.
+fn this_hostname() -> Option<String> {
+    env::var("HOSTNAME")
+        .ok()
+        .or_else(|| env::var("COMPUTERNAME").ok())
+        .or_else(|| std::fs::read_to_string("/etc/hostname").ok())
+        .map(|name| name.trim().to_string())
+        .filter(|name| !name.is_empty())
+}
+
 /// The remote cache URL this workspace is configured to use, if any.
 fn configured_remote() -> Result<Option<String>> {
     let cwd = env::current_dir().context("Failed to get current directory")?;
@@ -2161,6 +2230,41 @@ fn print_remote_status(url: &str, stats: &serde_json::Value) {
         "  sessions   {} live",
         stats["sessions"].as_u64().unwrap_or(0)
     );
+    // When it was last of any use, and when anybody last added to it — the
+    // two times that say whether a cache is alive.
+    let activity = &stats["activity"];
+    println!(
+        "  last used  {}",
+        when_ago(activity["last_used_at"].as_str())
+    );
+    println!(
+        "  last saved {}",
+        when_ago(activity["last_saved_at"].as_str())
+    );
+
+    if let Some(insights) = stats["insights"].as_array()
+        && !insights.is_empty()
+    {
+        println!();
+        println!("Worth a look:");
+        for insight in insights {
+            let mark = if insight["severity"] == "warn" {
+                "⚠"
+            } else {
+                "·"
+            };
+            let scope = match (insight["project"].as_str(), insight["target"].as_str()) {
+                (Some(project), Some(_)) => format!("[{project}] "),
+                (Some(project), None) => format!("[{project}] "),
+                _ => String::new(),
+            };
+            println!(
+                "  {mark} {scope}{}",
+                insight["message"].as_str().unwrap_or("")
+            );
+            println!("      {}", insight["action"].as_str().unwrap_or(""));
+        }
+    }
 
     if let Some(projects) = stats["projects"].as_array()
         && !projects.is_empty()
@@ -2172,11 +2276,17 @@ fn print_remote_status(url: &str, stats: &serde_json::Value) {
             let counters = &entry["counters"];
             let stale = entry["stale_workflows"].as_u64().unwrap_or(0);
             println!(
-                "  {:<24} {:<38} {} hit / {} miss{}",
+                "  {:<24} {:<38} {} hit / {} miss  ·  used {}  ·  saved {}{}",
                 project["name"].as_str().unwrap_or("?"),
                 project["id"].as_str().unwrap_or("?"),
                 counters["hits"].as_u64().unwrap_or(0),
                 counters["misses"].as_u64().unwrap_or(0),
+                when_ago(entry["last_used_at"].as_str()),
+                when_ago(
+                    entry["last_saved_at"]
+                        .as_str()
+                        .or(entry["newest_entry_at"].as_str())
+                ),
                 match stale {
                     0 => String::new(),
                     n => format!("  ·  {n} stale workflow(s)"),
@@ -2449,6 +2559,19 @@ fn resolve_dry_run_steps(
     targets: &[String],
     workspace: &Option<workspace::Workspace>,
 ) -> Result<(Vec<run::RunStep>, Option<cache::CacheConfig>)> {
+    // Nothing named means every workflow, as the doc comment above promises.
+    if targets.is_empty()
+        && let Some(ws) = workspace.as_ref()
+    {
+        let all = ws.workflow_names();
+        if all.is_empty() {
+            return Ok((Vec::new(), None));
+        }
+        let selection = workspace::graph::Selection::default();
+        let (_, graph) = workspace::graph::prepare_many(cwd, &all, &selection)?;
+        return Ok((graph.steps, None));
+    }
+
     // A named workflow compiles across the whole monorepo.
     if let (Some(ws), Some(first)) = (workspace.as_ref(), targets.first())
         && ws.workflow_names().iter().any(|name| name == first)

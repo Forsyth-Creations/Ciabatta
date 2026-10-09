@@ -270,6 +270,7 @@ export function RunDetailPage() {
           icon={<StatusIcon status={status} title={null} />}
           label={statusLabel(status)}
         />
+        <InspectToggle />
         <Tooltip title="Show the exact commands this run executed, in order, with the directory each one runs from — and where it has got to.">
           <Button size="small" startIcon={<TerminalIcon />} onClick={() => setRecreating(true)}>
             Recreate
@@ -1026,6 +1027,35 @@ function oneLine(height: number) {
     whiteSpace: "nowrap",
     textOverflow: "ellipsis",
   } as const;
+}
+
+/**
+ * Cache inspect mode's switch, in the run's own header: it changes what this
+ * page's graph says, so it lives on this page. Remembered between runs — the
+ * next run is usually the one that checks whether the fix worked.
+ */
+function InspectToggle() {
+  const inspect = useInspectMode();
+  return (
+    <Tooltip
+      title={
+        inspect.on
+          ? "Cache inspect mode is on — every step says what the cache decided and why. Click to turn it off."
+          : "Cache inspect mode: show what the cache decided for every step, and why a step that should have been reused wasn't."
+      }
+    >
+      <Button
+        size="small"
+        startIcon={<ManageSearchIcon />}
+        onClick={inspect.toggle}
+        aria-pressed={inspect.on}
+        color={inspect.on ? "warning" : "primary"}
+        variant={inspect.on ? "outlined" : "text"}
+      >
+        Inspect cache
+      </Button>
+    </Tooltip>
+  );
 }
 
 /**

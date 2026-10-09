@@ -39,7 +39,6 @@ import DarkModeIcon from "@mui/icons-material/DarkMode";
 import HubIcon from "@mui/icons-material/Hub";
 import InventoryIcon from "@mui/icons-material/Inventory2";
 import LightModeIcon from "@mui/icons-material/LightMode";
-import ManageSearchIcon from "@mui/icons-material/ManageSearch";
 import MenuBookIcon from "@mui/icons-material/MenuBook";
 import MenuIcon from "@mui/icons-material/Menu";
 import MonitorHeartIcon from "@mui/icons-material/MonitorHeart";
@@ -51,7 +50,6 @@ import { useEffect, useState } from "react";
 import type { ReactNode } from "react";
 
 import { useColorMode } from "../state/colorMode";
-import { useInspectMode } from "../state/inspect";
 import { ProjectSwitcher } from "./ProjectSwitcher";
 import { HealthIndicator } from "./HealthIndicator";
 
@@ -79,7 +77,6 @@ const FOOTER_ITEMS = [{ to: "/docs", label: "Docs", icon: <MenuBookIcon /> }] as
 export function AppShell({ children }: { children: ReactNode }) {
   const pathname = useRouterState({ select: (s) => s.location.pathname });
   const { mode, toggle: onToggleMode } = useColorMode();
-  const inspect = useInspectMode();
 
   const theme = useTheme();
   const isNarrow = useMediaQuery(theme.breakpoints.down("md"));
@@ -176,31 +173,6 @@ export function AppShell({ children }: { children: ReactNode }) {
           <ProjectSwitcher />
           <HealthIndicator />
 
-          <Tooltip
-            title={
-              inspect.on
-                ? "Cache inspect mode is on — run graphs show what the cache decided for every step, and why. Click to turn it off."
-                : "Cache inspect mode: show, on every run graph, what the cache decided for each step and why a step that should have been reused wasn't."
-            }
-          >
-            <IconButton
-              onClick={inspect.toggle}
-              size="small"
-              aria-label="Toggle cache inspect mode"
-              aria-pressed={inspect.on}
-              sx={
-                inspect.on
-                  ? {
-                      color: "warning.main",
-                      bgcolor: (t) => `${t.palette.warning.main}22`,
-                      "&:hover": { bgcolor: (t) => `${t.palette.warning.main}33` },
-                    }
-                  : undefined
-              }
-            >
-              <ManageSearchIcon />
-            </IconButton>
-          </Tooltip>
 
           <Tooltip title={mode === "dark" ? "Switch to light" : "Switch to dark"}>
             <IconButton onClick={onToggleMode} size="small" aria-label="Toggle colour mode">

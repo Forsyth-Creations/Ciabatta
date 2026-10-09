@@ -8,15 +8,25 @@ Inside `.ciabatta/ciabatta.yaml` and `.ciabatta/workflows/*.yaml`:
 
 - **Every field, with its documentation.** What `persistent:` means, why
   `continue_on_error:` exists, what a `timeout:` accepts. From the JSON Schema,
-  so it's the same text the format's own reference uses.
+  so it's the same text the format's own reference uses, rendered as markdown.
+- **Snippets for the common shapes.** A new entry under `steps:` offers a
+  plain step, a step with `needs:`, a push step, a pull step and a recovery
+  node; an empty workflow file offers a whole workflow.
 - **Dependencies that resolve.** A step's `needs:` offers the steps in that
   file. A workflow's `needs:` offers the *other packages'* workflows —
-  `proto:generate`, with its description beside it. Two fields spelled the same
-  way that mean different things, which is the mistake this exists to prevent.
+  `proto:generate`, with its description beside it and its owner in the docs
+  panel. Two fields spelled the same way that mean different things, which is
+  the mistake this exists to prevent. `background:` and `depends_on:` offer the
+  same references, typing `proto:` narrows to that package's workflows, and an
+  entry already in the list isn't offered again.
 - **Tools your repo can actually install.** `requires:` offers what the
   monorepo root's `toolchain:` has a hint for. Anything else gets a warning:
-  a missing tool with no install command is a build failure with no fix.
-- **Registries, tags, `{CIABATTA_*}` variables**, and the phases `kind:` knows.
+  a missing tool with no install command is a build failure with no fix. The
+  docs panel shows each tool's install command.
+- **Registries, tags, owners, `{CIABATTA_*}` variables**, and the phases
+  `kind:` knows — values drawn from the repo rather than made-up examples.
+- **Suggestions that open on their own.** After `- `, `: `, `[` or `,`, and
+  after accepting a field name that leaves the cursor where a value goes.
 - **Typo detection.** `needs: [protos]` is flagged where you typed it, with
   "Did you mean `proto`?", rather than at build time in someone else's
   terminal.
@@ -45,6 +55,7 @@ binary, field completion still works and nothing complains.
 | --- | --- | --- |
 | `ciabatta.server.path` | `""` | A specific binary, for a build of your own. Empty uses `PATH`. |
 | `ciabatta.server.enabled` | `true` | Turn the server off and keep only the schema. |
+| `ciabatta.completion.autoTrigger` | `true` | Reopen suggestions after accepting a field name, when there's something to suggest. |
 | `ciabatta.trace.server` | `off` | Log the protocol traffic to the **Ciabatta** output channel. |
 
 **Ciabatta: Restart Language Server** picks up a rebuilt binary without

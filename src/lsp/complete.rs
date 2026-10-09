@@ -13,7 +13,7 @@
 
 use serde_json::{Value, json};
 
-use super::context::{Cursor, item_name, step_names};
+use super::context::{Cursor, item_name, listed, step_names};
 use super::index::{Index, Role};
 
 /// How a completion item sorts and what kind of icon it gets. The protocol's
@@ -34,6 +34,9 @@ struct Item {
     /// The grey text after the label: why this is the right choice.
     detail: String,
     kind: i64,
+    /// Markdown for the side panel, when there's more to say than fits on
+    /// the detail line.
+    documentation: Option<String>,
 }
 
 impl Item {
@@ -42,7 +45,13 @@ impl Item {
             label: label.into(),
             detail: detail.into(),
             kind,
+            documentation: None,
         }
+    }
+
+    fn documented(mut self, markdown: String) -> Self {
+        self.documentation = Some(markdown);
+        self
     }
 }
 
@@ -112,13 +121,21 @@ pub fn items(
         "end":   { "line": line, "character": character },
     });
 
+    // A list never needs the same entry twice, so what it already holds is
+    // dropped rather than offered back.
+    let already = listed(lines, line, character);
+
     let items: Vec<Value> = items
         .into_iter()
         .filter(|item| matches_word(&item.label, &cursor.word))
+        .filter(|item| !already.contains(&item.label))
         .enumerate()
         .map(|(i, item)| {
-            json!({
+            let mut value = json!({
                 "label": item.label,
+                // Shown on every row, not just the focused one, so the list
+                // can be read without arrowing through it.
+                "labelDetails": { "description": item.detail },
                 "detail": item.detail,
                 "kind": item.kind,
                 "textEdit": { "range": range, "newText": item.label },
@@ -126,7 +143,11 @@ pub fn items(
                 // should sit above whatever the schema offers for the same
                 // position rather than being interleaved alphabetically.
                 "sortText": format!("0{i:04}"),
-            })
+            });
+            if let Some(markdown) = item.documentation {
+                value["documentation"] = json!({ "kind": "markdown", "value": markdown });
+            }
+            value
         })
         .collect();
 
@@ -159,8 +180,11 @@ fn in_workflow(cursor: &Cursor, member: Option<&str>, index: &Index, lines: &[&s
             .collect();
     }
 
-    if cursor.at(&["needs"]) {
+    if cursor.at(&["needs"]) || cursor.at(&["background"]) {
         return workflow_refs(index, member);
+    }
+    if cursor.ends_with(&["owner"]) {
+        return owners(index);
     }
 
     if cursor.ends_with(&["requires"]) {
@@ -214,6 +238,9 @@ fn in_config(cursor: &Cursor, member: Option<&str>, index: &Index) -> Vec<Item> 
     if cursor.ends_with(&["cache", "env"]) {
         return env_vars(index, "used elsewhere in this repository");
     }
+    if cursor.at(&["workspace", "owner"]) {
+        return owners(index);
+    }
 
     // Inline workflows (`workflows.<name>:`) are workflows, and the arbitrary
     // name in the middle of the path is not part of the shape.
@@ -226,25 +253,85 @@ fn in_config(cursor: &Cursor, member: Option<&str>, index: &Index) -> Vec<Item> 
     Vec::new()
 }
 
+/// Every workflow another package could depend on, each documented with what
+/// it does and who to ask about it.
 fn workflow_refs(index: &Index, member: Option<&str>) -> Vec<Item> {
-    index
-        .workflow_refs(member)
-        .into_iter()
-        .map(|(reference, detail)| Item::new(reference, detail, kind::MODULE))
-        .collect()
+    let mut items = Vec::new();
+    for m in &index.members {
+        if Some(m.name.as_str()) == member || m.workflows.is_empty() {
+            continue;
+        }
+        let about = m
+            .description
+            .as_deref()
+            .map(|d| format!("\n\n{d}"))
+            .unwrap_or_default();
+        for (workflow, description) in &m.workflows {
+            let detail = description
+                .clone()
+                .unwrap_or_else(|| format!("{}'s {workflow} workflow", m.name));
+            items.push(
+                Item::new(format!("{}:{workflow}", m.name), detail, kind::MODULE).documented(
+                    format!(
+                        "**{}** › `{workflow}`\n\n{}\n\n---\nSub-workspace `{}`, owned by {}{about}",
+                        m.name,
+                        description.as_deref().unwrap_or("No description."),
+                        m.name,
+                        m.owner,
+                    ),
+                ),
+            );
+        }
+        let names: Vec<String> = m.workflows.keys().map(|w| format!("`{w}`")).collect();
+        items.push(
+            Item::new(
+                m.name.clone(),
+                m.description
+                    .clone()
+                    .unwrap_or_else(|| format!("owned by {}", m.owner)),
+                kind::MODULE,
+            )
+            .documented(format!(
+                "**{}** — its workflow with this file's name.\n\nWorkflows: {}\n\n---\nOwned by {}{about}",
+                m.name,
+                names.join(", "),
+                m.owner,
+            )),
+        );
+    }
+    items
 }
 
 fn tools(index: &Index) -> Vec<Item> {
     index
         .tools
         .iter()
-        .map(|(tool, description)| {
+        .map(|(tool, spec)| {
+            let detail = spec
+                .description
+                .clone()
+                .unwrap_or_else(|| "declared in the root's toolchain:".into());
+            let mut doc = format!("**{tool}** — {detail}");
+            if let Some(hint) = &spec.hint {
+                doc.push_str(&format!("\n\nInstall: `{hint}`"));
+            }
+            if let Some(check) = &spec.check {
+                doc.push_str(&format!("\n\nDetected by: `{check}`"));
+            }
+            Item::new(tool, detail, kind::KEYWORD).documented(doc)
+        })
+        .collect()
+}
+
+fn owners(index: &Index) -> Vec<Item> {
+    index
+        .owners
+        .iter()
+        .map(|owner| {
             Item::new(
-                tool,
-                description
-                    .clone()
-                    .unwrap_or_else(|| "declared in the root's toolchain:".into()),
-                kind::KEYWORD,
+                owner,
+                "an owner already named in this repository",
+                kind::CONSTANT,
             )
         })
         .collect()
@@ -298,9 +385,16 @@ mod tests {
                         .collect(),
                 },
             ],
-            tools: [("cargo".to_string(), Some("The Rust toolchain".into()))]
-                .into_iter()
-                .collect(),
+            tools: [(
+                "cargo".to_string(),
+                crate::workspace::ToolSpec {
+                    description: Some("The Rust toolchain".into()),
+                    hint: Some("curl https://sh.rustup.rs | sh".into()),
+                    check: None,
+                },
+            )]
+            .into_iter()
+            .collect(),
             registries: [("nexus".to_string(), "http://localhost:8527".to_string())]
                 .into_iter()
                 .collect(),
@@ -308,6 +402,9 @@ mod tests {
                 .into_iter()
                 .collect(),
             env: ["API_TOKEN".to_string()].into_iter().collect(),
+            owners: ["Henry Forsyth".to_string(), "platform-team".to_string()]
+                .into_iter()
+                .collect(),
         }
     }
 
@@ -395,6 +492,97 @@ mod tests {
             "api",
         );
         assert!(got.contains(&"proto:generate".to_string()));
+    }
+
+    /// The full protocol item for a label, for checking more than the label.
+    fn item(src: &str, role: Role, label: &str) -> Value {
+        let raw: Vec<String> = src.lines().map(str::to_string).collect();
+        let (line, character) = raw
+            .iter()
+            .enumerate()
+            .find_map(|(i, l)| l.find('|').map(|c| (i, c)))
+            .expect("fixture needs a | cursor marker");
+        let cleaned: Vec<String> = raw.iter().map(|l| l.replace('|', "")).collect();
+        let refs: Vec<&str> = cleaned.iter().map(String::as_str).collect();
+        let cursor = resolve(&refs, line, character).expect("cursor should resolve");
+        items(
+            &cursor,
+            &role,
+            Some("api"),
+            &sample_index(),
+            &refs,
+            line,
+            character,
+        )
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["label"] == label)
+        .cloned()
+        .unwrap_or_else(|| panic!("no item labelled {label}"))
+    }
+
+    #[test]
+    fn entries_already_in_the_list_are_not_offered_again() {
+        let got = complete(
+            "needs:\n  - proto:generate\n  - |",
+            Role::Workflow("build".into()),
+            "api",
+        );
+        assert!(!got.contains(&"proto:generate".to_string()));
+        assert!(got.contains(&"proto".to_string()));
+
+        let got = complete(
+            "requires: [cargo, |]",
+            Role::Workflow("build".into()),
+            "api",
+        );
+        assert!(got.is_empty());
+    }
+
+    #[test]
+    fn typing_the_colon_of_a_reference_offers_that_members_workflows() {
+        let got = complete("needs:\n  - proto:|", Role::Workflow("build".into()), "api");
+        assert_eq!(got, vec!["proto:generate"]);
+    }
+
+    #[test]
+    fn background_offers_workflow_references_like_needs() {
+        let got = complete("background:\n  - |", Role::Workflow("test".into()), "api");
+        assert!(got.contains(&"proto:generate".to_string()));
+    }
+
+    #[test]
+    fn owner_offers_the_owners_already_in_use() {
+        let got = complete(
+            "steps:\n  - name: a\n    owner: plat|",
+            Role::Workflow("t".into()),
+            "api",
+        );
+        assert_eq!(got, vec!["platform-team"]);
+        let got = complete("workspace:\n  owner: |", Role::Config, "api");
+        assert_eq!(got.len(), 2);
+    }
+
+    #[test]
+    fn items_carry_markdown_documentation() {
+        let tool = item("requires:\n  - |", Role::Workflow("b".into()), "cargo");
+        let doc = tool["documentation"]["value"].as_str().unwrap();
+        assert_eq!(tool["documentation"]["kind"], "markdown");
+        assert!(doc.contains("curl https://sh.rustup.rs | sh"));
+
+        let reference = item(
+            "needs:\n  - |",
+            Role::Workflow("b".into()),
+            "proto:generate",
+        );
+        let doc = reference["documentation"]["value"].as_str().unwrap();
+        assert!(doc.contains("Generate protobufs"));
+        assert!(doc.contains("Henry Forsyth"));
+        assert_eq!(
+            reference["labelDetails"]["description"],
+            "Generate protobufs"
+        );
     }
 
     #[test]

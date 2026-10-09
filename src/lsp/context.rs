@@ -110,6 +110,9 @@ fn inspect(raw: &str) -> Line {
 
 /// The colon that ends a mapping key: the first one at the top level, not one
 /// inside a quoted scalar or a `{CIABATTA_*}` placeholder.
+///
+/// As in YAML, the colon has to be followed by a space or the end of the line:
+/// `proto:generate` is one scalar — a workflow reference — not a key.
 fn find_key_colon(s: &str) -> Option<usize> {
     let bytes = s.as_bytes();
     let mut quote: Option<u8> = None;
@@ -118,7 +121,9 @@ fn find_key_colon(s: &str) -> Option<usize> {
             (Some(q), c) if c == q => quote = None,
             (Some(_), _) => {}
             (None, b'"') | (None, b'\'') => quote = Some(b),
-            (None, b':') => return Some(i),
+            (None, b':') if bytes.get(i + 1).is_none_or(|c| c.is_ascii_whitespace()) => {
+                return Some(i);
+            }
             (None, _) => {}
         }
     }
@@ -196,7 +201,16 @@ pub fn resolve(lines: &[&str], line: usize, character: usize) -> Option<Cursor> 
     let word;
     let mut search_col;
 
-    if let Some(key) = self_line
+    // `- proto:` is a reference half typed, not a key: the `:` trigger fires
+    // right there, and has to offer `proto`'s workflows rather than nothing.
+    let half_typed_reference =
+        self_line.is_item && self_line.value.is_empty() && before.ends_with(':') && !flow;
+
+    if half_typed_reference {
+        in_key = false;
+        word = unquote(word_before(before)).to_string();
+        search_col = self_line.content_col;
+    } else if let Some(key) = self_line
         .key
         .clone()
         .filter(|_| before.contains(':') || flow)
@@ -274,6 +288,73 @@ pub fn item_name(lines: &[&str], item_line: Option<usize>) -> Option<String> {
         }
     }
     None
+}
+
+/// The entries already in the sequence the cursor is adding to, so a list
+/// isn't offered back what it already holds. The entry being typed is left out.
+///
+/// Covers both spellings: `- a` lines at the cursor's own column, and the
+/// other items of an inline `[a, b, |]` on the cursor's line.
+pub fn listed(lines: &[&str], line: usize, character: usize) -> Vec<String> {
+    let Some(raw) = lines.get(line) else {
+        return Vec::new();
+    };
+    let cut = raw
+        .char_indices()
+        .nth(character)
+        .map(|(i, _)| i)
+        .unwrap_or(raw.len());
+    let (before, after) = raw.split_at(cut);
+
+    if in_flow_sequence(before) {
+        let open = before.rfind('[').expect("checked by in_flow_sequence");
+        let typed = &before[open + 1..];
+        // Everything before the last comma is finished; after the cursor, up
+        // to the closing bracket, is the rest of the list.
+        let done = typed.rfind(',').map_or("", |comma| &typed[..comma]);
+        let rest = after.split(']').next().unwrap_or("");
+        let rest = rest.split_once(',').map_or("", |(_, tail)| tail);
+        return done
+            .split(',')
+            .chain(rest.split(','))
+            .map(|entry| unquote(entry.trim()).to_string())
+            .filter(|entry| !entry.is_empty())
+            .collect();
+    }
+
+    let own = inspect(raw);
+    if !own.is_item || own.key.is_some() {
+        return Vec::new();
+    }
+    // Walk out from the cursor's line in both directions while the lines are
+    // still this sequence: siblings at the same column, or anything nested
+    // deeper under one of them.
+    let mut entries = Vec::new();
+    let mut take = |i: usize| -> bool {
+        let info = inspect(lines[i]);
+        if info.skip || info.content_col > own.content_col {
+            return true;
+        }
+        if info.content_col < own.content_col || !info.is_item || info.key.is_some() {
+            return false;
+        }
+        let value = unquote(&info.value);
+        if !value.is_empty() {
+            entries.push(value.to_string());
+        }
+        true
+    };
+    for i in (0..line).rev() {
+        if !take(i) {
+            break;
+        }
+    }
+    for i in line + 1..lines.len() {
+        if !take(i) {
+            break;
+        }
+    }
+    entries
 }
 
 /// Every step name in the document's top-level `steps:` list, in file order.
@@ -410,6 +491,60 @@ mod tests {
             "    - name: not-a-step",
         ];
         assert_eq!(step_names(&lines), vec!["format", "lint"]);
+    }
+
+    /// `listed` for a fixture with a `|` cursor marker.
+    fn listed_at(src: &str) -> Vec<String> {
+        let raw: Vec<String> = src.lines().map(str::to_string).collect();
+        let (line, character) = raw
+            .iter()
+            .enumerate()
+            .find_map(|(i, l)| l.find('|').map(|c| (i, c)))
+            .expect("fixture needs a | cursor marker");
+        let cleaned: Vec<String> = raw.iter().map(|l| l.replace('|', "")).collect();
+        let refs: Vec<&str> = cleaned.iter().map(String::as_str).collect();
+        listed(&refs, line, character)
+    }
+
+    #[test]
+    fn a_reference_is_a_scalar_not_a_key() {
+        let c = at("needs:\n  - proto:gen|");
+        assert!(!c.in_key);
+        assert!(c.at(&["needs"]));
+        assert_eq!(c.word, "proto:gen");
+    }
+
+    #[test]
+    fn a_reference_cut_off_at_its_colon_is_still_a_reference() {
+        let c = at("needs:\n  - proto:|");
+        assert!(!c.in_key);
+        assert!(c.at(&["needs"]));
+        assert_eq!(c.word, "proto:");
+    }
+
+    #[test]
+    fn listed_finds_the_other_entries_of_a_block_sequence() {
+        let got = listed_at("needs:\n  - proto\n  - |\n  - \"web:build\"\nsteps: []");
+        assert_eq!(got, vec!["proto", "web:build"]);
+    }
+
+    #[test]
+    fn listed_stops_at_the_end_of_its_own_sequence() {
+        let got = listed_at(
+            "steps:\n  - name: a\n    needs:\n      - b\n      - |\n  - name: c\n    needs:\n      - d",
+        );
+        assert_eq!(got, vec!["b"]);
+    }
+
+    #[test]
+    fn listed_reads_both_sides_of_an_inline_sequence() {
+        let got = listed_at("requires: [cargo, pro|, docker]");
+        assert_eq!(got, vec!["cargo", "docker"]);
+    }
+
+    #[test]
+    fn listed_is_empty_outside_a_sequence() {
+        assert!(listed_at("description: |").is_empty());
     }
 
     #[test]

@@ -131,6 +131,33 @@
       "description": "A node in the run graph: a normal step, or a recovery node (`recover: true`) entered only via some step's `on_error`.",
       "additionalProperties": false,
       "required": ["name"],
+      "defaultSnippets": [
+        {
+          "label": "step",
+          "description": "A step that runs a shell command.",
+          "body": { "name": "${1:build}", "description": "${2}", "run": "${3:make}" }
+        },
+        {
+          "label": "step with needs",
+          "description": "A step that waits for others in this workflow.",
+          "body": { "name": "${1:test}", "needs": ["${2}"], "run": "${3:make test}" }
+        },
+        {
+          "label": "push step",
+          "description": "Publish an artifact to a configured registry.",
+          "body": { "name": "${1:publish}", "kind": "push", "registry": "${2}", "artifact": "${3:dist/app.tar.gz}", "publish_path": "${4:app/{CIABATTA_COMMIT\\}/app.tar.gz}" }
+        },
+        {
+          "label": "pull step",
+          "description": "Fetch what a push step published, with its transfer fields copied in.",
+          "body": { "name": "${1:fetch}", "kind": "pull", "from": "${2}" }
+        },
+        {
+          "label": "recovery node",
+          "description": "Offer fixes when a step fails; reach it with that step's `on_error`.",
+          "body": { "name": "${1:fix}", "recover": true, "message": "${2:What should happen?}", "options": [{ "label": "${3:Retry}", "run": "${4}" }] }
+        }
+      ],
       "properties": {
         "name": {
           "type": "string",

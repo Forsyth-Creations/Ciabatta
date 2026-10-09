@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use crate::config::CIABATTA_DIR;
-use crate::workspace::{WORKFLOWS_DIR, Workspace, find_workspace_root};
+use crate::workspace::{ToolSpec, WORKFLOWS_DIR, Workspace, find_workspace_root};
 
 /// How long a scan stays good. Long enough that typing never triggers one,
 /// short enough that adding a sub-workspace shows up without restarting the
@@ -82,8 +82,8 @@ pub struct MemberInfo {
 #[derive(Debug, Clone, Default)]
 pub struct Index {
     pub members: Vec<MemberInfo>,
-    /// `toolchain:` entries: tool name to its one-line description.
-    pub tools: BTreeMap<String, Option<String>>,
+    /// `toolchain:` entries: tool name to how it's described and installed.
+    pub tools: BTreeMap<String, ToolSpec>,
     /// `registries:` entries: name to URL.
     pub registries: BTreeMap<String, String>,
     /// Every tag used anywhere, so a repo's vocabulary stays a small set
@@ -92,6 +92,8 @@ pub struct Index {
     /// Environment variable names the repo already mentions — from `env:`
     /// blocks and from checked-in `.env.default` templates.
     pub env: BTreeSet<String>,
+    /// Every `owner:` written anywhere, so a team is spelled one way.
+    pub owners: BTreeSet<String>,
 }
 
 impl Index {
@@ -184,25 +186,31 @@ fn scan(root: &Path) -> Index {
     let mut index = Index::default();
 
     for (tool, spec) in &workspace.toolchain {
-        index.tools.insert(tool.clone(), spec.description.clone());
+        index.tools.insert(tool.clone(), spec.clone());
     }
     index.env.extend(workspace.env.keys().cloned());
     index.tags.extend(workspace.root_meta.tags.iter().cloned());
+    index
+        .owners
+        .extend(workspace.root_meta.owner.iter().cloned());
 
     for member in &workspace.members {
         for (name, registry) in &member.config.registries {
             index.registries.insert(name.clone(), registry.url.clone());
         }
         index.tags.extend(member.meta.tags.iter().cloned());
+        index.owners.extend(member.meta.owner.iter().cloned());
         index.env.extend(member.meta.env.keys().cloned());
 
         let mut workflows = BTreeMap::new();
         for (name, workflow) in &member.workflows {
             index.tags.extend(workflow.tags.iter().cloned());
+            index.owners.extend(workflow.owner.iter().cloned());
             index.env.extend(workflow.env.keys().cloned());
             index.env.extend(workflow.required_env.iter().cloned());
             for step in &workflow.steps {
                 index.tags.extend(step.tags.iter().cloned());
+                index.owners.extend(step.owner.iter().cloned());
                 index.env.extend(step.env.keys().cloned());
             }
             workflows.insert(name.clone(), said(workflow.description.as_deref()));

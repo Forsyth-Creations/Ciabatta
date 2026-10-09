@@ -203,7 +203,9 @@ mod tests {
                 owner: "Henry Forsyth".into(),
                 workflows: [("generate".to_string(), None)].into_iter().collect(),
             }],
-            tools: [("cargo".to_string(), None)].into_iter().collect(),
+            tools: [("cargo".to_string(), Default::default())]
+                .into_iter()
+                .collect(),
             ..Index::default()
         }
     }

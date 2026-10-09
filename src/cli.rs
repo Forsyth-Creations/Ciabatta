@@ -753,6 +753,12 @@ pub struct WorkflowArgs {
     #[arg(long)]
     pub force: bool,
 
+    /// How many steps may run at once. Steps whose dependencies are met run
+    /// side by side; `-j 1` runs them one at a time, as ciabatta used to.
+    /// Defaults to `CIABATTA_JOBS`, then to the number of CPUs.
+    #[arg(short = 'j', long, value_name = "N")]
+    pub jobs: Option<usize>,
+
     /// Hold every step to the files it declared: run it in an isolated copy of
     /// the tree containing only its `cache.inputs`, then take its declared
     /// outputs back.

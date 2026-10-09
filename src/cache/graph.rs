@@ -327,6 +327,9 @@ pub fn layer_over(base: &mut CacheConfig, over: &CacheConfig) {
     if !over.env.is_empty() {
         base.env = over.env.clone();
     }
+    if let Some(no_outputs) = over.no_outputs {
+        base.no_outputs = Some(no_outputs);
+    }
     if !over.exclude.is_empty() {
         base.exclude = over.exclude.clone();
     }
@@ -635,6 +638,79 @@ mod tests {
         assert!(
             plan.steps[1].is_reuse(),
             "an upstream that can prove its outputs didn't move must not force a rerun: {:?}",
+            plan.steps[1].decision
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A step that says it writes nothing (`no_outputs: true`) is accountable:
+    /// it doesn't force the steps behind it to rebuild, and with unchanged
+    /// inputs it is reused itself.
+    ///
+    /// Without this, a `lint` or `test` at the root of a graph — which by its
+    /// nature declares no outputs — made every step that needed it rebuild on
+    /// every run, however little had changed.
+    #[test]
+    fn a_step_that_writes_nothing_does_not_hold_back_the_steps_behind_it() {
+        let dir = scratch("writesnothing");
+        write(&dir, "src/a.rs", "fn a() {}");
+        write(&dir, "dist/out", "built");
+        let store = Store::at(dir.join(".cache")).unwrap();
+
+        let cached = CacheConfig {
+            enabled: Some(true),
+            inputs: vec!["src/**/*".into()],
+            outputs: vec!["dist/**/*".into()],
+            exclude: vec!["dist".into()],
+            ..Default::default()
+        };
+        let lint = CacheConfig {
+            outputs: Vec::new(),
+            no_outputs: Some(true),
+            ..cached.clone()
+        };
+
+        let steps = vec![
+            step("lint", "make lint", &[]),
+            step("build", "make build", &["lint"]),
+        ];
+        let context = PerStep {
+            dir: dir.clone(),
+            configs: [
+                ("lint".to_string(), lint.clone()),
+                ("build".to_string(), cached.clone()),
+            ]
+            .into_iter()
+            .collect(),
+        };
+
+        // First time through, both run — and both are stored: the lint as an
+        // entry with no files, which is the whole of its result.
+        let plan = plan_graph(&steps, &context, &BTreeMap::new(), &store).unwrap();
+        assert!(
+            matches!(
+                plan.steps[0].decision,
+                Decision::Rebuild {
+                    reason: Reason::NeverBuilt,
+                    ..
+                }
+            ),
+            "{:?}",
+            plan.steps[0].decision
+        );
+        store_built(&store, plan.steps[0].decision.key().unwrap(), &dir, &lint);
+        store_built(&store, plan.steps[1].decision.key().unwrap(), &dir, &cached);
+
+        let plan = plan_graph(&steps, &context, &BTreeMap::new(), &store).unwrap();
+        assert!(
+            matches!(plan.steps[0].decision, Decision::Fresh { outputs: 0, .. }),
+            "a step that writes nothing is reused on unchanged inputs: {:?}",
+            plan.steps[0].decision
+        );
+        assert!(
+            plan.steps[1].is_reuse(),
+            "and it must not force the step behind it to rebuild: {:?}",
             plan.steps[1].decision
         );
 

@@ -92,6 +92,23 @@ pub struct CacheConfig {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub outputs: Vec<String>,
 
+    /// This build writes nothing a later step reads: a test, a lint, a type
+    /// check, a notification.
+    ///
+    /// Only meaningful with no `outputs`. A step that declares neither is one
+    /// the cache can't account for — it might have written anything — so it
+    /// runs every time and so does every step that needs it, which is how one
+    /// `lint` at the root of a graph stops everything behind it from ever being
+    /// reused. Saying it writes nothing makes it accountable: with its inputs
+    /// unchanged it is skipped like any other hit, and its dependents key on it
+    /// normally.
+    ///
+    /// Tri-state for the same reason as `enabled`: a level that doesn't
+    /// mention it inherits it rather than switching it off.
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub no_outputs: Option<bool>,
+
     /// Environment variables that are part of the key. A build whose result
     /// depends on `PROFILE` must say so, or switching profiles will silently
     /// reuse the other one's artifacts.
@@ -253,7 +270,13 @@ impl CacheConfig {
     /// why a step behind one of those has to run too. See
     /// [`Reason::UpstreamReran`].
     pub fn accounts_for_its_outputs(&self) -> bool {
-        !self.outputs.is_empty()
+        !self.outputs.is_empty() || self.writes_nothing()
+    }
+
+    /// Whether this build declared that it writes nothing anyone reads
+    /// (`no_outputs: true`, with no `outputs` to contradict it).
+    pub fn writes_nothing(&self) -> bool {
+        self.outputs.is_empty() && self.no_outputs.unwrap_or(false)
     }
 
     /// Hash the files this build writes. Never filtered by `exclude`.
@@ -709,7 +732,7 @@ impl Decision {
 }
 
 /// Where a cache entry was found.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Source {
     Local,
@@ -727,7 +750,7 @@ impl Source {
 
 /// Why a target has to be rebuilt. Every variant names something the user can
 /// go and look at — "cache miss" on its own has never helped anybody.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum Reason {
     /// This key has never been built.
@@ -775,13 +798,15 @@ impl Reason {
                 "output(s) have been modified since they were built: {}",
                 modified.join(", ")
             ),
-            Reason::NoOutputs => {
-                "no `cache.outputs` are declared, so there'd be nothing to restore".to_string()
-            }
+            Reason::NoOutputs => "no `cache.outputs` are declared, so there'd be nothing to \
+                 restore (set `cache.no_outputs: true` if it writes nothing)"
+                .to_string(),
             Reason::UpstreamReran { steps } => format!(
                 "{} ran and declares no `cache.outputs`, so there's no telling whether what \
-                 this step consumes changed",
-                steps.join(", ")
+                 this step consumes changed (give {} `cache.outputs`, or `cache.no_outputs: \
+                 true` if it writes nothing)",
+                steps.join(", "),
+                if steps.len() == 1 { "it" } else { "them" },
             ),
             Reason::Forced => "the run was started with --force".to_string(),
         }
@@ -898,7 +923,7 @@ pub fn plan(
     };
     let key = key_inputs.key()?;
 
-    if target.config.outputs.is_empty() {
+    if target.config.outputs.is_empty() && !target.config.writes_nothing() {
         return Ok(Decision::Rebuild {
             key,
             reason: Reason::NoOutputs,

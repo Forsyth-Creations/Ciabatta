@@ -35,6 +35,8 @@ enum StepState {
     /// dependents are released immediately: waiting for a dev server to exit is
     /// exactly the hang persistence exists to avoid.
     Started,
+    /// Its action is in flight. Not satisfied: its dependents wait for it.
+    Running,
     Failed,
 }
 
@@ -363,8 +365,9 @@ async fn run_phase_hook(
     Ok(true)
 }
 
-/// Execute the step DAG. Runs steps whose `needs` are satisfied, one wave at a
-/// time; on a step failure, routes to its `on_error` recovery node.
+/// Execute the step DAG. Starts every step whose `needs` are satisfied, up to
+/// [`RunCtl::jobs`] at once, and starts more as each one finishes; on a step
+/// failure, routes to its `on_error` recovery node.
 #[allow(clippy::too_many_arguments)]
 async fn run_dag(
     resolved: &ResolvedRun,
@@ -410,286 +413,376 @@ async fn run_dag(
     // Set once the run has been asked to stop, so the unwinding below can say
     // that is what happened rather than reporting a failed build.
     let mut stopped = false;
+    // The failure that ends the run, once one has. Nothing new is started
+    // after it, but what is already running is allowed to finish: killing a
+    // sibling half way through its own work would leave the tree in a state
+    // nobody asked for, and its log would read like a second failure.
+    let mut fatal: Option<anyhow::Error> = None;
+
+    // Steps whose `needs` are met run side by side, up to this many at once.
+    // They used to run one after another even when nothing connected them,
+    // which made a wide graph exactly as slow as a tall one.
+    let jobs = ctl.jobs();
+    let mut in_flight = futures::stream::FuturesUnordered::new();
+    // What a running step will need once it finishes — kept beside the futures
+    // rather than inside them, because the cache session is borrowed mutably
+    // to decide about the next step while this one is still running.
+    let mut pending_tokens: HashMap<&str, Box<super::cached::Pending>> = HashMap::new();
 
     loop {
-        // Asked to stop: schedule nothing further. The loop breaks rather than
-        // returning, so `stop_persistent` still runs — a stopped run that left
-        // its background tasks holding their ports would be the worst of both.
+        // Asked to stop: schedule nothing further. Whatever is running was
+        // raced against the same switch, so it ends promptly on its own.
         if ctl.cancel.as_ref().is_some_and(|c| c.is_stopped()) {
             stopped = true;
-            break;
         }
 
-        // A step is ready when it is Pending, not a recovery node, and all its
-        // `needs` are satisfied. Recovery nodes are only entered via on_error.
-        let ready: Vec<&RunStep> = resolved
-            .steps
-            .iter()
-            .filter(|s| !s.recover)
-            .filter(|s| state.get(s.name.as_str()) == Some(&StepState::Pending))
-            .filter(|s| {
-                s.needs.iter().all(|dep| {
-                    state
-                        .get(dep.as_str())
-                        .map(|st| st.satisfied())
-                        .unwrap_or(false)
-                })
-            })
-            .collect();
+        // ── start everything that can start ─────────────────────────────────
+        // Repeated until it settles, because a step that is skipped or served
+        // from the cache satisfies its dependents without running — and they
+        // may be able to start right now, too.
+        let mut progressed = true;
+        while progressed && !stopped && fatal.is_none() && in_flight.len() < jobs {
+            progressed = false;
 
-        if ready.is_empty() {
-            break;
-        }
-
-        // Run this wave sequentially. Run steps are ordered, side-effecting
-        // shell work (build → migrate → release); serial execution keeps their
-        // logs readable and recovery prompts unambiguous.
-        for step in ready {
-            // Checked per step as well as per wave: a wave is serial, so an
-            // eight-step wave asked to stop after the first would otherwise run
-            // the remaining seven.
-            if ctl.cancel.as_ref().is_some_and(|c| c.is_stopped()) {
-                stopped = true;
-                break;
-            }
-
-            // A `when`/`skip_if` condition can exclude the step; if so, mark it
-            // satisfied (so dependents proceed) and move on without running it.
-            // Every one of these reads the step's *own* environment: its
-            // workspace's `.env` first, then outward. Two members of a
-            // monorepo can set the same variable to different values and
-            // each of their steps sees its own.
-            let step_env = env.for_step(&step.name);
-
-            if let Some(reason) = super::step_skip_reason(step, step_env)? {
-                state.insert(step.name.as_str(), StepState::Skipped);
-                let _ = tx
-                    .send(ProgressUpdate::StepSkipped {
-                        workflow: workflow.to_string(),
-                        step: step.name.clone(),
-                        reason,
+            // A step is ready when it is Pending, not a recovery node, and all
+            // its `needs` are satisfied. Recovery nodes are only entered via
+            // on_error.
+            let ready: Vec<&RunStep> = resolved
+                .steps
+                .iter()
+                .filter(|s| !s.recover)
+                .filter(|s| state.get(s.name.as_str()) == Some(&StepState::Pending))
+                .filter(|s| {
+                    s.needs.iter().all(|dep| {
+                        state
+                            .get(dep.as_str())
+                            .map(|st| st.satisfied())
+                            .unwrap_or(false)
                     })
-                    .await;
-                continue;
-            }
+                })
+                .collect();
 
-            // A persistent step is started and left running: the graph moves on
-            // without it, so a dev server can't hang everything behind it.
-            // Background tasks never reach here — they were started before the
-            // first wave and are already marked `Started`.
-            if step.persistent && !dry_run {
-                persistent.push(start_persistent(step, workflow, root, step_env, ctl, tx).await?);
-                state.insert(step.name.as_str(), StepState::Started);
-                continue;
-            }
+            for step in ready {
+                if in_flight.len() >= jobs {
+                    break;
+                }
+                if ctl.cancel.as_ref().is_some_and(|c| c.is_stopped()) {
+                    stopped = true;
+                    break;
+                }
 
-            // Ask the cache before doing the work. A hit restores this step's
-            // declared outputs and marks it satisfied, so everything downstream
-            // proceeds exactly as if it had run.
-            let mut pending = None;
-            if let Some(session) = cache.as_deref_mut() {
-                match session.before(step, step_env).await {
-                    Ok(super::cached::Action::Skip { note }) => {
-                        state.insert(step.name.as_str(), StepState::Skipped);
+                // A `when`/`skip_if` condition can exclude the step; if so,
+                // mark it satisfied (so dependents proceed) and move on
+                // without running it. Every one of these reads the step's
+                // *own* environment: its workspace's `.env` first, then
+                // outward. Two members of a monorepo can set the same variable
+                // to different values and each of their steps sees its own.
+                let step_env = env.for_step(&step.name);
+
+                if let Some(reason) = super::step_skip_reason(step, step_env)? {
+                    state.insert(step.name.as_str(), StepState::Skipped);
+                    progressed = true;
+                    let _ = tx
+                        .send(ProgressUpdate::StepSkipped {
+                            workflow: workflow.to_string(),
+                            step: step.name.clone(),
+                            reason,
+                        })
+                        .await;
+                    continue;
+                }
+
+                // A persistent step is started and left running: the graph
+                // moves on without it, so a dev server can't hang everything
+                // behind it. Background tasks never reach here — they were
+                // started before the first wave and are already `Started`.
+                if step.persistent && !dry_run {
+                    persistent
+                        .push(start_persistent(step, workflow, root, step_env, ctl, tx).await?);
+                    state.insert(step.name.as_str(), StepState::Started);
+                    progressed = true;
+                    continue;
+                }
+
+                // Ask the cache before doing the work. A hit restores this
+                // step's declared outputs and marks it satisfied, so
+                // everything downstream proceeds exactly as if it had run.
+                let mut pending = None;
+                if let Some(session) = cache.as_deref_mut() {
+                    let decided = session.before(step, step_env).await;
+                    // Whatever was decided, the run view gets the details —
+                    // that's what puts the cache icon on the node, and what
+                    // the inspector reads when somebody asks why it missed.
+                    if let Some(report) = session.take_report() {
                         let _ = tx
-                            .send(ProgressUpdate::StepSkipped {
+                            .send(ProgressUpdate::StepCache {
                                 workflow: workflow.to_string(),
                                 step: step.name.clone(),
-                                reason: note,
+                                report: Box::new(report),
                             })
                             .await;
-                        continue;
                     }
-                    Ok(super::cached::Action::Run { note, token }) => {
-                        if let Some(note) = note {
+                    match decided {
+                        Ok(super::cached::Action::Skip { note }) => {
+                            state.insert(step.name.as_str(), StepState::Skipped);
+                            progressed = true;
+                            let _ = tx
+                                .send(ProgressUpdate::StepSkipped {
+                                    workflow: workflow.to_string(),
+                                    step: step.name.clone(),
+                                    reason: note,
+                                })
+                                .await;
+                            continue;
+                        }
+                        Ok(super::cached::Action::Run { note, token }) => {
+                            if let Some(note) = note {
+                                let _ = tx
+                                    .send(ProgressUpdate::Log(
+                                        workflow.to_string(),
+                                        format!("{}: {note}", step.name),
+                                    ))
+                                    .await;
+                            }
+                            pending = Some(token);
+                        }
+                        // A cache that can't decide costs a rebuild, never a
+                        // build. Nothing will be recorded about what the step
+                        // produced, so its dependents can't trust their keys
+                        // either — without this they would key on a missing
+                        // upstream, which is a different key from every run
+                        // where the decision worked.
+                        Err(e) => {
+                            session.mark_unaccounted(&step.name);
                             let _ = tx
                                 .send(ProgressUpdate::Log(
                                     workflow.to_string(),
-                                    format!("{}: {note}", step.name),
+                                    format!("note: skipping the cache for {} ({e:#})", step.name),
                                 ))
                                 .await;
                         }
-                        pending = Some(token);
-                    }
-                    // A cache that can't decide costs a rebuild, never a build.
-                    Err(e) => {
-                        let _ = tx
-                            .send(ProgressUpdate::Log(
-                                workflow.to_string(),
-                                format!("note: skipping the cache for {} ({e:#})", step.name),
-                            ))
-                            .await;
                     }
                 }
-            }
 
-            // Under `--authoritative` the step runs against a copy of the
-            // tree holding only what it declared. A step that declares nothing
-            // gets no sandbox and is counted as unverified, and a sandbox that
-            // can't be built is reported and skipped rather than failing the
-            // build: the flag is here to find undeclared inputs, not to become
-            // a new way for a run to die.
-            let mut sandbox = None;
-            if let Some(iso) = isolation.as_deref_mut() {
-                match iso.prepare(step) {
-                    Ok(prepared) => sandbox = prepared,
-                    Err(e) => {
-                        let _ = tx
-                            .send(ProgressUpdate::Log(
-                                workflow.to_string(),
-                                format!(
-                                    "note: {} could not be isolated, running it normally ({e:#})",
-                                    step.name
-                                ),
-                            ))
-                            .await;
+                // Under `--authoritative` the step runs against a copy of the
+                // tree holding only what it declared. A step that declares
+                // nothing gets no sandbox and is counted as unverified, and a
+                // sandbox that can't be built is reported and skipped rather
+                // than failing the build: the flag is here to find undeclared
+                // inputs, not to become a new way for a run to die.
+                let mut sandbox = None;
+                if let Some(iso) = isolation.as_deref_mut() {
+                    match iso.prepare(step) {
+                        Ok(prepared) => sandbox = prepared,
+                        Err(e) => {
+                            let _ = tx
+                                .send(ProgressUpdate::Log(
+                                    workflow.to_string(),
+                                    format!(
+                                        "note: {} could not be isolated, running it normally ({e:#})",
+                                        step.name
+                                    ),
+                                ))
+                                .await;
+                        }
                     }
                 }
+                if let Some(sandbox) = sandbox.as_ref() {
+                    let _ = tx
+                        .send(ProgressUpdate::Log(
+                            workflow.to_string(),
+                            match sandbox.linked {
+                                0 => format!(
+                                    "{}: isolated with {} declared input file(s)",
+                                    step.name, sandbox.staged
+                                ),
+                                linked => format!(
+                                    "{}: isolated with {} declared input file(s), plus {} \
+                                     unvouched-for path(s) from --sandbox-also",
+                                    step.name, sandbox.staged, linked
+                                ),
+                            },
+                        ))
+                        .await;
+                }
+
+                if let Some(token) = pending {
+                    pending_tokens.insert(step.name.as_str(), token);
+                }
+                state.insert(step.name.as_str(), StepState::Running);
+                progressed = true;
+
+                let cancel = ctl.cancel.as_ref();
+                in_flight.push(async move {
+                    let started = std::time::Instant::now();
+                    let outcome = run_step_action(
+                        step,
+                        workflow,
+                        config,
+                        root,
+                        step_env,
+                        dry_run,
+                        sandbox.as_ref().map(|s| s.dir.as_path()),
+                        cancel,
+                        tx,
+                    )
+                    .await;
+                    (step, sandbox, started.elapsed(), outcome)
+                });
             }
-            if let Some(sandbox) = sandbox.as_ref() {
+        }
+
+        // ── wait for something to finish ────────────────────────────────────
+        let Some((step, sandbox, took, outcome)) = futures::StreamExt::next(&mut in_flight).await
+        else {
+            // Nothing running and nothing more could start: the graph is
+            // done, or what's left is blocked behind a failure.
+            break;
+        };
+        let pending = pending_tokens.remove(step.name.as_str());
+        let step_env = env.for_step(&step.name);
+
+        // Whatever happened, the sandbox has to be dealt with before the
+        // outcome is: a success owes its outputs to the real tree, and a
+        // failure owes the operator the directory to look in.
+        let outcome = match (sandbox, isolation.as_deref_mut()) {
+            (Some(sandbox), Some(iso)) if outcome.is_ok() => match iso.collect(sandbox) {
+                Ok(_) => outcome,
+                // The step worked but its outputs didn't come back, so the
+                // tree is not what a successful run should leave behind.
+                // That is a failure, and saying otherwise would strand
+                // everything downstream on missing files.
+                Err(e) => Err(e.context(format!(
+                    "{} succeeded in isolation but its declared outputs could not be collected",
+                    step.name
+                ))),
+            },
+            (Some(sandbox), Some(iso)) => {
+                let kept = iso.keep(sandbox);
                 let _ = tx
                     .send(ProgressUpdate::Log(
                         workflow.to_string(),
-                        match sandbox.linked {
-                            0 => format!(
-                                "{}: isolated with {} declared input file(s)",
-                                step.name, sandbox.staged
-                            ),
-                            linked => format!(
-                                "{}: isolated with {} declared input file(s), plus {} \
-                                 unvouched-for path(s) from --sandbox-also",
-                                step.name, sandbox.staged, linked
-                            ),
-                        },
+                        format!(
+                            "{} failed in isolation. Its sandbox is kept at {} — if it reads \
+                             a file that isn't there, that file is missing from cache.inputs.",
+                            step.name,
+                            kept.display(),
+                        ),
                     ))
                     .await;
+                outcome
             }
+            (_, _) => outcome,
+        };
 
-            let started = std::time::Instant::now();
-            let outcome = run_step_action(
-                step,
-                workflow,
-                config,
-                root,
-                step_env,
-                dry_run,
-                sandbox.as_ref().map(|s| s.dir.as_path()),
-                ctl.cancel.as_ref(),
-                tx,
-            )
-            .await;
+        match outcome {
+            Ok(()) => {
+                state.insert(step.name.as_str(), StepState::Succeeded);
+                // Only a step that actually succeeded is worth keeping.
+                if let (Some(session), Some(token)) = (cache.as_deref_mut(), pending) {
+                    session.after(step, token, took.as_millis() as u64).await;
+                    if let Some(report) = session.take_report() {
+                        let _ = tx
+                            .send(ProgressUpdate::StepCache {
+                                workflow: workflow.to_string(),
+                                step: step.name.clone(),
+                                report: Box::new(report),
+                            })
+                            .await;
+                    }
+                }
+            }
+            Err(err) if err.is::<Stopped>() => {
+                // Not a failure: somebody pressed Stop, and this step was cut
+                // short by that. Recovery must not be entered — there is
+                // nothing to put back on the rails — and it must not be
+                // reported as a broken build, or the next person goes looking
+                // for a bug that isn't there.
+                state.insert(step.name.as_str(), StepState::Failed);
+                if let Some(session) = cache.as_deref_mut() {
+                    session.mark_unaccounted(&step.name);
+                }
+                stopped = true;
+            }
+            Err(err) => {
+                state.insert(step.name.as_str(), StepState::Failed);
+                // It ran and left the tree in a state nothing recorded —
+                // whatever runs on past this, by recovery or by tolerance,
+                // can't be served from the cache behind it.
+                if let Some(session) = cache.as_deref_mut() {
+                    session.mark_unaccounted(&step.name);
+                }
 
-            // Whatever happened, the sandbox has to be dealt with before the
-            // outcome is: a success owes its outputs to the real tree, and a
-            // failure owes the operator the directory to look in.
-            let outcome = match (sandbox, isolation.as_deref_mut()) {
-                (Some(sandbox), Some(iso)) if outcome.is_ok() => match iso.collect(sandbox) {
-                    Ok(_) => outcome,
-                    // The step worked but its outputs didn't come back, so the
-                    // tree is not what a successful run should leave behind.
-                    // That is a failure, and saying otherwise would strand
-                    // everything downstream on missing files.
-                    Err(e) => Err(e.context(format!(
-                        "{} succeeded in isolation but its declared outputs could not be collected",
-                        step.name
-                    ))),
-                },
-                (Some(sandbox), Some(iso)) => {
-                    let kept = iso.keep(sandbox);
+                // A recovery route takes precedence: it exists to put the run
+                // back on the rails rather than write the failure off. Not
+                // once the run is already failing, though — a fix-it prompt
+                // for a run that can't finish anyway answers nothing.
+                if fatal.is_none()
+                    && !stopped
+                    && let Some(target) = step.on_error.as_deref()
+                {
+                    recover(
+                        resolved,
+                        step,
+                        target,
+                        workflow,
+                        root,
+                        step_env,
+                        dry_run,
+                        ctl,
+                        tx,
+                        &mut state,
+                        &mut attempts,
+                    )
+                    .await?;
+                    continue;
+                }
+
+                // A tolerated failure takes this branch out of the graph and
+                // lets every independent branch finish; the run still ends up
+                // failing, but with the full picture.
+                if step.continue_on_error || err.is::<TimedOut>() {
                     let _ = tx
                         .send(ProgressUpdate::Log(
                             workflow.to_string(),
                             format!(
-                                "{} failed in isolation. Its sandbox is kept at {} — if it reads \
-                                 a file that isn't there, that file is missing from cache.inputs.",
-                                step.name,
-                                kept.display(),
+                                "⚠ step '{}' failed but the graph continues: {err}",
+                                step.name
                             ),
                         ))
                         .await;
-                    outcome
+                    tolerated.push(StepFailure {
+                        step: step.name.clone(),
+                        detail: err.to_string(),
+                    });
+                    continue;
                 }
-                (_, _) => outcome,
-            };
 
-            match outcome {
-                Ok(()) => {
-                    state.insert(step.name.as_str(), StepState::Succeeded);
-                    // Only a step that actually succeeded is worth keeping.
-                    if let (Some(session), Some(token)) = (cache.as_deref_mut(), pending) {
-                        session
-                            .after(step, token, started.elapsed().as_millis() as u64)
-                            .await;
-                    }
-                }
-                Err(err) if err.is::<Stopped>() => {
-                    // Not a failure: somebody pressed Stop, and this step was
-                    // cut short by that. Recovery must not be entered — there
-                    // is nothing to put back on the rails — and it must not be
-                    // reported as a broken build, or the next person goes
-                    // looking for a bug that isn't there.
-                    state.insert(step.name.as_str(), StepState::Failed);
-                    if let Some(session) = cache.as_deref_mut() {
-                        session.mark_unaccounted(&step.name);
-                    }
-                    stopped = true;
-                    break;
-                }
-                Err(err) => {
-                    state.insert(step.name.as_str(), StepState::Failed);
-                    // It ran and left the tree in a state nothing recorded —
-                    // whatever runs on past this, by recovery or by tolerance,
-                    // can't be served from the cache behind it.
-                    if let Some(session) = cache.as_deref_mut() {
-                        session.mark_unaccounted(&step.name);
-                    }
-
-                    // A recovery route takes precedence: it exists to put the
-                    // run back on the rails rather than write the failure off.
-                    if let Some(target) = step.on_error.as_deref() {
-                        recover(
-                            resolved,
-                            step,
-                            target,
-                            workflow,
-                            root,
-                            step_env,
-                            dry_run,
-                            ctl,
-                            tx,
-                            &mut state,
-                            &mut attempts,
-                        )
-                        .await?;
-                        continue;
-                    }
-
-                    // A tolerated failure takes this branch out of the graph
-                    // and lets every independent branch finish; the run still
-                    // ends up failing, but with the full picture.
-                    if step.continue_on_error || err.is::<TimedOut>() {
-                        let _ = tx
-                            .send(ProgressUpdate::Log(
-                                workflow.to_string(),
-                                format!(
-                                    "⚠ step '{}' failed but the graph continues: {err}",
-                                    step.name
-                                ),
-                            ))
-                            .await;
-                        tolerated.push(StepFailure {
-                            step: step.name.clone(),
-                            detail: err.to_string(),
-                        });
-                        continue;
-                    }
-
-                    // Nothing to fall back on: this failure ends the run.
-                    stop_persistent(persistent, workflow, root, tx).await;
-                    bail!("Run step '{}' failed: {}", step.name, err);
+                // Nothing to fall back on: this failure ends the run, once
+                // whatever else is running has finished.
+                if fatal.is_none() {
+                    fatal = Some(anyhow::anyhow!("Run step '{}' failed: {}", step.name, err));
                 }
             }
         }
+    }
+
+    if let Some(err) = fatal {
+        // Everything that never got going was waiting on this run going
+        // somewhere; say why it didn't, rather than leaving it pending.
+        for step in &resolved.steps {
+            if !step.recover && state.get(step.name.as_str()) == Some(&StepState::Pending) {
+                let _ = tx
+                    .send(ProgressUpdate::StepSkipped {
+                        workflow: workflow.to_string(),
+                        step: step.name.clone(),
+                        reason: "not started — the run failed".to_string(),
+                    })
+                    .await;
+            }
+        }
+        stop_persistent(persistent, workflow, root, tx).await;
+        return Err(err);
     }
 
     // Steps left Pending were waiting on a branch that failed; say so, rather
@@ -1632,6 +1725,16 @@ mod tests {
         root: &Path,
         cancel: Option<std::sync::Arc<crate::runner::Cancel>>,
     ) -> (Result<()>, Vec<ProgressUpdate>) {
+        drive_jobs(steps, root, cancel, None).await
+    }
+
+    /// [`drive_with`], with a limit on how many steps run at once.
+    async fn drive_jobs(
+        steps: Vec<RunStep>,
+        root: &Path,
+        cancel: Option<std::sync::Arc<crate::runner::Cancel>>,
+        jobs: Option<usize>,
+    ) -> (Result<()>, Vec<ProgressUpdate>) {
         let resolved = ResolvedRun {
             steps,
             ..Default::default()
@@ -1647,6 +1750,7 @@ mod tests {
             sandbox_also: Vec::new(),
             force: false,
             cancel,
+            jobs,
         };
         let env: HashMap<String, String> = std::env::vars().collect();
 
@@ -1708,6 +1812,116 @@ mod tests {
             run: Some(command.to_string()),
             ..Default::default()
         }
+    }
+
+    /// Two steps that need nothing from each other run at the same time.
+    ///
+    /// Each waits for the other to have started, so this only passes if they
+    /// are genuinely in flight together: run one after the other, the first
+    /// would wait for a sibling that never starts, and time out.
+    #[tokio::test]
+    async fn independent_steps_run_side_by_side() {
+        let root = std::env::temp_dir().join(format!("ciab_parallel_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+
+        let meet = |me: &str, other: &str| {
+            let mut s = step(
+                me,
+                &format!(
+                    "touch {me}.started; i=0; while [ ! -f {other}.started ]; do \
+                     i=$((i+1)); [ $i -gt 100 ] && exit 1; sleep 0.05; done"
+                ),
+            );
+            s.timeout = Some("20s".into());
+            s
+        };
+        let mut after = step("after", "true");
+        after.needs = vec!["left".into(), "right".into()];
+
+        let (result, updates) = drive_jobs(
+            vec![meet("left", "right"), meet("right", "left"), after],
+            &root,
+            None,
+            Some(4),
+        )
+        .await;
+        assert!(result.is_ok(), "{result:?}");
+        let finished = outcomes(&updates);
+        for name in ["left", "right", "after"] {
+            assert!(finished.contains(&(name.to_string(), true)), "{finished:?}");
+        }
+        // `after` needs both, so it can only have started once both finished.
+        let order: Vec<String> = updates
+            .iter()
+            .filter_map(|u| match u {
+                ProgressUpdate::StepStarted { step, .. } => Some(format!("start {step}")),
+                ProgressUpdate::StepFinished { step, .. } => Some(format!("end {step}")),
+                _ => None,
+            })
+            .collect();
+        let at = |what: &str| order.iter().position(|o| o == what).unwrap();
+        assert!(at("start after") > at("end left") && at("start after") > at("end right"));
+        // And the two siblings overlapped.
+        assert!(at("start right") < at("end left") && at("start left") < at("end right"));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `-j 1` puts things back the way they were: one step at a time.
+    #[tokio::test]
+    async fn one_job_runs_one_step_at_a_time() {
+        let root = std::env::temp_dir();
+        let (result, updates) = drive_jobs(
+            vec![step("a", "true"), step("b", "true"), step("c", "true")],
+            &root,
+            None,
+            Some(1),
+        )
+        .await;
+        assert!(result.is_ok());
+        let mut running = 0;
+        for update in &updates {
+            match update {
+                ProgressUpdate::StepStarted { .. } => {
+                    running += 1;
+                    assert_eq!(running, 1, "two steps were running at once under -j 1");
+                }
+                ProgressUpdate::StepFinished { .. } => running -= 1,
+                _ => {}
+            }
+        }
+    }
+
+    /// A failure ends the run, but not the sibling already running beside it —
+    /// that one finishes, and nothing new starts.
+    #[tokio::test]
+    async fn a_failure_lets_running_siblings_finish_and_starts_nothing_new() {
+        let root = std::env::temp_dir();
+        let mut slow = step("slow", "sleep 0.5");
+        slow.timeout = Some("20s".into());
+        let mut behind = step("behind", "true");
+        behind.needs = vec!["slow".into()];
+
+        let (result, updates) = drive_jobs(
+            vec![step("broken", "exit 3"), slow, behind],
+            &root,
+            None,
+            Some(4),
+        )
+        .await;
+
+        assert!(result.is_err());
+        let finished = outcomes(&updates);
+        assert!(finished.contains(&("broken".to_string(), false)));
+        assert!(
+            finished.contains(&("slow".to_string(), true)),
+            "a sibling in flight is allowed to finish: {finished:?}"
+        );
+        assert!(
+            skipped(&updates).iter().any(|(s, _)| s == "behind"),
+            "nothing new starts once the run has failed"
+        );
     }
 
     #[tokio::test]

@@ -443,6 +443,7 @@ async fn cmd_workflow(args: cli::WorkflowArgs, bare_name: bool) -> Result<()> {
             authoritative: args.authoritative,
             sandbox_also: args.sandbox_also.clone(),
             force: args.force,
+            jobs: args.jobs,
             ..Default::default()
         },
     )
@@ -1810,6 +1811,9 @@ async fn run_plain(
                     "⊘".style(color::warn())
                 )
             }
+            // Already said by the step's skip line; the report itself is for
+            // the web app's inspector.
+            ProgressUpdate::StepCache { .. } => {}
             // The command's own output, escapes and all — it was asked for
             // colour precisely because these lines end up here unaltered.
             ProgressUpdate::StepLog {

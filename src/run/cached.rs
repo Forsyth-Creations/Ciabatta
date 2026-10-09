@@ -15,6 +15,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
+use serde::{Deserialize, Serialize};
 
 use crate::cache::graph::StepContext;
 use crate::cache::store::{Build, Store};
@@ -61,6 +62,200 @@ pub struct Session {
     force: bool,
     /// What happened, for the summary at the end.
     pub stats: Stats,
+    /// What the session decided about each step, and why — handed to the run
+    /// view one step at a time through [`Session::take_report`].
+    reports: HashMap<String, CacheReport>,
+    /// The step whose report changed last, waiting to be taken.
+    fresh_report: Option<String>,
+    /// The configured remote cache as the run found it, connected or not, so a
+    /// step's report can say whether the shared cache was even asked.
+    remote_status: Option<RemoteStatus>,
+}
+
+/// Whether the shared cache was in play for this run.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct RemoteStatus {
+    pub url: String,
+    /// Registered with the server and usable. False means only the local
+    /// cache was consulted, which is the first thing to know about a miss
+    /// somebody expected the team's cache to answer.
+    pub connected: bool,
+    pub read_only: bool,
+    /// Why it isn't connected, when it isn't.
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+/// Everything the cache knew about one step: what it decided, the entry it
+/// used or compared against, and — when it rebuilt — what moved and what to do
+/// about it.
+///
+/// Sent to the run view as the decision is made, so a node can show that it
+/// was served from the cache (and from which), and so the inspector can answer
+/// "why didn't this one hit?" from the run itself rather than from a dry run
+/// that can only guess at it afterwards.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct CacheReport {
+    /// `fresh` · `hit` · `rebuild` · `uncached`.
+    pub outcome: String,
+    /// `local` or `remote`, on a hit.
+    #[serde(default)]
+    pub source: Option<String>,
+    /// The key this step was looked up under.
+    #[serde(default)]
+    pub key: Option<String>,
+    /// The decision in one sentence.
+    pub summary: String,
+    /// Why it rebuilt, structured, when it did.
+    #[serde(default)]
+    pub reason: Option<Reason>,
+    /// When the decision was made.
+    pub decided_at: String,
+    /// The entry that was reused, on a hit.
+    #[serde(default)]
+    pub entry: Option<EntryInfo>,
+    /// The most recent build of this target, on a rebuild: what it was
+    /// compared against.
+    #[serde(default)]
+    pub previous: Option<EntryInfo>,
+    /// What moved since `previous`, without the line-by-line hunks — a run's
+    /// view model is streamed whole on every change, so the full diff stays on
+    /// the cache page.
+    #[serde(default)]
+    pub diff: Option<DiffSummary>,
+    /// How many input files the key covered, and their total size.
+    pub input_files: usize,
+    pub input_bytes: u64,
+    /// The variables folded into the key — names only; values can be secrets.
+    #[serde(default)]
+    pub env: Vec<String>,
+    /// The steps this one keys on, and whether each could vouch for what it
+    /// produced.
+    #[serde(default)]
+    pub upstream: Vec<UpstreamInfo>,
+    /// The needed steps that forced this one to rebuild because they ran
+    /// without accounting for their outputs.
+    #[serde(default)]
+    pub blocked_by: Vec<String>,
+    /// Build time this hit didn't spend.
+    #[serde(default)]
+    pub saved_ms: u64,
+    /// The shared cache, as this run found it.
+    #[serde(default)]
+    pub remote: Option<RemoteStatus>,
+    /// What was stored after the step ran, when it was.
+    #[serde(default)]
+    pub stored: Option<StoredInfo>,
+    /// What to change so this step can be reused next time. Every entry names
+    /// something to go and do — "cache miss" on its own has never helped
+    /// anybody.
+    #[serde(default)]
+    pub hints: Vec<String>,
+}
+
+/// A cache entry, as much of it as the run view needs.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct EntryInfo {
+    pub key: String,
+    pub created_at: String,
+    #[serde(default)]
+    pub last_used_at: Option<String>,
+    pub size: u64,
+    pub outputs: usize,
+    pub duration_ms: u64,
+}
+
+impl From<&crate::cache::store::Entry> for EntryInfo {
+    fn from(entry: &crate::cache::store::Entry) -> Self {
+        EntryInfo {
+            key: entry.key.clone(),
+            created_at: entry.created_at.clone(),
+            last_used_at: entry.last_used_at.clone(),
+            size: entry.size,
+            outputs: entry.outputs.len(),
+            duration_ms: entry.duration_ms,
+        }
+    }
+}
+
+/// One upstream step, as this step's key saw it.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct UpstreamInfo {
+    pub step: String,
+    /// The first characters of its output fingerprint, or `None` when it
+    /// contributed none (skipped, persistent, or not yet recorded).
+    #[serde(default)]
+    pub fingerprint: Option<String>,
+    /// Whether it ran without being able to say what it produced.
+    pub unaccounted: bool,
+}
+
+/// A [`Diff`](crate::cache::diff::Diff) with the contents taken out.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct DiffSummary {
+    pub files: Vec<FileChange>,
+    /// How many files changed in all, when `files` was capped.
+    pub files_total: usize,
+    pub env: Vec<String>,
+    pub upstream: Vec<String>,
+    pub summary: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct FileChange {
+    pub path: String,
+    /// `added` · `removed` · `modified`.
+    pub kind: String,
+    pub additions: usize,
+    pub deletions: usize,
+}
+
+/// What a step that ran left in the cache.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct StoredInfo {
+    pub at: String,
+    pub size: u64,
+    pub outputs: usize,
+    /// Whether it was published to the shared cache: `None` when there is no
+    /// writable one to publish to.
+    #[serde(default)]
+    pub uploaded: Option<bool>,
+    /// Why nothing was stored, when nothing was.
+    #[serde(default)]
+    pub skipped: Option<String>,
+}
+
+/// How many changed files a report lists before it summarizes.
+const REPORT_FILES: usize = 25;
+
+impl DiffSummary {
+    fn of(diff: &crate::cache::diff::Diff) -> Self {
+        let kind = |k: &crate::cache::diff::ChangeKind| {
+            match k {
+                crate::cache::diff::ChangeKind::Added => "added",
+                crate::cache::diff::ChangeKind::Removed => "removed",
+                crate::cache::diff::ChangeKind::Modified => "modified",
+            }
+            .to_string()
+        };
+        DiffSummary {
+            files: diff
+                .files
+                .iter()
+                .take(REPORT_FILES)
+                .map(|f| FileChange {
+                    path: f.path.clone(),
+                    kind: kind(&f.kind),
+                    additions: f.additions,
+                    deletions: f.deletions,
+                })
+                .collect(),
+            files_total: diff.files.len(),
+            env: diff.env.iter().map(|e| e.name.clone()).collect(),
+            upstream: diff.upstream.iter().map(|u| u.step.clone()).collect(),
+            summary: diff.summary(),
+        }
+    }
 }
 
 /// A configured remote cache, once its project identity has been resolved.
@@ -164,6 +359,9 @@ impl Session {
             reused_locally: Vec::new(),
             force: false,
             stats: Stats::default(),
+            reports: HashMap::new(),
+            fresh_report: None,
+            remote_status: None,
         })
     }
 
@@ -188,10 +386,18 @@ impl Session {
         };
         let remote = &remote;
 
+        self.remote_status = Some(RemoteStatus {
+            url: remote.url.clone(),
+            connected: false,
+            read_only: remote.read_only,
+            error: None,
+        });
+
         let client = match Client::new(&remote.url, remote.tls_verify) {
             Ok(client) => client,
             Err(e) => {
                 eprintln!("note: the configured remote cache is unusable ({e:#})");
+                self.remote_failed(format!("{e:#}"));
                 return;
             }
         };
@@ -227,9 +433,13 @@ impl Session {
                     project: project.id,
                     read_only: remote.read_only,
                 });
+                if let Some(status) = self.remote_status.as_mut() {
+                    status.connected = true;
+                }
             }
             Err(e) => {
                 eprintln!("note: the remote cache is unavailable ({e:#}); using the local one");
+                self.remote_failed(format!("{e:#}"));
             }
         }
     }
@@ -260,8 +470,11 @@ impl Session {
         // Computed the same way `dry-run` computes it, so the two agree.
         let reran = crate::cache::graph::reran_upstream(&step.needs, &self.unaccounted);
 
-        if config.why_disabled().is_some() {
+        if let Some(why) = config.why_disabled() {
             self.stats.uncached += 1;
+            let mut report = self.report_base("uncached", why.to_string(), &step.needs, &upstream);
+            report.hints = uncached_hints(&config);
+            self.file_report(&step.name, report);
             // It runs regardless, and it has nothing to hash afterwards unless
             // it declared outputs — in which case `after` still records them.
             self.note_accountability(&step.name, &config);
@@ -328,18 +541,32 @@ impl Session {
             && let (Decision::Rebuild { key, .. }, Some(remote)) = (&decision, &self.remote)
         {
             let key = key.clone();
-            if crate::remote_cache::client::try_restore(&remote.client, &remote.project, &key, &dir)
-                .await
+            if let Some(entry) = crate::remote_cache::client::try_restore(
+                &remote.client,
+                &remote.project,
+                &key,
+                Some(&step.name),
+                &dir,
+            )
+            .await
             {
                 // Mirror it locally so the next run doesn't cross the network,
                 // and so the entry's inputs are there to diff against.
-                if let Ok(Some(entry)) = remote.client.lookup(&remote.project, &key).await {
-                    let _ = self.store.write_manifest(&entry);
-                }
+                //
+                // Under *this* store's names. The server keeps the entry under
+                // a project-scoped key, with the project id as its workspace,
+                // and a copy written as received lands under a filename no
+                // local lookup ever asks for — so the next run missed locally,
+                // went back to the network, and its misses had no previous
+                // build to diff against.
+                let mut entry = entry;
+                entry.key = key.clone();
+                entry.workspace = workspace.clone();
+                let _ = self.store.write_manifest(&entry);
                 decision = Decision::Hit {
                     key,
                     source: Source::Remote,
-                    outputs: 0,
+                    outputs: entry.outputs.len(),
                 };
             }
         }
@@ -347,14 +574,88 @@ impl Session {
         let inputs = config.hash_inputs(&dir, member.as_deref())?;
         let env_declared = crate::cache::graph::declared_env(&config, &env_map);
 
+        let mut report = self.report_base(
+            match &decision {
+                Decision::Fresh { .. } => "fresh",
+                Decision::Hit { .. } => "hit",
+                Decision::Rebuild { .. } => "rebuild",
+                Decision::Uncached { .. } => "uncached",
+            },
+            decision.describe(),
+            &step.needs,
+            &upstream,
+        );
+        report.key = decision.key().map(str::to_string);
+        report.input_files = inputs.len();
+        report.input_bytes = inputs.iter().map(|f| f.size).sum();
+        report.env = env_declared.keys().cloned().collect();
+        report.blocked_by = reran.clone();
+        match &decision {
+            Decision::Fresh { key, .. } | Decision::Hit { key, .. } => {
+                if let Decision::Hit { source, .. } = &decision {
+                    report.source = Some(
+                        match source {
+                            Source::Local => "local",
+                            Source::Remote => "remote",
+                        }
+                        .to_string(),
+                    );
+                }
+                if let Ok(Some(entry)) = self.store.get(key) {
+                    report.saved_ms = entry.duration_ms;
+                    report.entry = Some(EntryInfo::from(&entry));
+                }
+            }
+            Decision::Rebuild { reason, .. } => {
+                report.reason = Some(reason.clone());
+                report.previous = self
+                    .store
+                    .latest_for(&workspace, &step.name)
+                    .ok()
+                    .flatten()
+                    .map(|e| EntryInfo::from(&e));
+                // The same comparison `dry-run` shows, made against the tree
+                // as it is at the moment the decision was taken.
+                let diff = self
+                    .store
+                    .explain(
+                        &workspace,
+                        &step.name,
+                        &dir,
+                        &inputs,
+                        &env_declared,
+                        &upstream,
+                    )
+                    .ok()
+                    .flatten()
+                    .filter(|d| !d.is_empty());
+                report.hints = rebuild_hints(
+                    reason,
+                    &config,
+                    diff.as_ref(),
+                    report.previous.is_some(),
+                    &reran,
+                    self.remote_status.as_ref(),
+                );
+                report.diff = diff.as_ref().map(DiffSummary::of);
+            }
+            Decision::Uncached { .. } => {}
+        }
+        self.file_report(&step.name, report);
+
         match decision {
             Decision::Fresh { key, outputs } => {
                 self.stats.fresh += 1;
                 self.keep_alive(&key);
                 self.record_saved(&key);
-                self.remember(&step.name, &dir, &config)?;
+                self.remember(&step.name, &key, &dir, &config)?;
                 Ok(Action::Skip {
-                    note: format!("up to date ({outputs} output file(s) already correct)"),
+                    note: if outputs == 0 && config.writes_nothing() {
+                        "up to date (it passed with these exact inputs, and writes nothing)"
+                            .to_string()
+                    } else {
+                        format!("up to date ({outputs} output file(s) already correct)")
+                    },
                 })
             }
             Decision::Hit { key, source, .. } => {
@@ -367,7 +668,7 @@ impl Session {
                 }
                 self.stats.restored += 1;
                 self.record_saved(&key);
-                self.remember(&step.name, &dir, &config)?;
+                self.remember(&step.name, &key, &dir, &config)?;
                 Ok(Action::Skip {
                     note: format!("restored from {}", source.label()),
                 })
@@ -439,6 +740,14 @@ impl Session {
                 // Nothing was recorded about what it produced, so its
                 // dependents have nothing to check: they rerun behind it.
                 self.unaccounted.insert(step.name.clone());
+                self.stored(
+                    &step.name,
+                    StoredInfo {
+                        at: crate::cache::store::now(),
+                        skipped: Some(format!("its outputs couldn't be collected ({e:#})")),
+                        ..Default::default()
+                    },
+                );
                 return;
             }
         };
@@ -448,7 +757,24 @@ impl Session {
             .insert(step.name.clone(), crate::cache::fingerprint(&outputs));
 
         let Some(key) = key else { return };
-        if outputs.is_empty() {
+        // Nothing to keep — unless it said it writes nothing, in which case an
+        // entry with no files *is* the result: "this passed with these inputs".
+        if outputs.is_empty() && !config.writes_nothing() {
+            self.stored(
+                &step.name,
+                StoredInfo {
+                    at: crate::cache::store::now(),
+                    skipped: Some(if config.outputs.is_empty() {
+                        "no `cache.outputs` are declared, so there was nothing to store".to_string()
+                    } else {
+                        format!(
+                            "its `cache.outputs` ({}) matched no files after it ran",
+                            config.outputs.join(", ")
+                        )
+                    }),
+                    ..Default::default()
+                },
+            );
             return;
         }
 
@@ -466,22 +792,43 @@ impl Session {
             Ok(entry) => entry,
             Err(e) => {
                 eprintln!("note: couldn't cache {} ({e:#})", step.name);
+                self.stored(
+                    &step.name,
+                    StoredInfo {
+                        at: crate::cache::store::now(),
+                        skipped: Some(format!("the local store refused it ({e:#})")),
+                        ..Default::default()
+                    },
+                );
                 return;
             }
         };
 
+        let mut uploaded = None;
         if let Some(remote) = &self.remote
             && !remote.read_only
         {
-            crate::remote_cache::client::try_upload(
-                &remote.client,
-                &remote.project,
-                &key,
-                &entry,
-                &dir,
-            )
-            .await;
+            uploaded = Some(
+                crate::remote_cache::client::try_upload(
+                    &remote.client,
+                    &remote.project,
+                    &key,
+                    &entry,
+                    &dir,
+                )
+                .await,
+            );
         }
+        self.stored(
+            &step.name,
+            StoredInfo {
+                at: entry.created_at.clone(),
+                size: entry.size,
+                outputs: entry.outputs.len(),
+                uploaded,
+                skipped: None,
+            },
+        );
     }
 
     /// Note that an entry was used, for the end-of-run report to the server.
@@ -571,11 +918,76 @@ impl Session {
 
     /// Record what a reused step's outputs fingerprint to, so its dependents
     /// key correctly.
-    fn remember(&mut self, name: &str, dir: &Path, config: &CacheConfig) -> Result<()> {
-        let outputs = config.hash_outputs(dir)?;
+    ///
+    /// From the *entry*, not from the disk. The entry's outputs are exactly
+    /// what the step produced when it was built — what its dependents were
+    /// keyed against then, and what `dry-run` predicts with now. Re-hashing
+    /// the output globs instead picked up anything else lying under them (a
+    /// stale file from another branch, a second build's artifacts), changed
+    /// the fingerprint, and so changed every dependent's key: a reused step
+    /// that quietly stopped everything behind it from being reused, while the
+    /// dry run promised they would be.
+    fn remember(&mut self, name: &str, key: &str, dir: &Path, config: &CacheConfig) -> Result<()> {
+        let outputs = match self.store.get(key)? {
+            Some(entry) => entry.outputs,
+            // Only when the manifest has gone between the decision and here.
+            None => config.hash_outputs(dir)?,
+        };
         self.fingerprints
             .insert(name.to_string(), crate::cache::fingerprint(&outputs));
         Ok(())
+    }
+
+    /// Note that the configured remote couldn't be used, and why.
+    fn remote_failed(&mut self, error: String) {
+        if let Some(status) = self.remote_status.as_mut() {
+            status.connected = false;
+            status.error = Some(error);
+        }
+    }
+
+    /// The parts of a report every decision shares.
+    fn report_base(
+        &self,
+        outcome: &str,
+        summary: String,
+        needs: &[String],
+        upstream: &BTreeMap<String, String>,
+    ) -> CacheReport {
+        CacheReport {
+            outcome: outcome.to_string(),
+            summary,
+            decided_at: crate::cache::store::now(),
+            remote: self.remote_status.clone(),
+            upstream: needs
+                .iter()
+                .map(|need| UpstreamInfo {
+                    step: need.clone(),
+                    fingerprint: upstream.get(need).map(|f| f.chars().take(12).collect()),
+                    unaccounted: self.unaccounted.contains(need),
+                })
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    fn file_report(&mut self, step: &str, report: CacheReport) {
+        self.reports.insert(step.to_string(), report);
+        self.fresh_report = Some(step.to_string());
+    }
+
+    /// The report that changed last, if it hasn't been taken yet.
+    pub fn take_report(&mut self) -> Option<CacheReport> {
+        let step = self.fresh_report.take()?;
+        self.reports.get(&step).cloned()
+    }
+
+    /// Note what was (or wasn't) stored for a step that ran.
+    fn stored(&mut self, step: &str, stored: StoredInfo) {
+        if let Some(report) = self.reports.get_mut(step) {
+            report.stored = Some(stored);
+            self.fresh_report = Some(step.to_string());
+        }
     }
 
     /// Add a reused entry's original build time to the running total.
@@ -591,6 +1003,176 @@ impl Session {
             root: self.root.clone(),
             config: &self.config,
         }
+    }
+}
+
+/// What to do about a step the cache isn't looking at.
+fn uncached_hints(config: &CacheConfig) -> Vec<String> {
+    let mut hints = Vec::new();
+    if !config.is_on() {
+        hints.push(
+            "Caching is off for this step. Set `cache.enabled: true` with the `inputs` it \
+             reads (`ciabatta cache init` proposes them) to let it be reused."
+                .to_string(),
+        );
+    } else if config.inputs.is_empty() {
+        hints.push(
+            "Caching is on but no `cache.inputs` are declared, so there is nothing to key \
+             on. List the files this step reads."
+                .to_string(),
+        );
+    }
+    if !config.accounts_for_its_outputs() {
+        hints.push(
+            "It also declares no `cache.outputs`, so every step that needs it has to rebuild \
+             after it runs. If it writes nothing a later step reads, set \
+             `cache.no_outputs: true`."
+                .to_string(),
+        );
+    }
+    hints
+}
+
+/// What to change so a step that rebuilt can be reused next time.
+///
+/// Built from the same facts the inspector shows, so each line points at
+/// something on screen rather than at a guess.
+fn rebuild_hints(
+    reason: &Reason,
+    config: &CacheConfig,
+    diff: Option<&crate::cache::diff::Diff>,
+    has_previous: bool,
+    blocked_by: &[String],
+    remote: Option<&RemoteStatus>,
+) -> Vec<String> {
+    let mut hints = Vec::new();
+    match reason {
+        Reason::NeverBuilt if has_previous => hints.push(
+            "Its inputs, variables and upstream steps match the previous build, so what \
+             changed is something else in the key: its command, the enabled \
+             CIABATTA_FEAT_* features, or the ciabatta version that computed it."
+                .to_string(),
+        ),
+        Reason::NeverBuilt => hints.push(
+            "This is the first build of this step with these inputs — the next run with \
+             nothing changed should reuse it."
+                .to_string(),
+        ),
+        Reason::NoOutputs => hints.push(
+            "Declare `cache.outputs` for the files it writes so they can be stored and \
+             restored. If it writes nothing a later step reads (a test, a lint), set \
+             `cache.no_outputs: true` instead — it is then skipped when its inputs are \
+             unchanged, and stops forcing the steps after it to rebuild."
+                .to_string(),
+        ),
+        // Said below, from `blocked_by`, whatever the reason turned out to be.
+        Reason::UpstreamReran { .. } => {}
+        Reason::OutputsMissing { .. } => hints.push(
+            "The entry for these inputs exists but its stored files are gone — usually \
+             retention evicted them. It will be stored again after this run."
+                .to_string(),
+        ),
+        Reason::OutputsModified { modified } => hints.push(format!(
+            "Something changed {} after it was built. If another step writes there too, \
+             two steps share an output and keep invalidating each other.",
+            modified.join(", ")
+        )),
+        Reason::Forced => {
+            hints.push("The run was started with --force, which ignores the cache.".to_string())
+        }
+        Reason::InputsChanged { .. } => {}
+    }
+
+    // An upstream that ran without accounting for its outputs holds this step
+    // back whether or not its key also moved — and when it did, the upstream is
+    // usually why — so it is named regardless of the reason.
+    for upstream in blocked_by {
+        hints.push(format!(
+            "{upstream} ran without declaring `cache.outputs`, so nothing can tell whether it \
+             changed what this step reads, and this step has to rebuild after it every time. \
+             Give {upstream} `cache.outputs`, or `cache.no_outputs: true` if it writes nothing \
+             this step consumes."
+        ));
+    }
+
+    if let Some(diff) = diff {
+        // An input that is also one of this step's outputs changes every time
+        // the step runs, so the step can never hit.
+        let own_outputs: Vec<&str> = diff
+            .files
+            .iter()
+            .map(|f| f.path.as_str())
+            .filter(|path| {
+                config
+                    .outputs
+                    .iter()
+                    .any(|pattern| glob_covers(pattern, path))
+            })
+            .collect();
+        if !own_outputs.is_empty() {
+            hints.push(format!(
+                "{} {} both an input and an output of this step, so every build changes its \
+                 own key. Add {} to `cache.exclude`.",
+                listed(&own_outputs),
+                if own_outputs.len() == 1 { "is" } else { "are" },
+                if own_outputs.len() == 1 { "it" } else { "them" },
+            ));
+        }
+        // A blocked upstream's fingerprint moves for the reason given above;
+        // calling it unreproducible as well would send somebody the wrong way.
+        for upstream in diff
+            .upstream
+            .iter()
+            .filter(|u| !blocked_by.contains(&u.step))
+        {
+            hints.push(format!(
+                "{} produced different outputs than when this step was last built. If {} \
+                 didn't change either, its build isn't reproducible — a timestamp or build \
+                 id written into its outputs changes this step's key on every run.",
+                upstream.step, upstream.step
+            ));
+        }
+        for variable in &diff.env {
+            hints.push(format!(
+                "The declared variable {} changed since the last build.",
+                variable.name
+            ));
+        }
+    }
+
+    if let Some(remote) = remote
+        && !remote.connected
+    {
+        hints.push(format!(
+            "The remote cache at {} wasn't reachable, so only the local cache was asked{}.",
+            remote.url,
+            remote
+                .error
+                .as_deref()
+                .map(|e| format!(" ({e})"))
+                .unwrap_or_default()
+        ));
+    }
+    hints
+}
+
+/// Whether an output pattern covers `path` — a glob match, or a directory
+/// pattern the path sits under.
+fn glob_covers(pattern: &str, path: &str) -> bool {
+    if glob::Pattern::new(pattern).is_ok_and(|p| p.matches(path)) {
+        return true;
+    }
+    let dir = pattern
+        .trim_end_matches("/**/*")
+        .trim_end_matches("/**")
+        .trim_end_matches('/');
+    !dir.is_empty() && !dir.contains('*') && path.starts_with(&format!("{dir}/"))
+}
+
+fn listed(paths: &[&str]) -> String {
+    match paths.len() {
+        0..=3 => paths.join(", "),
+        n => format!("{} and {} more", paths[..3].join(", "), n - 3),
     }
 }
 
@@ -636,6 +1218,107 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    fn cached_step(name: &str, needs: &[&str], outputs: &str) -> RunStep {
+        RunStep {
+            name: name.to_string(),
+            run: Some(format!("make {name}")),
+            needs: needs.iter().map(|n| n.to_string()).collect(),
+            cache: Some(CacheConfig {
+                enabled: Some(true),
+                inputs: vec!["src/**/*".into()],
+                outputs: vec![format!("{outputs}/**/*")],
+                exclude: vec!["gen".into(), "out".into()],
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    /// Run `steps` through one session the way the engine does: decide, and
+    /// for anything that runs, "build" it and store the result.
+    async fn one_run(root: &Path, steps: &[RunStep]) -> Vec<String> {
+        let mut session = Session::open(root, &CiabattaConfig::default()).unwrap();
+        let env = HashMap::new();
+        let mut outcomes = Vec::new();
+        for step in steps {
+            let action = session.before(step, &env).await.unwrap();
+            let report = session.take_report().unwrap();
+            outcomes.push(format!("{}:{}", step.name, report.outcome));
+            if let Action::Run { token, .. } = action {
+                if let Some(pattern) = step.cache.as_ref().unwrap().outputs.first() {
+                    let dir = root.join(pattern.trim_end_matches("/**/*"));
+                    std::fs::create_dir_all(&dir).unwrap();
+                    std::fs::write(dir.join("built"), format!("{} output", step.name)).unwrap();
+                }
+                session.after(step, token, 5).await;
+            }
+        }
+        outcomes
+    }
+
+    /// A reused step hands its dependents the fingerprint of what it *built*,
+    /// not of whatever happens to be lying under its output globs now.
+    ///
+    /// It used to re-hash the globs, so one stray file next to a reused step's
+    /// outputs changed its fingerprint, which changed every dependent's key:
+    /// the upstream was reused and everything behind it rebuilt — while
+    /// `dry-run`, which fingerprints from the entry, promised a hit.
+    #[tokio::test]
+    async fn a_reused_upstream_does_not_stop_its_dependents_being_reused() {
+        let root = scratch("reusedupstream");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/lib.rs"), "fn lib() {}").unwrap();
+        let steps = [
+            cached_step("generate", &[], "gen"),
+            cached_step("build", &["generate"], "out"),
+        ];
+
+        assert_eq!(
+            one_run(&root, &steps).await,
+            ["generate:rebuild", "build:rebuild"]
+        );
+
+        // Something else drops a file under `generate`'s output directory.
+        std::fs::write(root.join("gen/stray"), "not generate's").unwrap();
+
+        assert_eq!(
+            one_run(&root, &steps).await,
+            ["generate:fresh", "build:fresh"],
+            "a reused upstream must not change the keys of the steps behind it"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// When a step is blocked by an upstream that can't account for itself,
+    /// the report says which one, and what to change.
+    #[tokio::test]
+    async fn the_report_names_the_upstream_that_blocked_a_step() {
+        let root = scratch("blockedreport");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/lib.rs"), "fn lib() {}").unwrap();
+        let mut lint = cached_step("lint", &[], "unused");
+        lint.cache.as_mut().unwrap().outputs.clear();
+        let build = cached_step("build", &["lint"], "out");
+
+        one_run(&root, &[lint.clone(), build.clone()]).await;
+
+        let mut session = Session::open(&root, &CiabattaConfig::default()).unwrap();
+        let env = HashMap::new();
+        session.before(&lint, &env).await.unwrap();
+        session.before(&build, &env).await.unwrap();
+        let report = session.take_report().unwrap();
+        assert_eq!(report.outcome, "rebuild");
+        assert_eq!(report.blocked_by, ["lint"]);
+        assert!(
+            report.hints.iter().any(|h| h.contains("no_outputs: true")),
+            "{:?}",
+            report.hints
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

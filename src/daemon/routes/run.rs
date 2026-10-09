@@ -336,8 +336,31 @@ async fn workflows(
     Ok(Json(json!({ "workflows": names })))
 }
 
-async fn list(State(state): State<AppState>) -> Json<Vec<Value>> {
-    Json(state.runs.list().iter().map(|r| r.summary()).collect())
+/// Narrows the run list to one project.
+#[derive(Deserialize)]
+pub struct ListQuery {
+    #[serde(default)]
+    project: Option<String>,
+}
+
+/// Every run, newest first — or only one project's, with `?project=`.
+///
+/// Filtered here rather than in the page: one daemon serves every checkout on
+/// the machine, and a run list that ignored the project switcher showed
+/// another repo's builds under this one's name.
+async fn list(
+    State(state): State<AppState>,
+    axum::extract::Query(query): axum::extract::Query<ListQuery>,
+) -> Json<Vec<Value>> {
+    Json(
+        state
+            .runs
+            .list()
+            .iter()
+            .filter(|run| query.project.as_ref().is_none_or(|p| &run.project == p))
+            .map(|r| r.summary())
+            .collect(),
+    )
 }
 
 /// Start a run and return its id.
@@ -636,6 +659,13 @@ fn trace(run: u64, update: &runner::ProgressUpdate) {
             step,
             line,
         } => tracing::debug!(run, %workflow, %step, "{line}"),
+        P::StepCache {
+            workflow,
+            step,
+            report,
+        } => {
+            tracing::debug!(run, %workflow, %step, outcome = %report.outcome, "{}", report.summary)
+        }
         P::StepNeedsChoice {
             workflow,
             step,

@@ -313,12 +313,25 @@ impl Client {
     }
 
     /// Look a key up. `None` is a miss; an error is a server problem.
-    pub async fn lookup(&self, project: &str, key: &str) -> Result<Option<Entry>> {
+    ///
+    /// `target` says which step the key belongs to. A server only ever sees keys, and a key it doesn't have tells it nothing
+    /// about what was asked for — so "40% of lookups miss" was all it could
+    /// report. Naming the target lets it say *which* step keeps missing, which
+    /// is the part somebody can act on. Older servers ignore the parameter.
+    pub async fn lookup_for(
+        &self,
+        project: &str,
+        key: &str,
+        target: Option<&str>,
+    ) -> Result<Option<Entry>> {
+        let mut request = self
+            .http
+            .get(self.url(&format!("/api/projects/{project}/cache/{key}")));
+        if let Some(target) = target {
+            request = request.query(&[("target", target)]);
+        }
         let response = self
-            .authed(
-                self.http
-                    .get(self.url(&format!("/api/projects/{project}/cache/{key}"))),
-            )
+            .authed(request)
             .timeout(TIMEOUT)
             .send()
             .await
@@ -617,22 +630,36 @@ fn error_message(status: reqwest::StatusCode, body: &str) -> String {
 
 /// Try the remote cache for `key`, restoring into `dir` on a hit.
 ///
-/// Returns `Ok(false)` for every kind of miss — including a server that's down
-/// — because a cache lookup must never be the reason a build fails. Problems
-/// are reported once, on stderr, and then got out of the way of.
-pub async fn try_restore(client: &Client, project: &str, key: &str, dir: &Path) -> bool {
-    match client.lookup(project, key).await {
+/// Returns the entry that was restored, or `None` for every kind of miss —
+/// including a server that's down — because a cache lookup must never be the
+/// reason a build fails. Problems are reported once, on stderr, and then got
+/// out of the way of.
+///
+/// Handing the entry back matters: the caller mirrors it locally, and asking
+/// the server for it a second time counted every remote hit twice in the
+/// server's stats.
+///
+/// `target` names the step being looked up, so the server can say *which*
+/// targets keep missing rather than only how many lookups did.
+pub async fn try_restore(
+    client: &Client,
+    project: &str,
+    key: &str,
+    target: Option<&str>,
+    dir: &Path,
+) -> Option<Entry> {
+    match client.lookup_for(project, key, target).await {
         Ok(Some(entry)) => match client.download(project, key, &entry, dir).await {
-            Ok(()) => true,
+            Ok(()) => Some(entry),
             Err(e) => {
                 eprintln!("note: the remote cache had this build but couldn't serve it ({e:#})");
-                false
+                None
             }
         },
-        Ok(None) => false,
+        Ok(None) => None,
         Err(e) => {
             eprintln!("note: the remote cache is unavailable ({e:#}); building locally");
-            false
+            None
         }
     }
 }
@@ -653,9 +680,21 @@ pub async fn try_touch(client: &Client, project: &str, keys: &[String]) {
 }
 
 /// Publish a build to the remote cache, best-effort.
-pub async fn try_upload(client: &Client, project: &str, key: &str, entry: &Entry, dir: &Path) {
-    if let Err(e) = client.upload(project, key, entry, dir).await {
-        eprintln!("note: couldn't publish this build to the remote cache ({e:#})");
+///
+/// Returns whether it landed, for the step's cache report.
+pub async fn try_upload(
+    client: &Client,
+    project: &str,
+    key: &str,
+    entry: &Entry,
+    dir: &Path,
+) -> bool {
+    match client.upload(project, key, entry, dir).await {
+        Ok(()) => true,
+        Err(e) => {
+            eprintln!("note: couldn't publish this build to the remote cache ({e:#})");
+            false
+        }
     }
 }
 

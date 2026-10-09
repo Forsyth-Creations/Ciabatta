@@ -15,6 +15,7 @@ import { createRoot } from "react-dom/client";
 
 import { router } from "./router";
 import { ColorModeProvider } from "./state/colorMode";
+import { InspectModeProvider } from "./state/inspect";
 import { ProjectProvider } from "./state/project";
 import { buildTheme } from "./theme";
 
@@ -38,7 +39,9 @@ function App() {
           <CssBaseline />
           <QueryClientProvider client={queryClient}>
             <ProjectProvider>
-              <RouterProvider router={router} />
+              <InspectModeProvider>
+                <RouterProvider router={router} />
+              </InspectModeProvider>
             </ProjectProvider>
           </QueryClientProvider>
         </ThemeProvider>

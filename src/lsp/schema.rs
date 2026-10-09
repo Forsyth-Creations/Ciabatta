@@ -97,6 +97,7 @@ fn cache() -> crate::cache::CacheConfig {
         enabled: Some(true),
         inputs: list(),
         outputs: list(),
+        no_outputs: Some(true),
         env: list(),
         exclude: list(),
         remote: Some(remote()),

@@ -183,6 +183,11 @@ pub struct StepView {
     /// ever visible by opening the config, which is precisely when somebody is
     /// asking why a step rebuilt — so the answer belongs next to the step.
     deps: crate::run::deps::TargetDeps,
+    /// What the cache decided about it in this run and why, once it has —
+    /// absent for a step the cache never looked at (caching off for the run,
+    /// a dry run, a condition that skipped it).
+    #[serde(default)]
+    cache: Option<crate::run::cached::CacheReport>,
     /// When it started and finished, RFC 3339 in local time — so the viewer can
     /// say how long it took and when it ended. Defaulted so a run recorded
     /// before these existed still loads from disk.
@@ -273,6 +278,17 @@ impl GuiState {
                     }
                     let line = format!("[{step}] skipped: {reason}");
                     push_log(&mut r.logs, &mut r.dropped_logs, line);
+                }
+            }
+            ProgressUpdate::StepCache {
+                workflow,
+                step,
+                report,
+            } => {
+                if let Some(r) = self.recipe_mut(&workflow)
+                    && let Some(s) = r.step_mut(&step)
+                {
+                    s.cache = Some(*report);
                 }
             }
             ProgressUpdate::StepLog {
@@ -565,6 +581,7 @@ pub fn initial_state(
                 // default is the honest empty answer rather than a missing key
                 // the viewer would have to special-case.
                 deps: deps.remove(&step.name).unwrap_or_default(),
+                cache: None,
                 started_at: None,
                 finished_at: None,
             });

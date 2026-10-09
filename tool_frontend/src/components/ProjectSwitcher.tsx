@@ -27,6 +27,7 @@ import {
 import DeleteOutlineIcon from "@mui/icons-material/DeleteOutline";
 import FolderOpenIcon from "@mui/icons-material/FolderOpen";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useNavigate, useRouterState } from "@tanstack/react-router";
 
 import { api } from "../api/client";
 import { queryKeys } from "../api/queries";
@@ -36,6 +37,16 @@ import { useProjectContext } from "../state/project";
 export function ProjectSwitcher() {
   const { projects, projectId, setProjectId, isLoading } = useProjectContext();
   const queryClient = useQueryClient();
+  const navigate = useNavigate();
+  const pathname = useRouterState({ select: (s) => s.location.pathname });
+
+  // A run belongs to one project. Switching away while looking at one would
+  // leave the old project's run on screen under the new project's name, so go
+  // back to the (new) project's list of runs instead.
+  const switchTo = (id: string) => {
+    setProjectId(id);
+    if (/^\/run\/\d+/.test(pathname)) navigate({ to: "/run" });
+  };
 
   // Confirmed rather than immediate: the row is a few pixels from the one you
   // click to *switch* projects, and the two mistakes are not equally cheap.
@@ -66,7 +77,7 @@ export function ProjectSwitcher() {
       <FormControl size="small" sx={{ minWidth: 200 }}>
         <Select
           value={projectId ?? ""}
-          onChange={(event) => setProjectId(event.target.value)}
+          onChange={(event) => switchTo(event.target.value)}
           displayEmpty
           // Checkout paths are long and arbitrary. Without a ceiling the menu
           // grows past the right edge of the window, taking the remove button

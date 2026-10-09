@@ -68,7 +68,9 @@ export function RunPage() {
           </Button>
         }
       />
-      <RequireProject>{(project) => <Launcher project={project} />}</RequireProject>
+      {/* Keyed by project so switching projects starts the launcher afresh —
+          a workflow picked in one repo means nothing in the next. */}
+      <RequireProject>{(project) => <Launcher key={project} project={project} />}</RequireProject>
     </>
   );
 }
@@ -76,7 +78,7 @@ export function RunPage() {
 function Launcher({ project }: { project: string }) {
   const navigate = useNavigate();
   const { targets, isLoading: loadingTargets } = useRunTargets(project);
-  const { data: runs, isLoading, error } = useRuns();
+  const { data: runs, isLoading, error } = useRuns(project);
   const start = useStartRun();
 
   const [selected, setSelected] = useState<string>("");

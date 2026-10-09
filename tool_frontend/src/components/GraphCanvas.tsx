@@ -154,7 +154,9 @@ export function GraphCanvas({
         onNodeClick={onNodeClick}
         onPaneClick={onPaneClick}
         fitView
-        fitViewOptions={{ padding: 0.08 }}
+        // Capped, so a two-node graph is drawn at a natural size instead of
+        // blown up to fill the canvas.
+        fitViewOptions={FIT}
         // These are views of computed state, not editors: dragging a node
         // around would imply the position means something and survives a
         // refresh, and neither is true.
@@ -166,7 +168,7 @@ export function GraphCanvas({
       >
         <Background variant={BackgroundVariant.Dots} gap={18} size={1} />
         <ReadableFit />
-        <Controls showInteractive={false} fitViewOptions={{ padding: 0.08 }} />
+        <Controls showInteractive={false} fitViewOptions={FIT} />
         {(minimap ?? (typeof height === "number" && height >= 400)) && (
           <MiniMap
             pannable
@@ -191,6 +193,9 @@ export function GraphCanvas({
     </Box>
   );
 }
+
+/** How a graph is fitted to its canvas. */
+const FIT = { padding: 0.08, maxZoom: 1.15 };
 
 /** The smallest zoom a graph is first shown at. */
 const READABLE_ZOOM = 0.6;

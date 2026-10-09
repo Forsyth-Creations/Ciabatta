@@ -21,3 +21,15 @@ if ($userPath -notlike "*$InstallDir*") {
 }
 
 Write-Host "installed: $dest"
+
+# `oven` is a shorter name for the same binary. Symlinks need admin rights on
+# Windows, so it's a .cmd shim that forwards to ciabatta.exe beside it. Never
+# replace an oven.cmd that isn't ours.
+$shim = Join-Path $InstallDir "oven.cmd"
+$shimBody = "@`"%~dp0ciabatta.exe`" %*"
+if (-not (Test-Path $shim)) {
+    Set-Content -Path $shim -Value $shimBody -Encoding ASCII
+    Write-Host "alias:     $shim"
+} elseif ((Get-Content -Raw $shim).Trim() -ne $shimBody) {
+    Write-Host "note: $shim already exists and isn't ciabatta's - left it alone, so no 'oven' alias"
+}

@@ -1,6 +1,6 @@
 [package]
 name = "zed_ciabatta"
-version = "0.5.0"
+version = "0.5.1"
 # 2021, not the CLI's 2024: Zed compiles a dev extension with whatever Rust the
 # user happens to have, so the lower the floor the fewer people it fails for.
 edition = "2021"

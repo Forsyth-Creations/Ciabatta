@@ -25,6 +25,8 @@ set -eu
 
 REPO="Forsyth-Creations/Ciabatta"
 BIN="ciabatta"
+# A shorter name for the same binary, installed as a symlink next to it.
+ALIAS="oven"
 
 say() { printf '%s\n' "$*"; }
 err() { printf 'error: %s\n' "$*" >&2; exit 1; }
@@ -212,6 +214,21 @@ else
 fi
 
 say "installed: $dest/$BIN"
+
+# --- the `oven` alias ------------------------------------------------------
+# A relative symlink, so it follows the binary through later updates. Never
+# replace an `oven` that isn't ours; a failure here leaves ciabatta installed.
+link="$dest/$ALIAS"
+if [ -L "$link" ] && [ "$(readlink "$link")" = "$BIN" ]; then
+    :
+elif [ -e "$link" ] || [ -L "$link" ]; then
+    say "note: $link already exists and isn't ciabatta — left it alone, so no '$ALIAS' alias"
+elif ln -s "$BIN" "$link" 2>/dev/null ||
+    { command -v sudo >/dev/null 2>&1 && sudo ln -s "$BIN" "$link"; }; then
+    say "alias:     $link -> $BIN"
+else
+    say "note: couldn't create the '$ALIAS' alias in $dest"
+fi
 
 # --- PATH hint -------------------------------------------------------------
 case ":${PATH}:" in

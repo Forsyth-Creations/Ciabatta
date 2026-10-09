@@ -55,6 +55,11 @@ pub struct Credential {
     /// the login so later commands reach it the same way.
     #[serde(default = "yes")]
     pub tls_verify: bool,
+    /// A certificate to trust for this server, from `login --ca-cert` — how a
+    /// cache with a self-signed certificate is reached *with* verification,
+    /// rather than by switching it off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ca_cert: Option<std::path::PathBuf>,
 }
 
 fn yes() -> bool {
@@ -121,6 +126,19 @@ impl Credentials {
             .get(normalize(url).as_str())
             .map(|c| c.tls_verify)
             .unwrap_or(true)
+    }
+
+    /// The extra certificate to trust for `url`: the one saved at login, or
+    /// `CIABATTA_REMOTE_CA` for a machine (a CI runner) that never logged in.
+    pub fn ca_cert(&self, url: &str) -> Option<std::path::PathBuf> {
+        self.servers
+            .get(normalize(url).as_str())
+            .and_then(|c| c.ca_cert.clone())
+            .or_else(|| {
+                std::env::var_os("CIABATTA_REMOTE_CA")
+                    .filter(|v| !v.is_empty())
+                    .map(std::path::PathBuf::from)
+            })
     }
 
     /// Other saved logins that are almost certainly the *same server* under a
@@ -212,6 +230,22 @@ impl Client {
     /// purpose: turning certificate checking off is a decision, and a default
     /// that call sites can forget to override is a decision nobody made.
     pub fn new(url: &str, tls_verify: bool) -> Result<Self> {
+        let credentials = Credentials::load();
+        let base = normalize(url);
+        Self::build(
+            url,
+            tls_verify,
+            credentials.ca_cert(&base).as_deref(),
+            credentials.get(&base).map(|c| c.token.clone()),
+        )
+    }
+
+    fn build(
+        url: &str,
+        tls_verify: bool,
+        ca_cert: Option<&Path>,
+        token: Option<String>,
+    ) -> Result<Self> {
         let base = normalize(url);
         anyhow::ensure!(!base.is_empty(), "a remote cache needs a URL");
 
@@ -219,9 +253,18 @@ impl Client {
         if !tls_verify {
             builder = builder.danger_accept_invalid_certs(true);
         }
+        if let Some(path) = ca_cert {
+            let pem = std::fs::read(path)
+                .with_context(|| format!("Failed to read the CA certificate {}", path.display()))?;
+            for cert in reqwest::Certificate::from_pem_bundle(&pem)
+                .with_context(|| format!("{} is not a PEM certificate", path.display()))?
+            {
+                builder = builder.add_root_certificate(cert);
+            }
+        }
 
         Ok(Client {
-            token: Credentials::load().get(&base).map(|c| c.token.clone()),
+            token,
             base,
             http: builder.build().context("Failed to build the HTTP client")?,
         })
@@ -237,10 +280,13 @@ impl Client {
     }
 
     /// A client with an explicit token, for the login flow itself.
-    pub fn with_token(url: &str, tls_verify: bool, token: Option<String>) -> Result<Self> {
-        let mut client = Self::new(url, tls_verify)?;
-        client.token = token;
-        Ok(client)
+    pub fn with_token(
+        url: &str,
+        tls_verify: bool,
+        ca_cert: Option<&Path>,
+        token: Option<String>,
+    ) -> Result<Self> {
+        Self::build(url, tls_verify, ca_cert, token)
     }
 
     fn url(&self, path: &str) -> String {
@@ -313,12 +359,25 @@ impl Client {
     }
 
     /// Look a key up. `None` is a miss; an error is a server problem.
-    pub async fn lookup(&self, project: &str, key: &str) -> Result<Option<Entry>> {
+    ///
+    /// `target` says which step the key belongs to. A server only ever sees keys, and a key it doesn't have tells it nothing
+    /// about what was asked for — so "40% of lookups miss" was all it could
+    /// report. Naming the target lets it say *which* step keeps missing, which
+    /// is the part somebody can act on. Older servers ignore the parameter.
+    pub async fn lookup_for(
+        &self,
+        project: &str,
+        key: &str,
+        target: Option<&str>,
+    ) -> Result<Option<Entry>> {
+        let mut request = self
+            .http
+            .get(self.url(&format!("/api/projects/{project}/cache/{key}")));
+        if let Some(target) = target {
+            request = request.query(&[("target", target)]);
+        }
         let response = self
-            .authed(
-                self.http
-                    .get(self.url(&format!("/api/projects/{project}/cache/{key}"))),
-            )
+            .authed(request)
             .timeout(TIMEOUT)
             .send()
             .await
@@ -617,22 +676,36 @@ fn error_message(status: reqwest::StatusCode, body: &str) -> String {
 
 /// Try the remote cache for `key`, restoring into `dir` on a hit.
 ///
-/// Returns `Ok(false)` for every kind of miss — including a server that's down
-/// — because a cache lookup must never be the reason a build fails. Problems
-/// are reported once, on stderr, and then got out of the way of.
-pub async fn try_restore(client: &Client, project: &str, key: &str, dir: &Path) -> bool {
-    match client.lookup(project, key).await {
+/// Returns the entry that was restored, or `None` for every kind of miss —
+/// including a server that's down — because a cache lookup must never be the
+/// reason a build fails. Problems are reported once, on stderr, and then got
+/// out of the way of.
+///
+/// Handing the entry back matters: the caller mirrors it locally, and asking
+/// the server for it a second time counted every remote hit twice in the
+/// server's stats.
+///
+/// `target` names the step being looked up, so the server can say *which*
+/// targets keep missing rather than only how many lookups did.
+pub async fn try_restore(
+    client: &Client,
+    project: &str,
+    key: &str,
+    target: Option<&str>,
+    dir: &Path,
+) -> Option<Entry> {
+    match client.lookup_for(project, key, target).await {
         Ok(Some(entry)) => match client.download(project, key, &entry, dir).await {
-            Ok(()) => true,
+            Ok(()) => Some(entry),
             Err(e) => {
                 eprintln!("note: the remote cache had this build but couldn't serve it ({e:#})");
-                false
+                None
             }
         },
-        Ok(None) => false,
+        Ok(None) => None,
         Err(e) => {
             eprintln!("note: the remote cache is unavailable ({e:#}); building locally");
-            false
+            None
         }
     }
 }
@@ -653,9 +726,21 @@ pub async fn try_touch(client: &Client, project: &str, keys: &[String]) {
 }
 
 /// Publish a build to the remote cache, best-effort.
-pub async fn try_upload(client: &Client, project: &str, key: &str, entry: &Entry, dir: &Path) {
-    if let Err(e) = client.upload(project, key, entry, dir).await {
-        eprintln!("note: couldn't publish this build to the remote cache ({e:#})");
+///
+/// Returns whether it landed, for the step's cache report.
+pub async fn try_upload(
+    client: &Client,
+    project: &str,
+    key: &str,
+    entry: &Entry,
+    dir: &Path,
+) -> bool {
+    match client.upload(project, key, entry, dir).await {
+        Ok(()) => true,
+        Err(e) => {
+            eprintln!("note: couldn't publish this build to the remote cache ({e:#})");
+            false
+        }
     }
 }
 
@@ -678,6 +763,7 @@ mod tests {
                 expires_at: None,
                 release: None,
                 tls_verify: true,
+                ca_cert: None,
             },
         );
         // Saved with a trailing slash, found without one.
@@ -701,6 +787,7 @@ mod tests {
                 expires_at: Some(past),
                 release: None,
                 tls_verify: true,
+                ca_cert: None,
             },
         );
         credentials.set(
@@ -711,6 +798,7 @@ mod tests {
                 expires_at: Some(future),
                 release: None,
                 tls_verify: true,
+                ca_cert: None,
             },
         );
         credentials.set(
@@ -722,6 +810,7 @@ mod tests {
                 expires_at: None,
                 release: None,
                 tls_verify: true,
+                ca_cert: None,
             },
         );
 
@@ -757,6 +846,7 @@ mod tests {
                 expires_at: None,
                 release: None,
                 tls_verify: false,
+                ca_cert: None,
             },
         );
         assert!(!credentials.tls_verify("https://self-signed"));
@@ -775,6 +865,7 @@ mod tests {
             expires_at: None,
             release: None,
             tls_verify: true,
+            ca_cert: None,
         };
         credentials.set("http://127.0.0.1:8380", credential.clone());
         credentials.set("http://cache.example.com:8380", credential.clone());

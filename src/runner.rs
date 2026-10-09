@@ -97,6 +97,14 @@ pub enum ProgressUpdate {
         step: String,
         reason: String,
     },
+    /// What the cache decided about a step, and why — sent as the decision is
+    /// made, and again once a step that ran has been stored. The run view
+    /// keeps the latest for each step.
+    StepCache {
+        workflow: String,
+        step: String,
+        report: Box<crate::run::cached::CacheReport>,
+    },
     /// A log line produced by a specific run step's action.
     StepLog {
         workflow: String,
@@ -209,6 +217,28 @@ pub struct RunCtl {
     /// daemon holds one per run so the Stop button in the web app can reach it.
     /// `None` for a run nobody can interrupt.
     pub cancel: Option<std::sync::Arc<Cancel>>,
+    /// How many steps may run at once (`--jobs`). `None` defers to
+    /// `CIABATTA_JOBS`, then to the machine's CPU count — see [`Self::jobs`].
+    pub jobs: Option<usize>,
+}
+
+impl RunCtl {
+    /// How many steps may run side by side. Never zero: a limit of nothing
+    /// would deadlock the scheduler rather than mean anything useful.
+    pub fn jobs(&self) -> usize {
+        self.jobs
+            .or_else(|| {
+                std::env::var("CIABATTA_JOBS")
+                    .ok()
+                    .and_then(|raw| raw.trim().parse().ok())
+            })
+            .unwrap_or_else(|| {
+                std::thread::available_parallelism()
+                    .map(|n| n.get())
+                    .unwrap_or(4)
+            })
+            .max(1)
+    }
 }
 
 impl Default for RunCtl {
@@ -221,6 +251,7 @@ impl Default for RunCtl {
             sandbox_also: Vec::new(),
             force: false,
             cancel: None,
+            jobs: None,
         }
     }
 }

@@ -28,12 +28,14 @@
 //!   told, and `ciabatta self update` can fetch the new one from the same place
 //!   it already trusts for artifacts. See [`releases`].
 
+pub mod activity;
 pub mod auth;
 pub mod client;
 pub mod page;
 pub mod projects;
 pub mod releases;
 pub mod server;
+pub mod tls;
 pub mod users;
 pub mod workflows;
 
@@ -150,6 +152,14 @@ pub struct Listen {
     /// How often to run the retention sweep, as a duration (`"1h"`, `"30m"`).
     #[serde(default = "default_sweep")]
     pub sweep_every: String,
+
+    /// Serve HTTPS instead of HTTP, with this certificate and key.
+    ///
+    /// Absent means plain HTTP — fine on a trusted network or behind a reverse
+    /// proxy that terminates TLS. `ciabatta remote-cache init --tls` writes a
+    /// self-signed pair and this section for you.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tls: Option<tls::TlsConfig>,
 }
 
 fn default_bind() -> String {
@@ -172,6 +182,7 @@ impl Default for Listen {
             port: default_port(),
             storage: default_storage(),
             sweep_every: default_sweep(),
+            tls: None,
         }
     }
 }
@@ -203,6 +214,9 @@ impl ServerConfig {
             config.server.storage = base.join(&config.server.storage);
         }
         config.releases.resolve_relative(base);
+        if let Some(tls) = config.server.tls.as_mut() {
+            tls.resolve_relative(base);
+        }
         Ok((config, base.to_path_buf()))
     }
 
@@ -224,7 +238,16 @@ impl ServerConfig {
 /// settings an operator will need within a week of standing this up, and a
 /// config that doesn't mention them sends them to a web search instead of to
 /// the line below the one they're already looking at.
-pub fn starter_config(port: u16, storage: &str) -> String {
+pub fn starter_config(port: u16, storage: &str, tls: bool) -> String {
+    let tls_section = if tls {
+        "  # HTTPS, with the self-signed pair `init --tls` generated. Swap in your own\n  \
+         # CA's certificate and key here to have clients trust it without --ca-cert.\n  \
+         tls:\n    cert: tls/cert.pem\n    key: tls/key.pem\n"
+    } else {
+        "  # Serve HTTPS with your own certificate (or rerun `init --tls` for a\n  \
+         # self-signed one):\n  \
+         # tls:\n  #   cert: tls/cert.pem\n  #   key: tls/key.pem\n"
+    };
     format!(
         r#"# A ciabatta remote cache.
 #
@@ -234,14 +257,14 @@ pub fn starter_config(port: u16, storage: &str) -> String {
 # Artifacts are stored on this machine's own filesystem, under `storage` below.
 
 server:
-  # 0.0.0.0 so the team can actually reach it. Put it behind a reverse proxy
-  # with TLS for anything beyond a trusted network — this server speaks HTTP.
+  # 0.0.0.0 so the team can actually reach it. Use TLS (below) for anything
+  # beyond a trusted network.
   bind: 0.0.0.0
   port: {port}
   storage: {storage}
   # How often to evict artifacts that breach the retention policy.
   sweep_every: 1h
-
+{tls_section}
 # ─── Retention ─────────────────────────────────────────────────────────────────
 # Age is measured from last *use*, not from when an artifact was built — the
 # thing everyone still depends on shouldn't be evicted for being old. Remove a
@@ -333,7 +356,7 @@ mod tests {
 
     #[test]
     fn the_starter_config_parses_and_is_usable_as_written() {
-        let rendered = starter_config(DEFAULT_PORT, "storage");
+        let rendered = starter_config(DEFAULT_PORT, "storage", false);
         let config: ServerConfig = crate::format::from_str(&rendered, crate::format::Format::Yaml)
             .unwrap_or_else(|e| panic!("the starter config must parse: {e}\n\n{rendered}"));
 
@@ -346,6 +369,17 @@ mod tests {
         assert!(config.auth.ldap.is_none());
         assert!(config.auth.users.is_empty());
         assert!(config.releases.binaries.is_empty());
+        assert!(config.server.tls.is_none());
+
+        let with_tls: ServerConfig = crate::format::from_str(
+            &starter_config(DEFAULT_PORT, "storage", true),
+            crate::format::Format::Yaml,
+        )
+        .unwrap();
+        assert_eq!(
+            with_tls.server.tls.unwrap().cert,
+            PathBuf::from("tls/cert.pem")
+        );
     }
 
     #[test]
@@ -354,7 +388,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("remote-cache.yaml");
-        std::fs::write(&path, starter_config(9000, "artifacts")).unwrap();
+        std::fs::write(&path, starter_config(9000, "artifacts", false)).unwrap();
 
         let (config, base) = ServerConfig::load(&path).unwrap();
         assert_eq!(base, dir);

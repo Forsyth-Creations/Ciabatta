@@ -33,7 +33,7 @@ use owo_colors::OwoColorize;
 
 use cli::{
     AiCommand, CacheCommand, Cli, Commands, ConfigCommand, ConfigureCommand, DaemonCommand,
-    RemoteCacheCommand, SelfCommand,
+    EnvCommand, RemoteCacheCommand, SelfCommand,
 };
 use config::{CiabattaConfig, find_root, load_config, load_config_file};
 use environment::CiabattaEnv;
@@ -41,7 +41,18 @@ use std::collections::BTreeMap;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let cli = Cli::parse();
+    // Everything after a bare `...` belongs to the workflow, not to ciabatta:
+    // it's split off before clap can mistake a custom `--force` for its own.
+    let (argv, custom_args) = cli::split_custom_args(std::env::args_os());
+    let cli = Cli::parse_from(argv);
+    if !custom_args.is_empty()
+        && !matches!(cli.command, Commands::Workflow(_) | Commands::External(_))
+    {
+        bail!(
+            "Arguments after `...` are passed to a workflow run (as CIABATTA_ARG_* variables), \
+             and this command isn't one."
+        );
+    }
 
     // `daemon serve` installs its own subscriber, writing to
     // ~/.ciabatta/daemon.log. It has to be the only one: `try_init` cannot
@@ -75,8 +86,12 @@ async fn main() -> Result<()> {
         }
 
         Commands::Workflow(args) => {
-            cmd_workflow(args, false).await?;
+            cmd_workflow(args, false, &custom_args).await?;
         }
+
+        Commands::Env { subcommand } => match subcommand {
+            EnvCommand::List => cmd_env_list()?,
+        },
 
         // An unrecognized subcommand is a workflow name. Re-parse the raw argv
         // through the very same parser `ciabatta workflow` uses, so the flags
@@ -86,7 +101,7 @@ async fn main() -> Result<()> {
                 std::iter::once("ciabatta".to_string()).chain(argv),
             )
             .map_err(|e| anyhow::anyhow!(e.to_string()))?;
-            cmd_workflow(invocation.args, true).await?;
+            cmd_workflow(invocation.args, true, &custom_args).await?;
         }
 
         Commands::List {
@@ -312,7 +327,11 @@ fn unknown_workflow(err: &anyhow::Error) -> bool {
 /// after `ciabatta workflow`. That's also how a mistyped command arrives here,
 /// so an unknown name gets an extra line pointing at `--help` — otherwise
 /// `ciabatta pusj` would only ever complain about workflows.
-async fn cmd_workflow(args: cli::WorkflowArgs, bare_name: bool) -> Result<()> {
+async fn cmd_workflow(
+    args: cli::WorkflowArgs,
+    bare_name: bool,
+    custom_args: &[String],
+) -> Result<()> {
     let cwd = env::current_dir().context("Failed to get current directory")?;
 
     // No workflow named: show what there is to run rather than erroring out.
@@ -419,6 +438,15 @@ async fn cmd_workflow(args: cli::WorkflowArgs, bare_name: bool) -> Result<()> {
     let announce = !args.use_tui() && !args.gui;
     let mut vars = build_env_vars(&cfg, &args.env, args.local, &ws.root, announce)?;
     source_ciabatta_vars(&mut vars, &ws.root, announce);
+    // Custom arguments last: they were typed for this run, so they win.
+    vars.extend(cli::parse_custom_args(custom_args)?);
+    if let Some(profile) = &args.env_profile {
+        environment::profiles::require(&ws.root, profile)?;
+        vars.insert(
+            environment::profiles::PROFILE_VAR.to_string(),
+            profile.clone(),
+        );
+    }
     report_env_drift(&ws.root, &graph.env_files, announce);
 
     let name = graph.label();
@@ -428,7 +456,7 @@ async fn cmd_workflow(args: cli::WorkflowArgs, bare_name: bool) -> Result<()> {
         // The daemon owns the run, so it compiles the graph itself from the
         // same declarations rather than being handed our copy.
         report_run_dependencies(&resolved, &name, &ws.root, &vars, false);
-        return cmd_workflow_gui(&args, &workflows, &ws.root, vars).await;
+        return cmd_workflow_gui(&args, &workflows, &ws.root, vars, custom_args).await;
     }
 
     execute_workflow(
@@ -443,6 +471,7 @@ async fn cmd_workflow(args: cli::WorkflowArgs, bare_name: bool) -> Result<()> {
             authoritative: args.authoritative,
             sandbox_also: args.sandbox_also.clone(),
             force: args.force,
+            jobs: args.jobs,
             ..Default::default()
         },
     )
@@ -483,9 +512,66 @@ fn report_run_dependencies(
     if let Some(text) = run::deps::report(&cfg, root, name, &resolved.steps, vars) {
         say(text);
     }
-    if let Some(text) = run::envdeps::collect(resolved, root, vars, Some(&cfg)).render(name) {
+    let report = run::envdeps::collect(resolved, root, vars, Some(&cfg));
+    if let Some(text) = report.render(name) {
         say(text);
     }
+    // Custom arguments are set apart, in yellow: they exist for this run only,
+    // and a run that needs them every time is one that should say so in a
+    // file instead.
+    if let Some(text) = report.render_arguments() {
+        for line in text.lines() {
+            say(format!("{}", line.style(color::warn())));
+        }
+    }
+}
+
+/// `ciabatta env list`: every env profile this workspace has.
+fn cmd_env_list() -> Result<()> {
+    let cwd = env::current_dir().context("Failed to get current directory")?;
+    let root = workspace::Workspace::discover(&cwd)
+        .map(|ws| ws.root)
+        .or_else(|_| find_root(&cwd).context("Not inside a ciabatta project"))?;
+    let dirs = environment::profiles::workspace_dirs(&root);
+    let profiles = environment::profiles::list(&root, &dirs);
+
+    // The base the profiles overlay, so it's clear what "no profile" means.
+    let base: Vec<String> = dirs
+        .iter()
+        .map(|rel| environment::files::join_rel(rel, environment::files::DEFAULT_ENV_FILE))
+        .filter(|path| root.join(path).is_file())
+        .collect();
+    println!(
+        "Default environment: {}",
+        if base.is_empty() {
+            "no .env files — just the shell's environment".to_string()
+        } else {
+            base.join(", ")
+        }
+    );
+    println!();
+
+    if profiles.is_empty() {
+        println!("No env profiles yet.");
+        println!(
+            "Create one by putting the variables that differ in `.env.<name>` next to a `.env` \
+             (e.g. `.env.staging`), then run `ciabatta <workflow> --env-profile <name>`."
+        );
+        return Ok(());
+    }
+
+    println!("Env profiles (run with --env-profile <name>):");
+    let width = profiles.iter().map(|p| p.name.len()).max().unwrap_or(0);
+    for profile in &profiles {
+        println!(
+            "  {:width$}  {} variable(s) · {}",
+            profile.name.style(color::active()),
+            profile.vars,
+            profile.files.join(", "),
+            width = width,
+        );
+    }
+    Ok(())
 }
 
 /// Tell the operator when the `.env` files a run depends on have moved since
@@ -516,6 +602,7 @@ async fn cmd_workflow_gui(
     workflows: &[String],
     root: &Path,
     vars: HashMap<String, String>,
+    custom_args: &[String],
 ) -> Result<()> {
     let session = daemon::connect(args.port).await?;
 
@@ -532,6 +619,10 @@ async fn cmd_workflow_gui(
             "env": vars,
             "dry_run": args.dry_run,
             "force": args.force,
+            // Sent as typed, not only as the variables they became: the daemon
+            // keeps them with the run, so "run again" repeats them.
+            "args": custom_args,
+            "env_profile": args.env_profile,
         }))
         .send()
         .await?;
@@ -1810,6 +1901,9 @@ async fn run_plain(
                     "⊘".style(color::warn())
                 )
             }
+            // Already said by the step's skip line; the report itself is for
+            // the web app's inspector.
+            ProgressUpdate::StepCache { .. } => {}
             // The command's own output, escapes and all — it was asked for
             // colour precisely because these lines end up here unaltered.
             ProgressUpdate::StepLog {
@@ -1875,6 +1969,8 @@ async fn cmd_remote_cache(subcommand: RemoteCacheCommand) -> Result<()> {
             into,
             port,
             storage,
+            tls,
+            tls_hosts,
             force,
         } => {
             let dir =
@@ -1897,10 +1993,34 @@ async fn cmd_remote_cache(subcommand: RemoteCacheCommand) -> Result<()> {
                 remote_cache::CONFIG_STEM,
                 format::YAML_EXT
             ));
-            std::fs::write(&path, remote_cache::starter_config(port, &storage))
+            let generated = if tls {
+                let mut hosts = tls_hosts;
+                if let Some(host) = this_hostname() {
+                    hosts.push(host);
+                }
+                Some(remote_cache::tls::generate_self_signed(
+                    &dir.join("tls"),
+                    &hosts,
+                )?)
+            } else {
+                None
+            };
+
+            std::fs::write(&path, remote_cache::starter_config(port, &storage, tls))
                 .with_context(|| format!("Failed to write {}", path.display()))?;
 
             println!("Wrote {}", path.display());
+            let scheme = if tls { "https" } else { "http" };
+            let trust = match &generated {
+                Some(pair) => {
+                    println!("Wrote {} and {}", pair.cert.display(), pair.key.display());
+                    if let Some(fingerprint) = pair.fingerprint() {
+                        println!("  sha-256 {fingerprint}");
+                    }
+                    format!(" --ca-cert {}", pair.cert.display())
+                }
+                None => String::new(),
+            };
             println!();
             println!("Next:");
             println!("  1. Read it — `auth.mode` is `open`, which means anyone who can reach");
@@ -1908,8 +2028,15 @@ async fn cmd_remote_cache(subcommand: RemoteCacheCommand) -> Result<()> {
             println!("     network; set `token` or `ldap` before exposing it further.");
             println!("  2. ciabatta remote-cache start");
             println!("  3. On each developer's machine:");
-            println!("       ciabatta remote-cache login http://<this-host>:{port}");
-            println!("       ciabatta cache init --remote http://<this-host>:{port}");
+            println!("       ciabatta remote-cache login {scheme}://<this-host>:{port}{trust}");
+            println!("       ciabatta cache init --remote {scheme}://<this-host>:{port}");
+            if generated.is_some() {
+                println!();
+                println!("The certificate is self-signed: copy cert.pem (never key.pem) to");
+                println!(
+                    "each machine for --ca-cert, or set CIABATTA_REMOTE_CA to its path in CI."
+                );
+            }
             Ok(())
         }
 
@@ -1938,7 +2065,16 @@ async fn cmd_remote_cache(subcommand: RemoteCacheCommand) -> Result<()> {
             username,
             password_env,
             no_tls_verify,
+            ca_cert,
         } => {
+            // Stored absolute: a login is remembered machine-wide, and a
+            // relative path would only mean something from one directory.
+            let ca_cert = ca_cert
+                .map(|path| {
+                    std::fs::canonicalize(&path)
+                        .with_context(|| format!("--ca-cert {} doesn't exist", path.display()))
+                })
+                .transpose()?;
             let tls_verify = !no_tls_verify;
             if !tls_verify {
                 eprintln!(
@@ -1948,7 +2084,7 @@ async fn cmd_remote_cache(subcommand: RemoteCacheCommand) -> Result<()> {
                 );
             }
 
-            let client = Client::with_token(&url, tls_verify, None)?;
+            let client = Client::with_token(&url, tls_verify, ca_cert.as_deref(), None)?;
 
             // Ask the server what it wants before prompting for anything, so an
             // open cache doesn't demand credentials it will ignore.
@@ -1989,6 +2125,7 @@ async fn cmd_remote_cache(subcommand: RemoteCacheCommand) -> Result<()> {
                     expires_at: session.expires_at.clone(),
                     release: health.release.clone(),
                     tls_verify,
+                    ca_cert,
                 },
             );
             credentials.save()?;
@@ -2113,6 +2250,32 @@ async fn cmd_remote_cache(subcommand: RemoteCacheCommand) -> Result<()> {
     }
 }
 
+/// "3h ago", "never" — how long since an RFC 3339 timestamp.
+fn when_ago(at: Option<&str>) -> String {
+    let Some(when) = at.and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok()) else {
+        return "never".to_string();
+    };
+    let seconds = (chrono::Utc::now() - when.with_timezone(&chrono::Utc))
+        .num_seconds()
+        .max(0);
+    match seconds {
+        0..60 => "just now".to_string(),
+        60..3600 => format!("{}m ago", seconds / 60),
+        3600..172_800 => format!("{}h ago", seconds / 3600),
+        _ => format!("{}d ago", seconds / 86_400),
+    }
+}
+
+/// This machine's hostname, for the certificate `init --tls` generates.
+fn this_hostname() -> Option<String> {
+    env::var("HOSTNAME")
+        .ok()
+        .or_else(|| env::var("COMPUTERNAME").ok())
+        .or_else(|| std::fs::read_to_string("/etc/hostname").ok())
+        .map(|name| name.trim().to_string())
+        .filter(|name| !name.is_empty())
+}
+
 /// The remote cache URL this workspace is configured to use, if any.
 fn configured_remote() -> Result<Option<String>> {
     let cwd = env::current_dir().context("Failed to get current directory")?;
@@ -2157,6 +2320,41 @@ fn print_remote_status(url: &str, stats: &serde_json::Value) {
         "  sessions   {} live",
         stats["sessions"].as_u64().unwrap_or(0)
     );
+    // When it was last of any use, and when anybody last added to it — the
+    // two times that say whether a cache is alive.
+    let activity = &stats["activity"];
+    println!(
+        "  last used  {}",
+        when_ago(activity["last_used_at"].as_str())
+    );
+    println!(
+        "  last saved {}",
+        when_ago(activity["last_saved_at"].as_str())
+    );
+
+    if let Some(insights) = stats["insights"].as_array()
+        && !insights.is_empty()
+    {
+        println!();
+        println!("Worth a look:");
+        for insight in insights {
+            let mark = if insight["severity"] == "warn" {
+                "⚠"
+            } else {
+                "·"
+            };
+            let scope = match (insight["project"].as_str(), insight["target"].as_str()) {
+                (Some(project), Some(_)) => format!("[{project}] "),
+                (Some(project), None) => format!("[{project}] "),
+                _ => String::new(),
+            };
+            println!(
+                "  {mark} {scope}{}",
+                insight["message"].as_str().unwrap_or("")
+            );
+            println!("      {}", insight["action"].as_str().unwrap_or(""));
+        }
+    }
 
     if let Some(projects) = stats["projects"].as_array()
         && !projects.is_empty()
@@ -2168,11 +2366,17 @@ fn print_remote_status(url: &str, stats: &serde_json::Value) {
             let counters = &entry["counters"];
             let stale = entry["stale_workflows"].as_u64().unwrap_or(0);
             println!(
-                "  {:<24} {:<38} {} hit / {} miss{}",
+                "  {:<24} {:<38} {} hit / {} miss  ·  used {}  ·  saved {}{}",
                 project["name"].as_str().unwrap_or("?"),
                 project["id"].as_str().unwrap_or("?"),
                 counters["hits"].as_u64().unwrap_or(0),
                 counters["misses"].as_u64().unwrap_or(0),
+                when_ago(entry["last_used_at"].as_str()),
+                when_ago(
+                    entry["last_saved_at"]
+                        .as_str()
+                        .or(entry["newest_entry_at"].as_str())
+                ),
                 match stale {
                     0 => String::new(),
                     n => format!("  ·  {n} stale workflow(s)"),
@@ -2445,6 +2649,19 @@ fn resolve_dry_run_steps(
     targets: &[String],
     workspace: &Option<workspace::Workspace>,
 ) -> Result<(Vec<run::RunStep>, Option<cache::CacheConfig>)> {
+    // Nothing named means every workflow, as the doc comment above promises.
+    if targets.is_empty()
+        && let Some(ws) = workspace.as_ref()
+    {
+        let all = ws.workflow_names();
+        if all.is_empty() {
+            return Ok((Vec::new(), None));
+        }
+        let selection = workspace::graph::Selection::default();
+        let (_, graph) = workspace::graph::prepare_many(cwd, &all, &selection)?;
+        return Ok((graph.steps, None));
+    }
+
     // A named workflow compiles across the whole monorepo.
     if let (Some(ws), Some(first)) = (workspace.as_ref(), targets.first())
         && ws.workflow_names().iter().any(|name| name == first)

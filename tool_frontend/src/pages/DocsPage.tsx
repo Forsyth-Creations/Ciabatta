@@ -232,9 +232,10 @@ const ENDPOINTS: EndpointGroup[] = [
     endpoints: [
       { method: "GET", path: "/api/run/workflows", note: "Workflow names this project can run." },
       { method: "POST", path: "/api/run/preflight", note: "What a start would need, without starting it." },
-      { method: "GET", path: "/api/run/runs", note: "Runs the daemon owns." },
-      { method: "POST", path: "/api/run/runs", note: "Start a workflow (workflow, or workflows: [], plus filter: []). 422 lists missing_env." },
-      { method: "GET", path: "/api/run/runs/{id}", note: "Current state of every step." },
+      { method: "GET", path: "/api/run/runs", note: "Runs the daemon owns. ?project= narrows it to one checkout's." },
+      { method: "POST", path: "/api/run/runs", note: "Start a workflow (workflow, or workflows: [], plus filter: [], args: [] for custom arguments, env_profile). 422 lists missing_env." },
+      { method: "GET", path: "/api/run/env-profiles", note: "The env profiles this project has — every .env.<name>, grouped by name." },
+      { method: "GET", path: "/api/run/runs/{id}", note: "Current state of every step, including each step's cache report." },
       { method: "GET", path: "/api/run/runs/{id}/stream", note: "SSE. Step transitions and log lines as they happen." },
       { method: "POST", path: "/api/run/runs/{id}/choose", note: "Answer a step that is waiting on a decision." },
     ],
@@ -363,11 +364,22 @@ const COMMANDS: CommandGroup[] = [
           ["--graph", "Print the resolved graph and run nothing."],
           ["--dry-run", "Walk every step, executing none of them."],
           ["--force", "Ignore the cache and run every step. Results are still stored, so the next run reuses them."],
+          ["-j, --jobs N", "How many steps may run at once. Defaults to CIABATTA_JOBS, then the CPU count; -j 1 runs them one at a time."],
+          ["--env-profile NAME", "Overlay each .env with its .env.NAME sibling. Also spelled --env_profile."],
           ["-e KEY=VALUE", "Set a variable for every step. Beats .env and CI."],
+          ["... ARGS", "Everything after a bare ... is the workflow's: --name=value, --name value, --flag or name=value, each becoming $CIABATTA_ARG_<NAME>."],
           ["--gui", "Watch it live in this app."],
           ["--tui", "Watch it in the terminal UI. Runs print plain text by default."],
           ["--authoritative", "Run each step against only the files it declared — the way to find an incomplete inputs list."],
         ],
+      },
+      {
+        usage: "ciabatta build --env-profile staging ... --target=arm64 --verbose",
+        note: "A run under the staging profile, with two custom arguments its steps read as $CIABATTA_ARG_TARGET and $CIABATTA_ARG_VERBOSE. The arguments are listed apart, in yellow, before the run starts.",
+      },
+      {
+        usage: "ciabatta env list",
+        note: "The env profiles this workspace has — every .env.<name>, with how many variables each sets and where its files are — and the default .env files they overlay.",
       },
       {
         usage: "ciabatta workflow build",
@@ -470,7 +482,13 @@ const COMMANDS: CommandGroup[] = [
       },
       {
         usage: "ciabatta remote-cache <init|start|login|status|add-user>",
-        note: "Run a shared cache for the team, or log this machine in to one. See the remote cache section.",
+        note: "Run a shared cache for the team, or log this machine in to one. `status` reports when it was last used and saved to, and what is worth fixing. See the remote cache section.",
+        flags: [
+          ["init --tls", "Serve HTTPS: generate a self-signed certificate under tls/ and point the config at it."],
+          ["init --tls-host HOST", "Another name clients reach the server by, added to that certificate. Repeatable."],
+          ["login --ca-cert FILE", "Trust this certificate for the server (the one init --tls wrote, or your CA's). Remembered; CI can set CIABATTA_REMOTE_CA instead."],
+          ["login --no-tls-verify", "Don't verify the certificate at all. Prefer --ca-cert."],
+        ],
       },
     ],
   },
@@ -1236,6 +1254,26 @@ steps:
           globs actually matched.
         </Alert>
 
+        <SubHeading>Steps that write nothing</SubHeading>
+        <P>
+          A step with no <C>outputs</C> is one the cache can&apos;t account for: it might have
+          written anything, so it runs every time — and so does <strong>every step that needs
+          it</strong>, because their keys can&apos;t see what it did. One <C>lint</C> at the root of
+          a graph used to be enough to stop everything behind it from ever being reused. When a
+          step genuinely writes nothing a later step reads — a test, a lint, a type check, a
+          notification — say so:
+        </P>
+        <Pre>{`# packages/api/.ciabatta/workflows/lint.yaml
+cache:
+  enabled: true
+  inputs: ["packages/api/src/**/*"]
+  no_outputs: true      # skipped when its inputs are unchanged, and holds nothing back`}</Pre>
+        <P>
+          It is then reused like any other step on unchanged inputs, and the steps after it key on
+          it normally. A step that writes files should list them in <C>outputs</C> instead, which
+          does the same and also stores them.
+        </P>
+
         <SubHeading>Then ask it what it thinks</SubHeading>
         <Pre>{`ciabatta why api:compile        # where it's declared, what it reads, what it writes
 ciabatta why api:compile --all  # …naming every input file, in hash order
@@ -1347,6 +1385,43 @@ REQUIRED_ENV: [API_URL, DATABASE_URL]`}</Pre>
     skip_if: env.IS_LOCAL
     env:
       DEPLOY_TIMEOUT: 600     # this step only, layered over the run's`}</Pre>
+
+        <SubHeading>Env profiles</SubHeading>
+        <P>
+          A profile is a file next to a <C>.env</C>, named after it: <C>.env.staging</C>,{" "}
+          <C>packages/api/.env.ci</C>. Running with <C>--env-profile staging</C> sources each{" "}
+          <C>.env</C> the run already reads and then its <C>.staging</C> sibling on top, so a
+          profile only holds what&apos;s <em>different</em> — everything it doesn&apos;t mention
+          falls back to the ordinary file, and from there outward, exactly as without one.
+          Templates (<C>.env.example</C> and friends) are never profiles.
+        </P>
+        <Pre>{`ciabatta env list                       # the profiles here, and their files
+ciabatta build --env-profile staging    # also spelled --env_profile`}</Pre>
+        <P>
+          The profile in force travels with the run as <C>CIABATTA_ENV_PROFILE</C>, so a step can
+          read which one it&apos;s under. The launcher on the <Link to="/run">Run page</Link> has
+          a picker with the same list.
+        </P>
+
+        <SubHeading>Custom arguments</SubHeading>
+        <P>
+          Everything after a bare <C>...</C> on a workflow run belongs to the workflow, not to
+          ciabatta — so a custom <C>--force</C> there is yours, never mistaken for the real one.
+          Each becomes a variable prefixed <C>CIABATTA_ARG_</C>, upper-cased, with <C>-</C> and{" "}
+          <C>.</C> turned into <C>_</C>:
+        </P>
+        <Pre>{`ciabatta build ... --target=arm64 --region eu --verbose dry-deploy=1
+#   CIABATTA_ARG_TARGET=arm64   CIABATTA_ARG_REGION=eu
+#   CIABATTA_ARG_VERBOSE=true   CIABATTA_ARG_DRY_DEPLOY=1`}</Pre>
+        <P>
+          They are listed apart from the rest of the environment, in yellow — in the summary
+          printed before a run, in the terminal UI&apos;s log, and on the run&apos;s page — because
+          they exist only in the command that was typed, and the next run won&apos;t have them
+          unless they&apos;re typed again. If a run needs them every time, that&apos;s what a
+          profile is for: put them in <C>.env.&lt;name&gt;</C> and run with{" "}
+          <C>--env-profile &lt;name&gt;</C>. The launcher takes them too, and{" "}
+          <strong>Run again</strong> repeats them.
+        </P>
 
         <SubHeading>When somebody changes the variables</SubHeading>
         <P>
@@ -1595,15 +1670,24 @@ ciabatta build --only api --isolated        # …and don't follow them at all`}<
 
         <SubHeading>Reading the Run page</SubHeading>
         <P>
-          <Link to="/run">Run</Link> lists everything the daemon has, and opening one gives you
-          the flowchart and the logs side by side. The graph reads left to right:
+          <Link to="/run">Run</Link> lists the selected project&apos;s runs — switching projects
+          switches the list — and opening one gives you the flowchart and the logs side by side.
+          The graph reads left to right:
         </P>
         <Bullets
           items={[
             <>
-              <strong>Each column is a wave.</strong> An arrow means &quot;comes after&quot;.
-              Edges that skip columns are routed down lanes of their own, so a line crossing a
-              node never means the two are connected.
+              <strong>Each column is a wave, and a wave runs in parallel.</strong> An arrow means
+              &quot;comes after&quot;; every step whose dependencies are met starts at once, up to{" "}
+              <C>--jobs</C> (the CPU count by default), and the next starts as soon as one
+              finishes. Edges that skip columns are routed down lanes of their own, so a line
+              crossing a node never means the two are connected.
+            </>,
+            <>
+              <strong>A cache icon on a node means it used its cached version</strong> — already
+              up to date, restored locally, or (a cloud) restored from the remote cache. Click
+              the icon for the entry it used: when it was built, when it was last used, what it
+              holds, and the build time it saved.
             </>,
             <>
               <strong>The icon on a node is its status</strong> — not started, running, succeeded,
@@ -1627,6 +1711,46 @@ ciabatta build --only api --isolated        # …and don't follow them at all`}<
           ]}
         />
 
+        <SubHeading>Why didn&apos;t that use the cache?</SubHeading>
+        <P>
+          <strong>Inspect cache</strong>, in a run&apos;s header, switches the graph to what the
+          cache made of every step. Each node says it in a line — reused, missed and why, not
+          cached, or <em>blocked by</em> an upstream step — and is outlined in that colour. The
+          wire along which an upstream step held another back is drawn red, labelled{" "}
+          <em>blocks cache</em>. Above the graph, a summary lists the steps holding others back
+          first, since those cost a rebuild on every run and drag everything behind them along.
+        </P>
+        <P>
+          Click a step for the full report: its key, the inputs and variables it keyed on, the
+          fingerprint of each upstream step it depends on (and which ran without accounting for
+          its outputs), the last build it was compared against, every file that moved since, what
+          was stored afterwards and whether it reached the remote cache — and a line for each
+          thing to change. The switch is remembered, so the next run — the one checking whether
+          the fix worked — opens in the same mode.
+        </P>
+        <Bullets
+          items={[
+            <>
+              <strong>Blocked by an upstream step</strong>: that step declares no{" "}
+              <C>cache.outputs</C>. Give it some, or <C>cache.no_outputs: true</C> if it writes
+              nothing this step reads.
+            </>,
+            <>
+              <strong>An upstream step produced different outputs</strong> while its own inputs
+              didn&apos;t change: its build isn&apos;t reproducible — usually a timestamp or build id
+              written into a file.
+            </>,
+            <>
+              <strong>A changed input that is also this step&apos;s own output</strong>: every build
+              changes its own key. Add it to <C>cache.exclude</C>.
+            </>,
+            <>
+              <strong>Key changed, but no input, variable or upstream did</strong>: the command,
+              the enabled <C>CIABATTA_FEAT_*</C> features, or the ciabatta version did.
+            </>,
+          ]}
+        />
+
         <SubHeading>Recreate, re-run, and full screen</SubHeading>
         <Bullets
           items={[
@@ -1634,7 +1758,8 @@ ciabatta build --only api --isolated        # …and don't follow them at all`}<
               <strong>Recreate</strong> opens the run as the commands that reproduce it: the{" "}
               <C>cd</C> into each package, the variables each step sets, and the exact command the
               engine handed to the shell — with the step in flight marked, so it doubles as a
-              position report while the run is going. There is a copy button.
+              position report while the run is going. Every line has its own copy button, for
+              re-running one step by hand, and there is one for the whole sequence.
             </>,
             <>
               <strong>Run again</strong> starts the same run once it has finished: same workflows,
@@ -1677,6 +1802,18 @@ ciabatta build --only api --isolated        # …and don't follow them at all`}<
               <strong>Cache paths are relative to the workspace root</strong>, not to the file
               you&apos;re writing them in. Let <C>ciabatta cache init</C> write them, then check
               with <C>ciabatta why &lt;step&gt; --all</C>.
+            </>,
+            <>
+              <strong>A step with no outputs holds back every step after it.</strong> If a{" "}
+              <C>lint</C> or <C>test</C> sits upstream of your build, mark it{" "}
+              <C>cache.no_outputs: true</C>, or the build will never be reused. Cache inspect mode
+              on the run&apos;s page points these out.
+            </>,
+            <>
+              <strong>Workspace names can&apos;t contain <C>:</C></strong> — it&apos;s how steps
+              and sub-workflows are addressed (<C>api:compile</C>), so <C>api:v2</C> would be
+              ambiguous. Ciabatta refuses the name and suggests one; a directory with a colon in
+              it needs an explicit <C>workspace.name</C>.
             </>,
             <>
               <strong>Exclude your own output.</strong> A build that writes into a directory its
@@ -1801,16 +1938,20 @@ ciabatta build --only api --isolated        # …and don't follow them at all`}<
               <strong>
                 <Link to="/workspace">Workspace</Link>
               </strong>{" "}
-              — every package, its workflows, owners and dependencies, with the graph between
-              them. The visual answer to <C>ciabatta list</C>, and where a workflow nobody has run
-              for a month is flagged as stale.
+              — every package, its workflows, owners and dependencies. Graph a workflow to see it
+              compiled across every package, drawn like a run&apos;s flowchart with what the cache
+              would do at each step (or switch to List for every node&apos;s details at once). The
+              visual answer to <C>ciabatta list</C>, and where a workflow nobody has run for a
+              month is flagged as stale.
             </>,
             <>
               <strong>
                 <Link to="/cache">Cache</Link>
               </strong>{" "}
               — what is stored, what it saved you, and for a rebuild the diff that caused it. The
-              Remote tab is the shared cache, if you have one.
+              Remote tab is the shared cache, if you have one: when it was last used and saved
+              to, what is worth fixing, and this project&apos;s targets ranked by how often they
+              miss.
             </>,
             <>
               <strong>
@@ -1898,17 +2039,51 @@ ciabatta cache init --remote http://cache.example.com:8380`}</Pre>
           the settings, both ways of finding a user, and what each error means.
         </P>
         <P>
-          The <Link to="/cache">Remote tab</Link> shows the hit rate, what is stored, the retention
-          policy, and which ciabatta builds the server hands out. A rate near zero usually means the
-          keys are not stable — an undeclared input, or something like a timestamp baked into a
-          build — rather than that nothing is reusable.
+          The <Link to="/cache">Remote tab</Link> shows the hit rate, <strong>when the cache was
+          last used and last saved to</strong>, what is stored against its size limit, the
+          retention policy, and which ciabatta builds the server hands out — then this
+          project&apos;s targets, worst-missing first, and its recent traffic.
         </P>
+
+        <SubHeading>What it tells you to fix</SubHeading>
+        <P>
+          The server counts hits, misses and uploads per project and <em>per target</em>, with
+          the last time each happened, and keeps them across restarts. From those it derives a
+          short list of things worth changing — on the server&apos;s page, the Remote tab, and{" "}
+          <C>ciabatta remote-cache status</C>:
+        </P>
+        <Bullets
+          items={[
+            <>
+              <strong>Uploaded again and again, never reused</strong>: the target&apos;s key changes
+              on every build. Open one of its runs in cache inspect mode to see what moved.
+            </>,
+            <>
+              <strong>Missed again and again, never uploaded</strong>: nobody writes it — every
+              client building it is read-only, or it declares no outputs.
+            </>,
+            <>
+              <strong>Hits only a fraction of its lookups</strong>: machines build it with
+              different keys — an OS-specific file, an absolute path, or a variable that differs
+              between CI and laptops.
+            </>,
+            <>
+              <strong>Still asked for, nothing saved in a week</strong>: whatever used to publish to
+              it has stopped.
+            </>,
+            <>
+              <strong>Near its size limit</strong>, and what the last retention sweep evicted.
+            </>,
+          ]}
+        />
 
         <SubHeading>The server&apos;s own page</SubHeading>
         <P>
           The cache server serves a small admin page at its root — open{" "}
-          <C>http://your-cache:8380/</C> in a browser. It shows the hit rate, what is stored, and
-          the ciabatta builds it hands out, and it does the one thing the CLI does badly:{" "}
+          <C>http://your-cache:8380/</C> in a browser. It shows when the cache was last used and
+          saved to, the insights above, every project with its targets, recent activity, the
+          largest entries and the ones retention will evict next — in light or dark, following the
+          system or chosen in its header — and it does the one thing the CLI does badly:{" "}
           <strong>minting credentials</strong>. <C>remote-cache add-user</C> prints a hash for you
           to paste into the config and restart around; the page writes the user to the
           server&apos;s own list and hands back the token there and then. That token is shown
@@ -1931,18 +2106,40 @@ ciabatta cache init --remote http://cache.example.com:8380`}</Pre>
           neither shadow nor delete them.
         </P>
 
-        <SubHeading>TLS</SubHeading>
+        <SubHeading>HTTPS</SubHeading>
         <P>
-          The server speaks HTTP; put it behind a reverse proxy with TLS for anything beyond a
-          trusted network. If that proxy uses a self-signed certificate, or an internal CA a machine
-          does not have installed, that machine can opt out with <C>cache.remote.tls_verify: false</C>{" "}
-          — or <C>remote-cache login --no-tls-verify</C>, which remembers the choice for later
-          commands.
+          The server terminates TLS itself when given a certificate and key, so a cache beyond a
+          trusted network needs no reverse proxy in front of it:
+        </P>
+        <Pre>{`# remote-cache.yaml
+server:
+  port: 8380
+  tls:
+    cert: tls/cert.pem      # PEM chain, leaf first — relative to this file
+    key:  tls/key.pem`}</Pre>
+        <P>
+          No CA to hand? <C>remote-cache init --tls</C> generates a self-signed pair under{" "}
+          <C>tls/</C>, valid for <C>localhost</C>, this machine&apos;s hostname and any{" "}
+          <C>--tls-host</C> you name, and writes the section above. The server prints the
+          certificate&apos;s SHA-256 fingerprint when it starts. Clients then trust that one
+          certificate rather than switching verification off:
+        </P>
+        <Pre>{`ciabatta remote-cache init --tls --tls-host cache.internal
+ciabatta remote-cache start              # https://0.0.0.0:8380, with its fingerprint
+
+# On each machine — copy cert.pem over, never key.pem
+ciabatta remote-cache login https://cache.internal:8380 --ca-cert cert.pem
+# In CI, without a login:
+export CIABATTA_REMOTE_CA=/path/to/cert.pem`}</Pre>
+        <P>
+          Behind a proxy that already terminates TLS, leave <C>server.tls</C> out. If a machine
+          can&apos;t be given the certificate at all, it can opt out with{" "}
+          <C>cache.remote.tls_verify: false</C> or <C>remote-cache login --no-tls-verify</C>.
         </P>
         <Alert severity="warning" sx={{ mb: 2, maxWidth: "78ch" }}>
           With verification off, HTTPS is an encrypted channel to <em>whoever answered</em> — so the
-          build artifacts it hands back are only as trustworthy as the network between you.
-          Installing the CA certificate is the better fix wherever it is available.
+          build artifacts it hands back are only as trustworthy as the network between you.{" "}
+          <C>--ca-cert</C> is the better fix wherever it is available.
         </Alert>
 
         <SubHeading>Running one locally</SubHeading>

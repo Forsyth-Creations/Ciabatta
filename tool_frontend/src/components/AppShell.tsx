@@ -173,6 +173,7 @@ export function AppShell({ children }: { children: ReactNode }) {
           <ProjectSwitcher />
           <HealthIndicator />
 
+
           <Tooltip title={mode === "dark" ? "Switch to light" : "Switch to dark"}>
             <IconButton onClick={onToggleMode} size="small" aria-label="Toggle colour mode">
               {mode === "dark" ? <LightModeIcon /> : <DarkModeIcon />}

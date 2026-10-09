@@ -28,6 +28,11 @@ import {
   Select,
   Stack,
   Tab,
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableRow,
   Tabs,
   Tooltip,
   Typography,
@@ -48,8 +53,10 @@ import type {
   PlannedStep,
   RebuildReason,
   Release,
+  RemoteProject,
   RemoteStatus,
 } from "../api/types";
+import { Prose, ago } from "../components/CacheReport";
 import { CacheDiffView } from "../components/CacheDiff";
 import { ErrorNote, Loading, PageHeader, RequireProject } from "../components/Page";
 
@@ -350,8 +357,8 @@ function RemoteStatusView({ status }: { status: RemoteStatus }) {
     return (
       <Alert severity="info" icon={<CloudOffIcon />}>
         This workspace isn't pointed at a remote cache. Stand one up with{" "}
-        <code>ciabatta remote-cache init</code>, then connect this workspace with{" "}
-        <code>ciabatta cache init --remote &lt;URL&gt;</code>.
+        <code>ciabatta remote-cache init</code> (add <code>--tls</code> to serve HTTPS), then
+        connect this workspace with <code>ciabatta cache init --remote &lt;URL&gt;</code>.
       </Alert>
     );
   }
@@ -371,21 +378,43 @@ function RemoteStatusView({ status }: { status: RemoteStatus }) {
 
   const { stats } = status;
   const hitRate = stats.hit_rate;
+  const activity = stats.activity;
+  // This workspace's own entry on the server — the part of the picture that
+  // is about the code in front of you.
+  const mine = stats.projects.find((entry) => entry.project.id === status.project);
+  const others = stats.projects.filter((entry) => entry !== mine);
+  // Insights about this project first; everything else after.
+  const insights = [...(stats.insights ?? [])].sort(
+    (a, b) =>
+      Number(b.project === mine?.project.name) - Number(a.project === mine?.project.name) ||
+      Number(b.severity === "warn") - Number(a.severity === "warn"),
+  );
+  const recent = (activity?.recent ?? [])
+    .filter((event) => !mine || event.project === mine.project.id)
+    .slice(0, 12);
 
   return (
     <Stack spacing={3}>
       <Paper variant="outlined" sx={{ p: 2 }}>
-        <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 2 }}>
+        <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 2 }} flexWrap="wrap" useFlexGap>
           <CloudQueueIcon fontSize="small" color="success" />
           <Typography variant="subtitle1" sx={{ fontFamily: "monospace" }}>
             {status.url}
           </Typography>
+          {stats.tls !== undefined && (
+            <Chip
+              size="small"
+              variant="outlined"
+              color={stats.tls ? "success" : "default"}
+              label={stats.tls ? "HTTPS" : "HTTP"}
+            />
+          )}
           {status.read_only && <Chip size="small" label="read-only" />}
           <Box sx={{ flexGrow: 1 }} />
-          {/* The server's own admin page — where credentials are minted. This
-              app can't do it: it talks to the cache with the daemon's saved
-              session, and user management belongs to whoever administers the
-              cache, not to everyone who can open this page. */}
+          {/* The server's own page — where credentials are minted, and where
+              the whole cache's activity is laid out. This app can't mint them:
+              it talks to the cache with the daemon's saved session, and user
+              management belongs to whoever administers the cache. */}
           <Button
             size="small"
             endIcon={<OpenInNewIcon fontSize="small" />}
@@ -393,7 +422,7 @@ function RemoteStatusView({ status }: { status: RemoteStatus }) {
             target="_blank"
             rel="noreferrer"
           >
-            Manage users
+            Open the cache's page
           </Button>
         </Stack>
 
@@ -403,45 +432,152 @@ function RemoteStatusView({ status }: { status: RemoteStatus }) {
             value={hitRate === null ? "—" : `${hitRate.toFixed(1)}%`}
             hint="A rate near zero usually means the keys aren't stable — an undeclared input, or something like a timestamp baked into a build — rather than that nothing is reusable."
           />
+          {activity && (
+            <>
+              <Stat
+                label="Last used"
+                value={ago(activity.last_used_at, true)}
+                hint={stamp(activity.last_used_at, "Nothing has been read from or written to it yet.")}
+              />
+              <Stat
+                label="Last saved to"
+                value={ago(activity.last_saved_at, true)}
+                hint={stamp(activity.last_saved_at, "Nothing has been uploaded yet.")}
+              />
+            </>
+          )}
           <Stat label="Hits" value={String(stats.counters.hits)} />
           <Stat label="Misses" value={String(stats.counters.misses)} />
-          <Stat label="Stored" value={stats.storage.human} />
+          <Stat
+            label="Stored"
+            value={stats.storage.human}
+            hint={
+              stats.storage.max_bytes
+                ? `${(stats.storage.percent ?? 0).toFixed(0)}% of the ${humanizeBytes(stats.storage.max_bytes)} limit`
+                : undefined
+            }
+          />
           <Stat label="Entries" value={String(stats.storage.entries)} />
           <Stat label="Served" value={humanizeBytes(stats.counters.bytes_served)} />
-          <Stat label="Sessions" value={String(stats.sessions)} />
         </Stack>
+        {/* Only once it is worth seeing: a sliver of a bar on a near-empty
+            store reads as a full one, since the track is tinted too. */}
+        {stats.storage.percent != null && stats.storage.percent >= 1 && (
+          <LinearProgress
+            variant="determinate"
+            value={Math.min(100, stats.storage.percent)}
+            color={stats.storage.percent >= 100 ? "error" : stats.storage.percent >= 80 ? "warning" : "success"}
+            sx={{ mt: 2, height: 4, borderRadius: 2 }}
+          />
+        )}
 
         <Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: 2 }}>
-          Retention: {stats.retention.description}. Counters are since the server started
-          ({new Date(stats.started_at).toLocaleString()}).
+          Retention: {stats.retention.description}.{" "}
+          {activity?.since
+            ? `Counted since ${new Date(activity.since).toLocaleDateString()}.`
+            : `Counters are since the server started (${new Date(stats.started_at).toLocaleString()}).`}
+          {activity?.last_eviction &&
+            ` Last eviction ${ago(activity.last_eviction.at)}: ${activity.last_eviction.removed} entries, ${humanizeBytes(activity.last_eviction.freed)}.`}
         </Typography>
       </Paper>
 
-      <ReleaseCard release={stats.release} />
-
-      {stats.projects.length > 0 && (
+      {stats.insights !== undefined && (
         <Box>
           <Typography variant="subtitle2" sx={{ mb: 1 }}>
-            Projects on this cache
+            Worth a look
+          </Typography>
+          {insights.length === 0 ? (
+            <Alert severity="success">Nothing needs attention.</Alert>
+          ) : (
+            <Stack spacing={1}>
+              {insights.map((insight, index) => (
+                <Alert key={index} severity={insight.severity === "warn" ? "warning" : "info"}>
+                  <Typography variant="body2" sx={{ fontWeight: 600 }}>
+                    {insight.project && (
+                      <Typography component="span" variant="caption" color="text.secondary" sx={{ mr: 1 }}>
+                        {insight.project}
+                        {insight.target && ` · ${insight.target}`}
+                      </Typography>
+                    )}
+                    <Prose text={insight.message} />
+                  </Typography>
+                  <Typography variant="caption" sx={{ display: "block", mt: 0.5 }}>
+                    <Prose text={insight.action} />
+                  </Typography>
+                </Alert>
+              ))}
+            </Stack>
+          )}
+        </Box>
+      )}
+
+      {mine && <ThisProject entry={mine} />}
+
+      {recent.length > 0 && (
+        <Box>
+          <Typography variant="subtitle2" sx={{ mb: 1 }}>
+            Recent activity{mine ? ` for ${mine.project.name}` : ""}
+          </Typography>
+          <Paper variant="outlined">
+            <Table size="small">
+              <TableHead>
+                <TableRow>
+                  <TableCell>When</TableCell>
+                  <TableCell>What</TableCell>
+                  <TableCell>Target</TableCell>
+                  <TableCell>Who</TableCell>
+                  <TableCell align="right">Size</TableCell>
+                </TableRow>
+              </TableHead>
+              <TableBody>
+                {recent.map((event, index) => (
+                  <TableRow key={index}>
+                    <TableCell>
+                      <Tooltip title={new Date(event.at).toLocaleString()}>
+                        <span>{ago(event.at)}</span>
+                      </Tooltip>
+                    </TableCell>
+                    <TableCell>
+                      <Chip
+                        size="small"
+                        variant="outlined"
+                        color={event.kind === "miss" ? "warning" : event.kind === "touch" ? "default" : "success"}
+                        label={event.kind === "touch" ? `kept ${event.count} alive` : event.kind}
+                      />
+                    </TableCell>
+                    <TableCell sx={{ fontFamily: "monospace", fontSize: 12 }}>{event.target ?? ""}</TableCell>
+                    <TableCell>{event.user ?? ""}</TableCell>
+                    <TableCell align="right">{event.bytes ? humanizeBytes(event.bytes) : ""}</TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </Paper>
+        </Box>
+      )}
+
+      <ReleaseCard release={stats.release} />
+
+      {others.length > 0 && (
+        <Box>
+          <Typography variant="subtitle2" sx={{ mb: 1 }}>
+            {mine ? "Other projects on this cache" : "Projects on this cache"}
           </Typography>
           <Stack spacing={1}>
-            {stats.projects.map((entry) => (
+            {others.map((entry) => (
               <Paper key={entry.project.id} variant="outlined" sx={{ p: 1.5 }}>
                 <Stack direction="row" spacing={2} alignItems="center" flexWrap="wrap" useFlexGap>
                   <Typography variant="body2" sx={{ fontWeight: 600, minWidth: 140 }}>
                     {entry.project.name}
                   </Typography>
-                  <Typography
-                    variant="caption"
-                    color="text.secondary"
-                    sx={{ fontFamily: "monospace" }}
-                  >
+                  <Typography variant="caption" color="text.secondary" sx={{ fontFamily: "monospace" }}>
                     {entry.project.id}
                   </Typography>
                   <Box sx={{ flexGrow: 1 }} />
                   <Typography variant="body2" color="text.secondary">
                     {entry.counters.hits} hit · {entry.counters.misses} miss
                     {entry.hit_rate !== null && ` · ${entry.hit_rate.toFixed(0)}%`}
+                    {entry.last_used_at !== undefined && ` · used ${ago(entry.last_used_at)}`}
                   </Typography>
                 </Stack>
               </Paper>
@@ -451,6 +587,67 @@ function RemoteStatusView({ status }: { status: RemoteStatus }) {
       )}
     </Stack>
   );
+}
+
+/**
+ * This workspace on the shared cache: how it's doing, when it was last used and
+ * saved to, and the targets that miss most — the ones to open in cache inspect
+ * mode.
+ */
+function ThisProject({ entry }: { entry: RemoteProject }) {
+  const saved = entry.last_saved_at ?? entry.newest_entry_at ?? null;
+  return (
+    <Paper variant="outlined" sx={{ p: 2 }}>
+      <Typography variant="subtitle2">This project — {entry.project.name}</Typography>
+      <Typography variant="caption" color="text.secondary" sx={{ display: "block", mb: 1.5 }}>
+        {entry.counters.hits} hit · {entry.counters.misses} miss
+        {entry.hit_rate !== null && ` (${entry.hit_rate.toFixed(0)}%)`} · {entry.entries} entries
+        {entry.bytes !== undefined && `, ${humanizeBytes(entry.bytes)}`}
+        {entry.last_used_at !== undefined && ` · last used ${ago(entry.last_used_at)}`}
+        {` · last saved to ${ago(saved)}`}
+      </Typography>
+      {(entry.targets?.length ?? 0) > 0 ? (
+        <Table size="small">
+          <TableHead>
+            <TableRow>
+              <TableCell>Target</TableCell>
+              <TableCell align="right">Hits</TableCell>
+              <TableCell align="right">Misses</TableCell>
+              <TableCell align="right">Uploads</TableCell>
+              <TableCell>Last hit</TableCell>
+              <TableCell>Last saved</TableCell>
+            </TableRow>
+          </TableHead>
+          <TableBody>
+            {entry.targets!.map((target) => (
+              <TableRow key={target.name}>
+                <TableCell sx={{ fontFamily: "monospace", fontSize: 12 }}>{target.name}</TableCell>
+                <TableCell align="right">{target.hits}</TableCell>
+                <TableCell
+                  align="right"
+                  sx={{ color: target.misses > 0 && target.hits === 0 ? "warning.main" : undefined }}
+                >
+                  {target.misses}
+                </TableCell>
+                <TableCell align="right">{target.uploads}</TableCell>
+                <TableCell>{ago(target.last_hit_at)}</TableCell>
+                <TableCell>{ago(target.last_upload_at)}</TableCell>
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
+      ) : (
+        <Typography variant="body2" color="text.secondary">
+          No per-target traffic yet.
+        </Typography>
+      )}
+    </Paper>
+  );
+}
+
+/** A timestamp for a tooltip, or what to say when there isn't one. */
+function stamp(at: string | null | undefined, otherwise: string): string {
+  return at ? new Date(at).toLocaleString() : otherwise;
 }
 
 /**

@@ -53,6 +53,8 @@ export function originText(variable: EnvVar): string {
       return `from ${variable.file ?? "an env file"}`;
     case "config":
       return "from an [env] table in the config";
+    case "argument":
+      return "a custom argument, given after `...` for this run only";
     default:
       return "nothing sets this — steps will read an empty string";
   }
@@ -82,7 +84,13 @@ export function EnvVarChip({ variable }: { variable: EnvVar }) {
       <Chip
         size="small"
         variant="outlined"
-        color={unset ? "error" : variable.required ? "warning" : "default"}
+        color={
+          unset
+            ? "error"
+            : variable.required || variable.origin === "argument"
+              ? "warning"
+              : "default"
+        }
         icon={variable.secret ? <KeyIcon /> : undefined}
         label={
           <span style={{ fontFamily: monoFontStack }}>
@@ -125,6 +133,34 @@ export function StepEnvChips({ env }: { env: Record<string, string> }) {
 }
 
 /**
+ * The run's custom arguments — what was typed after `...` — set apart and in
+ * the warning colour: they exist only in the command that started this run,
+ * so the next run won't have them unless they're typed again. Says how to
+ * keep them instead.
+ */
+export function CustomArguments({ report }: { report: EnvReport }) {
+  const args = report.vars.filter((v) => v.origin === "argument");
+  if (args.length === 0) return null;
+  return (
+    <Alert severity="warning" icon={false} sx={{ my: 1, py: 0.5 }}>
+      <Typography variant="caption" sx={{ display: "block", fontWeight: 600, mb: 0.5 }}>
+        ⚑ {args.length} custom argument{args.length === 1 ? "" : "s"}, for this run only
+      </Typography>
+      <Stack direction="row" spacing={0.75} flexWrap="wrap" useFlexGap>
+        {args.map((variable) => (
+          <EnvVarChip key={variable.key} variable={variable} />
+        ))}
+      </Stack>
+      <Typography variant="caption" sx={{ display: "block", mt: 0.75 }}>
+        If this run needs these every time, keep them in an env profile: put them in{" "}
+        <code>{report.profile ? `.env.${report.profile}` : ".env.<name>"}</code> next to your{" "}
+        <code>.env</code> and run with <code>--env-profile {report.profile ?? "<name>"}</code>.
+      </Typography>
+    </Alert>
+  );
+}
+
+/**
  * The whole environment a graph depends on: what is set, where it came from,
  * and what is still missing.
  *
@@ -135,8 +171,10 @@ export function StepEnvChips({ env }: { env: Record<string, string> }) {
 export function EnvPanel({ report, title = "Environment" }: { report: EnvReport; title?: string }) {
   if (report.vars.length === 0 && report.files.length === 0) return null;
 
-  const used = report.vars.filter((v) => v.steps.length > 0 || v.required);
-  const unused = report.vars.filter((v) => v.steps.length === 0 && !v.required);
+  // Custom arguments have a block of their own, above.
+  const vars = report.vars.filter((v) => v.origin !== "argument");
+  const used = vars.filter((v) => v.steps.length > 0 || v.required);
+  const unused = vars.filter((v) => v.steps.length === 0 && !v.required);
 
   return (
     <Box>
@@ -144,12 +182,17 @@ export function EnvPanel({ report, title = "Environment" }: { report: EnvReport;
         <Typography variant="overline" color="text.secondary">
           {title} — {report.vars.length} variable(s) this graph depends on
         </Typography>
+        {report.profile && (
+          <Chip size="small" color="secondary" variant="outlined" label={`profile: ${report.profile}`} />
+        )}
         {report.files.length > 0 && (
           <Typography variant="caption" color="text.secondary" sx={{ fontFamily: monoFontStack }}>
             sourcing {report.files.join(", ")}
           </Typography>
         )}
       </Stack>
+
+      <CustomArguments report={report} />
 
       {report.missing.length > 0 && (
         <Alert severity="warning" sx={{ my: 1 }}>

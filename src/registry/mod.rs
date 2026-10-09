@@ -730,22 +730,34 @@ mod tests {
             let mut lines = Vec::new();
             {
                 let mut sink = LogSink::streaming(&mut lines, tx);
-                run_shell_command("echo first; sleep 0.4; echo second", cwd, &env, &mut sink)
+                run_shell_command("echo first; sleep 1.5; echo second", cwd, &env, &mut sink)
                     .await
                     .unwrap();
             }
-            lines
+            (lines, std::time::Instant::now())
         });
 
-        // The first line arrives promptly, long before the ~0.4s command ends.
-        let first = tokio::time::timeout(std::time::Duration::from_millis(250), rx.recv())
+        // Measured from when the first line *arrives* to when the command
+        // *ends*, not from when it was spawned: starting a shell can take
+        // hundreds of milliseconds on a loaded CI runner (this used to allow
+        // 250ms from spawn, and failed on Windows when bash was slow to start).
+        // Streamed, the first line lands ~1.5s before the end; buffered until
+        // exit, the two would be all but simultaneous.
+        let first = tokio::time::timeout(std::time::Duration::from_secs(30), rx.recv())
             .await
-            .expect("first line should stream before the command exits")
+            .expect("the command should print within 30s")
             .expect("live channel stays open while the command runs");
+        let first_at = std::time::Instant::now();
         assert_eq!(first, "first");
 
-        let all = runner.await.unwrap();
+        let (all, finished_at) = runner.await.unwrap();
         assert_eq!(all, vec!["first".to_string(), "second".to_string()]);
+        let lead = finished_at.duration_since(first_at);
+        assert!(
+            lead >= std::time::Duration::from_millis(1000),
+            "the first line arrived only {lead:?} before the command finished — it was \
+             buffered until exit rather than streamed"
+        );
     }
 
     #[test]

@@ -80,6 +80,8 @@ export function runCommand(state: RunState): string {
   if (run.isolated) parts.push("--isolated");
   if (run.force) parts.push("--force");
   if (state.dry_run) parts.push("--dry-run");
+  if (run.env_profile) parts.push("--env-profile", quote(run.env_profile));
+  if ((run.args ?? []).length > 0) parts.push("...", ...run.args!.map(quote));
   return parts.join(" ");
 }
 
@@ -278,6 +280,38 @@ export function RecreateDrawer({
   );
 }
 
+/**
+ * Copy one line (or block) to the clipboard.
+ *
+ * Every line gets one, because the usual reason to open this drawer is to
+ * re-run *one* step by hand — and selecting a single line of monospace text
+ * out of a list, without the status glyph or the trailing `# step` comment, is
+ * fiddly enough that people retyped it instead.
+ */
+function CopyButton({ text, label = "Copy this line" }: { text: string; label?: string }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <Tooltip title={copied ? "Copied" : label}>
+      <IconButton
+        size="small"
+        aria-label={label}
+        onClick={async () => {
+          try {
+            await navigator.clipboard.writeText(text);
+            setCopied(true);
+            setTimeout(() => setCopied(false), 1400);
+          } catch {
+            // Clipboard access can be refused; the text is on screen either way.
+          }
+        }}
+        sx={{ p: 0.25, flexShrink: 0, color: copied ? "success.main" : "text.secondary" }}
+      >
+        {copied ? <CheckIcon sx={{ fontSize: 15 }} /> : <ContentCopyIcon sx={{ fontSize: 15 }} />}
+      </IconButton>
+    </Tooltip>
+  );
+}
+
 function RootLine({ root }: { root: string }) {
   return (
     <>
@@ -292,24 +326,35 @@ function RootLine({ root }: { root: string }) {
 
 function CommandLine({ text }: { text: string }) {
   return (
-    <Box
-      component="pre"
+    <Stack
+      direction="row"
+      alignItems="flex-start"
+      spacing={0.5}
       sx={{
-        fontFamily: monoFontStack,
-        fontSize: 12.5,
-        m: 0,
         my: 0.5,
         p: 1,
         borderRadius: 1,
         border: 1,
         borderColor: "divider",
         bgcolor: "action.hover",
-        whiteSpace: "pre-wrap",
-        overflowWrap: "anywhere",
       }}
     >
-      {text}
-    </Box>
+      <Box
+        component="pre"
+        sx={{
+          fontFamily: monoFontStack,
+          fontSize: 12.5,
+          m: 0,
+          flexGrow: 1,
+          minWidth: 0,
+          whiteSpace: "pre-wrap",
+          overflowWrap: "anywhere",
+        }}
+      >
+        {text}
+      </Box>
+      <CopyButton text={text} label="Copy" />
+    </Stack>
   );
 }
 
@@ -352,6 +397,7 @@ function LineRow({ line }: { line: Line }) {
           fontFamily: monoFontStack,
           fontSize: 12.5,
           minWidth: 0,
+          flexGrow: 1,
           overflowWrap: "anywhere",
           whiteSpace: "pre-wrap",
           color:
@@ -371,6 +417,9 @@ function LineRow({ line }: { line: Line }) {
           </Box>
         )}
       </Box>
+      {/* The command alone — not the trailing `# step` note, which is only
+          there to say whose line it is. */}
+      <CopyButton text={line.text} />
     </Stack>
   );
 }

@@ -4,7 +4,7 @@
  * Two questions, one page. **What is there to run, and who owns it?** — the
  * searchable list of every sub-workspace's workflows, so nobody has to open six
  * packages to find out what a script does. And **what will actually happen?** —
- * the compiled graph for one workflow, wave by wave, with every node labelled
+ * the compiled graph for one workflow, drawn as a graph, with every node labelled
  * by the sub-workspace it came from.
  *
  * Starting a workflow posts to the run API with a `workflow` field; the daemon
@@ -31,6 +31,8 @@ import {
   Switch,
   TextField,
   Tooltip,
+  ToggleButton,
+  ToggleButtonGroup,
   Typography,
 } from "@mui/material";
 import AccountTreeIcon from "@mui/icons-material/AccountTree";
@@ -57,6 +59,7 @@ import {
 } from "../api/workspace";
 import { ErrorNote, Loading, PageHeader, RequireProject } from "../components/Page";
 import { EnvDriftBanner } from "../components/EnvDriftBanner";
+import { WorkflowFlow } from "../components/WorkflowFlow";
 import { EnvPanel, EnvVarChip, StepEnvChips } from "../components/EnvVars";
 import {
   GraphInputsPanel,
@@ -427,6 +430,11 @@ function GraphPanel({ project, workflow }: { project: string; workflow: string }
   const { data: plan } = useCachePlan(project, workflow);
   const start = useStartRun();
   const [dryRun, setDryRun] = useState(false);
+  // The graph by default: it shows what waits for what, which a list of waves
+  // can only imply. The list stays one click away, for reading every node's
+  // details at once.
+  const [view, setView] = useState<"graph" | "list">("graph");
+  const [selected, setSelected] = useState<string | null>(null);
 
   if (isLoading) return <Loading label={`Compiling the “${workflow}” graph…`} />;
   if (error) return <ErrorNote error={error} />;
@@ -467,6 +475,16 @@ function GraphPanel({ project, workflow }: { project: string; workflow: string }
             {data.units.length} sub-workspace(s), in {data.waves.length} wave(s)
             {background.length > 0 && ` · ${background.length} background`}
           </Typography>
+          <ToggleButtonGroup
+            size="small"
+            exclusive
+            value={view}
+            onChange={(_, next) => next && setView(next)}
+            aria-label="How to show the workflow"
+          >
+            <ToggleButton value="graph">Graph</ToggleButton>
+            <ToggleButton value="list">List</ToggleButton>
+          </ToggleButtonGroup>
           <FormControlLabel
             control={<Switch checked={dryRun} onChange={(e) => setDryRun(e.target.checked)} />}
             label="Dry run"
@@ -510,7 +528,30 @@ function GraphPanel({ project, workflow }: { project: string; workflow: string }
           <EnvPanel report={data.env} title="environment — read before wave 1" />
           {caching && plan && <GraphInputsPanel plan={plan} />}
 
-          {data.waves.map((wave, index) => {
+          {view === "graph" && (
+            <>
+              <WorkflowFlow
+                graph={data}
+                planned={planned}
+                selected={selected}
+                onSelect={setSelected}
+              />
+              {selected && byId.get(selected) ? (
+                <GraphNodeCard
+                  node={byId.get(selected)!}
+                  env={envFor(data, selected)}
+                  planned={planned.get(selected)}
+                />
+              ) : (
+                <Typography variant="caption" color="text.secondary">
+                  Click a step for its details — what it waits for, what it reads, and what the
+                  cache would do with it. Dashed red edges are failure branches.
+                </Typography>
+              )}
+            </>
+          )}
+
+          {view === "list" && data.waves.map((wave, index) => {
             const steps = wave.filter((id) => !isBackground.has(id));
             // A wave that held nothing but background tasks isn't a wave.
             if (steps.length === 0) return null;
@@ -538,7 +579,7 @@ function GraphPanel({ project, workflow }: { project: string; workflow: string }
 
           {caching && plan && <GraphOutputsPanel plan={plan} />}
 
-          {background.length > 0 && (
+          {view === "list" && background.length > 0 && (
             <Box>
               <Tooltip title={BACKGROUND_TOOLTIP}>
                 <Stack
@@ -566,7 +607,7 @@ function GraphPanel({ project, workflow }: { project: string; workflow: string }
             </Box>
           )}
 
-          {recoveries.length > 0 && (
+          {view === "list" && recoveries.length > 0 && (
             <Box>
               <Typography variant="overline" color="text.secondary">
                 recovery nodes — entered only when a step fails

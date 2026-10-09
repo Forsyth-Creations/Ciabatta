@@ -80,6 +80,69 @@ export interface StepView extends Timed {
 
   /** The five things this target is defined by. */
   deps: TargetDeps;
+
+  /** What the cache decided about this step in this run, and why. Absent when
+   *  the cache never looked at it — caching off, a dry run, `--authoritative`,
+   *  or a condition that skipped the step. */
+  cache?: CacheReport | null;
+}
+
+/** Whether the shared cache was in play for the run. */
+export interface RemoteCacheStatus {
+  url: string;
+  connected: boolean;
+  read_only: boolean;
+  error: string | null;
+}
+
+/** A cache entry, as much of it as the run view needs. */
+export interface CacheEntryInfo {
+  key: string;
+  created_at: string;
+  last_used_at: string | null;
+  size: number;
+  outputs: number;
+  duration_ms: number;
+}
+
+/** What the cache decided about one step during a run. */
+export interface CacheReport {
+  outcome: "fresh" | "hit" | "rebuild" | "uncached";
+  source: "local" | "remote" | null;
+  key: string | null;
+  summary: string;
+  /** Why it rebuilt, structured — the same shape the cache page's plan uses. */
+  reason: { kind: string; [field: string]: unknown } | null;
+  decided_at: string;
+  /** The entry that was reused, on a hit. */
+  entry: CacheEntryInfo | null;
+  /** The last build of this target, on a rebuild — what it was compared to. */
+  previous: CacheEntryInfo | null;
+  diff: {
+    files: { path: string; kind: "added" | "removed" | "modified"; additions: number; deletions: number }[];
+    files_total: number;
+    env: string[];
+    upstream: string[];
+    summary: string;
+  } | null;
+  input_files: number;
+  input_bytes: number;
+  env: string[];
+  upstream: { step: string; fingerprint: string | null; unaccounted: boolean }[];
+  /** Needed steps that forced this one to rebuild: they ran without declaring
+   *  what they produce. */
+  blocked_by: string[];
+  saved_ms: number;
+  remote: RemoteCacheStatus | null;
+  stored: {
+    at: string;
+    size: number;
+    outputs: number;
+    uploaded: boolean | null;
+    skipped: string | null;
+  } | null;
+  /** What to change so this step can be reused next time. */
+  hints: string[];
 }
 
 /**
@@ -184,6 +247,10 @@ export interface RunSummary extends Timed {
   filter: string[];
   only: string[];
   isolated: boolean;
+  /** Custom arguments, as typed after `...`. */
+  args?: string[];
+  /** The env profile it ran under. */
+  env_profile?: string | null;
 }
 
 /** How long the daemon keeps a finished run and its logs. */
@@ -202,16 +269,26 @@ export interface RunState {
 }
 
 export const runKeys = {
+  /** Every run list — invalidating this refreshes each project's. */
   runs: ["run", "runs"] as const,
+  runsFor: (project: string) => ["run", "runs", project] as const,
   run: (id: number) => ["run", "run", id] as const,
   workflows: (project: string) => ["run", "workflows", project] as const,
   settings: ["run", "settings"] as const,
 };
 
-export function useRuns() {
+/**
+ * The selected project's runs, newest first.
+ *
+ * Keyed by project, and filtered by the daemon: one daemon serves every
+ * checkout on the machine, and a list shared between them showed another
+ * repo's builds under whichever project was picked.
+ */
+export function useRuns(project: string) {
   return useQuery({
-    queryKey: runKeys.runs,
-    queryFn: () => api.get<RunSummary[]>("/api/run/runs"),
+    queryKey: runKeys.runsFor(project),
+    queryFn: () =>
+      api.get<RunSummary[]>(`/api/run/runs?project=${encodeURIComponent(project)}`),
     refetchInterval: 3_000,
   });
 }
@@ -287,6 +364,29 @@ export interface StartRunBody {
   isolated?: boolean;
   /** With `workflow`: run only the steps these terms select (CLI `--filter`). */
   filter?: string[];
+  /** Custom arguments, as after `...` on the CLI: each becomes CIABATTA_ARG_*. */
+  args?: string[];
+  /** Run under this env profile (`--env-profile`). */
+  env_profile?: string;
+}
+
+/** An env profile: every `.env.<name>` in the workspace. */
+export interface EnvProfile {
+  name: string;
+  files: string[];
+  vars: number;
+}
+
+/** The env profiles a project has, for the launcher. */
+export function useEnvProfiles(project: string) {
+  return useQuery({
+    queryKey: ["run", "env-profiles", project] as const,
+    queryFn: () =>
+      api.get<{ profiles: EnvProfile[] }>(
+        `/api/run/env-profiles?project=${encodeURIComponent(project)}`,
+      ),
+    select: (data) => data.profiles,
+  });
 }
 
 /** One thing this project can run. */

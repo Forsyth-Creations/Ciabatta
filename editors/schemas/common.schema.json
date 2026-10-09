@@ -53,6 +53,10 @@
           "items": { "type": "string" },
           "examples": [["target/release/app", "dist/**/*"]]
         },
+        "no_outputs": {
+          "type": "boolean",
+          "description": "This build writes nothing a later step reads — a test, a lint, a type check. With no `outputs`, a step is otherwise one the cache can't account for: it runs every time, and so does every step that needs it. Setting this lets it be skipped when its inputs are unchanged, and stops it forcing its dependents to rebuild. Ignored when `outputs` are declared."
+        },
         "env": {
           "type": "array",
           "description": "Environment variables that are part of the cache key. A build whose result depends on PROFILE must say so, or switching profiles will silently reuse the other one's artifacts.",

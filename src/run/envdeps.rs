@@ -31,6 +31,9 @@ pub enum Origin {
     EnvFile,
     /// A declared `[env]` table: a sub-workspace's, a workflow's, or a step's.
     Config,
+    /// A custom argument given after `...` on the command line, which became a
+    /// `CIABATTA_ARG_*` variable for this run only.
+    Argument,
     /// Nothing supplies it. Steps reading it will see an empty string.
     Unset,
 }
@@ -42,6 +45,7 @@ impl Origin {
             Origin::Environment => "environment",
             Origin::EnvFile => "env file",
             Origin::Config => "config",
+            Origin::Argument => "argument",
             Origin::Unset => "unset",
         }
     }
@@ -90,6 +94,9 @@ pub struct EnvReport {
     pub missing: Vec<String>,
     /// Every variable, required ones first, then by name.
     pub vars: Vec<EnvVar>,
+    /// The env profile the run was started with (`--env-profile`), if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
 }
 
 impl EnvReport {
@@ -109,13 +116,18 @@ impl EnvReport {
             "Environment for '{workflow}' — {} variable(s) this run depends on\n",
             self.vars.len()
         ));
+        if let Some(profile) = &self.profile {
+            out.push_str(&format!("  profile  {profile}\n"));
+        }
         if !self.files.is_empty() {
             out.push_str(&format!("  sourcing {}\n", self.files.join(", ")));
         }
 
+        // Custom arguments are shown on their own, by `render_arguments`.
         let rows: Vec<(&EnvVar, String)> = self
             .vars
             .iter()
+            .filter(|var| var.origin != Origin::Argument)
             .map(|var| {
                 let value = match (&var.value, var.varies) {
                     (Some(value), _) => value.clone(),
@@ -170,6 +182,50 @@ impl EnvReport {
                 self.missing.join(", ")
             ));
         }
+        Some(out)
+    }
+}
+
+impl EnvReport {
+    /// The custom arguments this run was given after `...`, with the nudge
+    /// to keep them somewhere better — or `None` when there were none.
+    ///
+    /// Separate from [`Self::render`] so the terminal can colour it: these are
+    /// the one part of a run's environment that exists nowhere but in the
+    /// command somebody typed, and so the part the next run won't have unless
+    /// it's typed again.
+    pub fn render_arguments(&self) -> Option<String> {
+        let args: Vec<&EnvVar> = self
+            .vars
+            .iter()
+            .filter(|var| var.origin == Origin::Argument)
+            .collect();
+        if args.is_empty() {
+            return None;
+        }
+        let width = args.iter().map(|v| v.key.len()).max().unwrap_or(0);
+        let mut out = format!("⚑ Custom arguments ({}) — for this run only\n", args.len());
+        for var in &args {
+            let readers = if var.steps.is_empty() {
+                "no step reads it".to_string()
+            } else {
+                format!("used by {}", var.steps.join(", "))
+            };
+            out.push_str(&format!(
+                "  {:width$}  {}  [{readers}]\n",
+                var.key,
+                var.value.as_deref().unwrap_or(""),
+                width = width
+            ));
+        }
+        out.push_str(&format!(
+            "  tip: if this run needs these every time, keep them in an env profile —\n  \
+             put them in .env.<name> next to your .env and run with --env-profile <name>.{}\n",
+            self.profile
+                .as_ref()
+                .map(|p| format!(" (This run uses '{p}': add them to .env.{p}.)"))
+                .unwrap_or_default()
+        ));
         Some(out)
     }
 }
@@ -291,6 +347,13 @@ pub fn collect(
         keys.extend(pairs.iter().map(|(key, _)| key.clone()));
     }
     keys.extend(users.keys().cloned());
+    // Custom arguments are reported whether or not a step reads them: they
+    // were typed for this run, and one nothing reads is probably misspelled.
+    keys.extend(
+        base.keys()
+            .filter(|k| k.starts_with(crate::cli::CUSTOM_ARG_PREFIX))
+            .cloned(),
+    );
     // The `{VAR}` placeholders that decide *which* `.env` file gets sourced are
     // a dependency of the run before any step exists.
     for path in &resolved.env_files {
@@ -350,6 +413,9 @@ pub fn collect(
                 (_, None) if disagree => (Origin::EnvFile, None, None, true),
                 (Some(value), None) => match from_file {
                     Some(file) => (Origin::EnvFile, Some(file), Some(value), false),
+                    None if key.starts_with(crate::cli::CUSTOM_ARG_PREFIX) => {
+                        (Origin::Argument, None, Some(value), false)
+                    }
                     None => (Origin::Environment, None, Some(value), false),
                 },
                 (None, None) => (Origin::Unset, None, None, false),
@@ -384,6 +450,10 @@ pub fn collect(
         required: resolved.required_env.clone(),
         missing,
         vars,
+        profile: base
+            .get(crate::environment::profiles::PROFILE_VAR)
+            .filter(|p| !p.trim().is_empty())
+            .cloned(),
     }
 }
 

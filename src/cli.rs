@@ -66,6 +66,12 @@ pub enum Commands {
     #[command(visible_alias = "wf")]
     Workflow(WorkflowArgs),
 
+    /// Inspect the environments a workflow can run under.
+    Env {
+        #[command(subcommand)]
+        subcommand: EnvCommand,
+    },
+
     /// List what this workspace can do: every sub-workspace, its workflows,
     /// who owns them, and what they need — plus the workflows in the local config.
     ///
@@ -580,6 +586,13 @@ pub enum CacheCommand {
 }
 
 #[derive(Subcommand, Debug)]
+pub enum EnvCommand {
+    /// List the env profiles this workspace has — every `.env.<name>` file,
+    /// grouped by name — for `--env-profile <name>`.
+    List,
+}
+
+#[derive(Subcommand, Debug)]
 pub enum RemoteCacheCommand {
     /// Write a config for a new remote cache server.
     Init {
@@ -594,6 +607,18 @@ pub enum RemoteCacheCommand {
         /// Directory for the artifact store, relative to the config.
         #[arg(long, value_name = "DIR", default_value = "storage")]
         storage: String,
+
+        /// Serve HTTPS: generate a self-signed certificate under `tls/` and
+        /// point the config at it. Swap in a certificate from your own CA by
+        /// editing `server.tls`.
+        #[arg(long)]
+        tls: bool,
+
+        /// A hostname or IP clients will use to reach the server, added to the
+        /// generated certificate. Repeatable. `localhost` and this machine's
+        /// hostname are always included.
+        #[arg(long = "tls-host", value_name = "HOST", requires = "tls")]
+        tls_hosts: Vec<String>,
 
         /// Overwrite an existing config.
         #[arg(long)]
@@ -627,6 +652,14 @@ pub enum RemoteCacheCommand {
         /// the network.
         #[arg(long)]
         no_tls_verify: bool,
+
+        /// Trust this PEM certificate for the server — the one `remote-cache
+        /// init --tls` generated, or your internal CA's. Remembered for later
+        /// commands, and a safer answer to a self-signed certificate than
+        /// `--no-tls-verify`. On a machine that never logs in (a CI runner),
+        /// set `CIABATTA_REMOTE_CA` instead.
+        #[arg(long, value_name = "FILE", conflicts_with = "no_tls_verify")]
+        ca_cert: Option<std::path::PathBuf>,
 
         /// Username. Prompted for when the server needs one and it's omitted.
         #[arg(short, long)]
@@ -752,6 +785,18 @@ pub struct WorkflowArgs {
     /// refresh entries you don't trust.
     #[arg(long)]
     pub force: bool,
+
+    /// How many steps may run at once. Steps whose dependencies are met run
+    /// side by side; `-j 1` runs them one at a time, as ciabatta used to.
+    /// Defaults to `CIABATTA_JOBS`, then to the number of CPUs.
+    #[arg(short = 'j', long, value_name = "N")]
+    pub jobs: Option<usize>,
+
+    /// Run with an env profile: each `.env` the run sources is overlaid with
+    /// its `.env.<NAME>` sibling, so the profile only has to hold what differs.
+    /// `ciabatta env list` shows the profiles this workspace has.
+    #[arg(long = "env-profile", alias = "env_profile", value_name = "NAME")]
+    pub env_profile: Option<String>,
 
     /// Hold every step to the files it declared: run it in an isolated copy of
     /// the tree containing only its `cache.inputs`, then take its declared
@@ -988,6 +1033,105 @@ pub enum ConfigureCommand {
 }
 
 /// Parse `-e KEY=VALUE` flags into a HashMap.
+/// The token after which a workflow run's arguments are its own rather than
+/// ciabatta's: `ciabatta build --force ... --target=arm64 region=eu`.
+pub const CUSTOM_ARGS_MARKER: &str = "...";
+
+/// What every custom argument's variable name starts with.
+pub const CUSTOM_ARG_PREFIX: &str = "CIABATTA_ARG_";
+
+/// Split argv at the first `...`: ciabatta's own arguments before it, the
+/// workflow's custom arguments after.
+///
+/// Done before clap sees anything, so a custom `--force` after the marker is
+/// the workflow's and never ciabatta's — the marker is the one boundary both
+/// sides can rely on.
+pub fn split_custom_args<I>(argv: I) -> (Vec<std::ffi::OsString>, Vec<String>)
+where
+    I: IntoIterator<Item = std::ffi::OsString>,
+{
+    let mut ours = Vec::new();
+    let mut custom = Vec::new();
+    let mut after = false;
+    for arg in argv {
+        if after {
+            custom.push(arg.to_string_lossy().into_owned());
+        } else if arg == CUSTOM_ARGS_MARKER {
+            after = true;
+        } else {
+            ours.push(arg);
+        }
+    }
+    (ours, custom)
+}
+
+/// Turn custom arguments into the variables steps see.
+///
+/// ```text
+/// --target=arm64   CIABATTA_ARG_TARGET=arm64
+/// --target arm64   CIABATTA_ARG_TARGET=arm64
+/// --verbose        CIABATTA_ARG_VERBOSE=true
+/// region=eu        CIABATTA_ARG_REGION=eu
+/// ```
+///
+/// Names are upper-cased, with `-` and `.` becoming `_`, so `--dry-deploy`
+/// arrives as `$CIABATTA_ARG_DRY_DEPLOY`. A bare word with no name is refused
+/// rather than guessed at: positional meaning is exactly what a variable can't
+/// carry.
+pub fn parse_custom_args(
+    args: &[String],
+) -> anyhow::Result<std::collections::BTreeMap<String, String>> {
+    let mut out = std::collections::BTreeMap::new();
+    let mut i = 0;
+    while i < args.len() {
+        let arg = &args[i];
+        let (name, value) = if let Some(flag) = arg.strip_prefix("--").or(arg.strip_prefix('-')) {
+            match flag.split_once('=') {
+                Some((name, value)) => (name.to_string(), value.to_string()),
+                // `--name value`, when what follows isn't another flag.
+                None => match args.get(i + 1).filter(|next| !next.starts_with('-')) {
+                    Some(next) if !next.contains('=') => {
+                        i += 1;
+                        (flag.to_string(), next.clone())
+                    }
+                    _ => (flag.to_string(), "true".to_string()),
+                },
+            }
+        } else if let Some((name, value)) = arg.split_once('=') {
+            (name.to_string(), value.to_string())
+        } else {
+            anyhow::bail!(
+                "Custom argument '{arg}' has no name. After `...`, write `--name=value`, \
+                 `--name value`, `--flag`, or `name=value` — each becomes \
+                 {CUSTOM_ARG_PREFIX}<NAME> for the workflow's steps."
+            );
+        };
+        out.insert(custom_arg_var(&name)?, value);
+        i += 1;
+    }
+    Ok(out)
+}
+
+/// `dry-deploy` → `CIABATTA_ARG_DRY_DEPLOY`.
+pub fn custom_arg_var(name: &str) -> anyhow::Result<String> {
+    let normalized: String = name
+        .trim()
+        .chars()
+        .map(|c| match c {
+            '-' | '.' => '_',
+            c => c.to_ascii_uppercase(),
+        })
+        .collect();
+    anyhow::ensure!(
+        !normalized.is_empty()
+            && normalized
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_'),
+        "'{name}' can't be a custom argument name — use letters, digits, '-' and '_'."
+    );
+    Ok(format!("{CUSTOM_ARG_PREFIX}{normalized}"))
+}
+
 pub fn parse_env_flags(
     flags: &[String],
 ) -> anyhow::Result<std::collections::HashMap<String, String>> {
@@ -1009,6 +1153,45 @@ mod tests {
         match Cli::try_parse_from(argv).expect("parses").command {
             Commands::Workflow(args) => args,
             other => panic!("expected a workflow, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn custom_arguments_after_the_marker_become_prefixed_variables() {
+        let argv = [
+            "ciabatta",
+            "build",
+            "--force",
+            "...",
+            "--target=arm64",
+            "--region",
+            "eu",
+            "--verbose",
+            "dry-deploy=1",
+        ]
+        .map(std::ffi::OsString::from);
+        let (ours, custom) = split_custom_args(argv);
+        assert_eq!(
+            ours,
+            ["ciabatta", "build", "--force"].map(std::ffi::OsString::from)
+        );
+
+        let vars = parse_custom_args(&custom).unwrap();
+        assert_eq!(vars["CIABATTA_ARG_TARGET"], "arm64");
+        assert_eq!(vars["CIABATTA_ARG_REGION"], "eu");
+        assert_eq!(vars["CIABATTA_ARG_VERBOSE"], "true");
+        assert_eq!(vars["CIABATTA_ARG_DRY_DEPLOY"], "1");
+        assert_eq!(vars.len(), 4);
+
+        assert!(parse_custom_args(&["positional".to_string()]).is_err());
+        assert!(parse_custom_args(&["--bad$name".to_string()]).is_err());
+    }
+
+    #[test]
+    fn env_profile_accepts_both_spellings() {
+        for flag in ["--env-profile", "--env_profile"] {
+            let args = workflow_args(&["ciabatta", "workflow", "build", flag, "staging"]);
+            assert_eq!(args.env_profile.as_deref(), Some("staging"));
         }
     }
 

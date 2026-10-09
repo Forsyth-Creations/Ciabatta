@@ -25,6 +25,7 @@ import {
   Typography,
 } from "@mui/material";
 import ArrowBackIcon from "@mui/icons-material/ArrowBack";
+import ManageSearchIcon from "@mui/icons-material/ManageSearch";
 import StopIcon from "@mui/icons-material/Stop";
 import ReplayIcon from "@mui/icons-material/Replay";
 import TerminalIcon from "@mui/icons-material/Terminal";
@@ -72,6 +73,15 @@ import {
   type LayoutEdge,
 } from "../components/layout";
 import { StatusIcon, statusColour, statusLabel } from "../components/StatusIcon";
+import {
+  CacheIcon,
+  CacheReportView,
+  Prose,
+  cacheLabel,
+  cacheTone,
+  wasReused,
+} from "../components/CacheReport";
+import { useInspectMode } from "../state/inspect";
 import { ErrorNote, Loading } from "../components/Page";
 import { monoFontStack } from "../theme";
 
@@ -135,7 +145,7 @@ const STEP_CHROME = 2 * 2 + 6 * 2;
 const DEPENDENCY_HEIGHT = 46;
 
 /** How tall a node is drawn — what `layeredLayout` centres its wires on. */
-function nodeHeight(id: string, byName: Map<string, StepView>): number {
+function nodeHeight(id: string, byName: Map<string, StepView>, inspect: boolean): number {
   const step = byName.get(id);
   if (!step) return DEPENDENCY_HEIGHT;
   return (
@@ -145,7 +155,10 @@ function nodeHeight(id: string, byName: Map<string, StepView>): number {
     // before it runs as after.
     LINE.small +
     (step.workspace ? LINE.small : 0) +
-    (step.background ? LINE.small : 0)
+    (step.background ? LINE.small : 0) +
+    // Inspect mode's cache line, there for every step whether or not the
+    // cache has spoken yet — for the same reason the timing line is.
+    (inspect && !step.recover ? LINE.small : 0)
   );
 }
 
@@ -249,14 +262,29 @@ export function RunDetailPage() {
             {timing && <RunClock timing={timing} live={!state.done} />}
             {(state.run.filter ?? []).length > 0 &&
               ` · filtered: ${state.run.filter.join(" ")}`}
+            {state.run.env_profile && ` · profile: ${state.run.env_profile}`}
           </Typography>
         </Box>
+        {(state.run.args ?? []).length > 0 && (
+          <Tooltip
+            title={`Custom arguments, given after \`...\` for this run only: ${state.run.args!.join(" ")}. They're listed with the run's environment below.`}
+          >
+            <Chip
+              size="small"
+              color="warning"
+              variant="outlined"
+              label={`⚑ ${state.run.args!.join(" ")}`}
+              sx={{ maxWidth: 320, fontFamily: monoFontStack }}
+            />
+          </Tooltip>
+        )}
         <Chip
           size="small"
           variant="outlined"
           icon={<StatusIcon status={status} title={null} />}
           label={statusLabel(status)}
         />
+        <InspectToggle />
         <Tooltip title="Show the exact commands this run executed, in order, with the directory each one runs from — and where it has got to.">
           <Button size="small" startIcon={<TerminalIcon />} onClick={() => setRecreating(true)}>
             Recreate
@@ -340,6 +368,7 @@ function WorkflowPanel({
 }) {
   const theme = useTheme();
   const choose = useChoose(runId);
+  const { on: inspect } = useInspectMode();
   const [showOrder, setShowOrder] = useState(false);
   // Variables are dependencies, so the graph draws them like every other
   // dependency. The toggle is for the graphs where they'd crowd out the steps.
@@ -353,8 +382,8 @@ function WorkflowPanel({
   const [focused, setFocused] = useState<string | null>(null);
 
   const { nodes, edges } = useMemo(
-    () => buildFlow(workflow, theme, showOrder, showEnv, showFiles, focused),
-    [workflow, theme, showOrder, showEnv, showFiles, focused],
+    () => buildFlow(workflow, theme, showOrder, showEnv, showFiles, focused, inspect),
+    [workflow, theme, showOrder, showEnv, showFiles, focused, inspect],
   );
   const step = workflow.steps.find((s) => s.name === selectedStep);
   // Ticks only while the workflow is running, so a running phase or step
@@ -430,6 +459,16 @@ function WorkflowPanel({
 
       {choose.error && <ErrorNote error={choose.error} />}
 
+      {inspect && (
+        <InspectSummary
+          workflow={workflow}
+          onSelect={(name) => {
+            setFocused(name);
+            onSelectStep(name);
+          }}
+        />
+      )}
+
       {/*
         Graph and logs side by side once there is width for both, stacked below
         that. Watching a step run means watching two things — which node is
@@ -487,10 +526,17 @@ function WorkflowPanel({
             height={PANE_HEIGHT}
             // Turning the environment column on and off changes the graph's
             // extent, so the view has to be re-fitted around it.
-            fitKey={`${showEnv ? "env" : ""}${showFiles ? "+files" : ""}` || "steps-only"}
+            fitKey={
+              `${showEnv ? "env" : ""}${showFiles ? "+files" : ""}${inspect ? "+inspect" : ""}` ||
+              "steps-only"
+            }
             onNodeClick={(_, node) => clickNode(node.id)}
             onPaneClick={() => setFocused(null)}
-            nodeColor={(node) => statusColor(node.data?.status as StepStatus, theme)}
+            nodeColor={(node) =>
+              inspect && byNameHas(workflow, node.id)
+                ? cacheTone(workflow.steps.find((s) => s.name === node.id)?.cache, theme)
+                : statusColor(node.data?.status as StepStatus, theme)
+            }
           />
         </Box>
 
@@ -519,6 +565,7 @@ function WorkflowPanel({
         step={step ?? null}
         focused={focused}
         now={now}
+        inspect={inspect}
         onClear={clearSelection}
       />
 
@@ -599,16 +646,18 @@ function Inspector({
   step,
   focused,
   now,
+  inspect,
   onClear,
 }: {
   workflow: WorkflowView;
   step: StepView | null;
   focused: string | null;
   now: number;
+  inspect: boolean;
   onClear: () => void;
 }) {
   const body = step ? (
-    <StepInspector workflow={workflow} step={step} now={now} onClear={onClear} />
+    <StepInspector workflow={workflow} step={step} now={now} inspect={inspect} onClear={onClear} />
   ) : focused !== null && isDependencyNode(focused) ? (
     <FocusNote workflow={workflow} focused={focused} onClear={onClear} />
   ) : null;
@@ -632,6 +681,7 @@ function Inspector({
         <Typography variant="caption" color="text.secondary">
           Click a step to see its logs, what it waits for and why it ran. Click a
           variable or a file set to light up the steps that read it.
+          {inspect && " Cache inspect mode is on: each step says what the cache made of it."}
         </Typography>
       )}
     </Box>
@@ -643,11 +693,13 @@ function StepInspector({
   workflow,
   step,
   now,
+  inspect,
   onClear,
 }: {
   workflow: WorkflowView;
   step: StepView;
   now: number;
+  inspect: boolean;
   onClear: () => void;
 }) {
   const upstream = [...dependencyClosure(workflow, step.name)].filter(
@@ -690,8 +742,188 @@ function StepInspector({
         now={now}
         env={workflow.env.vars.filter((variable) => variable.steps.includes(step.name))}
       />
+      <StepCacheSection step={step} inspect={inspect} />
     </Stack>
   );
+}
+
+/**
+ * The cache's side of a selected step: compact normally, everything in inspect
+ * mode — the key, the fingerprints of what it keyed on upstream, every file
+ * that moved.
+ */
+function StepCacheSection({ step, inspect }: { step: StepView; inspect: boolean }) {
+  if (step.recover) return null;
+  if (!step.cache) {
+    if (!inspect) return null;
+    return (
+      <Alert severity="info" icon={<ManageSearchIcon fontSize="small" />} sx={{ py: 0.25 }}>
+        <Typography variant="caption">
+          The cache wasn't consulted for this step
+          {step.status === "pending"
+            ? " yet — it hasn't been reached."
+            : step.status === "skipped"
+              ? " — a condition skipped it, or the run stopped before it."
+              : ". Caching is off for this run: it was a dry run, started with --authoritative, or the project has no cache configured."}
+        </Typography>
+      </Alert>
+    );
+  }
+  return (
+    <Box
+      sx={{
+        mt: 0.5,
+        p: 1.25,
+        border: 1,
+        borderColor: inspect ? "warning.main" : "divider",
+        borderRadius: 1,
+      }}
+    >
+      <Typography variant="overline" color="text.secondary" sx={{ lineHeight: 1.5 }}>
+        Cache
+      </Typography>
+      <CacheReportView report={step.cache} detailed={inspect} />
+    </Box>
+  );
+}
+
+/**
+ * Inspect mode's overview: how the cache did across the whole run, and the
+ * steps that could have been reused but weren't, each with what to change.
+ *
+ * Ordered by what's worth fixing first. A step held back by an upstream is the
+ * most expensive kind of miss — it repeats on every run and drags everything
+ * behind it along — so those lead.
+ */
+function InspectSummary({
+  workflow,
+  onSelect,
+}: {
+  workflow: WorkflowView;
+  onSelect: (name: string) => void;
+}) {
+  const steps = workflow.steps.filter((s) => !s.recover);
+  const reused = steps.filter((s) => wasReused(s.cache));
+  const ran = steps.filter((s) => s.cache?.outcome === "rebuild");
+  const uncached = steps.filter((s) => s.cache?.outcome === "uncached");
+  const silent = steps.filter((s) => !s.cache);
+
+  // Everything holding something else back, with who it holds back.
+  const blockers = new Map<string, string[]>();
+  for (const s of steps) {
+    for (const upstream of s.cache?.blocked_by ?? []) {
+      blockers.set(upstream, [...(blockers.get(upstream) ?? []), s.name]);
+    }
+  }
+
+  // The rest of what ran with something to say. Blocked steps and their
+  // blockers are left out: the alert above already says it, once, per blocker.
+  const attention = ran.filter(
+    (s) =>
+      (s.cache?.hints.length ?? 0) > 0 &&
+      (s.cache?.blocked_by.length ?? 0) === 0 &&
+      !blockers.has(s.name),
+  );
+
+  return (
+    <Box
+      sx={{
+        mb: 1.5,
+        p: 1.5,
+        border: 1,
+        borderColor: "warning.main",
+        borderRadius: 1,
+        bgcolor: (t) => `${t.palette.warning.main}0d`,
+      }}
+    >
+      <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap sx={{ mb: 1 }}>
+        <ManageSearchIcon fontSize="small" sx={{ color: "warning.main" }} />
+        <Typography variant="subtitle2" sx={{ mr: 1 }}>
+          Cache inspect
+        </Typography>
+        <Chip size="small" color="success" variant="outlined" label={`${reused.length} reused`} />
+        <Chip size="small" color="warning" variant="outlined" label={`${ran.length} ran`} />
+        {uncached.length > 0 && (
+          <Chip size="small" variant="outlined" label={`${uncached.length} not cached`} />
+        )}
+        {silent.length > 0 && (
+          <Tooltip title="Steps the cache never looked at: not reached yet, skipped by a condition, or caching was off for this run.">
+            <Chip size="small" variant="outlined" label={`${silent.length} not consulted`} />
+          </Tooltip>
+        )}
+      </Stack>
+
+      {steps.length > 0 && silent.length === steps.length && (
+        <Typography variant="caption" color="text.secondary" sx={{ display: "block" }}>
+          The cache wasn't consulted for any step in this run. Dry runs and{" "}
+          <code>--authoritative</code> runs bypass it, and a project needs{" "}
+          <code>cache.enabled</code> with <code>cache.inputs</code> before it's used at all.
+        </Typography>
+      )}
+
+      {blockers.size > 0 && (
+        <Alert severity="error" icon={false} sx={{ py: 0.25, mb: 1 }}>
+          <Typography variant="caption" sx={{ display: "block", fontWeight: 600 }}>
+            Steps holding others back from their cache
+          </Typography>
+          {[...blockers].map(([upstream, held]) => (
+            <Typography key={upstream} variant="caption" sx={{ display: "block" }}>
+              <Box
+                component="button"
+                type="button"
+                onClick={() => onSelect(upstream)}
+                sx={linkButton}
+              >
+                {upstream}
+              </Box>{" "}
+              declares no <code>cache.outputs</code>, so {held.length} step
+              {held.length === 1 ? "" : "s"} after it ({held.join(", ")}) rebuild every run. Give it{" "}
+              <code>cache.outputs</code>, or <code>cache.no_outputs: true</code> if it writes nothing
+              they read.
+            </Typography>
+          ))}
+        </Alert>
+      )}
+
+      {attention.length > 0 && (
+        <Stack spacing={0.5}>
+          {attention.slice(0, 8).map((s) => (
+            <Stack key={s.name} direction="row" spacing={1} alignItems="baseline">
+              <Box component="button" type="button" onClick={() => onSelect(s.name)} sx={linkButton}>
+                {s.name}
+              </Box>
+              <Typography variant="caption" color="text.secondary" sx={{ minWidth: 0 }}>
+                {cacheLabel(s.cache)} — <Prose text={s.cache!.hints[0]} />
+              </Typography>
+            </Stack>
+          ))}
+          {attention.length > 8 && (
+            <Typography variant="caption" color="text.secondary">
+              … and {attention.length - 8} more. Click a node for its details.
+            </Typography>
+          )}
+        </Stack>
+      )}
+    </Box>
+  );
+}
+
+/** A step name you can click, styled as a link rather than a button. */
+const linkButton = {
+  p: 0,
+  border: 0,
+  background: "none",
+  cursor: "pointer",
+  color: "primary.main",
+  fontFamily: monoFontStack,
+  fontSize: 12,
+  fontWeight: 600,
+  flexShrink: 0,
+  "&:hover": { textDecoration: "underline" },
+} as const;
+
+function byNameHas(workflow: WorkflowView, id: string): boolean {
+  return workflow.steps.some((s) => s.name === id);
 }
 
 /**
@@ -708,7 +940,15 @@ function StepInspector({
  * the order toggle is on. Null both when the toggle is off and for the recovery
  * steps that have no place in the sequence.
  */
-function NodeLabel({ step, order }: { step: StepView; order: number | null }) {
+function NodeLabel({
+  step,
+  order,
+  inspect,
+}: {
+  step: StepView;
+  order: number | null;
+  inspect: boolean;
+}) {
   // The id is "<workspace>:<step>" (or "<workspace>:<workflow>:<step>"), and
   // repeating the workspace in both lines just wastes the node's width.
   const short =
@@ -753,17 +993,42 @@ function NodeLabel({ step, order }: { step: StepView; order: number | null }) {
         )}
         <Box sx={{ ...oneLine(LINE.name), fontWeight: 600 }}>{short}</Box>
         <Box sx={{ ...oneLine(LINE.small), fontSize: 10, opacity: 0.7, fontFamily: monoFontStack }}>
-          {step.started_at && step.finished_at
-            ? `${elapsedOf(step, 0)} · ${clockTime(step.finished_at)}`
-            : statusLabel(step.status).toLowerCase()}
+          {/* A step served from the cache is "skipped" to the engine, but
+              that word belongs to steps a condition left out. */}
+          {wasReused(step.cache)
+            ? `from cache${step.finished_at ? ` · ${clockTime(step.finished_at)}` : ""}`
+            : step.started_at && step.finished_at
+              ? `${elapsedOf(step, 0)} · ${clockTime(step.finished_at)}`
+              : statusLabel(step.status).toLowerCase()}
         </Box>
         {step.background && (
           <Box sx={{ ...oneLine(LINE.small), fontSize: 10, opacity: 0.7 }}>
             background · nothing waits for it
           </Box>
         )}
+        {inspect && !step.recover && <InspectLine step={step} />}
       </Box>
+      {/* The node was served from the cache rather than run: say so where
+          the eye already is, and let a click on it explain. */}
+      {step.cache && wasReused(step.cache) && <CacheIcon report={step.cache} />}
     </Stack>
+  );
+}
+
+/** Inspect mode's line on a node: what the cache made of the step. */
+function InspectLine({ step }: { step: StepView }) {
+  const theme = useTheme();
+  return (
+    <Box
+      sx={{
+        ...oneLine(LINE.small),
+        fontSize: 10,
+        fontWeight: 600,
+        color: cacheTone(step.cache, theme),
+      }}
+    >
+      {cacheLabel(step.cache)}
+    </Box>
   );
 }
 
@@ -776,6 +1041,35 @@ function oneLine(height: number) {
     whiteSpace: "nowrap",
     textOverflow: "ellipsis",
   } as const;
+}
+
+/**
+ * Cache inspect mode's switch, in the run's own header: it changes what this
+ * page's graph says, so it lives on this page. Remembered between runs — the
+ * next run is usually the one that checks whether the fix worked.
+ */
+function InspectToggle() {
+  const inspect = useInspectMode();
+  return (
+    <Tooltip
+      title={
+        inspect.on
+          ? "Cache inspect mode is on — every step says what the cache decided and why. Click to turn it off."
+          : "Cache inspect mode: show what the cache decided for every step, and why a step that should have been reused wasn't."
+      }
+    >
+      <Button
+        size="small"
+        startIcon={<ManageSearchIcon />}
+        onClick={inspect.toggle}
+        aria-pressed={inspect.on}
+        color={inspect.on ? "warning" : "primary"}
+        variant={inspect.on ? "outlined" : "text"}
+      >
+        Inspect cache
+      </Button>
+    </Tooltip>
+  );
 }
 
 /**
@@ -1186,6 +1480,7 @@ function buildFlow(
   showEnv: boolean,
   showFiles: boolean,
   focused: string | null,
+  inspect: boolean,
 ): { nodes: Node[]; edges: Edge[] } {
   const stepIds = workflow.steps.map((s) => s.name);
   const byName = new Map(workflow.steps.map((s) => [s.name, s]));
@@ -1284,7 +1579,7 @@ function buildFlow(
   const { nodes: positioned, routes } = layeredLayout(
     ids,
     layoutEdges,
-    (id) => nodeData(id, byName, groups, sequence, showOrder, workflow),
+    (id) => nodeData(id, byName, groups, sequence, showOrder, workflow, inspect),
     {
       // A column has to be wider than the widest node it can hold, or a long
       // step name grows its node into the next column and the edges arriving
@@ -1293,7 +1588,7 @@ function buildFlow(
       columnWidth: NODE_WIDTH + 130,
       nodeWidth: NODE_WIDTH,
       rowGap: 26,
-      heightOf: (id) => nodeHeight(id, byName),
+      heightOf: (id) => nodeHeight(id, byName, inspect),
       // Variables and input files are inputs to the run, not steps of it, so
       // they take columns of their own to the left — variables outside the
       // files, so the two kinds read as two columns rather than one pile.
@@ -1312,7 +1607,7 @@ function buildFlow(
 
   const nodes: Node[] = positioned.map((node) => ({
     ...node,
-    style: nodeStyle(node.id, byName, theme, focus),
+    style: nodeStyle(node.id, byName, theme, focus, inspect),
   }));
   const route = (source: string, target: string) => ({
     route: routes.get(routeKey(source, target)),
@@ -1323,8 +1618,16 @@ function buildFlow(
     // An edge survives the dimming only if both ends did — so a focused node's
     // chain keeps the order between its steps, and everything else recedes.
     const on = focus.lit(edge.from) && focus.lit(edge.to);
-    const stroke =
-      edge.kind === "error"
+    // Inspect mode: the edge along which an upstream step held this one back
+    // from its cache. That's the relationship being asked about, so it's the
+    // one drawn loudest.
+    const blocking =
+      inspect &&
+      edge.kind === "needs" &&
+      (byName.get(edge.to)?.cache?.blocked_by.includes(edge.from) ?? false);
+    const stroke = blocking
+      ? theme.palette.error.main
+      : edge.kind === "error"
         ? theme.palette.error.main
         : edge.kind === "retry"
           ? theme.palette.warning.main
@@ -1340,7 +1643,7 @@ function buildFlow(
       source: edge.from,
       target: edge.to,
       data: route(edge.from, edge.to),
-      label: edge.kind === "needs" ? undefined : edge.kind,
+      label: blocking ? "blocks cache" : edge.kind === "needs" ? undefined : edge.kind,
       // react-flow's label is white-on-white in dark mode; these follow the
       // page instead.
       labelStyle: { fill: theme.palette.text.secondary, fontSize: 10 },
@@ -1353,7 +1656,7 @@ function buildFlow(
       markerEnd: { ...ROUTED_EDGE.markerEnd, color: stroke },
       style: {
         stroke,
-        strokeWidth: on && focus.id !== null ? 2 : 1.4,
+        strokeWidth: blocking ? 2.5 : on && focus.id !== null ? 2 : 1.4,
         strokeDasharray: edge.kind === "needs" ? undefined : "5 4",
         opacity: on ? 1 : DIMMED,
       },
@@ -1418,6 +1721,8 @@ function envColour(variable: EnvVar, theme: Theme): string {
   if (unsetProblem(variable)) return theme.palette.error.main;
   // An optional variable nobody set is a fact, not a fault: drawn quietly.
   if (variable.origin === "unset") return theme.palette.text.disabled;
+  // A custom argument: typed for this run only, in the colour it has elsewhere.
+  if (variable.origin === "argument") return theme.palette.warning.main;
   return theme.palette.secondary.main;
 }
 
@@ -1429,11 +1734,18 @@ function nodeData(
   sequence: Map<string, number>,
   showOrder: boolean,
   workflow: WorkflowView,
+  inspect: boolean,
 ): Record<string, unknown> {
   const step = byName.get(id);
   if (step) {
     return {
-      label: <NodeLabel step={step} order={showOrder ? (sequence.get(id) ?? null) : null} />,
+      label: (
+        <NodeLabel
+          step={step}
+          order={showOrder ? (sequence.get(id) ?? null) : null}
+          inspect={inspect}
+        />
+      ),
       status: step.status,
     };
   }
@@ -1469,6 +1781,7 @@ function nodeStyle(
   byName: Map<string, StepView>,
   theme: Theme,
   focus: Focus,
+  inspect: boolean,
 ): React.CSSProperties {
   // The ring marks the node that was *clicked*, not everything the click lit
   // up. With a step's whole upstream chain lit, ringing all of it would say
@@ -1481,7 +1794,7 @@ function nodeStyle(
     // Bounded, so a node can't grow across the gap the wires route through. A
     // long name wraps inside the box instead of widening it.
     width: NODE_WIDTH,
-    height: nodeHeight(id, byName),
+    height: nodeHeight(id, byName, inspect),
     // Border-box, so a border thickening on focus eats into the node rather
     // than growing it off the height the wires were routed to.
     boxSizing: "border-box" as const,
@@ -1499,7 +1812,16 @@ function nodeStyle(
       ...common,
       // Recovery nodes are dashed: they're branches you hope never run.
       border: `2px ${step.recover ? "dashed" : "solid"} ${
-        picked ? theme.palette.secondary.main : statusColor(step.status, theme)
+        picked
+          ? theme.palette.secondary.main
+          : // In inspect mode the border is the cache's verdict, not the
+            // step's: the status is still the glyph beside the name.
+            inspect && !step.recover
+            ? cacheTone(step.cache, theme)
+            : // Reused is as good an outcome as ran-and-passed.
+              wasReused(step.cache)
+              ? theme.palette.success.main
+              : statusColor(step.status, theme)
       }`,
       fontSize: 12,
       padding: "6px 12px",

@@ -10,6 +10,7 @@
 pub mod cache;
 pub mod features;
 pub mod files;
+pub mod profiles;
 
 use std::collections::HashMap;
 use std::path::Path;

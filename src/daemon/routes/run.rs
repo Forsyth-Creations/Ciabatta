@@ -36,6 +36,7 @@ use super::{RouteError, RouteResult};
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/run/workflows", get(workflows))
+        .route("/api/run/env-profiles", get(env_profiles))
         .route("/api/run/preflight", post(preflight))
         .route("/api/run/runs", get(list).post(create))
         .route("/api/run/runs/{id}", get(detail).delete(remove))
@@ -123,6 +124,8 @@ impl Run {
             "filter": self.request.filter,
             "only": self.request.only,
             "isolated": self.request.isolated,
+            "args": self.request.args,
+            "env_profile": self.request.env_profile,
         })
     }
 }
@@ -311,6 +314,14 @@ pub struct CreatePayload {
     /// Ignore the cache and run every step. Results are still stored.
     #[serde(default)]
     force: bool,
+    /// Custom arguments, as typed after `...` — each becomes a
+    /// `CIABATTA_ARG_*` variable. Kept with the run (unlike `env`), so
+    /// "run again" passes them again.
+    #[serde(default)]
+    args: Vec<String>,
+    /// The env profile to run under (`--env-profile`).
+    #[serde(default)]
+    env_profile: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -336,8 +347,46 @@ async fn workflows(
     Ok(Json(json!({ "workflows": names })))
 }
 
-async fn list(State(state): State<AppState>) -> Json<Vec<Value>> {
-    Json(state.runs.list().iter().map(|r| r.summary()).collect())
+/// Narrows the run list to one project.
+#[derive(Deserialize)]
+pub struct ListQuery {
+    #[serde(default)]
+    project: Option<String>,
+}
+
+/// Every run, newest first — or only one project's, with `?project=`.
+///
+/// Filtered here rather than in the page: one daemon serves every checkout on
+/// the machine, and a run list that ignored the project switcher showed
+/// another repo's builds under this one's name.
+/// The env profiles a project has, for the launcher's picker.
+async fn env_profiles(
+    State(state): State<AppState>,
+    axum::extract::Query(query): axum::extract::Query<ProjectQuery>,
+) -> RouteResult<Json<Value>> {
+    let root = state.project_root(&query.project)?;
+    let root = crate::workspace::Workspace::discover(&root)
+        .map(|ws| ws.root)
+        .unwrap_or(root);
+    let dirs = crate::environment::profiles::workspace_dirs(&root);
+    Ok(Json(json!({
+        "profiles": crate::environment::profiles::list(&root, &dirs),
+    })))
+}
+
+async fn list(
+    State(state): State<AppState>,
+    axum::extract::Query(query): axum::extract::Query<ListQuery>,
+) -> Json<Vec<Value>> {
+    Json(
+        state
+            .runs
+            .list()
+            .iter()
+            .filter(|run| query.project.as_ref().is_none_or(|p| &run.project == p))
+            .map(|r| r.summary())
+            .collect(),
+    )
 }
 
 /// Start a run and return its id.
@@ -411,6 +460,16 @@ async fn start(state: AppState, payload: CreatePayload) -> RouteResult<Json<Valu
     // same), then layer whatever the caller supplied on top.
     let mut env: HashMap<String, String> = std::env::vars().collect();
     env.extend(payload.env.clone());
+    // Custom arguments and the profile after everything else: they were asked
+    // for, for this run.
+    env.extend(crate::cli::parse_custom_args(&payload.args).map_err(RouteError::bad_request)?);
+    if let Some(profile) = payload.env_profile.as_deref().filter(|p| !p.is_empty()) {
+        crate::environment::profiles::require(&root, profile).map_err(RouteError::bad_request)?;
+        env.insert(
+            crate::environment::profiles::PROFILE_VAR.to_string(),
+            profile.to_string(),
+        );
+    }
 
     // Fail fast on a bad flowchart, before anything is spawned. The resolved
     // environment goes in with it, so the view can show each step's variables
@@ -636,6 +695,13 @@ fn trace(run: u64, update: &runner::ProgressUpdate) {
             step,
             line,
         } => tracing::debug!(run, %workflow, %step, "{line}"),
+        P::StepCache {
+            workflow,
+            step,
+            report,
+        } => {
+            tracing::debug!(run, %workflow, %step, outcome = %report.outcome, "{}", report.summary)
+        }
         P::StepNeedsChoice {
             workflow,
             step,

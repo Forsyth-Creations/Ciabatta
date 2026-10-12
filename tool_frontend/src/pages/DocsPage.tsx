@@ -1659,7 +1659,8 @@ ciabatta build --tui                 # watch it in the terminal`}</Pre>
 ciabatta test --filter '!tag:flaky'         # everything except the flaky ones
 ciabatta build --filter workspace:api       # one package's steps
 ciabatta build --only api                   # start from api; its dependencies still come
-ciabatta build --only api --isolated        # …and don't follow them at all`}</Pre>
+ciabatta build --only api --isolated        # …and don't follow them at all
+cd packages/api && ciabatta build           # same as --only api; --all for everything`}</Pre>
         <P>
           Selectors are <C>tag:</C>, <C>workspace:</C> (alias <C>member:</C>), <C>kind:</C>,{" "}
           <C>owner:</C>, <C>step:</C>, or a bare word that searches all of them plus descriptions.

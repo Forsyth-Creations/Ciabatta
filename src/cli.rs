@@ -765,6 +765,13 @@ pub struct WorkflowArgs {
     #[arg(long, value_name = "MEMBER")]
     pub only: Vec<String>,
 
+    /// Run the whole monorepo's graph even from inside a sub-workspace.
+    ///
+    /// Without it, running a workflow from inside a package that defines it is
+    /// the same as `--only <that package>`: that package and what it needs.
+    #[arg(long, conflicts_with = "only")]
+    pub all: bool,
+
     /// Run only the steps matching this term (repeatable). Accepts
     /// tag:<name>, workspace:<name>, kind:<name>, owner:<name>, step:<name>,
     /// or a bare word; prefix with ! to exclude.

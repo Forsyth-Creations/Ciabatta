@@ -362,6 +362,22 @@ async fn cmd_workflow(
     let mut workflows = vec![first.clone()];
     workflows.extend(args.also.iter().cloned());
 
+    // Inside a package that defines this workflow, the run is that package
+    // (and what it needs) — as if `--only <package>` had been typed. `cd`
+    // into what you're working on and build just that.
+    if args.only.is_empty()
+        && !args.all
+        && let Ok(ws) = workspace::Workspace::discover(&cwd)
+        && let Some(member) = ws.member_scope(&cwd, &workflows)
+    {
+        eprintln!(
+            "Running from {}: only {} and what it needs (as --only {}). \
+             Pass --all for the whole monorepo.",
+            member.rel, member.name, member.name
+        );
+        args.only.push(member.name.clone());
+    }
+
     let selection = workspace::graph::Selection {
         only: args.only.clone(),
         isolated: args.isolated,
@@ -3739,6 +3755,7 @@ Any workflow name then becomes a command:
   ciabatta build --graph      # show the graph, run nothing
   ciabatta build --dry-run    # walk every step, execute nothing
   ciabatta build --only api   # start from one package (deps still come along)
+  cd packages/api && ciabatta build   # the same: run from inside a package
   ciabatta dry-run build      # what would be reused from the cache, and why not
   ciabatta list               # every workflow, its owner, and what it does
   ciabatta list -s proto      # ...filtered
@@ -4387,6 +4404,7 @@ Any workflow name then becomes a command:
   ciabatta build --graph      # show the graph, run nothing
   ciabatta build --dry-run    # walk every step, execute nothing
   ciabatta build --only api   # start from one package (deps still come along)
+  cd packages/api && ciabatta build   # the same: run from inside a package
   ciabatta dry-run build      # what would be reused from the cache, and why not
   ciabatta list               # every workflow, its owner, and what it does
   ciabatta list -s proto      # ...filtered

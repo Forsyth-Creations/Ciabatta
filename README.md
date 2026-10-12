@@ -230,6 +230,10 @@ Useful flags on any workflow (`ciabatta build`, `ciabatta release`, …):
 - `--dry-run` — walk every step, executing none of them.
 - `--only MEMBER` — start from one sub-workspace. Its dependencies still come
   along, so the result stays correct. Repeatable.
+- **From inside a package, a run is scoped to it.** `cd packages/api &&
+  ciabatta build` is `ciabatta build --only api`, as long as that package
+  defines `build` itself (it says so on stderr). `--all` runs the whole
+  monorepo's graph anyway.
 - `--isolated` — don't follow dependencies out of what you selected, for when
   everything upstream is already built.
 - `-e, --env KEY=VALUE` — set a variable for every step. Repeatable.

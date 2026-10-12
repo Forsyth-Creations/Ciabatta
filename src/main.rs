@@ -554,7 +554,15 @@ fn report_run_dependencies(
         say(text);
     }
     let report = run::envdeps::collect(resolved, root, vars, Some(&cfg));
-    if let Some(text) = report.render(name) {
+    // Coloured only when the stream it lands on is a terminal: this prints
+    // before the run decides its own colour, and a redirected report stays
+    // greppable.
+    use std::io::IsTerminal;
+    let colour = color::for_stream(match to_stderr {
+        true => std::io::stderr().is_terminal(),
+        false => std::io::stdout().is_terminal(),
+    });
+    if let Some(text) = report.render(name, colour) {
         say(text);
     }
     // Custom arguments are set apart, in yellow: they exist for this run only,

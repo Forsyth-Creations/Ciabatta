@@ -115,10 +115,14 @@ impl EnvReport {
 
     /// The report as a block of terminal text, or `None` when a run depends on
     /// no variables at all (in which case there is nothing worth saying).
-    pub fn render(&self, workflow: &str) -> Option<String> {
+    pub fn render(&self, workflow: &str, colour: bool) -> Option<String> {
+        use owo_colors::{OwoColorize, Style};
+
         if self.is_empty() {
             return None;
         }
+        let paint = |style: Style| crate::color::paint(colour, style);
+        let faint = paint(Style::new().dimmed());
 
         let mut out = String::new();
         out.push_str(&format!(
@@ -153,6 +157,7 @@ impl EnvReport {
             })
             .collect();
 
+        // One width for every group, so the columns line up down the report.
         let width = rows.iter().map(|(v, _)| v.key.len()).max().unwrap_or(0);
         // Long values (a connection string, a path list) shouldn't push every
         // annotation off the right of the terminal, so the value column is
@@ -164,72 +169,182 @@ impl EnvReport {
             .max()
             .unwrap_or(0);
 
-        for (var, value) in &rows {
-            let mut notes: Vec<String> = vec![self.decided_by(var)];
-            if var.required {
-                notes.push("required_env".to_string());
+        // Grouped by where the value came from — each source file its own
+        // group — in the order the search consults them, so the report reads
+        // top to bottom the way the values were decided. The header says where
+        // and why once; the rows say only what's particular to each.
+        let mut groups: Vec<(Group, Option<String>)> = Vec::new();
+        for (var, _) in &rows {
+            let key = (
+                Group::of(var),
+                var.file.clone().filter(|_| Group::of(var).has_file()),
+            );
+            if !groups.contains(&key) {
+                groups.push(key);
             }
-            if let Some(purpose) = &var.purpose {
-                notes.push(purpose.clone());
-            }
-            if var.optional {
-                notes.push("optional".to_string());
-            }
-            if !var.steps.is_empty() {
-                notes.push(format!("used by {}", var.steps.join(", ")));
-            }
+        }
+        let searched = |file: &Option<String>| {
+            file.as_ref()
+                .and_then(|f| self.files.iter().position(|x| x == f))
+                .unwrap_or(0)
+        };
+        groups.sort_by_key(|(group, file)| (*group, searched(file)));
+
+        for (group, file) in &groups {
+            let style = paint(group.colour());
+            let heading = paint(group.colour().bold());
+            let (title, why) =
+                group.header(file.as_deref(), self.profile.as_deref(), self.files.len());
             out.push_str(&format!(
-                "  {:width$}  {:value_width$}  [{}]\n",
-                var.key,
-                value,
-                notes.join(" · "),
-                width = width,
-                value_width = value_width
+                "  {} {}\n",
+                title.style(heading),
+                format!("— {why}").style(faint),
             ));
-            // The same sentence the run page shows, so the terminal never
-            // knows less than the browser about why a value won.
-            if let Some(reason) = &var.reason {
-                out.push_str(&format!("  {:width$}  ↳ {reason}\n", "", width = width));
+            for (var, value) in rows.iter().filter(|(var, _)| {
+                Group::of(var) == *group && (!group.has_file() || var.file == *file)
+            }) {
+                let mut notes: Vec<String> = Vec::new();
+                if !var.overrides.is_empty() {
+                    notes.push(format!("overrides {}", var.overrides.join(", ")));
+                }
+                if var.required {
+                    notes.push("required_env".to_string());
+                }
+                if let Some(purpose) = &var.purpose {
+                    notes.push(purpose.clone());
+                }
+                if var.optional {
+                    notes.push("optional".to_string());
+                }
+                if var.varies {
+                    notes.push("set differently by different steps".to_string());
+                }
+                if !var.steps.is_empty() {
+                    notes.push(format!("used by {}", var.steps.join(", ")));
+                }
+                // A required variable nothing set is the one line that stops
+                // the run; it's red whatever else it is.
+                let key_style = match *group == Group::Unset && !var.optional {
+                    true => paint(Style::new().red().bold()),
+                    false => style,
+                };
+                // Padded only when notes follow, so a bare row has no
+                // trailing whitespace.
+                let rest = match notes.is_empty() {
+                    true => value.clone(),
+                    false => format!(
+                        "{value:value_width$}  {}",
+                        format!("[{}]", notes.join(" · ")).style(faint)
+                    ),
+                };
+                out.push_str(&format!(
+                    "    {}  {rest}\n",
+                    format!("{:width$}", var.key).style(key_style),
+                ));
             }
         }
 
         if !self.missing.is_empty() {
             out.push_str(&format!(
-                "  ✗ still needed: {} — set them with -e KEY=VALUE\n",
-                self.missing.join(", ")
+                "  {}\n",
+                format!(
+                    "✗ still needed: {} — set them with -e KEY=VALUE",
+                    self.missing.join(", ")
+                )
+                .style(paint(Style::new().red()))
             ));
         }
         Some(out)
     }
 }
 
-impl EnvReport {
-    /// How `var`'s value was decided, in a few words: where it came from and
-    /// what it beat, or why nothing could supply it.
-    fn decided_by(&self, var: &EnvVar) -> String {
-        let beat = |what: &str| -> String {
-            match var.overrides.is_empty() {
-                true => what.to_string(),
-                false => format!("{what}, overrides {}", var.overrides.join(", ")),
-            }
-        };
-        match var.origin {
-            Origin::Environment => beat("terminal"),
-            Origin::EnvFile => {
-                let file = var.file.as_deref().unwrap_or("env file");
-                match var.via {
-                    Some(FileKind::Profile) => beat(&format!("{file} (profile)")),
-                    Some(FileKind::Workflow) => beat(&format!("{file} (workflow)")),
-                    _ => beat(file),
-                }
-            }
-            Origin::Default => beat(&format!(
-                "{} (default)",
-                var.file.as_deref().unwrap_or("env default")
-            )),
-            Origin::Config => "config [env]".to_string(),
-            Origin::Argument => "argument".to_string(),
-            Origin::Unset => "unset — not in the terminal or any env file searched".to_string(),
+/// Where a variable's value came from, as the report groups them — in the
+/// order the search consults them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Group {
+    Terminal,
+    Workflow,
+    Profile,
+    EnvFile,
+    Default,
+    Config,
+    Unset,
+}
+
+impl Group {
+    fn of(var: &EnvVar) -> Group {
+        match (var.origin, var.via) {
+            (Origin::Environment | Origin::Argument, _) => Group::Terminal,
+            (Origin::Config, _) => Group::Config,
+            (Origin::Unset, _) => Group::Unset,
+            (Origin::Default, _) | (_, Some(FileKind::Default)) => Group::Default,
+            (_, Some(FileKind::Workflow)) => Group::Workflow,
+            (_, Some(FileKind::Profile)) => Group::Profile,
+            (Origin::EnvFile, _) => Group::EnvFile,
+        }
+    }
+
+    /// Whether the group is split by source file.
+    fn has_file(self) -> bool {
+        matches!(
+            self,
+            Group::Workflow | Group::Profile | Group::EnvFile | Group::Default
+        )
+    }
+
+    /// The header over a group: where its values came from, and why that
+    /// source won.
+    fn header(
+        self,
+        file: Option<&str>,
+        profile: Option<&str>,
+        searched: usize,
+    ) -> (String, String) {
+        let file = file.unwrap_or("?");
+        match self {
+            Group::Terminal => (
+                "terminal".into(),
+                "set in the terminal, which always wins".into(),
+            ),
+            Group::Workflow => (
+                format!("{file} (workflow env_file)"),
+                "named by the workflow, searched before every workspace's files".into(),
+            ),
+            Group::Profile => (
+                format!("{file} (profile {})", profile.unwrap_or("?")),
+                "the active profile's file, searched before the .env beside it".into(),
+            ),
+            Group::EnvFile => (
+                file.to_string(),
+                "the first .env in the search (from where the run started, up to the root) \
+                 to set these"
+                    .into(),
+            ),
+            Group::Default => (
+                format!("{file} (defaults)"),
+                "nothing searched before it sets these".into(),
+            ),
+            Group::Config => (
+                "step [env] tables".into(),
+                "set on the step itself, on top of the run's environment".into(),
+            ),
+            Group::Unset => (
+                "unset".into(),
+                format!("not set in the terminal or in any of the {searched} env file(s) searched"),
+            ),
+        }
+    }
+
+    fn colour(self) -> owo_colors::Style {
+        use owo_colors::Style;
+        match self {
+            Group::Terminal => Style::new().magenta(),
+            Group::Workflow => Style::new().blue(),
+            Group::Profile => Style::new().cyan(),
+            Group::EnvFile => Style::new().green(),
+            Group::Default => Style::new().dimmed(),
+            Group::Config => Style::new().yellow(),
+            Group::Unset => Style::new().dimmed(),
         }
     }
 }
@@ -924,18 +1039,34 @@ mod tests {
         assert_eq!(target.origin, Origin::Default);
         assert_eq!(target.value.as_deref(), Some("dev"));
 
-        let text = report.render("build-checks").unwrap();
+        let text = report.render("build-checks", false).unwrap();
         assert!(
             text.contains(
                 "precedence: terminal > .env > .ciabatta/.env.default (first to set it wins)"
             ),
             "{text}"
         );
+        // Grouped under a header per source, in search order; each row keeps
+        // only what's its own.
+        let env_at = text
+            .find("  .env — the first .env in the search")
+            .expect(&text);
+        let default_at = text
+            .find("  .ciabatta/.env.default (defaults) — nothing searched before it")
+            .expect(&text);
+        assert!(env_at < default_at, "{text}");
         assert!(
-            text.contains("[.env, overrides .ciabatta/.env.default"),
+            text.contains("overrides .ciabatta/.env.default · required_env"),
             "{text}"
         );
-        assert!(text.contains("[.ciabatta/.env.default (default)"), "{text}");
+        assert!(text.contains("    TARGET   dev\n"), "{text}");
+        assert!(!text.contains('\u{1b}'), "no colour asked for, none given");
+        assert!(
+            report
+                .render("build-checks", true)
+                .unwrap()
+                .contains('\u{1b}')
+        );
 
         // The terminal beats every file, and the report says which it beat.
         let report = collect(
@@ -994,9 +1125,9 @@ mod tests {
                 .unwrap()
                 .starts_with("none")
         );
-        let text = report.render("build").unwrap();
+        let text = report.render("build", false).unwrap();
         assert!(
-            text.contains("↳ .env is the first .env in the search"),
+            text.contains("unset — not set in the terminal or in any of the 1 env file(s)"),
             "{text}"
         );
 

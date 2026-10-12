@@ -1523,23 +1523,27 @@ The **profile** is chosen before the search starts: `--env-profile <name>` on
 the command line (or the run launcher's profile picker), else
 `CIABATTA_ENV_PROFILE` from the terminal, else none.
 
-The report printed before every run (and by `--dry-run`) shows the search order
-and gives each variable the reason its value won, so you never have to guess.
-The run page shows the same reasons when you hover over or select a variable:
+The report printed before every run (and by `--dry-run`) shows the search order,
+then groups the variables by the file they came from. Each group has a header
+naming the source and why it won, colour-coded by kind in a terminal: magenta
+for the terminal, blue for workflow files, cyan for profile files, green for
+`.env` files, dim for defaults, yellow for step `[env]` tables, red for
+required variables nothing set. The run page shows the same reasons when you
+hover over or select a variable:
 
 ```
 $ cd packages/api && ciabatta build --env-profile staging
 Environment for 'build' — 4 variable(s) this run depends on
   profile: staging — --env-profile staging on the command line, so each workspace's .env.staging is searched before its .env
   precedence: terminal > packages/api/.env.staging > packages/api/.env > .env > .env.default (first to set it wins)
-  API     staged    [packages/api/.env.staging (profile)]
-          ↳ packages/api/.env.staging belongs to the active profile (staging), which is searched before the .env beside it
-  REGION  global    [.env, overrides .env.default]
-          ↳ .env is the first .env in the search (from where the run started, up to the root) to set it; it overrides .env.default
-  SHARED  from-api  [packages/api/.env, overrides .env]
-          ↳ packages/api/.env is the first .env in the search (from where the run started, up to the root) to set it; it overrides .env
-  TIER    dev       [.env.default (default)]
-          ↳ .env.default is a defaults file, and nothing searched before it sets this
+  packages/api/.env.staging (profile staging) — the active profile's file, searched before the .env beside it
+    API     staged
+  packages/api/.env — the first .env in the search (from where the run started, up to the root) to set these
+    SHARED  from-api  [overrides .env · used by api:hello]
+  .env — the first .env in the search (from where the run started, up to the root) to set these
+    REGION  global    [overrides .env.default]
+  .env.default (defaults) — nothing searched before it sets these
+    TIER    dev
 ```
 
 `ciabatta watch` sources the same files a run would and prints exactly what it

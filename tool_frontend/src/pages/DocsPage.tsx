@@ -1392,19 +1392,23 @@ required_env: [API_URL, DEPLOY_TOKEN] # must be set, or the run won't start`}</P
         <P>
           The <strong>profile</strong> is chosen first: <C>--env-profile &lt;name&gt;</C> (or
           the launcher&apos;s profile picker), else <C>CIABATTA_ENV_PROFILE</C> from the
-          terminal, else none. The report before each run, and every variable on the{" "}
-          <Link to="/run">Run page</Link>, show the profile in use and why, plus the reason
-          each value won and which files it overrode:
+          terminal, else none. The report before each run groups the variables under a header
+          per source file, naming where they came from and why that source won; every variable
+          on the <Link to="/run">Run page</Link> carries the same reason, and which files it
+          overrode:
         </P>
         <Pre>{`$ cd packages/api && ciabatta build --env-profile staging
+Environment for 'build' — 4 variable(s) this run depends on
   profile: staging — --env-profile staging on the command line, so each workspace's .env.staging is searched before its .env
   precedence: terminal > packages/api/.env.staging > packages/api/.env > .env > .env.default (first to set it wins)
-  API     staged    [packages/api/.env.staging (profile)]
-          ↳ packages/api/.env.staging belongs to the active profile (staging), which is searched before the .env beside it
-  SHARED  from-api  [packages/api/.env, overrides .env]
-          ↳ packages/api/.env is the first .env in the search (from where the run started, up to the root) to set it; it overrides .env
-  TIER    dev       [.env.default (default)]
-          ↳ .env.default is a defaults file, and nothing searched before it sets this`}</Pre>
+  packages/api/.env.staging (profile staging) — the active profile's file, searched before the .env beside it
+    API     staged
+  packages/api/.env — the first .env in the search (from where the run started, up to the root) to set these
+    SHARED  from-api  [overrides .env · used by api:hello]
+  .env — the first .env in the search (from where the run started, up to the root) to set these
+    REGION  global    [overrides .env.default]
+  .env.default (defaults) — nothing searched before it sets these
+    TIER    dev`}</Pre>
         <Pre>{`# packages/api/.ciabatta/ciabatta.yaml
 workspace:
   env_file: .env              # the default; set it to point somewhere else

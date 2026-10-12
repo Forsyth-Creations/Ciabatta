@@ -10,12 +10,14 @@ homepage = "https://forsyth-creations.github.io/Ciabatta/"
 keywords = ["artifact", "publishing", "cli", "registry", "ci"]
 categories = ["command-line-utilities", "development-tools"]
 
-# The daemon's web app is compiled into the binary from tool_frontend/dist, so
-# a published crate has to carry it — it's gitignored build output, not source.
+# The daemon's web app and the remote cache's admin app are compiled into the
+# binary from tool_frontend/dist and remote-cache-web/dist, so a published crate
+# has to carry them — they're gitignored build output, not source.
 include = [
     "src/**/*",
     "build.rs",
     "tool_frontend/dist/**/*",
+    "remote-cache-web/dist/**/*",
     # The config schemas are embedded in the binary and served to editors, so a
     # published crate has to carry them too, alongside the packaged extensions
     # the daemon offers for download. `editors/` is otherwise excluded: the
@@ -55,7 +57,8 @@ axum = { version = "0.8", features = ["macros"] }
 tower = "0.5"
 tower-http = { version = "0.6", features = ["trace"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
-# The built tool_frontend bundle is embedded in the binary at compile time.
+# The built tool_frontend and remote-cache-web bundles are embedded in the
+# binary at compile time.
 include_dir = "0.7"
 async-stream = "0.3"
 rand = "0.8"

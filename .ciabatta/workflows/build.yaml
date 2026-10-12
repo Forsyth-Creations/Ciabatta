@@ -6,13 +6,15 @@ owner: Henry Forsyth
 # belong at this level — the compiler pulls each whole unit in and orders it
 # before everything here.
 #
-# Both of them produce something `build.rs` compiles into the binary, which is
+# All of them produce something `build.rs` compiles into the binary, which is
 # why they are dependencies rather than siblings: `tool_frontend` builds the
-# web app the daemon serves, and `vscode-extension` packages the `.vsix` the
-# daemon offers for download. Build the binary without them and it carries a
-# placeholder page and no extension.
+# web app the daemon serves, `remote-cache-web` the admin app the remote cache
+# server serves, and `vscode-extension` packages the `.vsix` the daemon offers
+# for download. Build the binary without them and it carries placeholder pages
+# and no extension.
 needs:
 - tool_frontend:build
+- remote-cache-web:build
 - vscode-extension:build
 requires:
 - cargo

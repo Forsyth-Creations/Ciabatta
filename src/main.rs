@@ -2542,6 +2542,10 @@ fn print_remote_status(url: &str, stats: &serde_json::Value) {
         cache::store::human_size(counters["bytes_served"].as_u64().unwrap_or(0))
     );
     println!(
+        "  saved      {} of build time",
+        cache::cli::humanize_ms(counters["saved_ms"].as_u64().unwrap_or(0))
+    );
+    println!(
         "  retention  {}",
         stats["retention"]["description"].as_str().unwrap_or("—")
     );

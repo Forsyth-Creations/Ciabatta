@@ -1,14 +1,17 @@
 //! Makes sure the directories the daemon embeds exist before the crate is
 //! compiled.
 //!
-//! Two of them, both produced by yarn and both gitignored, and `include_dir!`
+//! Three of them, all produced by yarn and all gitignored, and `include_dir!`
 //! needs each to be present at compile time:
 //!
-//! * `tool_frontend/dist` — the web app. Built by
+//! * `tool_frontend/dist` — the daemon's web app. Built by
 //!   `yarn workspace ciabatta-tool-frontend build`. Rather than fail the build
 //!   (which would mean nobody can `cargo build` without node installed), we
 //!   drop in a placeholder page that tells the reader how to build the real
 //!   thing.
+//! * `remote-cache-web/dist` — the remote cache server's admin app, built by
+//!   `yarn workspace ciabatta-remote-cache-web build`. Same placeholder, same
+//!   reasoning.
 //! * `editors/dist` — the packaged editor extensions, built by
 //!   `yarn workspace ciabatta-vscode build`. Here an empty directory is the
 //!   honest answer
@@ -31,13 +34,28 @@ fn main() {
     let root = Path::new(&manifest_dir);
 
     editors_dist(&root.join("editors").join("dist"));
+    web_dist(
+        root,
+        "tool_frontend",
+        "ciabatta-tool-frontend",
+        "the daemon",
+    );
+    web_dist(
+        root,
+        "remote-cache-web",
+        "ciabatta-remote-cache-web",
+        "the remote cache server",
+    );
+}
 
-    let dist = root.join("tool_frontend").join("dist");
+/// Make sure `<dir>/dist` holds a web app, writing a placeholder if it doesn't.
+fn web_dist(root: &Path, dir: &str, workspace: &str, server: &str) {
+    let dist = root.join(dir).join("dist");
 
     // `rerun-if-changed` on a directory only tracks that directory's own mtime,
     // which does not change when a nested file is edited in place. Emit every
     // file individually so an edited asset can't be silently baked in stale.
-    println!("cargo:rerun-if-changed=tool_frontend/dist");
+    println!("cargo:rerun-if-changed={dir}/dist");
     track_recursively(&dist);
 
     if dist.join("index.html").exists() {
@@ -47,14 +65,14 @@ fn main() {
     if let Err(e) = fs::create_dir_all(&dist) {
         panic!("failed to create {}: {e}", dist.display());
     }
-    if let Err(e) = fs::write(dist.join("index.html"), placeholder_html()) {
+    if let Err(e) = fs::write(dist.join("index.html"), placeholder_html(dir, workspace)) {
         panic!("failed to write the placeholder page: {e}");
     }
 
     println!(
-        "cargo:warning=tool_frontend/dist was empty, so the daemon will serve a \
+        "cargo:warning={dir}/dist was empty, so {server} will serve a \
          placeholder page. Run `yarn install && yarn workspace \
-         ciabatta-tool-frontend build` and rebuild to embed the real web app."
+         {workspace} build` and rebuild to embed the real web app."
     );
 }
 
@@ -86,7 +104,7 @@ fn track_recursively(dir: &Path) {
     }
 }
 
-fn placeholder_html() -> String {
+fn placeholder_html(dir: &str, workspace: &str) -> String {
     format!(
         r#"<!doctype html>
 <meta charset="utf-8">
@@ -109,12 +127,12 @@ fn placeholder_html() -> String {
 <h1>🍞 The web app isn't built yet</h1>
 <p>
   This <code>ciabatta</code> binary was compiled without a
-  <code>tool_frontend/dist</code> bundle, so there's nothing to serve here.
-  The daemon itself is running fine — only the UI is missing.
+  <code>{dir}/dist</code> bundle, so there's nothing to serve here.
+  The server itself is running fine — only the UI is missing.
 </p>
 <p>Build it and recompile:</p>
 <pre>yarn install
-yarn workspace ciabatta-tool-frontend build
+yarn workspace {workspace} build
 cargo build --release</pre>
 <p>
   The JSON API is unaffected; <code>GET /api/health</code> works regardless.

@@ -1,0 +1,25 @@
+# The "build" workflow for the remote cache's admin app.
+#
+# Its `dist/` is compiled into the ciabatta binary by build.rs, which is why the
+# root's build workflow names this one in its `needs`.
+
+description: "Build the remote cache admin app"
+owner: Henry Forsyth
+needs: []
+requires: []
+
+# Paths are relative to the workspace root, as in tool_frontend's workflow.
+cache:
+  enabled: true
+  inputs:
+    - "remote-cache-web/src/**/*"
+    - "remote-cache-web/public/**/*"
+    - "remote-cache-web/index.html"
+    - "remote-cache-web/package.json"
+    - "remote-cache-web/vite.config.ts"
+  outputs: ["remote-cache-web/dist/**/*"]
+
+steps:
+  - name: build
+    description: "Build the remote cache admin app"
+    run: yarn build

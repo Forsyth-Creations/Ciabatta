@@ -11,6 +11,9 @@
 //!   is something the server can say;
 //! * when the cache was last used and last saved to, overall and per project;
 //! * a short log of recent traffic, and what the last retention sweep evicted;
+//! * the build time those hits saved, from each entry's recorded duration;
+//! * a day-by-day tally of the same counts, so the admin page can chart how
+//!   the hit rate is moving rather than only where it has ended up;
 //!
 //! and from those, [`insights`]: the handful of things worth doing something
 //! about, each phrased as the thing to do.
@@ -37,6 +40,10 @@ const RECENT: usize = 200;
 /// past it, the least recently active target makes room.
 const MAX_TARGETS: usize = 500;
 
+/// How many days of daily totals are kept. A quarter is long enough to see a
+/// regression arrive and a fix take hold, and small enough to send in full.
+const DAYS: usize = 90;
+
 /// Everything recorded, as it is written to disk.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Recorded {
@@ -50,6 +57,24 @@ pub struct Recorded {
     /// What the most recent retention sweep that evicted anything did.
     #[serde(default)]
     pub last_eviction: Option<Eviction>,
+    /// Every project's traffic summed per UTC day, keyed `YYYY-MM-DD` — which
+    /// sorts as a date, so the oldest day is always the first key.
+    #[serde(default)]
+    pub daily: BTreeMap<String, Day>,
+}
+
+/// One day's traffic, across every project.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct Day {
+    pub hits: u64,
+    pub misses: u64,
+    pub uploads: u64,
+    #[serde(default)]
+    pub bytes_served: u64,
+    #[serde(default)]
+    pub bytes_stored: u64,
+    #[serde(default)]
+    pub saved_ms: u64,
 }
 
 /// One project's traffic.
@@ -79,6 +104,8 @@ pub struct TargetActivity {
     pub uploads: u64,
     #[serde(default)]
     pub bytes_stored: u64,
+    #[serde(default)]
+    pub saved_ms: u64,
     #[serde(default)]
     pub last_hit_at: Option<String>,
     #[serde(default)]
@@ -153,6 +180,8 @@ pub struct Traffic<'a> {
     pub key: Option<&'a str>,
     pub user: Option<&'a str>,
     pub bytes: u64,
+    /// For a hit: how long the build it handed back originally took.
+    pub saved_ms: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -207,6 +236,29 @@ impl Activity {
     pub fn record(&self, traffic: Traffic<'_>) {
         let at = crate::cache::store::now();
         let mut recorded = self.lock();
+
+        // RFC 3339 in UTC, so the first ten characters are the UTC date.
+        let day = recorded
+            .daily
+            .entry(at.chars().take(10).collect())
+            .or_default();
+        match traffic.kind {
+            Kind::Hit => {
+                day.hits += 1;
+                day.bytes_served += traffic.bytes;
+                day.saved_ms += traffic.saved_ms;
+            }
+            Kind::Miss => day.misses += 1,
+            Kind::Upload => {
+                day.uploads += 1;
+                day.bytes_stored += traffic.bytes;
+            }
+            Kind::Touch(_) => {}
+        }
+        while recorded.daily.len() > DAYS {
+            recorded.daily.pop_first();
+        }
+
         let project = recorded
             .projects
             .entry(traffic.project.to_string())
@@ -216,6 +268,7 @@ impl Activity {
             Kind::Hit => {
                 project.counters.hits += 1;
                 project.counters.bytes_served += traffic.bytes;
+                project.counters.saved_ms += traffic.saved_ms;
                 project.last_hit_at = Some(at.clone());
             }
             Kind::Miss => {
@@ -249,6 +302,7 @@ impl Activity {
             match traffic.kind {
                 Kind::Hit => {
                     target.hits += 1;
+                    target.saved_ms += traffic.saved_ms;
                     target.last_hit_at = Some(at.clone());
                 }
                 Kind::Miss => {
@@ -317,6 +371,7 @@ impl Activity {
                 acc.uploads += p.counters.uploads;
                 acc.bytes_served += p.counters.bytes_served;
                 acc.bytes_stored += p.counters.bytes_stored;
+                acc.saved_ms += p.counters.saved_ms;
                 acc
             })
     }
@@ -556,6 +611,7 @@ mod tests {
             key: Some("abcdef0123456789"),
             user: Some("ada"),
             bytes: 100,
+            saved_ms: if kind == Kind::Hit { 4_000 } else { 0 },
         }
     }
 
@@ -582,10 +638,38 @@ mod tests {
         assert!(project.last_hit_at.is_some() && project.last_upload_at.is_some());
         assert!(project.last_used_at().is_some());
         assert_eq!(project.targets["web:build"].misses, 1);
+        assert_eq!(project.targets["api:build"].saved_ms, 4_000);
+        assert_eq!(reopened.totals().saved_ms, 4_000);
         assert_eq!(recorded.recent.len(), 3);
         assert_eq!(recorded.recent[0].kind, "miss", "newest first");
         assert_eq!(recorded.recent[0].key.as_deref(), Some("abcdef012345"));
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn traffic_is_tallied_by_day_and_old_days_age_out() {
+        let dir = scratch("daily");
+        let activity = Activity::open(&dir).unwrap();
+        {
+            let mut recorded = activity.lock();
+            for d in 0..DAYS {
+                recorded
+                    .daily
+                    .insert(format!("2000-01-{d:03}"), Day::default());
+            }
+        }
+        activity.record(traffic(Kind::Hit, "api:build"));
+        activity.record(traffic(Kind::Miss, "api:build"));
+        activity.record(traffic(Kind::Touch(3), "api:build"));
+
+        let daily = activity.snapshot().daily;
+        assert_eq!(daily.len(), DAYS, "the oldest day made room for today");
+        assert!(!daily.contains_key("2000-01-000"));
+        let (_, today) = daily.last_key_value().unwrap();
+        assert_eq!((today.hits, today.misses, today.uploads), (1, 1, 0));
+        assert_eq!(today.bytes_served, 100);
+        assert_eq!(today.saved_ms, 4_000, "a hit saves the build it replaced");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

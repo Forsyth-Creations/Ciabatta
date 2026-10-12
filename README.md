@@ -1149,12 +1149,16 @@ must never end up silently sharing a cache, and the id is what prevents it.
 
 ### The server's own page
 
-The cache server serves a small admin page at its root — open
+The cache server serves an admin app at its root — open
 `http://cache.example.com:8380/` in a browser — light or dark, following the
-system or picked in its header. It shows when the cache was **last used and
-last saved to**, what's stored against the size limit, every project with its
-targets ranked by misses, recent traffic, and what retention will evict next.
-Those counts are kept per project and per target, and survive restarts.
+system or picked in its header. It charts the **hit rate** and **lookups per
+day** (hits and misses, over the last 7, 30 or 90 days — the server keeps a
+daily tally for a quarter), which projects and targets miss most, and for
+reported builds, their outcomes and how many steps each reused. It also shows
+when the cache was **last used and last saved to**, what's stored against the
+size limit, every project with its targets ranked by misses, recent traffic,
+and what retention will evict next. Those counts are kept per project and per
+target, and survive restarts.
 
 From them the server derives **insights** — the few things worth changing,
 each phrased as the change: a target uploaded again and again but never reused
@@ -1983,20 +1987,24 @@ Then either drag the file onto the Extensions panel or run
 
 ## Web frontend
 
-Two separate front ends live in this repo:
+Three separate front ends live in this repo:
 
 - **`tool_frontend/`** — the daemon's web app described above (React, MUI,
   TanStack, React Flow). It's compiled into the binary, so a release is still a
   single file. Build it with `yarn workspace ciabatta-tool-frontend build`;
   `yarn dev` inside `tool_frontend/` gives HMR against a running daemon.
+- **`remote-cache-web/`** — the remote cache server's admin app (React, MUI,
+  MUI X Charts), also compiled into the binary. Build it with
+  `yarn workspace ciabatta-remote-cache-web build`; `yarn dev` inside it
+  proxies `/api` to a cache server on 8380 (or `CIABATTA_CACHE_URL`).
 - **`frontend/`** — the public docs site on GitHub Pages, with download links
   and usage instructions. See the
   [project site](https://forsyth-creations.github.io/Ciabatta/).
 
-Building the Rust binary without them still works: the daemon serves a
-placeholder page telling you to run the yarn build, and its Editors page offers
-no download and points at the releases instead. CI and the release workflow
-always build both first.
+Building the Rust binary without them still works: the daemon and the cache
+server each serve a placeholder page telling you to run the yarn build, and the
+daemon's Editors page offers no download and points at the releases instead. CI and the release workflow
+always build them first.
 
 ### Building it all
 

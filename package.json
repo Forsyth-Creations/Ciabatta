@@ -7,6 +7,7 @@
         "frontend",
         "src",
         "tool_frontend",
+        "remote-cache-web",
         "editors/vscode"
     ],
     "scripts": {

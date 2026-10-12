@@ -54,6 +54,11 @@ pub struct Counters {
     pub bytes_served: u64,
     #[serde(default)]
     pub bytes_stored: u64,
+    /// Build time hits spared their clients: each hit adds how long the build
+    /// it handed back originally took, as recorded in the entry. Saved time
+    /// rather than wall-clock time — two runners hitting at once both count.
+    #[serde(default)]
+    pub saved_ms: u64,
 }
 
 impl Counters {

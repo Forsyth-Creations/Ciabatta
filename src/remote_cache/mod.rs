@@ -32,12 +32,12 @@ pub mod activity;
 pub mod auth;
 pub mod builds;
 pub mod client;
-pub mod page;
 pub mod projects;
 pub mod releases;
 pub mod server;
 pub mod tls;
 pub mod users;
+pub mod web;
 pub mod workflows;
 
 use std::path::{Path, PathBuf};

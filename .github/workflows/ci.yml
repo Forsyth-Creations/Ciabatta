@@ -94,9 +94,9 @@ jobs:
           fi
           echo "${{ github.workspace }}/.bootstrap" >> "$GITHUB_PATH"
 
-      # Stage 1. The real build: tool_frontend, the VS Code extension, the
-      # website, and then the binary — which embeds the first two, so it is
-      # compiled again here with them in place.
+      # Stage 1. The real build: tool_frontend, the remote cache's admin app,
+      # the VS Code extension, the website, and then the binary — which embeds
+      # all but the website, so it is compiled again here with them in place.
       - name: Build everything
         run: ciabatta build
 
@@ -107,11 +107,13 @@ jobs:
           # and leaves editors/dist empty when the extension wasn't packaged.
           # Shipping either would produce a release whose UI says "run yarn
           # build" and whose Editors page offers nothing, so fail loudly here.
-          if grep -q 'ciabatta-placeholder-bundle' tool_frontend/dist/index.html; then
-            echo "::error::tool_frontend/dist holds the build.rs placeholder, not the built app."
-            exit 1
-          fi
-          test -d tool_frontend/dist/assets
+          for app in tool_frontend remote-cache-web; do
+            if grep -q 'ciabatta-placeholder-bundle' "$app/dist/index.html"; then
+              echo "::error::$app/dist holds the build.rs placeholder, not the built app."
+              exit 1
+            fi
+            test -d "$app/dist/assets"
+          done
           test -s editors/dist/ciabatta-vscode.vsix
 
       # Format, clippy and the test suite. The step list is in
@@ -272,17 +274,22 @@ jobs:
       - name: Build the web app
         run: yarn workspace ciabatta-tool-frontend build
 
+      - name: Build the remote cache admin app
+        run: yarn workspace ciabatta-remote-cache-web build
+
       - name: Package the VS Code extension
         run: yarn workspace ciabatta-vscode build
 
       - name: Verify the real assets will be embedded
         shell: bash
         run: |
-          if grep -q 'ciabatta-placeholder-bundle' tool_frontend/dist/index.html; then
-            echo "::error::tool_frontend/dist holds the build.rs placeholder, not the built app."
-            exit 1
-          fi
-          test -d tool_frontend/dist/assets
+          for app in tool_frontend remote-cache-web; do
+            if grep -q 'ciabatta-placeholder-bundle' "$app/dist/index.html"; then
+              echo "::error::$app/dist holds the build.rs placeholder, not the built app."
+              exit 1
+            fi
+            test -d "$app/dist/assets"
+          done
           test -s editors/dist/ciabatta-vscode.vsix
 
       - name: Build release binary
@@ -359,9 +366,10 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      # The crate carries tool_frontend/dist and editors/dist (see `include` in
-      # Cargo.toml), so both have to be built here or the published crate ships
-      # a placeholder page and no extension. Same reasoning as the release legs
+      # The crate carries tool_frontend/dist, remote-cache-web/dist and
+      # editors/dist (see `include` in Cargo.toml), so all three have to be
+      # built here or the published crate ships placeholder pages and no
+      # extension. Same reasoning as the release legs
       # for not going through `ciabatta build`.
       - name: Enable Corepack
         run: corepack enable
@@ -375,6 +383,9 @@ jobs:
 
       - name: Build the web app
         run: yarn workspace ciabatta-tool-frontend build
+
+      - name: Build the remote cache admin app
+        run: yarn workspace ciabatta-remote-cache-web build
 
       - name: Package the VS Code extension
         run: yarn workspace ciabatta-vscode build

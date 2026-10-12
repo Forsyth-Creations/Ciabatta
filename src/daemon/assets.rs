@@ -103,7 +103,7 @@ fn asset_response(path: &str, body: &'static [u8]) -> Response {
 }
 
 /// Whether a path should 404 rather than fall through to the SPA.
-fn looks_like_asset(path: &str) -> bool {
+pub(crate) fn looks_like_asset(path: &str) -> bool {
     path.rsplit('/')
         .next()
         .is_some_and(|name| name.contains('.'))
@@ -111,7 +111,7 @@ fn looks_like_asset(path: &str) -> bool {
 
 /// Content type by extension. Small hand-rolled table — the bundle only ever
 /// contains a handful of asset kinds, and this avoids a mime dependency.
-fn content_type(path: &str) -> &'static str {
+pub(crate) fn content_type(path: &str) -> &'static str {
     match path.rsplit('.').next().unwrap_or("") {
         "html" => "text/html; charset=utf-8",
         "js" | "mjs" => "text/javascript; charset=utf-8",

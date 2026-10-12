@@ -26,6 +26,83 @@ pub fn router() -> Router<AppState> {
         .route("/api/cache/plan", get(plan))
         .route("/api/cache/status", get(status))
         .route("/api/cache/remote", get(remote_status))
+        .route("/api/cache/files", get(files))
+}
+
+#[derive(Deserialize)]
+pub struct FilesQuery {
+    project: String,
+    /// The cache key a run reported for the step.
+    key: String,
+}
+
+/// Every file the cache saw for one key, each with its hash: the inputs it was
+/// keyed on and the outputs it stored (or, for a step still building, the
+/// outputs as they stand on disk right now).
+///
+/// Served on demand rather than carried in the run's view model, which is
+/// streamed whole on every change — a monorepo step can read thousands of
+/// files, and nobody needs them until they click on it.
+async fn files(
+    State(state): State<AppState>,
+    Query(query): Query<FilesQuery>,
+) -> RouteResult<Json<serde_json::Value>> {
+    // A key is hex; anything else is somebody trying a path.
+    if query.key.is_empty() || !query.key.chars().all(|c| c.is_ascii_alphanumeric()) {
+        return Err(RouteError::bad_request("not a cache key"));
+    }
+    let root = state.project_root(&query.project)?;
+    let store = crate::cache::graph::store_for(&root)?;
+    let entry = store.get(&query.key)?;
+    let inspection = store.inspection(&query.key);
+
+    let (inputs, outputs, stored, target, workspace, env, upstream, at) = match (entry, inspection)
+    {
+        (Some(entry), _) => (
+            entry.inputs,
+            entry.outputs,
+            true,
+            entry.target,
+            entry.workspace,
+            entry.env.into_keys().collect::<Vec<_>>(),
+            entry.upstream,
+            entry.created_at,
+        ),
+        (None, Some(inspection)) => {
+            let outputs =
+                crate::cache::hash_matching(&inspection.dir, &inspection.output_patterns, &[])
+                    .unwrap_or_default();
+            (
+                inspection.inputs,
+                outputs,
+                false,
+                inspection.target,
+                inspection.workspace,
+                inspection.env,
+                inspection.upstream,
+                inspection.decided_at,
+            )
+        }
+        (None, None) => {
+            return Err(RouteError::not_found(format!(
+                "nothing is recorded under cache key {}",
+                query.key
+            )));
+        }
+    };
+
+    Ok(Json(json!({
+        "key": query.key,
+        "target": target,
+        "workspace": workspace,
+        "stored": stored,
+        "at": at,
+        "algorithm": "sha256",
+        "inputs": inputs,
+        "outputs": outputs,
+        "env": env,
+        "upstream": upstream,
+    })))
 }
 
 #[derive(Deserialize)]
@@ -215,6 +292,7 @@ mod tests {
             "/api/cache/plan?project=x",
             "/api/cache/status?project=x",
             "/api/cache/remote?project=x",
+            "/api/cache/files?project=x&key=abc",
         ] {
             let response = router(test_state())
                 .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())

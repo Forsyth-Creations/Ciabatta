@@ -51,7 +51,7 @@ impl StepContext for WorkspaceContext<'_> {
         // Two levels, not three: a workflow's own `cache:` was folded into
         // each of its steps when the graph compiled, so `step.cache` already
         // carries it.
-        super::graph::effective(workspace_level.as_ref(), step.cache.as_ref())
+        super::graph::effective(workspace_level.as_ref(), step.cache.as_ref()).with_step_env(step)
     }
 
     fn dir(&self, _step: &RunStep) -> PathBuf {
@@ -347,7 +347,7 @@ fn dedup(mut values: Vec<String>) -> Vec<String> {
 
 /// Whether a glob matches at least one file under `dir`.
 fn matches_anything(dir: &Path, pattern: &str) -> bool {
-    let joined = dir.join(pattern);
+    let joined = dir.join(crate::cache::normalize_glob(pattern));
     let Some(as_str) = joined.to_str() else {
         return false;
     };

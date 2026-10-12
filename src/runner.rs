@@ -282,8 +282,26 @@ pub async fn run_workflow_ctl(
     tracing::debug!(workflow = %name, dry_run, "starting workflow");
 
     let started = std::time::Instant::now();
-    let result =
-        crate::run::execute(name, resolved, config, root, env_vars, dry_run, &ctl, &tx).await;
+    let started_at = chrono::Utc::now().to_rfc3339();
+
+    // Every update passes through a ledger on its way out, so the build record
+    // the remote cache keeps is made of exactly what the run view was shown.
+    let (inner_tx, mut inner_rx) = mpsc::channel::<ProgressUpdate>(256);
+    let outer = tx.clone();
+    let tap = tokio::spawn(async move {
+        let mut ledger = crate::remote_cache::builds::Ledger::default();
+        while let Some(update) = inner_rx.recv().await {
+            ledger.observe(&update);
+            let _ = outer.send(update).await;
+        }
+        ledger
+    });
+    let result = crate::run::execute(
+        name, resolved, config, root, env_vars, dry_run, &ctl, &inner_tx,
+    )
+    .await;
+    drop(inner_tx);
+    let ledger = tap.await.unwrap_or_default();
 
     match result {
         Ok(()) => {
@@ -310,15 +328,33 @@ pub async fn run_workflow_ctl(
             Err(e) if e.to_string() == STOPPED_MESSAGE => crate::run::history::Outcome::Stopped,
             Err(_) => crate::run::history::Outcome::Failed,
         };
-        record_run(
-            name,
-            resolved,
-            config,
-            root,
-            outcome,
-            started.elapsed().as_millis() as u64,
-        )
-        .await;
+        let duration_ms = started.elapsed().as_millis() as u64;
+        record_run(name, resolved, config, root, outcome, duration_ms).await;
+
+        // A run with no CI variables (one started from the web app, or a
+        // terminal without `--local`) still came from some commit: say which.
+        let mut described = env_vars.clone();
+        if !described.contains_key("CIABATTA_COMMIT")
+            && let Ok(git) = crate::git::local_git_vars(root)
+        {
+            for (key, value) in git {
+                described.entry(key).or_insert(value);
+            }
+        }
+        let mut build = crate::remote_cache::builds::describe(&described);
+        build.workflow = name.to_string();
+        build.outcome = match outcome {
+            crate::run::history::Outcome::Success => "success",
+            crate::run::history::Outcome::Stopped => "stopped",
+            crate::run::history::Outcome::Failed => "failed",
+        }
+        .to_string();
+        build.started_at = started_at;
+        build.finished_at = chrono::Utc::now().to_rfc3339();
+        build.duration_ms = duration_ms;
+        build.error = result.as_ref().err().map(|e| format!("{e:#}"));
+        build.steps = ledger.steps(&resolved.steps);
+        crate::remote_cache::builds::report(config, root, &build).await;
     }
 
     result

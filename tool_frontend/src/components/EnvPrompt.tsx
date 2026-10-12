@@ -3,7 +3,7 @@
  *
  * Shared by the launcher and by "run again", because the daemon refuses both
  * the same way: a 422 listing what it couldn't resolve, rather than a run that
- * would abort at its own `REQUIRED_ENV` gate a second later.
+ * would abort at its own `required_env` gate a second later.
  */
 
 import { useState } from "react";

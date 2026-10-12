@@ -55,7 +55,8 @@ impl Item {
     }
 }
 
-/// The phases `kind:` recognises. Only `push` and `pull` change behaviour —
+/// The phases `kind:` recognises. Only `push`, `pull` and the two release
+/// kinds change behaviour —
 /// the rest label the node on the graph — but offering the set is how a repo
 /// ends up using one vocabulary instead of six.
 const PHASES: &[(&str, &str)] = &[
@@ -73,6 +74,14 @@ const PHASES: &[(&str, &str)] = &[
     (
         "pull",
         "Fetches an artifact from `registry:` — a built-in action",
+    ),
+    (
+        "release-push",
+        "Publishes `release.files` as a versioned release — a built-in action",
+    ),
+    (
+        "release-pull",
+        "Fetches a versioned release (`--release`) — a built-in action",
     ),
 ];
 
@@ -211,7 +220,10 @@ fn in_workflow(cursor: &Cursor, member: Option<&str>, index: &Index, lines: &[&s
     if cursor.at(&["steps", "when"]) || cursor.at(&["steps", "skip_if"]) {
         return env_vars(index, "compared against this step's condition");
     }
-    if cursor.at(&["REQUIRED_ENV"]) || cursor.ends_with(&["cache", "env"]) {
+    if cursor.at(&["required_env"])
+        || cursor.at(&["REQUIRED_ENV"])
+        || cursor.ends_with(&["cache", "env"])
+    {
         return env_vars(index, "used elsewhere in this repository");
     }
     if cursor.at(&["steps", "from"]) {

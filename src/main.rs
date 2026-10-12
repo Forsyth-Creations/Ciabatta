@@ -285,6 +285,10 @@ async fn main() -> Result<()> {
             cmd_remote_cache(subcommand).await?;
         }
 
+        Commands::Releases { command } => {
+            cmd_releases(command).await?;
+        }
+
         Commands::Zelf { subcommand } => {
             cmd_self(subcommand).await?;
         }
@@ -328,11 +332,15 @@ fn unknown_workflow(err: &anyhow::Error) -> bool {
 /// so an unknown name gets an extra line pointing at `--help` — otherwise
 /// `ciabatta pusj` would only ever complain about workflows.
 async fn cmd_workflow(
-    args: cli::WorkflowArgs,
+    mut args: cli::WorkflowArgs,
     bare_name: bool,
     custom_args: &[String],
 ) -> Result<()> {
     let cwd = env::current_dir().context("Failed to get current directory")?;
+    if let Some(version) = args.release.take() {
+        args.env
+            .push(format!("{}={version}", run::release::RELEASE_VAR));
+    }
 
     // No workflow named: show what there is to run rather than erroring out.
     let Some(first) = args.workflow.clone() else {
@@ -353,6 +361,22 @@ async fn cmd_workflow(
 
     let mut workflows = vec![first.clone()];
     workflows.extend(args.also.iter().cloned());
+
+    // Inside a package that defines this workflow, the run is that package
+    // (and what it needs) — as if `--only <package>` had been typed. `cd`
+    // into what you're working on and build just that.
+    if args.only.is_empty()
+        && !args.all
+        && let Ok(ws) = workspace::Workspace::discover(&cwd)
+        && let Some(member) = ws.member_scope(&cwd, &workflows)
+    {
+        eprintln!(
+            "Running from {}: only {} and what it needs (as --only {}). \
+             Pass --all for the whole monorepo.",
+            member.rel, member.name, member.name
+        );
+        args.only.push(member.name.clone());
+    }
 
     let selection = workspace::graph::Selection {
         only: args.only.clone(),
@@ -486,7 +510,7 @@ async fn cmd_workflow(
 /// the difference between "works here" and "fails there" is far more often a
 /// variable, an undeclared input, or a package pulled in from three directories
 /// away than it is the graph itself. Ciabatta has already resolved all of it
-/// before the first step runs — `REQUIRED_ENV`, the `.env` files it sources, the
+/// before the first step runs — `required_env`, the `.env` files it sources, the
 /// `[env]` tables that cascade to each step, each target's inputs, outputs and
 /// declared variables — so it may as well say so, in the same spirit as printing
 /// the graph before executing it.
@@ -2276,6 +2300,150 @@ fn this_hostname() -> Option<String> {
         .filter(|name| !name.is_empty())
 }
 
+/// `ciabatta releases …`: list, fetch and publish releases by hand. The same
+/// operations a `kind: release-pull` / `kind: release-push` step performs.
+async fn cmd_releases(command: cli::ReleasesCommand) -> Result<()> {
+    use run::release;
+
+    let cwd = env::current_dir().context("Failed to get current directory")?;
+    // The monorepo root, not the nearest package: releases live in the cache
+    // a run from the root uses.
+    let root = workspace::Workspace::discover(&cwd)
+        .map(|ws| ws.root)
+        .ok()
+        .or_else(|| find_root(&cwd))
+        .context("Not inside a ciabatta project (no .ciabatta directory above here)")?;
+    let config = load_config(&root)?;
+    let store = cache::store::Store::for_project(&root)?;
+    let shared = release::connect(&config, &root).await?;
+    let mut vars: HashMap<String, String> = env::vars().collect();
+    // What a push records about where it came from, as a `--local` run would.
+    if let Ok(git) = git::local_git_vars(&root) {
+        for (key, value) in git {
+            vars.entry(key).or_insert(value);
+        }
+    }
+
+    // With no --name, the one release name there is — or a list to pick from.
+    let pick_name =
+        |name: Option<String>, known: &[(release::ReleaseInfo, String)]| -> Result<String> {
+            if let Some(name) = name {
+                return Ok(name);
+            }
+            let mut names: Vec<&str> = known.iter().map(|(r, _)| r.name.as_str()).collect();
+            names.sort();
+            names.dedup();
+            match names.as_slice() {
+                [only] => Ok(only.to_string()),
+                [] => Ok(release::default_name(None, &config, &root)),
+                several => bail!(
+                    "This project has several releases ({}); pick one with --name.",
+                    several.join(", ")
+                ),
+            }
+        };
+
+    match command {
+        cli::ReleasesCommand::List { name } => {
+            let all = release::list(&store, shared.as_ref()).await?;
+            let shown: Vec<_> = all
+                .iter()
+                .filter(|(r, _)| name.as_ref().is_none_or(|n| &r.name == n))
+                .collect();
+            if shown.is_empty() {
+                println!(
+                    "No releases yet. Publish one with a `kind: release-push` step, or                      `ciabatta releases push <VERSION> --file <GLOB>`."
+                );
+                return Ok(());
+            }
+            println!(
+                "{:<20} {:<16} {:<22} {:>6} {:>10}  WHERE",
+                "NAME", "VERSION", "CREATED", "FILES", "SIZE"
+            );
+            for (info, place) in shown {
+                println!(
+                    "{:<20} {:<16} {:<22} {:>6} {:>10}  {}",
+                    info.name,
+                    info.version,
+                    info.created_at
+                        .chars()
+                        .take(19)
+                        .collect::<String>()
+                        .replace('T', " "),
+                    info.files,
+                    cache::store::human_size(info.size),
+                    place
+                );
+            }
+        }
+        cli::ReleasesCommand::Pull {
+            version,
+            name,
+            into,
+        } => {
+            let version = release::resolve_version(
+                version.as_deref(),
+                &vars,
+                &root,
+                release::Direction::Pull,
+            )?;
+            let known = if name.is_none() {
+                release::list(&store, shared.as_ref()).await?
+            } else {
+                Vec::new()
+            };
+            let name = pick_name(name, &known)?;
+            let into = into.unwrap_or_else(|| cwd.clone());
+            let (files, from) =
+                release::pull(&store, shared.as_ref(), &name, &version, &into).await?;
+            println!(
+                "Fetched {name}@{version} from {from}: {} file(s) into {}",
+                files.len(),
+                into.display()
+            );
+        }
+        cli::ReleasesCommand::Push {
+            version,
+            files,
+            name,
+            overwrite,
+        } => {
+            let version = release::resolve_version(
+                version.as_deref(),
+                &vars,
+                &root,
+                release::Direction::Push,
+            )?;
+            let name = name.unwrap_or_else(|| release::default_name(None, &config, &root));
+            match release::push(
+                &store,
+                shared.as_ref(),
+                &name,
+                &version,
+                &cwd,
+                &files,
+                overwrite,
+                &vars,
+            )
+            .await?
+            {
+                release::Pushed::Unchanged => {
+                    println!("{name}@{version} is already released with exactly these files.")
+                }
+                release::Pushed::Published { files, shared } => println!(
+                    "Released {name}@{version}: {files} file(s){}",
+                    if shared {
+                        " — shared through the remote cache"
+                    } else {
+                        ", in this machine's cache only (configure cache.remote to share it)"
+                    }
+                ),
+            }
+        }
+    }
+    Ok(())
+}
+
 /// The remote cache URL this workspace is configured to use, if any.
 fn configured_remote() -> Result<Option<String>> {
     let cwd = env::current_dir().context("Failed to get current directory")?;
@@ -3256,7 +3424,7 @@ needs: []
 # runs, with the install command from the root's `toolchain:` section.
 requires: []
 
-# REQUIRED_ENV: [API_TOKEN]   # refuse to start unless these are set
+# required_env: [API_TOKEN]   # refuse to start unless these are set
 # env_file: .env              # sourced before the run
 
 steps:
@@ -3386,7 +3554,7 @@ system:
 # workflows:
 #   release:
 #     description: Build the app and publish it
-#     REQUIRED_ENV: [API_TOKEN]        # refuse to start unless these are set
+#     required_env: [API_TOKEN]        # refuse to start unless these are set
 #     steps:
 #       - name: build
 #         run: make dist
@@ -3587,6 +3755,7 @@ Any workflow name then becomes a command:
   ciabatta build --graph      # show the graph, run nothing
   ciabatta build --dry-run    # walk every step, execute nothing
   ciabatta build --only api   # start from one package (deps still come along)
+  cd packages/api && ciabatta build   # the same: run from inside a package
   ciabatta dry-run build      # what would be reused from the cache, and why not
   ciabatta list               # every workflow, its owner, and what it does
   ciabatta list -s proto      # ...filtered
@@ -3611,7 +3780,7 @@ workspace:                   # this package's identity (ciabatta init --lib)
                                # default rather than adding to it.
   env_default: .env.default    # the checked-in template `.env` is generated
                                # from. REQUIRED of any package whose workflows
-                               # declare REQUIRED_ENV — see ENVIRONMENT below.
+                               # declare required_env — see ENVIRONMENT below.
   umbrella: true               # on the ROOT config only: "I'm not a package,
                                # just shared toolchain and settings"
 
@@ -3642,7 +3811,7 @@ workflow name. Small packages can write them inline under `workflows:` instead
                                             # workspace.depends_on
   requires: [cargo]                         # tools all its steps need
   env_file: .env.build                      # relative to this package
-  REQUIRED_ENV: [API_TOKEN]                 # refuse to start unless set
+  required_env: [API_TOKEN]                 # refuse to start unless set
   tags: [rust]
 
   env:                                      # vars for all its steps
@@ -3723,7 +3892,9 @@ cache:
   exclude: [target]                     # never counted as an input, so a build
                                         # can't invalidate itself with its own
                                         # output. Does NOT filter `outputs`.
-  env: [PROFILE]                        # variables the RESULT depends on
+  env: [PROFILE]                        # OPTIONAL: extra variables to key on.
+                                        # Every `env:` and `required_env`
+                                        # variable already keys the cache.
 
   remote:                               # the shared cache (project-level: put
     url: http://cache.example.com:8380  # this in the MONOREPO ROOT's config)
@@ -3747,7 +3918,9 @@ cache:
 A stage has exactly THREE dependencies, and any of them changing is a rebuild:
 
   1. its input files,
-  2. the environment variables it declared in `cache.env`,
+  2. its environment variables: every one from an `env:` table (workspace,
+     workflow, step), the workflow's `required_env`, and any extra names in
+     `cache.env`,
   3. the outputs of the stages it `needs`.
 
 The third is what makes a graph cacheable rather than just a directory: change
@@ -3952,7 +4125,7 @@ Three rules, in the order they apply:
      absent, so your edits survive.
 
 And one requirement that follows from the third: a workspace whose workflows
-declare REQUIRED_ENV must declare `env_default`. Not bureaucracy — it's what
+declare required_env must declare `env_default`. Not bureaucracy — it's what
 makes rule 3 possible. A repo where the required variables are written down
 somewhere reviewable is a repo a new person can build.
 
@@ -4235,6 +4408,7 @@ Any workflow name then becomes a command:
   ciabatta build --graph      # show the graph, run nothing
   ciabatta build --dry-run    # walk every step, execute nothing
   ciabatta build --only api   # start from one package (deps still come along)
+  cd packages/api && ciabatta build   # the same: run from inside a package
   ciabatta dry-run build      # what would be reused from the cache, and why not
   ciabatta list               # every workflow, its owner, and what it does
   ciabatta list -s proto      # ...filtered
@@ -4259,7 +4433,7 @@ workspace:                   # this package's identity (ciabatta init --lib)
                                # default rather than adding to it.
   env_default: .env.default    # the checked-in template `.env` is generated
                                # from. REQUIRED of any package whose workflows
-                               # declare REQUIRED_ENV — see ENVIRONMENT below.
+                               # declare required_env — see ENVIRONMENT below.
   umbrella: true               # on the ROOT config only: "I'm not a package,
                                # just shared toolchain and settings"
 
@@ -4290,7 +4464,7 @@ workflow name. Small packages can write them inline under `workflows:` instead
                                             # workspace.depends_on
   requires: [cargo]                         # tools all its steps need
   env_file: .env.build                      # relative to this package
-  REQUIRED_ENV: [API_TOKEN]                 # refuse to start unless set
+  required_env: [API_TOKEN]                 # refuse to start unless set
   tags: [rust]
 
   env:                                      # vars for all its steps
@@ -4371,7 +4545,9 @@ cache:
   exclude: [target]                     # never counted as an input, so a build
                                         # can't invalidate itself with its own
                                         # output. Does NOT filter `outputs`.
-  env: [PROFILE]                        # variables the RESULT depends on
+  env: [PROFILE]                        # OPTIONAL: extra variables to key on.
+                                        # Every `env:` and `required_env`
+                                        # variable already keys the cache.
 
   remote:                               # the shared cache (project-level: put
     url: http://cache.example.com:8380  # this in the MONOREPO ROOT's config)
@@ -4395,7 +4571,9 @@ cache:
 A stage has exactly THREE dependencies, and any of them changing is a rebuild:
 
   1. its input files,
-  2. the environment variables it declared in `cache.env`,
+  2. its environment variables: every one from an `env:` table (workspace,
+     workflow, step), the workflow's `required_env`, and any extra names in
+     `cache.env`,
   3. the outputs of the stages it `needs`.
 
 The third is what makes a graph cacheable rather than just a directory: change
@@ -4600,7 +4778,7 @@ Three rules, in the order they apply:
      absent, so your edits survive.
 
 And one requirement that follows from the third: a workspace whose workflows
-declare REQUIRED_ENV must declare `env_default`. Not bureaucracy — it's what
+declare required_env must declare `env_default`. Not bureaucracy — it's what
 makes rule 3 possible. A repo where the required variables are written down
 somewhere reviewable is a repo a new person can build.
 

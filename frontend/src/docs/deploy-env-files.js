@@ -64,13 +64,13 @@ run  = "echo migrating $DB_URL"   # DB_URL comes from .env`)}
   }),
 
   section({
-    eyebrow: "Works with REQUIRED_ENV",
+    eyebrow: "Works with required_env",
     title: "A sourced value can satisfy a requirement",
-    sub: "Because files are sourced <em>before</em> the <code>REQUIRED_ENV</code> gate is checked, a variable provided by a <code>.env</code> counts as present.",
+    sub: "Because files are sourced <em>before</em> the <code>required_env</code> gate is checked, a variable provided by a <code>.env</code> counts as present.",
     html: `
       ${code(`[recipies.web.deploy]
 env_file     = ".env"
-REQUIRED_ENV = ["DB_URL", "DEPLOY_TOKEN"]   # both may come from .env`)}
+required_env = ["DB_URL", "DEPLOY_TOKEN"]   # both may come from .env`)}
       ${note(
         "If a required variable is still empty or unset after sourcing, the deploy aborts before running a single step and names what's missing. A referenced <code>env_file</code> that doesn't exist is a hard error too — no silent skip.",
       )}`,

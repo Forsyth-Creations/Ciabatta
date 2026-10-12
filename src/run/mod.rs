@@ -15,6 +15,7 @@ pub mod envdeps;
 pub mod filter;
 pub mod history;
 pub mod isolate;
+pub mod release;
 pub mod transfer;
 pub mod view;
 pub mod why;
@@ -133,6 +134,12 @@ pub struct RunStep {
     /// and a dev server should.
     #[serde(skip)]
     pub background: bool,
+    /// Set by the compiler from the workflow's `required_env`: the names this
+    /// step's run refuses to start without, which also key its cache entry.
+    /// `#[serde(skip)]` for the same reason as `background` — it's declared on
+    /// the workflow, not the step.
+    #[serde(skip)]
+    pub required_env: Vec<String>,
     /// Don't fail the whole run when this step fails: its dependents are
     /// skipped, every other branch carries on, and the run reports the failure
     /// at the end. Always applied when a `timeout` expires.
@@ -258,6 +265,11 @@ pub struct RunStep {
     /// do — most steps inherit and never write this.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cache: Option<crate::cache::CacheConfig>,
+
+    /// For a `kind: release-push` / `kind: release-pull` step: which release,
+    /// which version, and which files. See [`release`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub release: Option<release::ReleaseSpec>,
 }
 
 /// One fix choice on a recovery node.
@@ -316,7 +328,16 @@ impl RunStep {
     /// recovery node that only presents options. A transfer step counts: its
     /// action is the built-in registry move.
     pub fn has_action(&self) -> bool {
-        self.script.is_some() || self.run.is_some() || self.direction().is_some()
+        self.script.is_some()
+            || self.run.is_some()
+            || self.direction().is_some()
+            || self.release_direction().is_some()
+    }
+
+    /// Whether this is a `kind: release-push` or `kind: release-pull` step,
+    /// and which.
+    pub fn release_direction(&self) -> Option<release::Direction> {
+        release::Direction::of_kind(self.kind.as_deref()?)
     }
 
     /// The transfer direction this step's `kind` selects, or `None` for an
@@ -603,7 +624,7 @@ pub struct PreparedEnv {
     /// `{VAR}` placeholders in `env_file` paths with no value, so the file to
     /// source can't even be named yet.
     pub unresolved_paths: Vec<String>,
-    /// `REQUIRED_ENV` variables that are empty or unset.
+    /// `required_env` variables that are empty or unset.
     pub missing_required: Vec<String>,
     /// The build features this run was started with — every `CIABATTA_FEAT_*`
     /// the resolved environment carries. Reported at the start of the run, and
@@ -664,7 +685,7 @@ impl PreparedEnv {
 
 /// Resolve a run's environment: substitute `{VAR}` placeholders in its
 /// `env_file` paths, source those files over `base`, and check the result
-/// against `REQUIRED_ENV`.
+/// against `required_env`.
 ///
 /// Never runs anything, so both the engine (which does this for real, just
 /// before the first phase) and the daemon's launcher (which does it to decide
@@ -673,7 +694,7 @@ impl PreparedEnv {
 ///
 /// Unresolvable `env_file` paths short-circuit: nothing can be sourced until
 /// the path is known, and a file that *would* have been sourced may be exactly
-/// what supplies the `REQUIRED_ENV` variables — so those aren't reported yet.
+/// what supplies the `required_env` variables — so those aren't reported yet.
 pub fn prepare_env(
     resolved: &ResolvedRun,
     root: &Path,
@@ -829,7 +850,7 @@ fn with_profile(files: &[String], root: &Path, profile: &str) -> Vec<String> {
 /// Return the names from `required` that are absent from `env` or present but
 /// empty (after trimming). An empty result means every required variable is
 /// set, so the run may proceed. Order follows `required` so the reported list
-/// matches how the operator declared `REQUIRED_ENV`.
+/// matches how the operator declared `required_env`.
 fn missing_required_env(required: &[String], env: &HashMap<String, String>) -> Vec<String> {
     required
         .iter()
@@ -1076,6 +1097,20 @@ pub fn validate_flowchart(steps: &[RunStep], run_name: &str) -> Result<()> {
         } else if !step.has_action() {
             bail!(
                 "Step '{}' in run '{}' has no `script`, `run`, or `workflow` to execute.",
+                step.name,
+                run_name
+            );
+        }
+
+        // A release push with nothing to publish can only fail at run time,
+        // after the build it was waiting on — say so before anything runs.
+        if step.release_direction() == Some(release::Direction::Push)
+            && step.script.is_none()
+            && step.run.is_none()
+            && step.release.as_ref().is_none_or(|r| r.files.is_empty())
+        {
+            bail!(
+                "Step '{}' in run '{}' is a `kind: release-push` with no `release.files`                  — list the globs of what to publish.",
                 step.name,
                 run_name
             );

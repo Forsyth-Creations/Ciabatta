@@ -110,7 +110,7 @@ pub struct WorkspaceMeta {
     /// The checked-in template the `.env` is generated from when it's missing —
     /// conventionally `.env.default`.
     ///
-    /// Required of any workspace whose builds declare `REQUIRED_ENV`: those
+    /// Required of any workspace whose builds declare `required_env`: those
     /// builds cannot run without those variables, and a repo that doesn't write
     /// down what they are is one a new person can't build. See
     /// [`crate::environment::files`].
@@ -170,10 +170,14 @@ pub struct Workflow {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub env_file: Vec<String>,
     /// Variables that must be set and non-empty, or the run is refused up front.
-    #[serde(default, rename = "REQUIRED_ENV")]
+    /// Their values key the cache (as a digest — this is where tokens go).
+    /// `REQUIRED_ENV`, the spelling before 0.6.0, still reads.
+    #[serde(default, rename = "required_env", alias = "REQUIRED_ENV")]
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub required_env: Vec<String>,
-    /// Environment variables applied to every step of this workflow.
+    /// Environment variables applied to every step of this workflow. Every one
+    /// of them keys the cache: a build run with different variables is a
+    /// different build.
     #[serde(default)]
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub env: BTreeMap<String, String>,
@@ -245,14 +249,19 @@ impl Workflow {
     /// by a test, because serde's own list isn't reachable at runtime and the
     /// alternative — `deny_unknown_fields` — would turn a typo into a parse
     /// error phrased in serde's vocabulary rather than one that says which key
-    /// was meant. `REQUIRED_ENV` appears as it is written in the file, not as
+    /// was meant. `required_env` appears as it is written in the file, not as
     /// the field is spelled in Rust.
+    /// Older spellings still read, and so still known: `REQUIRED_ENV` from
+    /// before 0.6.0, when it was the only key written in capitals.
+    pub const KEY_ALIASES: &'static [&'static str] = &["REQUIRED_ENV"];
+
     pub const KNOWN_KEYS: &'static [&'static str] = &[
         "description",
         "owner",
         "needs",
         "requires",
         "env_file",
+        "required_env",
         "REQUIRED_ENV",
         "env",
         "tags",
@@ -406,6 +415,27 @@ impl Workspace {
     /// Look up a member by name.
     pub fn member(&self, name: &str) -> Option<&Member> {
         self.members.iter().find(|m| m.name == name)
+    }
+
+    /// The sub-workspace `dir` sits in, when it's a member below the root
+    /// that defines one of `workflows` — the package somebody `cd`ed into to
+    /// build just that package.
+    ///
+    /// The innermost member wins, so a package nested in another is its own.
+    /// The root never counts: running from the top means the whole monorepo,
+    /// and so does a member that doesn't define the workflow — there would be
+    /// nothing of its own to scope the run to.
+    pub fn member_scope(&self, dir: &Path, workflows: &[String]) -> Option<&Member> {
+        let dir = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
+        self.members
+            .iter()
+            .filter(|m| m.rel != ".")
+            .filter(|m| {
+                let own = m.dir.canonicalize().unwrap_or_else(|_| m.dir.clone());
+                dir.starts_with(own)
+            })
+            .max_by_key(|m| m.dir.components().count())
+            .filter(|m| workflows.iter().any(|w| m.has_workflow(w)))
     }
 
     /// Every distinct workflow name defined anywhere in the monorepo, sorted —
@@ -708,9 +738,16 @@ fn check_workflow_keys(path: &Path) -> Result<()> {
         );
     }
 
+    // "Did you mean" offers the current spellings only — an old alias still
+    // reads, but it is not what anybody should be told to write.
+    let current: Vec<&str> = Workflow::KNOWN_KEYS
+        .iter()
+        .filter(|key| !Workflow::KEY_ALIASES.contains(key))
+        .copied()
+        .collect();
     bail!(
         "{}",
-        crate::format::diagnose::unknown_key_report(path, &content, &unknown, Workflow::KNOWN_KEYS)
+        crate::format::diagnose::unknown_key_report(path, &content, &unknown, &current)
     )
 }
 
@@ -905,6 +942,58 @@ mod tests {
         std::fs::write(dir.join(file), body).unwrap();
     }
 
+    /// `cd packages/api && ciabatta build` is `ciabatta build --only api`:
+    /// the innermost member defining the workflow, never the root, and nothing
+    /// when the member has no such workflow of its own.
+    #[test]
+    fn a_run_from_inside_a_package_is_scoped_to_it() {
+        let root = scratch("member_scope");
+        write_member_as(
+            &root,
+            ".",
+            "ciabatta.yaml",
+            "workspace:\n  umbrella: true\n",
+        );
+        let api = write_member_as(
+            &root,
+            "packages/api",
+            "ciabatta.yaml",
+            "workspace:\n  name: api\n",
+        );
+        write_workflow_as(
+            &api,
+            "build.yaml",
+            "steps:\n  - name: compile\n    run: echo api\n",
+        );
+        let web = write_member_as(
+            &root,
+            "packages/web",
+            "ciabatta.yaml",
+            "workspace:\n  name: web\n",
+        );
+        write_workflow_as(
+            &web,
+            "test.yaml",
+            "steps:\n  - name: unit\n    run: echo web\n",
+        );
+        std::fs::create_dir_all(api.join("src/deep")).unwrap();
+
+        let ws = Workspace::load(&root).unwrap();
+        let build = vec!["build".to_string()];
+        let scope = |dir: &Path| ws.member_scope(dir, &build).map(|m| m.name.clone());
+
+        assert_eq!(scope(&api), Some("api".to_string()));
+        assert_eq!(scope(&api.join("src/deep")), Some("api".to_string()));
+        assert_eq!(scope(&root), None, "the root means the whole monorepo");
+        assert_eq!(scope(&web), None, "web has no build of its own");
+        assert_eq!(
+            ws.member_scope(&web, &["build".to_string(), "test".to_string()])
+                .map(|m| m.name.as_str()),
+            Some("web")
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// The format ciabatta writes from 0.2.0. Discovery, workflow loading and
     /// the `depends_on` wiring must all behave identically to the TOML fixtures
     /// the rest of this module uses.
@@ -1092,6 +1181,9 @@ mod tests {
             );
         }
         for key in Workflow::KNOWN_KEYS {
+            if Workflow::KEY_ALIASES.contains(key) {
+                continue;
+            }
             assert!(
                 serialized.contains_key(*key),
                 "KNOWN_KEYS lists `{key}`, which is not a Workflow field"

@@ -515,6 +515,41 @@ impl Client {
         Ok(())
     }
 
+    /// Record a finished build in the project's feed. See [`super::builds`].
+    pub async fn report_build(
+        &self,
+        project: &str,
+        record: &super::builds::BuildRecord,
+    ) -> Result<()> {
+        self.authed(
+            self.http
+                .post(self.url(&format!("/api/projects/{project}/builds"))),
+        )
+        .timeout(TIMEOUT)
+        .json(record)
+        .send()
+        .await
+        .context("Failed to report the build")?
+        .error_for_status()
+        .context("Failed to report the build")?;
+        Ok(())
+    }
+
+    /// The releases a project has published. See [`crate::run::release`].
+    pub async fn releases(&self, project: &str) -> Result<Vec<crate::run::release::ReleaseInfo>> {
+        let response = self
+            .authed(
+                self.http
+                    .get(self.url(&format!("/api/projects/{project}/releases"))),
+            )
+            .timeout(TIMEOUT)
+            .send()
+            .await
+            .with_context(|| format!("Could not reach the remote cache at {}", self.base))?;
+        let body: serde_json::Value = parse(response).await?;
+        Ok(serde_json::from_value(body["releases"].clone()).unwrap_or_default())
+    }
+
     /// What every checkout of a project has run, as the server has it.
     pub async fn workflows(&self, project: &str) -> Result<Vec<crate::run::history::Record>> {
         let response = self

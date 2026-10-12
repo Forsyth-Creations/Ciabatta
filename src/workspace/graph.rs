@@ -752,6 +752,7 @@ fn compile(
             env.extend(workflow.env.clone());
             env.extend(step.env.clone());
             compiled.env = env;
+            compiled.required_env = workflow.required_env.clone();
 
             // The `.env` files this step resolves through, outermost first: the
             // workspaces above it, then its own, then whatever the workflow
@@ -901,6 +902,7 @@ fn compile(
             env.extend(workflow.env.clone());
             env.extend(step.env.clone());
             compiled.env = env;
+            compiled.required_env = workflow.required_env.clone();
             compiled.env_files = member_chain.clone();
             for file in &workflow.env_file {
                 let path = join_rel(&member.rel, file);
@@ -917,7 +919,7 @@ fn compile(
             graph.steps.push(compiled);
         }
 
-        // A background target's own `REQUIRED_ENV` is the run's too: it has to
+        // A background target's own `required_env` is the run's too: it has to
         // start, and it cannot start without them.
         for var in &workflow.required_env {
             if !graph.required_env.contains(var) {
@@ -1619,7 +1621,7 @@ mod tests {
         assert!(err.contains("API_TOKEN"), "and the variables: {err}");
         assert!(err.contains("env_default"), "and the fix: {err}");
 
-        // A member with no REQUIRED_ENV is asked for nothing.
+        // A member with no required_env is asked for nothing.
         let web = member(&root, "packages/web", "[workspace]\nname = \"web\"\n");
         workflow(&web, "bundle", "[[steps]]\nname = \"b\"\nrun = \"true\"\n");
         let ws = Workspace::load(&root).unwrap();

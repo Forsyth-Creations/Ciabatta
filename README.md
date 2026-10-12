@@ -196,6 +196,7 @@ artifacts are published from. For workflows it goes one level further out: the
 | `ciabatta dry-run [TARGET...]` | What a run would reuse from the cache and what it would rebuild — and for a rebuild, exactly what changed. Runs nothing. `--diff` for the lines. |
 | `ciabatta cache <init\|status\|prune\|clean>` | Set up and inspect the build cache. `init [WORKFLOW]` proposes inputs and outputs from what's actually in the directory and writes them into that workflow's file. |
 | `ciabatta remote-cache <init\|start\|login\|logout\|status\|add-user>` | Run or connect to a shared cache the whole team reads from. |
+| `ciabatta releases <list\|push\|pull>` | Versioned releases: list what's been published, or push and pull one by hand. See [Releases](#releases). |
 | `ciabatta self update` | Update this binary from the remote cache that serves it, verified against the SHA-256 it advertises. |
 | `ciabatta convert --script PATH` | Turn an existing script into a workflow: its tools, its variables, its outputs, and the description in its header. |
 | `ciabatta register` | Tell the daemon this checkout exists, so it shows up in the web app's project switcher. `init` does this for you. |
@@ -229,9 +230,15 @@ Useful flags on any workflow (`ciabatta build`, `ciabatta release`, …):
 - `--dry-run` — walk every step, executing none of them.
 - `--only MEMBER` — start from one sub-workspace. Its dependencies still come
   along, so the result stays correct. Repeatable.
+- **From inside a package, a run is scoped to it.** `cd packages/api &&
+  ciabatta build` is `ciabatta build --only api`, as long as that package
+  defines `build` itself (it says so on stderr). `--all` runs the whole
+  monorepo's graph anyway.
 - `--isolated` — don't follow dependencies out of what you selected, for when
   everything upstream is already built.
 - `-e, --env KEY=VALUE` — set a variable for every step. Repeatable.
+- `--release VERSION` — the release a `kind: release-pull` step fetches (and a
+  push publishes, unless the step names a version). Sets `CIABATTA_RELEASE`.
 - `--tui` — run inside the live terminal UI. **Runs print plain text by
   default**, which is what CI wants and what you can pipe; the TUI is opt-in.
   (`--no-tui` is still accepted and does nothing.)
@@ -294,7 +301,7 @@ the same graph.
 description: Compile the API service
 owner: Ada
 needs: [proto:generate]        # cross-package deps for this workflow
-REQUIRED_ENV: [API_TOKEN]      # refuse to start unless set
+required_env: [API_TOKEN]      # refuse to start unless set
 env_file: .env                 # relative to this package (and the default)
 env_default: .env.default      # the checked-in template .env comes from
 
@@ -766,7 +773,7 @@ so a complex pipeline doesn't clutter `ciabatta.yaml`:
 ```yaml
 # packages/web/.ciabatta/workflows/deploy.yaml — the filename is the name.
 description: Migrate and release the web app
-REQUIRED_ENV: [RUN_TOKEN, AWS_REGION]     # gate the whole graph
+required_env: [RUN_TOKEN, AWS_REGION]     # gate the whole graph
 
 steps:
   - name: build
@@ -811,7 +818,7 @@ They're listed apart, in yellow, in the environment summary before the run, in
 the TUI log, and on the run's page — with a nudge to move them into an env
 profile if the run needs them every time.
 
-**`REQUIRED_ENV`** lists variables the workflow needs. Before anything runs,
+**`required_env`** lists variables the workflow needs. Before anything runs,
 each is checked; if one is empty or unset the run is aborted — the missing
 names are printed to the console and shown in the `--gui` view, and no step runs.
 
@@ -831,14 +838,14 @@ before executing it:
 ```
 Environment for 'web' — 5 variable(s) this run depends on
   sourcing .env
-  API_TOKEN     ••••••••                  [environment · REQUIRED_ENV · used by deploy]
-  AWS_REGION    eu-west-1                 [env file · .env · REQUIRED_ENV · used by deploy]
-  STAGE         prod                      [environment · REQUIRED_ENV · used by build, deploy]
+  API_TOKEN     ••••••••                  [environment · required_env · used by deploy]
+  AWS_REGION    eu-west-1                 [env file · .env · required_env · used by deploy]
+  STAGE         prod                      [environment · required_env · used by build, deploy]
   DATABASE_URL  postgres://localhost/app  [env file · .env]
   JOBS          4                         [config · used by build]
 ```
 
-The list is everything the run is actually wired to: `REQUIRED_ENV`, every key
+The list is everything the run is actually wired to: `required_env`, every key
 in the `.env` files it sources, the `[env]` tables that cascade from
 sub-workspace to workflow to step, and every `$VAR` the step commands, working
 directories and `when` / `skip_if` conditions read. Each line says where the
@@ -926,7 +933,9 @@ cache:
   exclude: [packages/api/target]        # never counted as an input, so a build
                                         # can't invalidate itself with its own
                                         # output
-  env: [PROFILE]                        # variables the RESULT depends on
+  env: [PROFILE]                        # OPTIONAL: extra variables to key on.
+                                        # Every `env:` and `required_env`
+                                        # variable already keys the cache.
 
 steps:
   - name: compile
@@ -946,6 +955,10 @@ which is the fastest way to check you got the prefix right.
 `ciabatta cache init` writes the prefix for you — run it in the package and it
 proposes paths already rooted correctly.
 
+Patterns are globs, and `**` means "at any depth" however you write it:
+`src/**/*.rs`, `src/**.rs` and `**.json` all work — `**.json` is every `.json`
+file below the workspace root.
+
 A step can narrow it further with its own `cache:`, layered over the workflow's
 field by field — so a step that declares only `env:` keeps the workflow's inputs
 and outputs, and does not silently turn caching off by failing to mention
@@ -959,8 +972,31 @@ A stage has exactly **three** dependencies, and any of them changing is a
 rebuild:
 
 1. its **input files**,
-2. the **environment variables** it declared in `cache.env`,
+2. its **environment variables** — every one it gets from an `env:` table
+   (workspace, workflow or step) and every name in its workflow's
+   `required_env`, plus anything extra listed in `cache.env`,
 3. the **outputs of the stages it needs**.
+
+**Variables key the cache without being repeated.** A workflow declares its
+variables in two places, and both are part of every step's key:
+
+```yaml
+# packages/api/.ciabatta/workflows/build.yaml
+env:                     # set for every step, by value
+  MODE: release
+required_env: [API_URL, DEPLOY_TOKEN]   # must be set, or the run won't start
+```
+
+Change `MODE`, or run with a different `API_URL`, and the steps rebuild.
+`required_env` values go into the key (and the stored manifest, which is
+shared through the remote cache) as a SHA-256 digest, because that is where
+tokens get declared: a new token still invalidates the entry, but the token
+itself is never written down. `cache.env` is only for a variable a build reads
+from the ambient environment without declaring it. (`REQUIRED_ENV`, the
+spelling before 0.6.0, still works.)
+
+The run page shows both lists — `required_env` first, then `env`, then anything
+else the steps read — and marks every variable that is part of a cache key.
 
 The third is what makes a *graph* cacheable rather than just a directory. Change
 a `.proto` file and `proto:generate` misses; its outputs change; every stage
@@ -1018,6 +1054,14 @@ cache:
 graph; click it for the entry it used. *Inspect cache*, in a run's header,
 shows what the cache decided for every step — reused, missed and why, or blocked
 by an upstream step — with what to change for each.
+
+In inspect mode every node also shows the start of its **cache key**, and
+clicking a step lists **every file behind that key with its SHA-256** — the
+inputs the key was computed from and the outputs that were stored (or, while
+the step is still building, the outputs on disk right now). The hashes are the
+ones `sha256sum` prints, and the copy button gives the list in the format
+`sha256sum -c` checks, so "is the cache seeing the file I think it is?" is a
+question you can answer by hand.
 
 ### Proving the inputs are right: `--authoritative`
 
@@ -1144,6 +1188,20 @@ page, add one `admin: true` user to `auth.users` in the config, set
 `auth.mode: token`, and restart. Server-managed users live in
 `<storage>/users.json`; config-declared ones stay yours, and the page will
 neither shadow nor delete them.
+
+### Builds, kept on the server
+
+Every run in a workspace with a `cache.remote` reports itself to the server
+when it finishes: the workflow, how it ended and how long it took, who ran it
+and where (and under which CI system), the branch, commit and tag, and **the
+flow it ran** — every step with what it needed, its status and timing, and
+what the cache made of it (reused from where, under which key, or why not).
+Metadata only: logs never leave the machine that produced them.
+
+The server's page has a **Builds** view — also at `/builds` — listing them
+newest first across every project; click one to see its flow drawn as a graph
+and its steps in a table. The latest 500 builds per project are kept, and a
+project's go with it when it is forgotten.
 
 ### TLS
 
@@ -1307,6 +1365,73 @@ Nothing updates automatically. A build tool that swaps its own binary out from
 under a running CI job is a bad build tool; this notices, tells you, and waits
 to be asked.
 
+## Releases
+
+A cache entry is found by what went *into* a build, and ages out when nobody
+asks for it. That's right for skipping work and wrong for shipping it: a deploy
+wants "the files of v1.4.2", whatever the tree looks like today, still there
+next month. A **release** is a labelled cache entry — the same verified
+artifacts, shared through the same remote cache — stored under a name and a
+version instead of its inputs, and **never evicted** by retention.
+
+Two step kinds put releases on the graph:
+
+```yaml
+# packages/api/.ciabatta/workflows/build.yaml — runs in CI on a tag
+steps:
+  - name: compile
+    run: make dist
+  - name: publish
+    kind: release-push
+    needs: [compile]
+    release:
+      files: ["dist/**"]          # relative to the step's directory
+
+# packages/api/.ciabatta/workflows/deploy.yaml
+steps:
+  - name: fetch
+    kind: release-pull            # writes dist/ back where the push found it
+  - name: ship
+    needs: [fetch]
+    run: ./scripts/deploy.sh dist/
+```
+
+```bash
+ciabatta deploy --release v1.4.2    # fetch exactly that build, then deploy it
+```
+
+**The version is always explicit.** A push uses `release.version` if the step
+sets one (with `{VAR}` substitution, e.g. `"{CIABATTA_TAG}"`), else
+`$CIABATTA_RELEASE`, else the **git tag on HEAD** — so a tag build in CI
+publishes under its tag with no configuration at all. A pull uses
+`release.version` or `$CIABATTA_RELEASE`, which `--release <VERSION>` sets, and
+never guesses: deploying "whatever was latest" is how the wrong build reaches
+production.
+
+**A release is immutable.** Re-running a push with the same files is a no-op,
+so a retried CI job doesn't fail; pushing *different* files under an existing
+version is refused unless the step sets `release.overwrite: true`.
+
+The release's **name** defaults to the step's sub-workspace (or the project's
+name in a plain project), so a package's build and deploy workflows agree
+without saying so; set `release.name` to fetch another package's release.
+`release.into` puts pulled files somewhere other than the step's directory.
+
+Releases work without a remote cache — they're kept in this machine's cache —
+but they're meant to be shared: with a `cache.remote` configured, a push that
+can't reach the server fails rather than quietly keeping the release to itself.
+
+By hand:
+
+```bash
+ciabatta releases list                         # local and remote, newest first
+ciabatta releases push v1.4.2 --file 'dist/**' # what a release-push step does
+ciabatta releases pull v1.4.2 --into ./out     # what a release-pull step does
+```
+
+The remote cache's page lists every project's releases under **Releases**
+(also at `/releases`).
+
 ## Environment files
 
 Four rules, in the order they apply:
@@ -1330,7 +1455,7 @@ Four rules, in the order they apply:
    two packages that need the same variable declare it in the workspace above
    them, or each declares it for itself.
 
-`REQUIRED_ENV` resolves up that same chain. A sub-library that needs `API_URL`
+`required_env` resolves up that same chain. A sub-library that needs `API_URL`
 does **not** have to document it if the workspace above it already does —
 demanding a template from every package that reads a shared variable would be
 asking the same question once per package, and would make declaring it once
@@ -1373,7 +1498,7 @@ page shows each step's chain, so "which `.env` did this value come from?" is a
 question with a visible answer.
 
 And one requirement that follows from the third: **a workspace whose workflows
-declare `REQUIRED_ENV` must declare `env_default`.** Not bureaucracy — it's what
+declare `required_env` must declare `env_default`.** Not bureaucracy — it's what
 makes rule 3 possible. A repo where the required variables are written down
 somewhere reviewable is a repo a new person can build; one where they aren't is
 a repo where the answer lives in somebody's shell history.
@@ -1459,7 +1584,7 @@ ciabatta convert --script scripts/build.sh
 
 It reads the script and does the tedious part: the tools it calls, the
 environment variables it reads (and which have no fallback, so they belong in
-`REQUIRED_ENV`), the files it writes, and the description sitting in its own
+`required_env`), the files it writes, and the description sitting in its own
 header comment. Everything it finds is printed for review before it's written,
 and what it can't infer it leaves marked rather than guessing.
 

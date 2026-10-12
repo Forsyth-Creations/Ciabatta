@@ -1077,8 +1077,9 @@ const SECTIONS: DocSection[] = [
             </>,
             <>
               <strong>Environment variables</strong> — the values it reads. Some decide{" "}
-              <em>whether</em> it can run at all (<C>REQUIRED_ENV</C>); some decide{" "}
-              <em>what it produces</em>, and those belong in <C>cache.env</C>.
+              <em>whether</em> it can run at all (<C>required_env</C>); others are set by value
+              (<C>env</C>). Both are part of the cache key, so a build run with different
+              variables is a different build.
             </>,
             <>
               <strong>The steps it needs</strong> — named in <C>needs</C>. If one of them produced
@@ -1241,11 +1242,15 @@ cache:
   inputs:  ["packages/api/src/**/*", "packages/api/Cargo.toml", "Cargo.lock"]
   outputs: ["packages/api/target/release/api"]
   exclude: ["packages/api/target"]   # its own output is not one of its inputs
-  env:     [PROFILE]                 # variables the RESULT depends on
+  env:     [PROFILE]                 # optional: env + required_env already key it
 
 steps:
   - name: compile
     run: cargo build --release`}</Pre>
+        <P>
+          Patterns are globs, and <C>**</C> means &quot;at any depth&quot; however it&apos;s
+          written: <C>src/**/*.rs</C>, <C>src/**.rs</C> and <C>**.json</C> all work.
+        </P>
         <Alert severity="warning" sx={{ my: 2, maxWidth: "78ch" }}>
           <strong>Paths are relative to the workspace root, wherever the block is written.</strong>{" "}
           One project is one cache, so one directory has to be what those paths mean. Getting the
@@ -1319,15 +1324,30 @@ ciabatta cache status           # what the local cache is holding, and what it s
               ambient environment, CI, <C>-e</C>.
             </>,
             <>
-              <strong>Must it be set?</strong> — <C>REQUIRED_ENV</C>, checked before anything
+              <strong>Must it be set?</strong> — <C>required_env</C>, checked before anything
               runs.
             </>,
             <>
-              <strong>Does the result depend on it?</strong> — <C>cache.env</C>, which folds it
-              into the cache key.
+              <strong>Does the result depend on it?</strong> — always, if it&apos;s declared.
+              Every variable in a workflow&apos;s <C>env</C> and <C>required_env</C> is part of
+              the cache key; <C>cache.env</C> is only for something a build reads from the
+              ambient environment without declaring it.
             </>,
           ]}
         />
+
+        <Pre>{`# packages/api/.ciabatta/workflows/build.yaml
+env:                                  # set for every step, by value
+  MODE: release
+required_env: [API_URL, DEPLOY_TOKEN] # must be set, or the run won't start`}</Pre>
+        <P>
+          Both lists key the cache. <C>required_env</C> values go in as a SHA-256 digest — that is
+          where tokens get declared, and cache manifests are shared through the remote cache — so
+          a new token still rebuilds, but the token itself is never written down. The run page
+          shows <C>required_env</C>, then <C>env</C>, then whatever else the steps read, and
+          marks each variable that is part of a cache key with a fingerprint.{" "}
+          <C>REQUIRED_ENV</C>, the spelling before 0.6.0, still works.
+        </P>
 
         <SubHeading>Where values come from</SubHeading>
         <P>Precedence, weakest first:</P>
@@ -1354,7 +1374,7 @@ workspace:
 
         <SubHeading>Refusing to start without one</SubHeading>
         <Pre>{`# packages/api/.ciabatta/workflows/build.yaml
-REQUIRED_ENV: [API_URL, DATABASE_URL]`}</Pre>
+required_env: [API_URL, DATABASE_URL]`}</Pre>
         <P>
           Checked before the first step runs, so a missing token fails in a second with the name
           of what&apos;s missing, rather than fifteen minutes in with a stack trace. Starting the
@@ -1512,7 +1532,7 @@ owner: API Team
 requires: [sh, cargo]            # checked before anything runs
 tags: [backend]                  # every step here inherits these
 
-REQUIRED_ENV: [API_URL]
+required_env: [API_URL]
 
 # Other packages' workflows that must finish first, on top of whatever
 # workspace.depends_on already says.
@@ -1573,7 +1593,7 @@ steps:
             ["requires", "Executables that must be on PATH, checked before the run starts."],
             ["needs", "Workflows in OTHER packages that must finish first."],
             ["background", "Workflows that must be RUNNING for this one to finish — a mock API, a database. Started first, gate nothing, stopped at the end."],
-            ["REQUIRED_ENV", "Variables that must be set and non-empty, or the run is refused up front."],
+            ["required_env", "Variables that must be set and non-empty, or the run is refused up front."],
             ["env_file", ".env path(s) relative to the package, sourced before the graph runs."],
             ["env", "Variables applied to every step here."],
             ["cache", "What this workflow's builds read, write and key on."],
@@ -1655,7 +1675,8 @@ ciabatta build --tui                 # watch it in the terminal`}</Pre>
 ciabatta test --filter '!tag:flaky'         # everything except the flaky ones
 ciabatta build --filter workspace:api       # one package's steps
 ciabatta build --only api                   # start from api; its dependencies still come
-ciabatta build --only api --isolated        # …and don't follow them at all`}</Pre>
+ciabatta build --only api --isolated        # …and don't follow them at all
+cd packages/api && ciabatta build           # same as --only api; --all for everything`}</Pre>
         <P>
           Selectors are <C>tag:</C>, <C>workspace:</C> (alias <C>member:</C>), <C>kind:</C>,{" "}
           <C>owner:</C>, <C>step:</C>, or a bare word that searches all of them plus descriptions.
@@ -1810,6 +1831,12 @@ ciabatta build --only api --isolated        # …and don't follow them at all`}<
               on the run&apos;s page points these out.
             </>,
             <>
+              <strong>Check what the cache is hashing.</strong> In cache inspect mode each node
+              shows the start of its key, and clicking a step lists every input and output behind
+              that key with its SHA-256 — the value <C>sha256sum</C> prints — with a copy button
+              that produces a <C>sha256sum -c</C> file.
+            </>,
+            <>
               <strong>Workspace names can&apos;t contain <C>:</C></strong> — it&apos;s how steps
               and sub-workflows are addressed (<C>api:compile</C>), so <C>api:v2</C> would be
               ambiguous. Ciabatta refuses the name and suggests one; a directory with a colon in
@@ -1834,9 +1861,9 @@ ciabatta build --only api --isolated        # …and don't follow them at all`}<
               for that?&quot;.
             </>,
             <>
-              <strong>Declare the variables your output depends on</strong> in <C>cache.env</C>.
-              The Run page flags every variable a step reads without declaring — that list is your
-              to-do.
+              <strong>Declare the variables your output depends on</strong> in the workflow&apos;s{" "}
+              <C>env</C> or <C>required_env</C> — both key the cache. The Run page flags every
+              variable a step reads without declaring — that list is your to-do.
             </>,
             <>
               <strong>
@@ -1847,7 +1874,7 @@ ciabatta build --only api --isolated        # …and don't follow them at all`}<
             </>,
             <>
               <strong>
-                Use <C>REQUIRED_ENV</C> freely.
+                Use <C>required_env</C> freely.
               </strong> Failing in one second with a name beats
               failing in fifteen minutes with a stack trace.
             </>,
@@ -2199,6 +2226,16 @@ ciabatta remote-cache status         # hit rate, storage, retention`}</Pre>
           trace left in your project.
         </P>
 
+        <SubHeading>Builds, kept on the server</SubHeading>
+        <P>
+          Every run in a workspace with a <C>cache.remote</C> reports itself when it finishes: the
+          workflow, how it ended, who ran it and where, the branch, commit and tag, and{" "}
+          <strong>the flow it ran</strong> — each step with what it needed, its status and timing,
+          and what the cache made of it. Metadata only; logs never leave the machine. The
+          server&apos;s page lists them under <strong>Builds</strong> (also at <C>/builds</C>),
+          and opening one draws its flow as a graph. The latest 500 per project are kept.
+        </P>
+
         <SubHeading>Handing out ciabatta itself</SubHeading>
         <P>
           Point the server at the binaries you want your team on. It hashes them, mentions the
@@ -2212,6 +2249,66 @@ ciabatta remote-cache status         # hit rate, storage, retention`}</Pre>
           Nothing updates automatically. A build tool that swaps its own binary out from under a
           running CI job is a bad build tool; this notices, tells you, and waits to be asked.
         </P>
+      </>
+    ),
+  },
+  {
+    id: "releases",
+    group: "Reference",
+    title: "Releases",
+    body: (
+      <>
+        <P>
+          A cache entry is found by what went <em>into</em> a build and ages out when nobody asks
+          for it — right for skipping work, wrong for shipping it. A <strong>release</strong> is
+          a labelled cache entry: the same verified artifacts, shared through the same remote
+          cache, stored under a name and a version instead of its inputs, and{" "}
+          <strong>never evicted</strong>.
+        </P>
+        <Pre>{`# build.yaml — runs in CI on a tag
+steps:
+  - name: compile
+    run: make dist
+  - name: publish
+    kind: release-push
+    needs: [compile]
+    release:
+      files: ["dist/**"]        # relative to the step's directory
+
+# deploy.yaml
+steps:
+  - name: fetch
+    kind: release-pull          # writes dist/ back where the push found it
+  - name: ship
+    needs: [fetch]
+    run: ./scripts/deploy.sh dist/`}</Pre>
+        <Pre>{`ciabatta deploy --release v1.4.2`}</Pre>
+        <Bullets
+          items={[
+            <>
+              <strong>The version is explicit.</strong> A push uses <C>release.version</C> (with{" "}
+              <C>{"{VAR}"}</C> substitution), else <C>$CIABATTA_RELEASE</C>, else the git tag on
+              HEAD — so a tag build publishes under its tag with no configuration. A pull uses{" "}
+              <C>release.version</C> or <C>$CIABATTA_RELEASE</C> (what <C>--release</C> sets),
+              and never guesses.
+            </>,
+            <>
+              <strong>A release is immutable.</strong> The same files again is a no-op; different
+              files under an existing version are refused unless <C>release.overwrite: true</C>.
+            </>,
+            <>
+              <strong>Names default to the step&apos;s sub-workspace</strong>, so a package&apos;s
+              build and deploy workflows agree; set <C>release.name</C> to fetch another
+              package&apos;s, and <C>release.into</C> to write somewhere else.
+            </>,
+            <>
+              <C>ciabatta releases list</C>, <C>ciabatta releases push v1.4.2 --file
+              &apos;dist/**&apos;</C> and <C>ciabatta releases pull v1.4.2 --into ./out</C> do the
+              same by hand. The remote cache&apos;s page lists every release under{" "}
+              <strong>Releases</strong>.
+            </>,
+          ]}
+        />
       </>
     ),
   },

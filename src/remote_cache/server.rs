@@ -57,6 +57,9 @@ pub struct AppState {
     /// What every checkout of every project has run, merged — see
     /// [`super::workflows`].
     pub workflows: Arc<super::workflows::Store>,
+    /// Recent builds, per project, with the flow each one ran — see
+    /// [`super::builds`].
+    pub builds: Arc<super::builds::Store>,
     /// Who used what, and when — persisted, unlike the counters it replaced.
     /// See [`super::activity`].
     pub activity: Arc<super::activity::Activity>,
@@ -77,6 +80,7 @@ impl AppState {
         let users = Users::open(&config.server.storage)?;
         let workflows = super::workflows::Store::open(&config.server.storage)?;
         let activity = super::activity::Activity::open(&config.server.storage)?;
+        let builds = super::builds::Store::open(&config.server.storage)?;
         let release = config.releases.scan();
 
         Ok(AppState {
@@ -84,6 +88,7 @@ impl AppState {
             projects: Arc::new(projects),
             users: Arc::new(users),
             workflows: Arc::new(workflows),
+            builds: Arc::new(builds),
             activity: Arc::new(activity),
             sessions: Arc::new(Sessions::open(&config.server.storage)),
             release: Arc::new(std::sync::RwLock::new(release)),
@@ -273,6 +278,14 @@ pub fn router(state: AppState) -> Router {
             "/api/projects/{id}/workflows",
             get(get_workflows).post(report_workflows),
         )
+        .route(
+            "/api/projects/{id}/builds",
+            get(list_builds).post(report_build),
+        )
+        .route("/api/projects/{id}/builds/{build}", get(get_build))
+        .route("/api/builds", get(build_feed))
+        .route("/api/projects/{id}/releases", get(list_releases))
+        .route("/api/releases", get(all_releases))
         .route("/api/projects/{id}/cache/touch", post(touch_entries))
         .route(
             "/api/projects/{id}/cache/{key}",
@@ -288,6 +301,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/release/{platform}", get(download_release))
         // The admin page, last so no API path can be shadowed by it.
         .route("/", get(admin_page))
+        .route("/builds", get(admin_page))
+        .route("/releases", get(admin_page))
         .layer(DefaultBodyLimit::max(MAX_ARTIFACT_BYTES))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
@@ -621,7 +636,11 @@ async fn stats(
     };
     let mut by_size: Vec<&Entry> = entries.iter().collect();
     by_size.sort_by_key(|e| std::cmp::Reverse(e.size));
-    let mut by_age: Vec<&Entry> = entries.iter().collect();
+    // "First to be evicted" must not list what retention never evicts.
+    let mut by_age: Vec<&Entry> = entries
+        .iter()
+        .filter(|e| !crate::run::release::is_release(e))
+        .collect();
     by_age.sort_by(|a, b| a.last_touched().cmp(b.last_touched()));
 
     let max_bytes = state.config.retention.max_size_bytes().ok().flatten();
@@ -749,6 +768,7 @@ async fn forget_project(
         tracing::warn!("couldn't forget {id}'s workflow history: {e:#}");
     }
     state.activity.forget(&id);
+    state.builds.forget(&id);
 
     if !state.projects.forget(&id)? {
         return Err(ApiError::not_found(format!("No project {id}")));
@@ -901,6 +921,151 @@ async fn report_workflows(
         .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     Ok(Json(json!({ "ok": true, "workflows": known })))
+}
+
+/// Record a finished build in the project's feed.
+///
+/// Any identity may report, read-only included, for the same reason it may
+/// report workflow history: saying what ran changes nothing anybody builds,
+/// and read-only CI runners are the builds the feed most wants.
+async fn report_build(
+    State(state): State<AppState>,
+    headers: header::HeaderMap,
+    Path(id): Path<String>,
+    Json(mut record): Json<super::builds::BuildRecord>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let identity = state.identify(&headers)?;
+    require_project(&state, &id)?;
+    if record.id.trim().is_empty() || record.id.len() > 64 {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "a build record needs an id of at most 64 characters",
+        ));
+    }
+    record.steps.truncate(super::builds::MAX_STEPS);
+    record.reported_by = Some(identity.name).filter(|n| !n.is_empty());
+    state
+        .builds
+        .add(&id, &record)
+        .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")))?;
+    Ok(Json(json!({ "ok": true, "id": record.id })))
+}
+
+#[derive(Deserialize)]
+struct BuildsQuery {
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+/// A project's recent builds, newest first, without their steps.
+async fn list_builds(
+    State(state): State<AppState>,
+    headers: header::HeaderMap,
+    Path(id): Path<String>,
+    Query(query): Query<BuildsQuery>,
+) -> ApiResult<Json<serde_json::Value>> {
+    state.identify(&headers)?;
+    require_project(&state, &id)?;
+    let limit = query.limit.unwrap_or(100);
+    let builds: Vec<_> = state
+        .builds
+        .list(&id, limit)
+        .iter()
+        .map(|record| record.summary())
+        .collect();
+    Ok(Json(json!({ "builds": builds })))
+}
+
+/// One build, with the flow it ran.
+async fn get_build(
+    State(state): State<AppState>,
+    headers: header::HeaderMap,
+    Path((id, build)): Path<(String, String)>,
+) -> ApiResult<Json<serde_json::Value>> {
+    state.identify(&headers)?;
+    require_project(&state, &id)?;
+    let record = state
+        .builds
+        .get(&id, &build)
+        .ok_or_else(|| ApiError::not_found(format!("No build {build} in project {id}")))?;
+    let name = state.projects.get(&id).map(|p| p.name).unwrap_or_default();
+    Ok(Json(
+        json!({ "project": id, "project_name": name, "build": record }),
+    ))
+}
+
+/// Every project's recent builds in one feed, newest first.
+async fn build_feed(
+    State(state): State<AppState>,
+    headers: header::HeaderMap,
+    Query(query): Query<BuildsQuery>,
+) -> ApiResult<Json<serde_json::Value>> {
+    state.identify(&headers)?;
+    let projects = state.projects.list();
+    let names: std::collections::BTreeMap<String, String> = projects
+        .iter()
+        .map(|p| (p.id.clone(), p.name.clone()))
+        .collect();
+    let ids: Vec<String> = names.keys().cloned().collect();
+    let builds: Vec<serde_json::Value> = state
+        .builds
+        .feed(&ids, query.limit.unwrap_or(100).min(500))
+        .into_iter()
+        .map(|(project, record)| {
+            let mut summary = serde_json::to_value(record.summary()).unwrap_or_default();
+            summary["project"] = json!(project);
+            summary["project_name"] = json!(names.get(&project).cloned().unwrap_or_default());
+            summary
+        })
+        .collect();
+    Ok(Json(json!({ "builds": builds })))
+}
+
+/// A project's releases, newest first. See [`crate::run::release`].
+async fn list_releases(
+    State(state): State<AppState>,
+    headers: header::HeaderMap,
+    Path(id): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    state.identify(&headers)?;
+    require_project(&state, &id)?;
+    let mut releases: Vec<crate::run::release::ReleaseInfo> = state
+        .store
+        .list()?
+        .iter()
+        .filter(|e| e.workspace == id)
+        .filter_map(crate::run::release::ReleaseInfo::of)
+        .collect();
+    releases.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    Ok(Json(json!({ "releases": releases })))
+}
+
+/// Every project's releases, for the page.
+async fn all_releases(
+    State(state): State<AppState>,
+    headers: header::HeaderMap,
+) -> ApiResult<Json<serde_json::Value>> {
+    state.identify(&headers)?;
+    let names: std::collections::BTreeMap<String, String> = state
+        .projects
+        .list()
+        .into_iter()
+        .map(|p| (p.id, p.name))
+        .collect();
+    let mut releases: Vec<serde_json::Value> = state
+        .store
+        .list()?
+        .iter()
+        .filter_map(|entry| {
+            let info = crate::run::release::ReleaseInfo::of(entry)?;
+            let mut value = serde_json::to_value(&info).ok()?;
+            value["project"] = json!(entry.workspace);
+            value["project_name"] = json!(names.get(&entry.workspace).cloned().unwrap_or_default());
+            Some(value)
+        })
+        .collect();
+    releases.sort_by(|a, b| b["created_at"].as_str().cmp(&a["created_at"].as_str()));
+    Ok(Json(json!({ "releases": releases })))
 }
 
 /// What every checkout of this project has run.
@@ -1460,6 +1625,74 @@ mod tests {
             .header(header::CONTENT_TYPE, "application/json")
             .body(Body::from(body.to_string()))
             .unwrap()
+    }
+
+    /// A run's record goes in, comes back in the project's list and the
+    /// server-wide feed without its steps, and whole when asked for by id.
+    #[tokio::test]
+    async fn builds_are_reported_listed_and_opened() {
+        let dir = scratch("builds");
+        let state = open_state(&dir);
+        let response = router(state.clone())
+            .oneshot(post("/api/projects", r#"{"name":"monorepo"}"#))
+            .await
+            .unwrap();
+        let id = json(response).await["id"].as_str().unwrap().to_string();
+
+        let record = r#"{
+            "id": "b-1", "workflow": "build", "outcome": "success",
+            "started_at": "2026-10-01T00:00:00Z", "finished_at": "2026-10-01T00:01:00Z",
+            "duration_ms": 60000, "branch": "main", "commit": "abc",
+            "steps": [
+                {"name": "compile", "status": "reused", "cache": "hit"},
+                {"name": "test", "status": "success", "needs": ["compile"]}
+            ]
+        }"#;
+        let response = router(state.clone())
+            .oneshot(post(&format!("/api/projects/{id}/builds"), record))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let list = json(
+            router(state.clone())
+                .oneshot(get(&format!("/api/projects/{id}/builds")))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(list["builds"][0]["id"], "b-1");
+        assert_eq!(list["builds"][0]["reused"], 1);
+        assert_eq!(list["builds"][0]["steps"].as_array().unwrap().len(), 0);
+
+        let feed = json(
+            router(state.clone())
+                .oneshot(get("/api/builds"))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(feed["builds"][0]["project_name"], "monorepo");
+
+        let one = json(
+            router(state.clone())
+                .oneshot(get(&format!("/api/projects/{id}/builds/b-1")))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(one["build"]["steps"][1]["needs"][0], "compile");
+
+        let missing = router(state.clone())
+            .oneshot(get(&format!("/api/projects/{id}/builds/nope")))
+            .await
+            .unwrap();
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+
+        // The page is served at /builds as well as /.
+        let page = router(state.clone()).oneshot(get("/builds")).await.unwrap();
+        assert_eq!(page.status(), StatusCode::OK);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]

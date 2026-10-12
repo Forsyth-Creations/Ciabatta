@@ -3,7 +3,7 @@
 import { useQuery } from "@tanstack/react-query";
 
 import { api } from "./client";
-import type { CachePlan, CacheStatus, RemoteStatus } from "./types";
+import type { CachePlan, CacheStatus, FileHash, RemoteStatus } from "./types";
 
 export const cacheKeys = {
   status: (project: string) => ["cache", "status", project] as const,
@@ -69,4 +69,43 @@ export function humanizeBytes(bytes: number): string {
     unit += 1;
   }
   return unit === 0 ? `${bytes} B` : `${value.toFixed(1)} ${units[unit]}`;
+}
+
+/** Every file the cache saw under one key, each with its hash. */
+export interface CacheKeyFiles {
+  key: string;
+  target: string;
+  workspace: string;
+  /** Whether an entry was stored under this key. When false, the inputs are
+   *  what the run keyed the step on and the outputs are as they stand on disk
+   *  right now — the step is still building, failed, or stores nothing. */
+  stored: boolean;
+  at: string;
+  algorithm: string;
+  inputs: FileHash[];
+  outputs: FileHash[];
+  env: string[];
+  upstream: Record<string, string>;
+}
+
+/**
+ * The files behind a cache key, fetched when a step is opened rather than
+ * carried in the run's stream. Refetched while the step may still be writing
+ * its outputs, so the list fills in as it builds.
+ */
+export function useCacheKeyFiles(
+  project: string | undefined,
+  key: string | null | undefined,
+  live: boolean,
+) {
+  return useQuery({
+    queryKey: ["cache", "files", project ?? "", key ?? ""] as const,
+    queryFn: () =>
+      api.get<CacheKeyFiles>(
+        `/api/cache/files?${new URLSearchParams({ project: project ?? "", key: key ?? "" })}`,
+      ),
+    enabled: Boolean(project && key),
+    refetchInterval: live ? 3_000 : false,
+    retry: false,
+  });
 }

@@ -326,7 +326,11 @@ function rebuildLabel(reason: RebuildReason): string {
     case "never_built":
       return "never built with these inputs";
     case "inputs_changed":
-      return `${reason.total} input file(s) changed`;
+      return reason.total === 0
+        ? "its key changed though no input file did"
+        : `${reason.total} input file(s) changed`;
+    case "env_changed":
+      return `variable(s) it keys on changed: ${reason.vars.join(", ")}`;
     case "outputs_missing":
       return "expected outputs are missing";
     case "outputs_modified":

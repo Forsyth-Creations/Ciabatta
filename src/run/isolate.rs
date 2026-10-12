@@ -205,7 +205,7 @@ impl Isolation {
     fn link_ambient(&self, sandbox: &Path) -> Result<usize> {
         let mut linked = 0usize;
         for pattern in &self.also {
-            let joined = self.root.join(pattern);
+            let joined = self.root.join(crate::cache::normalize_glob(pattern));
             let Some(as_str) = joined.to_str() else {
                 continue;
             };

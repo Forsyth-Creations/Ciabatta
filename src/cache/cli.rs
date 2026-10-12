@@ -347,7 +347,7 @@ fn dedup(mut values: Vec<String>) -> Vec<String> {
 
 /// Whether a glob matches at least one file under `dir`.
 fn matches_anything(dir: &Path, pattern: &str) -> bool {
-    let joined = dir.join(pattern);
+    let joined = dir.join(crate::cache::normalize_glob(pattern));
     let Some(as_str) = joined.to_str() else {
         return false;
     };

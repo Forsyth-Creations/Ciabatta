@@ -265,7 +265,7 @@ fn walk_files(dir: &Path) -> Result<Vec<PathBuf>> {
 
 /// Expand a glob `pattern` (relative to `root`) into the matching regular files.
 fn glob_files(root: &Path, pattern: &str) -> Result<Vec<PathBuf>> {
-    let full = root.join(pattern);
+    let full = root.join(crate::cache::normalize_glob(pattern));
     let entries = glob::glob(&full.to_string_lossy())
         .with_context(|| format!("Invalid glob pattern '{}'", pattern))?;
     let mut files = Vec::new();

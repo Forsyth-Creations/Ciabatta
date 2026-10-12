@@ -466,6 +466,54 @@ pub fn list_matching(dir: &Path, patterns: &[String], exclude: &[String]) -> Res
     matching(dir, patterns, exclude, false)
 }
 
+/// Rewrite a `**` glued to other text into the spelling the matcher accepts.
+///
+/// `**.json`, `src/**.rs` and `assets/img**` are how most tools let you write
+/// "at any depth", but the `glob` crate only treats `**` as recursive when it
+/// is a whole path component, and refuses anything else as an invalid pattern.
+/// So `**.json` becomes `**/*.json` — every `.json` file at any depth — and a
+/// component like `img**` becomes `img*/**`: whatever starts with `img`, and
+/// everything below it. A pattern already written the strict way is returned
+/// untouched.
+pub fn normalize_glob(pattern: &str) -> String {
+    if !pattern.contains("**") {
+        return pattern.to_string();
+    }
+    let parts: Vec<String> = pattern
+        .split('/')
+        .map(|component| {
+            if component == "**" || !component.contains("**") {
+                return component.to_string();
+            }
+            // A run of stars longer than two means the same as two.
+            let mut squeezed = component.to_string();
+            while squeezed.contains("***") {
+                squeezed = squeezed.replace("***", "**");
+            }
+            let pieces: Vec<&str> = squeezed.split("**").collect();
+            let mut out: Vec<String> = Vec::new();
+            for (i, piece) in pieces.iter().enumerate() {
+                let first = i == 0;
+                let last = i == pieces.len() - 1;
+                match (piece.is_empty(), first, last) {
+                    (true, _, _) => {}
+                    // Text before the first `**`: the start of a name.
+                    (false, true, _) => out.push(format!("{piece}*")),
+                    // Text after the last `**`: the end of a name.
+                    (false, _, true) => out.push(format!("*{piece}")),
+                    (false, _, _) => out.push(format!("*{piece}*")),
+                }
+                if !last {
+                    out.push("**".to_string());
+                }
+            }
+            out.dedup_by(|a, b| a == "**" && b == "**");
+            out.join("/")
+        })
+        .collect();
+    parts.join("/")
+}
+
 fn matching(
     dir: &Path,
     patterns: &[String],
@@ -475,11 +523,12 @@ fn matching(
     let mut seen: BTreeMap<String, FileHash> = BTreeMap::new();
 
     for pattern in patterns {
+        let normalized = normalize_glob(pattern);
         // `glob` has no notion of a trailing slash; strip it so `src/` reaches
         // the directory itself and is then walked like any other. A leading
         // `./` goes too, or it would survive into every relative path the walk
         // produces and no stored manifest would ever match.
-        let trimmed = pattern
+        let trimmed = normalized
             .trim_end_matches(['/', '\\'])
             .trim_start_matches("./")
             .trim_start_matches(".\\");
@@ -581,6 +630,7 @@ fn is_excluded(rel: &str, dir: &Path, exclude: &[String]) -> bool {
         if as_prefix {
             return true;
         }
+        let pattern = &normalize_glob(pattern);
         glob::Pattern::new(pattern).is_ok_and(|p| p.matches(rel))
             || dir
                 .join(pattern)
@@ -1163,6 +1213,46 @@ mod tests {
                 .len(),
             1
         );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_double_star_glued_to_text_is_rewritten_into_whole_components() {
+        assert_eq!(normalize_glob("**.json"), "**/*.json");
+        assert_eq!(normalize_glob("config/**.json"), "config/**/*.json");
+        assert_eq!(normalize_glob("assets/img**"), "assets/img*/**");
+        assert_eq!(normalize_glob("a**b"), "a*/**/*b");
+        assert_eq!(normalize_glob("***.json"), "**/*.json");
+        // Already strict: untouched.
+        assert_eq!(normalize_glob("src/**/*.rs"), "src/**/*.rs");
+        assert_eq!(normalize_glob("dist/**"), "dist/**");
+        assert_eq!(normalize_glob("*.json"), "*.json");
+    }
+
+    /// `**.json` used to be refused outright as an invalid pattern.
+    #[test]
+    fn a_double_star_extension_pattern_matches_at_every_depth() {
+        let dir = scratch("double-star-ext");
+        write(&dir, "package.json", "{}");
+        write(&dir, "config/app.json", "{}");
+        write(&dir, "config/deep/more.json", "{}");
+        write(&dir, "config/readme.md", "# no");
+
+        let all = hash_matching(&dir, &["**.json".to_string()], &[]).unwrap();
+        let paths: Vec<&str> = all.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(
+            paths,
+            vec!["config/app.json", "config/deep/more.json", "package.json"]
+        );
+
+        let under = hash_matching(&dir, &["config/**.json".to_string()], &[]).unwrap();
+        assert_eq!(under.len(), 2);
+
+        // And as an exclude.
+        let kept = hash_matching(&dir, &["config".to_string()], &["**.json".to_string()]).unwrap();
+        let kept: Vec<&str> = kept.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(kept, vec!["config/readme.md"]);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

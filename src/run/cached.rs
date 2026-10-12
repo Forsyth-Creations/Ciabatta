@@ -578,6 +578,25 @@ impl Session {
         let inputs = config.hash_inputs(&dir, member.as_deref())?;
         let env_declared = crate::cache::graph::declared_env(&config, &env_map);
 
+        // What the run view's file list reads, for a step still building or
+        // one that never stores an entry. Best-effort: it's a debugging aid.
+        if let Some(key) = decision.key() {
+            let inspection = crate::cache::store::Inspection {
+                key: key.to_string(),
+                target: step.name.clone(),
+                workspace: workspace.clone(),
+                decided_at: crate::cache::store::now(),
+                inputs: inputs.clone(),
+                env: env_declared.keys().cloned().collect(),
+                upstream: upstream.clone(),
+                dir: dir.clone(),
+                output_patterns: config.outputs.clone(),
+            };
+            if let Err(e) = self.store.write_inspection(&inspection) {
+                tracing::debug!("couldn't record what {} was keyed on: {e:#}", step.name);
+            }
+        }
+
         let mut report = self.report_base(
             match &decision {
                 Decision::Fresh { .. } => "fresh",
@@ -1163,7 +1182,7 @@ fn rebuild_hints(
 /// Whether an output pattern covers `path` — a glob match, or a directory
 /// pattern the path sits under.
 fn glob_covers(pattern: &str, path: &str) -> bool {
-    if glob::Pattern::new(pattern).is_ok_and(|p| p.matches(path)) {
+    if glob::Pattern::new(&crate::cache::normalize_glob(pattern)).is_ok_and(|p| p.matches(path)) {
         return true;
     }
     let dir = pattern
@@ -1260,6 +1279,30 @@ mod tests {
             }
         }
         outcomes
+    }
+
+    /// The run view's file list is there from the moment the step is decided,
+    /// with every input hashed, before the step has stored anything.
+    #[tokio::test]
+    async fn deciding_a_step_records_what_it_was_keyed_on() {
+        let root = scratch("inspection");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/lib.rs"), "fn lib() {}").unwrap();
+        let step = cached_step("build", &[], "out");
+
+        let mut session = Session::open(&root, &CiabattaConfig::default()).unwrap();
+        session.before(&step, &HashMap::new()).await.unwrap();
+        let key = session.take_report().unwrap().key.unwrap();
+
+        let store = Store::for_project(&root).unwrap();
+        assert!(store.get(&key).unwrap().is_none(), "nothing stored yet");
+        let inspection = store.inspection(&key).expect("an inspection record");
+        assert_eq!(inspection.target, "build");
+        assert_eq!(inspection.inputs.len(), 1);
+        assert_eq!(inspection.inputs[0].path, "src/lib.rs");
+        assert_eq!(inspection.inputs[0].sha256.len(), 64);
+        assert_eq!(inspection.output_patterns, vec!["out/**/*".to_string()]);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// A reused step hands its dependents the fingerprint of what it *built*,

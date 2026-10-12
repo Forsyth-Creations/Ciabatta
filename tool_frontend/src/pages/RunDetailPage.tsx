@@ -82,6 +82,7 @@ import {
   wasReused,
 } from "../components/CacheReport";
 import { useInspectMode } from "../state/inspect";
+import { CacheKeyFilesView } from "../components/CacheKeyFiles";
 import { ErrorNote, Loading } from "../components/Page";
 import { monoFontStack } from "../theme";
 
@@ -346,6 +347,7 @@ export function RunDetailPage() {
       {workflow && (
         <WorkflowPanel
           runId={id}
+          project={state.run.project}
           workflow={workflow}
           selectedStep={selectedStep}
           onSelectStep={setSelectedStep}
@@ -357,11 +359,13 @@ export function RunDetailPage() {
 
 function WorkflowPanel({
   runId,
+  project,
   workflow,
   selectedStep,
   onSelectStep,
 }: {
   runId: number;
+  project: string;
   workflow: WorkflowView;
   selectedStep: string | null;
   onSelectStep: (name: string | null) => void;
@@ -561,6 +565,7 @@ function WorkflowPanel({
       </Box>
 
       <Inspector
+        project={project}
         workflow={workflow}
         step={step ?? null}
         focused={focused}
@@ -642,6 +647,7 @@ function GraphToggle({
  * click only changes what it says.
  */
 function Inspector({
+  project,
   workflow,
   step,
   focused,
@@ -649,6 +655,7 @@ function Inspector({
   inspect,
   onClear,
 }: {
+  project: string;
   workflow: WorkflowView;
   step: StepView | null;
   focused: string | null;
@@ -657,7 +664,14 @@ function Inspector({
   onClear: () => void;
 }) {
   const body = step ? (
-    <StepInspector workflow={workflow} step={step} now={now} inspect={inspect} onClear={onClear} />
+    <StepInspector
+      project={project}
+      workflow={workflow}
+      step={step}
+      now={now}
+      inspect={inspect}
+      onClear={onClear}
+    />
   ) : focused !== null && isDependencyNode(focused) ? (
     <FocusNote workflow={workflow} focused={focused} onClear={onClear} />
   ) : null;
@@ -690,12 +704,14 @@ function Inspector({
 
 /** A selected step: what it is, what it waits for, and its command. */
 function StepInspector({
+  project,
   workflow,
   step,
   now,
   inspect,
   onClear,
 }: {
+  project: string;
   workflow: WorkflowView;
   step: StepView;
   now: number;
@@ -742,7 +758,7 @@ function StepInspector({
         now={now}
         env={workflow.env.vars.filter((variable) => variable.steps.includes(step.name))}
       />
-      <StepCacheSection step={step} inspect={inspect} />
+      <StepCacheSection project={project} step={step} inspect={inspect} />
     </Stack>
   );
 }
@@ -752,7 +768,15 @@ function StepInspector({
  * mode — the key, the fingerprints of what it keyed on upstream, every file
  * that moved.
  */
-function StepCacheSection({ step, inspect }: { step: StepView; inspect: boolean }) {
+function StepCacheSection({
+  project,
+  step,
+  inspect,
+}: {
+  project: string;
+  step: StepView;
+  inspect: boolean;
+}) {
   if (step.recover) return null;
   if (!step.cache) {
     if (!inspect) return null;
@@ -783,6 +807,15 @@ function StepCacheSection({ step, inspect }: { step: StepView; inspect: boolean 
         Cache
       </Typography>
       <CacheReportView report={step.cache} detailed={inspect} />
+      {inspect && step.cache.key && (
+        <Box sx={{ mt: 1.25, pt: 1, borderTop: 1, borderColor: "divider" }}>
+          <CacheKeyFilesView
+            project={project}
+            cacheKey={step.cache.key}
+            live={step.status === "running" || step.status === "pending"}
+          />
+        </Box>
+      )}
     </Box>
   );
 }
@@ -1028,6 +1061,12 @@ function InspectLine({ step }: { step: StepView }) {
       }}
     >
       {cacheLabel(step.cache)}
+      {step.cache?.key && (
+        <Box component="span" sx={{ fontFamily: monoFontStack, fontWeight: 400, opacity: 0.75 }}>
+          {" · "}
+          {step.cache.key.slice(0, 8)}
+        </Box>
+      )}
     </Box>
   );
 }

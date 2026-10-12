@@ -6,6 +6,10 @@
 //! entries/<key>.json          the manifest: inputs, outputs, when, by whom
 //! artifacts/<key>/<path>      the output files themselves, laid out as they
 //!                             were relative to the workspace directory
+//! inspect/<key>.json          what a run keyed a step on — every input file
+//!                             and its hash — written when the decision is
+//!                             made, so the run view can show it while the
+//!                             step is still building
 //! ```
 //!
 //! Two files per entry rather than one archive, because the manifest is read
@@ -32,6 +36,10 @@ const CACHE_DIR: &str = "cache";
 const ENTRIES_DIR: &str = "entries";
 /// Where the output files live.
 const ARTIFACTS_DIR: &str = "artifacts";
+/// Where the per-key inspection records live.
+const INSPECT_DIR: &str = "inspect";
+/// How long an inspection record outlives a key nothing was stored under.
+const INSPECT_TTL_SECONDS: u64 = 7 * 24 * 60 * 60;
 
 /// One cached build: what went in, what came out, and when.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -105,6 +113,36 @@ pub struct Build {
     pub duration_ms: u64,
 }
 
+/// What a run keyed one step on, written the moment the decision is made.
+///
+/// A manifest only exists once a step has finished and stored something, and
+/// "what is the cache looking at?" is a question asked *during* a build — of a
+/// step that is still running, that failed, or that stores nothing. This is
+/// the answer for those: the key, every input file with its hash, and enough
+/// to hash the outputs as they currently stand.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct Inspection {
+    pub key: String,
+    pub target: String,
+    pub workspace: String,
+    pub decided_at: String,
+    /// The hashed input files, exactly as they went into the key.
+    #[serde(default)]
+    pub inputs: Vec<FileHash>,
+    /// Names of the variables folded into the key. Never their values.
+    #[serde(default)]
+    pub env: Vec<String>,
+    /// Upstream step → fingerprint of what it produced.
+    #[serde(default)]
+    pub upstream: BTreeMap<String, String>,
+    /// Where the step's paths are rooted, and the `outputs` patterns to hash
+    /// under it, so its outputs can be looked at before any are stored.
+    #[serde(default)]
+    pub dir: PathBuf,
+    #[serde(default)]
+    pub output_patterns: Vec<String>,
+}
+
 /// A cache store rooted at a directory.
 #[derive(Debug, Clone)]
 pub struct Store {
@@ -134,6 +172,28 @@ impl Store {
 
     fn manifest_path(&self, key: &str) -> PathBuf {
         self.root.join(ENTRIES_DIR).join(format!("{key}.json"))
+    }
+
+    fn inspection_path(&self, key: &str) -> PathBuf {
+        self.root.join(INSPECT_DIR).join(format!("{key}.json"))
+    }
+
+    /// Record what a step was keyed on. Best-effort by design: losing one only
+    /// costs the run view a file list.
+    pub fn write_inspection(&self, inspection: &Inspection) -> Result<()> {
+        let path = self.inspection_path(&inspection.key);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("Failed to create {}", parent.display()))?;
+        }
+        let body = serde_json::to_string(inspection)?;
+        std::fs::write(&path, body).with_context(|| format!("Failed to write {}", path.display()))
+    }
+
+    /// The inspection record for `key`, if a run has written one.
+    pub fn inspection(&self, key: &str) -> Option<Inspection> {
+        let raw = std::fs::read_to_string(self.inspection_path(key)).ok()?;
+        serde_json::from_str(&raw).ok()
     }
 
     /// Where an entry's output files are kept.
@@ -385,6 +445,7 @@ impl Store {
         let _ = std::fs::remove_file(self.manifest_path(key));
         let _ = std::fs::remove_dir_all(self.artifact_dir(key));
         let _ = std::fs::remove_dir_all(self.snapshot_dir(key));
+        let _ = std::fs::remove_file(self.inspection_path(key));
         Ok(())
     }
 
@@ -396,6 +457,7 @@ impl Store {
         }
         // Artifacts with no manifest — the debris of an interrupted `put`.
         self.sweep_orphans()?;
+        let _ = std::fs::remove_dir_all(self.root.join(INSPECT_DIR));
         Ok(entries.len())
     }
 
@@ -421,7 +483,35 @@ impl Store {
                 removed += 1;
             }
         }
+        self.sweep_inspections(&known);
         Ok(removed)
+    }
+
+    /// Drop inspection records for keys nothing was ever stored under, once
+    /// they're a week old: a run view from last week is the oldest anybody
+    /// reopens, and every edit to an input mints a new key.
+    fn sweep_inspections(&self, known: &[String]) {
+        let Ok(read) = std::fs::read_dir(self.root.join(INSPECT_DIR)) else {
+            return;
+        };
+        for entry in read.flatten() {
+            let path = entry.path();
+            let Some(key) = path.file_stem().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            if known.iter().any(|k| k == key) {
+                continue;
+            }
+            let old = entry
+                .metadata()
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.elapsed().ok())
+                .is_some_and(|age| age.as_secs() > INSPECT_TTL_SECONDS);
+            if old {
+                let _ = std::fs::remove_file(&path);
+            }
+        }
     }
 
     /// Apply a retention policy, evicting whatever breaches it.
@@ -695,6 +785,35 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    /// The run view lists what a step was keyed on before anything is stored,
+    /// and the record goes when its entry does.
+    #[test]
+    fn an_inspection_round_trips_and_goes_with_its_entry() {
+        let root = scratch("inspection");
+        let store = Store::at(root.join("store")).unwrap();
+        let work = root.join("work");
+        let input = build_output(&work, "src/a.rs", "fn a() {}");
+
+        assert!(store.inspection("k1").is_none());
+        let inspection = Inspection {
+            key: "k1".to_string(),
+            target: "build".to_string(),
+            workspace: ".".to_string(),
+            decided_at: now(),
+            inputs: vec![input.clone()],
+            env: vec!["PROFILE".to_string()],
+            dir: work.clone(),
+            output_patterns: vec!["dist".to_string()],
+            ..Default::default()
+        };
+        store.write_inspection(&inspection).unwrap();
+        assert_eq!(store.inspection("k1"), Some(inspection));
+
+        store.remove("k1").unwrap();
+        assert!(store.inspection("k1").is_none());
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     fn build_output(dir: &Path, rel: &str, body: &str) -> FileHash {

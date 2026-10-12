@@ -1497,10 +1497,10 @@ and everything below it is ignored for that variable:
 ```
 1. the terminal                     shell, CI, git-derived CIABATTA_*, -e KEY=VALUE
 2. workflow env files               env_file: on a workflow, e.g. .ciabatta/.env.{DEPLOY_ENV}
-3. the workspace you ran from       .env.<profile>  >  .env  >  .env.default
-4. each enclosing workspace         .env.<profile>  >  .env  >  .env.default
+3. the workspace you ran from       .env (or the elected profile copied into it)  >  .env.default
+4. each enclosing workspace         .env (or the elected profile copied into it)  >  .env.default
    …
-5. the monorepo root                .env.<profile>  >  .env  >  .env.default
+5. the monorepo root                .env (or the elected profile copied into it)  >  .env.default
 ```
 
 - **The terminal always wins.** Exporting a variable, or passing
@@ -1512,16 +1512,18 @@ and everything below it is ignored for that variable:
   `packages/api` first, then each workspace above it, then the root. Run from
   the root and only the root's files are searched. A sibling package's files
   are never searched.
-- **Within one workspace,** the active profile's `.env.<profile>` beats `.env`,
-  which beats the defaults file. The defaults file is `env_default` if declared,
-  otherwise a `.env.default` beside the `.env`. A `.env.example` is never a
+- **Within one workspace,** the `.env` beats the defaults file — `env_default`
+  if declared, otherwise a `.env.default` beside the `.env`. An elected profile
+  *is* the `.env`: it's copied in (see [Env profiles](#env-profiles)). A `.env.example` is never a
   source of values, because it often holds placeholders.
 - **Nothing found?** The variable is unset. If it's in `required_env`, the run
   stops before any step executes and names it.
 
 The **profile** is chosen before the search starts: `--env-profile <name>` on
 the command line (or the run launcher's profile picker), else
-`CIABATTA_ENV_PROFILE` from the terminal, else none.
+`CIABATTA_ENV_PROFILE` from the terminal. Without either, the `.env` is read as
+it is — which may itself be a copy of a profile elected earlier with
+`ciabatta env use`, and the report says so.
 
 The report printed before every run (and by `--dry-run`) shows the search order,
 then groups the variables by the file they came from. Each group has a header
@@ -1534,14 +1536,13 @@ hover over or select a variable:
 ```
 $ cd packages/api && ciabatta build --env-profile staging
 Environment for 'build' — 4 variable(s) this run depends on
-  profile: staging — --env-profile staging on the command line, so each workspace's .env.staging is searched before its .env
-  precedence: terminal > packages/api/.env.staging > packages/api/.env > .env > .env.default (first to set it wins)
-  packages/api/.env.staging (profile staging) — the active profile's file, searched before the .env beside it
+  profile: staging — --env-profile staging on the command line, so each workspace's .ciabatta/.env.staging is copied into its .env
+  precedence: terminal > packages/api/.ciabatta/.env.staging > .env > .env.default (first to set it wins)
+  packages/api/.ciabatta/.env.staging (profile staging) — the elected profile, copied into this workspace's .env and searched in its place
     API     staged
-  packages/api/.env — the first .env in the search (from where the run started, up to the root) to set these
-    SHARED  from-api  [overrides .env · used by api:hello]
+    SHARED  from-api-staging  [overrides .env · used by api:hello]
   .env — the first .env in the search (from where the run started, up to the root) to set these
-    REGION  global    [overrides .env.default]
+    REGION  global            [overrides .env.default]
   .env.default (defaults) — nothing searched before it sets these
     TIER    dev
 ```
@@ -1552,18 +1553,34 @@ step can't quietly see different environments.
 
 ### Env profiles
 
-A profile is a file next to a `.env`, named after it — `.env.staging`,
-`packages/api/.env.ci`. With `--env-profile staging` (or `--env_profile`), each
-workspace's `.env.staging` is searched just before its `.env`, so a profile only
-needs to hold what differs:
+A profile is a whole `.env` for one situation, kept in a workspace's
+`.ciabatta/` folder as `.env.<name>`: `.ciabatta/.env.dev`,
+`.ciabatta/.env.prod`, `packages/api/.ciabatta/.env.staging`. Electing one
+copies it into the `.env` of every workspace that has it:
 
 ```bash
-ciabatta env list                        # the profiles here, and their files
-ciabatta build --env-profile staging
+ciabatta env list                        # the profiles here, and what each .env is now
+ciabatta env use dev                     # copy each .ciabatta/.env.dev into its .env
+ciabatta env use dev --dry-run           # say what would be copied, change nothing
+ciabatta build --env-profile dev         # the same copy, then the run
 ```
 
+- **The `.env` is replaced, not merged.** A profile holds the whole
+  environment for its situation.
+- **What was there is backed up first** to `.env.bak` (or the next free
+  `.env.bak.1`, `.env.bak.2`, …, so an earlier backup is never overwritten).
+  The exception is a `.env` that's an unedited copy of a profile: the profile
+  file can always make it again, so switching between profiles doesn't pile up
+  backups. Add `.env.bak*` to `.gitignore`; ciabatta warns when git would pick
+  a backup up.
+- **The copy says where it came from** in its first line, so `ciabatta env
+  list` and the report before each run can tell you which profile `.env` is.
+  Edit the profile file, not the copy: electing it again replaces the copy.
+- **A `--dry-run` copies nothing**, but reports the values the run would see:
+  while a profile is elected, its file stands in for the `.env` in the search.
+
 The profile in force reaches the steps as `CIABATTA_ENV_PROFILE`. Templates
-(`.env.example`, `.env.default`, …) are never profiles.
+(`.env.example`, `.env.default`, …) and backups are never profiles.
 
 ## Build features
 

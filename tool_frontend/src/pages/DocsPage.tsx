@@ -234,7 +234,7 @@ const ENDPOINTS: EndpointGroup[] = [
       { method: "POST", path: "/api/run/preflight", note: "What a start would need, without starting it." },
       { method: "GET", path: "/api/run/runs", note: "Runs the daemon owns. ?project= narrows it to one checkout's." },
       { method: "POST", path: "/api/run/runs", note: "Start a workflow (workflow, or workflows: [], plus filter: [], args: [] for custom arguments, env_profile). 422 lists missing_env." },
-      { method: "GET", path: "/api/run/env-profiles", note: "The env profiles this project has — every .env.<name>, grouped by name." },
+      { method: "GET", path: "/api/run/env-profiles", note: "The env profiles this project has — every .ciabatta/.env.<name>, grouped by name." },
       { method: "GET", path: "/api/run/runs/{id}", note: "Current state of every step, including each step's cache report." },
       { method: "GET", path: "/api/run/runs/{id}/stream", note: "SSE. Step transitions and log lines as they happen." },
       { method: "POST", path: "/api/run/runs/{id}/choose", note: "Answer a step that is waiting on a decision." },
@@ -365,7 +365,7 @@ const COMMANDS: CommandGroup[] = [
           ["--dry-run", "Walk every step, executing none of them."],
           ["--force", "Ignore the cache and run every step. Results are still stored, so the next run reuses them."],
           ["-j, --jobs N", "How many steps may run at once. Defaults to CIABATTA_JOBS, then the CPU count; -j 1 runs them one at a time."],
-          ["--env-profile NAME", "Overlay each .env with its .env.NAME sibling. Also spelled --env_profile."],
+          ["--env-profile NAME", "Copy each workspace's .ciabatta/.env.NAME into its .env first (backing up a hand-written .env). Also spelled --env_profile."],
           ["-e KEY=VALUE", "Set a variable for every step. Beats .env and CI."],
           ["... ARGS", "Everything after a bare ... is the workflow's: --name=value, --name value, --flag or name=value, each becoming $CIABATTA_ARG_<NAME>."],
           ["--gui", "Watch it live in this app."],
@@ -1356,10 +1356,10 @@ required_env: [API_URL, DEPLOY_TOKEN] # must be set, or the run won't start`}</P
         </P>
         <Pre>{`1. the terminal                     shell, CI, git-derived CIABATTA_*, -e KEY=VALUE
 2. workflow env files               env_file: on a workflow, e.g. .ciabatta/.env.{DEPLOY_ENV}
-3. the workspace you ran from       .env.<profile>  >  .env  >  .env.default
-4. each enclosing workspace         .env.<profile>  >  .env  >  .env.default
+3. the workspace you ran from       .env (or the elected profile copied into it)  >  .env.default
+4. each enclosing workspace         .env (or the elected profile copied into it)  >  .env.default
    …
-5. the monorepo root                .env.<profile>  >  .env  >  .env.default`}</Pre>
+5. the monorepo root                .env (or the elected profile copied into it)  >  .env.default`}</Pre>
         <Bullets
           items={[
             <>
@@ -1378,10 +1378,13 @@ required_env: [API_URL, DEPLOY_TOKEN] # must be set, or the run won't start`}</P
               files are never searched.
             </>,
             <>
-              <strong>Within one workspace,</strong> the active profile&apos;s{" "}
-              <C>.env.&lt;profile&gt;</C> beats <C>.env</C>, which beats the defaults file:{" "}
-              <C>env_default</C> if declared, otherwise a <C>.env.default</C> beside it. A{" "}
-              <C>.env.example</C> is never a source of values.
+              <strong>Within one workspace,</strong> the <C>.env</C> beats the defaults file:{" "}
+              <C>env_default</C> if declared, otherwise a <C>.env.default</C> beside it. An
+              elected profile <em>is</em> the <C>.env</C>: <C>ciabatta env use &lt;name&gt;</C>{" "}
+              (or <C>--env-profile &lt;name&gt;</C>) copies each workspace&apos;s{" "}
+              <C>.ciabatta/.env.&lt;name&gt;</C> into its <C>.env</C>, backing up a{" "}
+              <C>.env</C> somebody wrote to <C>.env.bak</C> first. A <C>.env.example</C> is
+              never a source of values.
             </>,
             <>
               <strong>Nothing found?</strong> The variable is unset, and a{" "}
@@ -1399,14 +1402,13 @@ required_env: [API_URL, DEPLOY_TOKEN] # must be set, or the run won't start`}</P
         </P>
         <Pre>{`$ cd packages/api && ciabatta build --env-profile staging
 Environment for 'build' — 4 variable(s) this run depends on
-  profile: staging — --env-profile staging on the command line, so each workspace's .env.staging is searched before its .env
-  precedence: terminal > packages/api/.env.staging > packages/api/.env > .env > .env.default (first to set it wins)
-  packages/api/.env.staging (profile staging) — the active profile's file, searched before the .env beside it
+  profile: staging — --env-profile staging on the command line, so each workspace's .ciabatta/.env.staging is copied into its .env
+  precedence: terminal > packages/api/.ciabatta/.env.staging > .env > .env.default (first to set it wins)
+  packages/api/.ciabatta/.env.staging (profile staging) — the elected profile, copied into this workspace's .env and searched in its place
     API     staged
-  packages/api/.env — the first .env in the search (from where the run started, up to the root) to set these
-    SHARED  from-api  [overrides .env · used by api:hello]
+    SHARED  from-api-staging  [overrides .env · used by api:hello]
   .env — the first .env in the search (from where the run started, up to the root) to set these
-    REGION  global    [overrides .env.default]
+    REGION  global            [overrides .env.default]
   .env.default (defaults) — nothing searched before it sets these
     TIER    dev`}</Pre>
         <Pre>{`# packages/api/.ciabatta/ciabatta.yaml
@@ -1457,15 +1459,26 @@ required_env: [API_URL, DATABASE_URL]`}</Pre>
 
         <SubHeading>Env profiles</SubHeading>
         <P>
-          A profile is a file next to a <C>.env</C>, named after it: <C>.env.staging</C>,{" "}
-          <C>packages/api/.env.ci</C>. Running with <C>--env-profile staging</C> sources each{" "}
-          <C>.env</C> the run already reads and then its <C>.staging</C> sibling on top, so a
-          profile only holds what&apos;s <em>different</em> — everything it doesn&apos;t mention
-          falls back to the ordinary file, and from there outward, exactly as without one.
-          Templates (<C>.env.example</C> and friends) are never profiles.
+          A profile is a whole <C>.env</C> for one situation, kept in a workspace&apos;s{" "}
+          <C>.ciabatta/</C> folder as <C>.env.&lt;name&gt;</C>: <C>.ciabatta/.env.dev</C>,{" "}
+          <C>packages/api/.ciabatta/.env.staging</C>. Electing one copies it into the{" "}
+          <C>.env</C> of every workspace that has it, <em>replacing</em> what was there. A{" "}
+          <C>.env</C> somebody wrote is backed up first to <C>.env.bak</C> (or the next free{" "}
+          <C>.env.bak.N</C>, never overwriting an earlier backup); an unedited copy of a profile
+          isn&apos;t, since the profile file can make it again. The copy&apos;s first line says
+          which profile it came from. Templates (<C>.env.example</C> and friends) and backups are
+          never profiles.
         </P>
-        <Pre>{`ciabatta env list                       # the profiles here, and their files
-ciabatta build --env-profile staging    # also spelled --env_profile`}</Pre>
+        <Pre>{`ciabatta env list                       # the profiles here, and what each .env is now
+ciabatta env use dev                    # copy each .ciabatta/.env.dev into its .env
+ciabatta env use dev --dry-run          # say what would be copied, change nothing
+ciabatta build --env-profile dev        # the same copy, then the run (also --env_profile)`}</Pre>
+        <P>
+          Add <C>.env.bak*</C> to <C>.gitignore</C>: a backup holds what the <C>.env</C> held,
+          and ciabatta warns when git would pick one up. A <C>--dry-run</C> copies nothing but
+          reports the values the run would see, because an elected profile&apos;s file stands in
+          for the <C>.env</C> in the search.
+        </P>
         <P>
           The profile in force travels with the run as <C>CIABATTA_ENV_PROFILE</C>, so a step can
           read which one it&apos;s under. The launcher on the <Link to="/run">Run page</Link> has

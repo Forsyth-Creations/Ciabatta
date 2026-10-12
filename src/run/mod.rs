@@ -597,10 +597,15 @@ pub fn load_env_files(
 /// and its defaults file. Paths are relative to the monorepo root.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct EnvLevel {
-    /// The workspace's env files by name, whether or not they exist yet: a
-    /// missing one is skipped when read, but its `.<profile>` sibling may
-    /// still be there.
+    /// The workspace's directory, relative to the run root (`.` for the root):
+    /// where its `.ciabatta/.env.<profile>` files are looked for.
+    pub rel: String,
+    /// The workspace's env files by name, whether or not they exist yet — a
+    /// missing one is skipped when read.
     pub files: Vec<String>,
+    /// The one a profile is copied into (the first `env_file`, or `.env`),
+    /// and so the one its profile file stands in for.
+    pub target: String,
     /// Its `env_default` — or a `.env.default` sitting beside it.
     pub default: Option<String>,
 }
@@ -624,6 +629,8 @@ pub fn with_env_levels(
         return resolved;
     }
     let level = |meta: &crate::workspace::WorkspaceMeta, dir: &Path, rel: &str| EnvLevel {
+        rel: rel.to_string(),
+        target: files::join_rel(rel, &files::target_file(meta)),
         files: match meta.env_file.is_empty() {
             true => vec![files::join_rel(rel, files::DEFAULT_ENV_FILE)],
             false => meta
@@ -665,7 +672,8 @@ pub fn with_env_levels(
 pub enum FileKind {
     /// Named by a workflow (`env_file:`), searched before every workspace.
     Workflow,
-    /// The active profile's sibling of a `.env`, searched before it.
+    /// The elected profile's `.ciabatta/.env.<name>`, standing in for the
+    /// `.env` it's copied into.
     Profile,
     /// A workspace's `.env` (or `env_file`).
     Env,
@@ -741,11 +749,11 @@ impl PreparedEnv {
 /// variable, the first of these to set it wins:
 ///
 /// 1. the environment ciabatta was started with — terminal, CI, git, `-e`;
-/// 2. the env files the run's workflows name (`env_file:` on a workflow),
-///    each after its `.<profile>` sibling;
+/// 2. the env files the run's workflows name (`env_file:` on a workflow);
 /// 3. each workspace from the one the run started in up to the root
-///    ([`with_env_levels`]), and in each: `.env.<profile>`, then `.env`, then
-///    its `.env.default`.
+///    ([`with_env_levels`]), and in each: its `.env` — or, with a profile
+///    elected, the `.ciabatta/.env.<profile>` that's copied into it — then its
+///    `.env.default`.
 ///
 /// What none of them sets is unset; a `required_env` left unset stops the run.
 ///
@@ -790,12 +798,7 @@ pub fn prepare_env(
     }
 
     // The search, in order: (file, must it exist, what kind of file).
-    let profile = active_profile(base);
-    let sibling = |file: &str| -> Option<String> {
-        profile
-            .as_deref()
-            .map(|p| crate::environment::profiles::overlay(file, p))
-    };
+    let profile = crate::environment::profiles::active(base);
     let mut search: Vec<(String, bool, FileKind)> = Vec::new();
     let push = |search: &mut Vec<(String, bool, FileKind)>, file: String, needed, kind| {
         if !search.iter().any(|(f, _, _)| *f == file) {
@@ -818,22 +821,25 @@ pub fn prepare_env(
         }
     }
     for (file, needed) in workflow_files.into_iter().rev() {
-        if let Some(sibling) = sibling(&file) {
-            push(&mut search, sibling, false, FileKind::Profile);
-        }
         push(&mut search, file, needed, FileKind::Workflow);
     }
 
-    // Then each workspace, nearest first: its profile siblings, its files
-    // (the last-named first), then its defaults.
+    // Then each workspace, nearest first: its files (the last-named first),
+    // then its defaults. With a profile elected, the workspace's
+    // `.ciabatta/.env.<profile>` stands in for the `.env` it's copied into —
+    // the same values once the copy is made, and the right ones in a dry run
+    // that makes no copy.
     for level in &resolved.env_levels {
         for file in level.files.iter().rev() {
-            if let Some(sibling) = sibling(file) {
-                push(&mut search, sibling, false, FileKind::Profile);
+            let stand_in = profile
+                .as_deref()
+                .filter(|_| *file == level.target)
+                .map(|p| crate::environment::profiles::profile_file(&level.rel, p))
+                .filter(|f| root.join(f).is_file());
+            match stand_in {
+                Some(profile_file) => push(&mut search, profile_file, false, FileKind::Profile),
+                None => push(&mut search, file.clone(), false, FileKind::Env),
             }
-        }
-        for file in level.files.iter().rev() {
-            push(&mut search, file.clone(), false, FileKind::Env);
         }
         if let Some(default) = &level.default {
             push(&mut search, default.clone(), false, FileKind::Default);
@@ -887,11 +893,6 @@ pub fn prepare_env(
         missing_required,
         features,
     })
-}
-
-/// The env profile a run was started with, when it was started with one.
-fn active_profile(base: &HashMap<String, String>) -> Option<String> {
-    crate::environment::profiles::choice(base).0
 }
 
 /// Return the names from `required` that are absent from `env` or present but
@@ -1573,14 +1574,20 @@ name = "a"
     }
 
     fn level(files: &[&str], default: Option<&str>) -> EnvLevel {
+        let rel = files[0]
+            .rsplit_once('/')
+            .map(|(dir, _)| dir.to_string())
+            .unwrap_or_else(|| ".".to_string());
         EnvLevel {
+            rel,
             files: files.iter().map(|f| f.to_string()).collect(),
+            target: files[0].to_string(),
             default: default.map(str::to_string),
         }
     }
 
     /// From the workspace the run started in up to the root, and within each:
-    /// `.env.<profile>`, then `.env`, then `.env.default`. First to set wins.
+    /// `.env`, then `.env.default`. First to set wins.
     #[test]
     fn the_environment_is_searched_nearest_first_and_the_first_match_wins() {
         let dir = scratch_dir("env_search");
@@ -1667,15 +1674,18 @@ name = "a"
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// Within a level the active profile's sibling beats the `.env`, which
-    /// beats the default — and the sibling applies even with no `.env` at all.
+    /// With a profile elected, each workspace's `.ciabatta/.env.<profile>`
+    /// stands in for its `.env` — what the copy will make it — and the
+    /// `.env.default` still answers what the profile doesn't set. A workspace
+    /// without that profile keeps its own `.env`.
     #[test]
-    fn an_env_profile_beats_the_env_it_sits_beside() {
-        let dir = scratch_dir("profile_overlay");
-        std::fs::write(dir.join(".env"), "REGION=us\nTIER=dev\n").unwrap();
-        std::fs::write(dir.join(".env.staging"), "REGION=eu\n").unwrap();
-        std::fs::write(dir.join(".env.default"), "TIER=x\nPORT=1\n").unwrap();
-        std::fs::write(dir.join("packages/api/.env.staging"), "API=staged\n").unwrap();
+    fn an_elected_profile_stands_in_for_the_env_it_is_copied_into() {
+        let dir = scratch_dir("profile_stand_in");
+        std::fs::create_dir_all(dir.join(".ciabatta")).unwrap();
+        std::fs::write(dir.join(".env"), "REGION=us\nSECRET=mine\n").unwrap();
+        std::fs::write(dir.join(".ciabatta/.env.staging"), "REGION=eu\n").unwrap();
+        std::fs::write(dir.join(".env.default"), "TIER=dev\n").unwrap();
+        std::fs::write(dir.join("packages/api/.env"), "API=own\n").unwrap();
 
         let resolved = ResolvedRun {
             env_levels: vec![
@@ -1687,26 +1697,26 @@ name = "a"
         let staging = env(&[(crate::environment::profiles::PROFILE_VAR, "staging")]);
         let prepared = prepare_env(&resolved, &dir, &staging).unwrap();
         assert_eq!(prepared.env["REGION"], "eu");
-        assert_eq!(prepared.env["TIER"], "dev");
-        assert_eq!(prepared.env["PORT"], "1");
-        assert_eq!(
-            prepared.env["API"], "staged",
-            "no packages/api/.env, its sibling still counts"
+        assert!(
+            !prepared.env.contains_key("SECRET"),
+            "the profile replaces the .env, it doesn't layer over it"
         );
+        assert_eq!(prepared.env["TIER"], "dev");
+        assert_eq!(prepared.env["API"], "own");
+        assert_eq!(prepared.sources["REGION"].kind, Some(FileKind::Profile));
         assert_eq!(
             prepared.sourced,
             [
-                "packages/api/.env.staging",
-                ".env.staging",
-                ".env",
+                "packages/api/.env",
+                ".ciabatta/.env.staging",
                 ".env.default"
             ]
         );
 
-        // Without the profile, the sibling isn't read.
+        // Without the profile, the `.env` is read as it is.
         let prepared = prepare_env(&resolved, &dir, &HashMap::new()).unwrap();
         assert_eq!(prepared.env["REGION"], "us");
-        assert!(!prepared.env.contains_key("API"));
+        assert_eq!(prepared.env["SECRET"], "mine");
 
         std::fs::remove_dir_all(&dir).ok();
     }

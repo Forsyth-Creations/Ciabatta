@@ -205,7 +205,7 @@ function Launcher({ project }: { project: string }) {
               sx={{ minWidth: 240, "& input": { fontFamily: monoFontStack } }}
             />
 
-            <Tooltip title="Overlay each .env with its .env.<profile> sibling for this run. `ciabatta env list` shows the same list.">
+            <Tooltip title="Copy each workspace's .ciabatta/.env.<profile> into its .env before the run, backing up a .env somebody wrote to .env.bak. `ciabatta env list` shows the same list.">
               <TextField
                 select
                 size="small"

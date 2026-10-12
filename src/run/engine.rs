@@ -115,6 +115,18 @@ pub async fn execute(
         crate::environment::files::require_template(&meta, root, &resolved.required_env, name)?;
     }
 
+    // An elected profile is copied into each workspace's `.env` before
+    // anything is generated or sourced: the run then reads those `.env`s like
+    // any other. A `.env` somebody wrote is backed up first; a dry run only
+    // says what it would copy.
+    if let Some(profile) = crate::environment::profiles::active(env_vars) {
+        for done in crate::environment::profiles::apply(root, &profile, dry_run)? {
+            if let Some(line) = crate::environment::profiles::describe(&done, dry_run) {
+                let _ = tx.send(ProgressUpdate::Log(name.to_string(), line)).await;
+            }
+        }
+    }
+
     // A fresh checkout has no `.env` — the checked-in template is what it has.
     // Generated for the project root *and* for every sub-workspace this run
     // touches, since a member's steps resolve through the member's own file.
@@ -158,8 +170,8 @@ pub async fn execute(
     // typed — so they're marked (⚑, drawn in yellow) and the log says where
     // they'd be better kept.
     // The profile is named with why it's the one in use — or why there's
-    // none — since it decides which `.env.<profile>` files were searched.
-    let (_, profile_reason) = crate::environment::profiles::choice(env_vars);
+    // none — since it decides what each workspace's `.env` holds.
+    let (_, profile_reason) = crate::environment::profiles::choice(env_vars, root);
     let _ = tx
         .send(ProgressUpdate::Log(
             name.to_string(),

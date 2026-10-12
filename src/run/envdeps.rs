@@ -312,7 +312,8 @@ impl Group {
             ),
             Group::Profile => (
                 format!("{file} (profile {})", profile.unwrap_or("?")),
-                "the active profile's file, searched before the .env beside it".into(),
+                "the elected profile, copied into this workspace's .env and searched in its place"
+                    .into(),
             ),
             Group::EnvFile => (
                 file.to_string(),
@@ -433,7 +434,7 @@ pub fn collect(
         .as_ref()
         .map(|p| p.sources.clone())
         .unwrap_or_default();
-    let (profile, profile_reason) = crate::environment::profiles::choice(base);
+    let (profile, profile_reason) = crate::environment::profiles::choice(base, root);
 
     // Which steps touch which variable, and what a step's own `[env]` sets it
     // to. `BTreeMap`s keep both the variable list and each variable's step list
@@ -625,8 +626,8 @@ fn reason(
                  workspace's files"
             ),
             Some(FileKind::Profile) => format!(
-                "{file} belongs to the active profile ({}), which is searched before the .env \
-                 beside it",
+                "{file} is the elected profile ({}), copied into its workspace's .env and \
+                 searched in its place",
                 profile.unwrap_or("?")
             ),
             Some(FileKind::Default) => {
@@ -1088,9 +1089,9 @@ mod tests {
     fn each_value_and_the_profile_come_with_a_reason() {
         let root = std::env::temp_dir().join(format!("ciab_envdeps_reason_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(root.join(".ciabatta")).unwrap();
         std::fs::write(root.join(".env"), "REGION=us\n").unwrap();
-        std::fs::write(root.join(".env.staging"), "REGION=eu\n").unwrap();
+        std::fs::write(root.join(".ciabatta/.env.staging"), "REGION=eu\n").unwrap();
 
         let resolved = ResolvedRun {
             required_env: vec!["MISSING".to_string()],
@@ -1108,8 +1109,10 @@ mod tests {
         let region = find(&report, "REGION");
         assert_eq!(region.via, Some(FileKind::Profile));
         let reason = region.reason.clone().unwrap();
-        assert!(reason.contains("active profile (staging)"), "{reason}");
-        assert!(reason.contains("overrides .env"), "{reason}");
+        assert!(
+            reason.contains(".ciabatta/.env.staging is the elected profile (staging)"),
+            "{reason}"
+        );
         let missing = find(&report, "MISSING").reason.clone().unwrap();
         assert!(missing.contains("not set in the terminal"), "{missing}");
 
@@ -1130,6 +1133,18 @@ mod tests {
             text.contains("unset — not set in the terminal or in any of the 1 env file(s)"),
             "{text}"
         );
+
+        // After `ciabatta env use staging`, a run with no profile asked for
+        // still says which profile .env is a copy of.
+        crate::environment::profiles::apply(&root, "staging", false).unwrap();
+        let report = collect(&resolved, &root, &env(&[]), None);
+        assert_eq!(report.profile.as_deref(), Some("staging"));
+        let why = report.profile_reason.clone().unwrap();
+        assert!(
+            why.contains(".env is a copy of .ciabatta/.env.staging"),
+            "{why}"
+        );
+        assert_eq!(find(&report, "REGION").value.as_deref(), Some("eu"));
 
         std::fs::remove_dir_all(&root).ok();
     }

@@ -91,6 +91,7 @@ async fn main() -> Result<()> {
 
         Commands::Env { subcommand } => match subcommand {
             EnvCommand::List => cmd_env_list()?,
+            EnvCommand::Use { name, dry_run } => cmd_env_use(&name, dry_run)?,
         },
 
         // An unrecognized subcommand is a workflow name. Re-parse the raw argv
@@ -575,50 +576,85 @@ fn report_run_dependencies(
     }
 }
 
-/// `ciabatta env list`: every env profile this workspace has.
-fn cmd_env_list() -> Result<()> {
+/// The project root `ciabatta env …` works on.
+fn env_root() -> Result<PathBuf> {
     let cwd = env::current_dir().context("Failed to get current directory")?;
-    let root = workspace::Workspace::discover(&cwd)
+    workspace::Workspace::discover(&cwd)
         .map(|ws| ws.root)
-        .or_else(|_| find_root(&cwd).context("Not inside a ciabatta project"))?;
+        .or_else(|_| find_root(&cwd).context("Not inside a ciabatta project"))
+}
+
+/// `ciabatta env list`: every env profile this workspace has, and which one
+/// each `.env` is currently a copy of.
+fn cmd_env_list() -> Result<()> {
+    let root = env_root()?;
     let dirs = environment::profiles::workspace_dirs(&root);
     let profiles = environment::profiles::list(&root, &dirs);
 
-    // The base the profiles overlay, so it's clear what "no profile" means.
-    let base: Vec<String> = dirs
+    // What each workspace's `.env` is right now: a profile's copy, or its own.
+    let current: Vec<(String, Option<(String, String)>)> = dirs
         .iter()
         .map(|rel| environment::files::join_rel(rel, environment::files::DEFAULT_ENV_FILE))
         .filter(|path| root.join(path).is_file())
+        .map(|path| {
+            let elected = environment::profiles::elected(&root.join(&path));
+            (path, elected)
+        })
         .collect();
-    println!(
-        "Default environment: {}",
-        if base.is_empty() {
-            "no .env files — just the shell's environment".to_string()
-        } else {
-            base.join(", ")
+    if current.is_empty() {
+        println!("No .env files — just the shell's environment.");
+    } else {
+        println!("Current environment:");
+        for (path, elected) in &current {
+            match elected {
+                Some((name, from)) => println!(
+                    "  {path}  copy of profile {} ({from})",
+                    name.style(color::active())
+                ),
+                None => println!("  {path}  its own (not a profile copy)"),
+            }
         }
-    );
+    }
     println!();
 
     if profiles.is_empty() {
         println!("No env profiles yet.");
         println!(
-            "Create one by putting the variables that differ in `.env.<name>` next to a `.env` \
-             (e.g. `.env.staging`), then run `ciabatta <workflow> --env-profile <name>`."
+            "Create one by putting a whole .env for it in `.ciabatta/.env.<name>` (e.g. \
+             `.ciabatta/.env.staging`), then run `ciabatta env use <name>` or \
+             `ciabatta <workflow> --env-profile <name>`."
         );
         return Ok(());
     }
 
-    println!("Env profiles (run with --env-profile <name>):");
+    println!(
+        "Env profiles (elect with `ciabatta env use <name>`, or --env-profile <name> on a run):"
+    );
     let width = profiles.iter().map(|p| p.name.len()).max().unwrap_or(0);
     for profile in &profiles {
         println!(
-            "  {:width$}  {} variable(s) · {}",
-            profile.name.style(color::active()),
+            "  {}  {} variable(s) · {}",
+            format!("{:width$}", profile.name).style(color::active()),
             profile.vars,
             profile.files.join(", "),
-            width = width,
         );
+    }
+    Ok(())
+}
+
+/// `ciabatta env use <name>`: copy a profile into every workspace's `.env`.
+fn cmd_env_use(name: &str, dry_run: bool) -> Result<()> {
+    let root = env_root()?;
+    color::decide(color::Consumer::Terminal);
+    let applied = environment::profiles::apply(&root, name, dry_run)?;
+    for done in &applied {
+        match environment::profiles::describe(done, dry_run) {
+            Some(line) => println!("{}", line.trim_start_matches("env profile: ")),
+            None => println!("{} is already a copy of {}", done.env_file, done.from),
+        }
+    }
+    if dry_run {
+        println!("\nNothing was changed (--dry-run).");
     }
     Ok(())
 }
@@ -4155,10 +4191,11 @@ Four rules, in the order they apply:
        the terminal (shell, CI, git, -e)                always wins
        env files the workflows name (`env_file:`)
        the workspace you ran from, then each one up to the root, each as:
-         .env.<profile>  >  .env  >  .env.default
+         .env (or the elected profile copied into it)  >  .env.default
 
-     The profile is chosen first: --env-profile, else CIABATTA_ENV_PROFILE
-     from the terminal, else none. A required_env variable none of them sets
+     Profiles live in each workspace's .ciabatta/ folder as .env.<name>.
+     `ciabatta env use <name>`, or --env-profile <name> on a run, copies each
+     into its workspace's .env, backing up a .env somebody wrote to .env.bak. A required_env variable none of them sets
      stops the run. The report printed before each run names the profile and
      why, and gives every variable the reason its value won.
 
@@ -4821,10 +4858,11 @@ Four rules, in the order they apply:
        the terminal (shell, CI, git, -e)                always wins
        env files the workflows name (`env_file:`)
        the workspace you ran from, then each one up to the root, each as:
-         .env.<profile>  >  .env  >  .env.default
+         .env (or the elected profile copied into it)  >  .env.default
 
-     The profile is chosen first: --env-profile, else CIABATTA_ENV_PROFILE
-     from the terminal, else none. A required_env variable none of them sets
+     Profiles live in each workspace's .ciabatta/ folder as .env.<name>.
+     `ciabatta env use <name>`, or --env-profile <name> on a run, copies each
+     into its workspace's .env, backing up a .env somebody wrote to .env.bak. A required_env variable none of them sets
      stops the run. The report printed before each run names the profile and
      why, and gives every variable the reason its value won.
 

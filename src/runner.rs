@@ -331,7 +331,17 @@ pub async fn run_workflow_ctl(
         let duration_ms = started.elapsed().as_millis() as u64;
         record_run(name, resolved, config, root, outcome, duration_ms).await;
 
-        let mut build = crate::remote_cache::builds::describe(env_vars);
+        // A run with no CI variables (one started from the web app, or a
+        // terminal without `--local`) still came from some commit: say which.
+        let mut described = env_vars.clone();
+        if !described.contains_key("CIABATTA_COMMIT")
+            && let Ok(git) = crate::git::local_git_vars(root)
+        {
+            for (key, value) in git {
+                described.entry(key).or_insert(value);
+            }
+        }
+        let mut build = crate::remote_cache::builds::describe(&described);
         build.workflow = name.to_string();
         build.outcome = match outcome {
             crate::run::history::Outcome::Success => "success",

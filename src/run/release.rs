@@ -419,8 +419,30 @@ pub async fn list(store: &Store, shared: Option<&Shared>) -> Result<Vec<(Release
 }
 
 /// Run a `kind: release-push` / `kind: release-pull` step.
+///
+/// A failure is written into the step's own log as well as returned: a
+/// release step has no command output of its own, so without it the node
+/// would say "failed" and nothing about why.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_step(
+    step: &crate::run::RunStep,
+    direction: Direction,
+    config: &CiabattaConfig,
+    root: &Path,
+    cwd: &Path,
+    env: &HashMap<String, String>,
+    dry_run: bool,
+    sink: &mut LogSink<'_>,
+) -> Result<()> {
+    let result = release_step(step, direction, config, root, cwd, env, dry_run, sink).await;
+    if let Err(e) = &result {
+        sink.push(format!("error: {e:#}"));
+    }
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn release_step(
     step: &crate::run::RunStep,
     direction: Direction,
     config: &CiabattaConfig,

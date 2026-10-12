@@ -256,11 +256,11 @@ function render() {
       <div class="topbar__inner">
         <span class="brand"><span class="brand__loaf">🍞</span> ciabatta <span class="brand__ver">v${VERSION}</span></span>
         <span class="topbar__spacer"></span>
+        <a class="topbar__link" href="#install">Install</a>
         <a class="topbar__link" href="#how">How it works</a>
         <a class="topbar__link" href="#cache">Caching</a>
         <a class="topbar__link" href="#releases">Releases</a>
         <a class="topbar__link" href="#remote">Remote cache</a>
-        <a class="topbar__link" href="#install">Install</a>
         <a class="topbar__link" href="#config">Publishing</a>
         <a class="topbar__link" href="#commands">Commands</a>
         <a class="topbar__cta" href="${REPO}">GitHub ↗</a>
@@ -306,6 +306,24 @@ function render() {
     </div>
 
     <div class="wrap">
+      <section class="section reveal" id="install">
+        <div class="section__head">
+          <div class="eyebrow">Install</div>
+          <h2>One binary. No runtime.</h2>
+          <p class="section__sub">Pick a package manager or grab a prebuilt binary. Linux builds are statically linked, so there's no glibc version to worry about.</p>
+        </div>
+        <div class="tabs" role="tablist" aria-label="Install method">
+          ${INSTALL_TABS.map((t, i) => `<button class="tab" role="tab" id="tab-${t.id}" aria-controls="panel-install" aria-selected="${i === 0}">${t.label}</button>`).join("")}
+        </div>
+        <div class="cmdline" id="panel-install" role="tabpanel">
+          <span class="cmdline__sigil">$</span>
+          <span class="cmdline__text" id="install-cmd">${INSTALL_TABS[0].cmd}</span>
+          <button class="copy" data-copy-target="install-cmd">copy</button>
+        </div>
+        <p class="cmdline__note" id="install-note">${INSTALL_TABS[0].note}</p>
+        <div class="platforms">${PLATFORMS.map(platformCard).join("")}</div>
+      </section>
+
       <section class="section reveal" id="how">
         <div class="section__head">
           <div class="eyebrow">How it works</div>
@@ -381,24 +399,6 @@ function render() {
           <img src="screens/builds-feed.png" alt="The remote cache's Builds view: a feed of builds with branch, commit and reuse counts, and one build opened into its flow and steps." loading="lazy" />
           <figcaption>The <b>Builds</b> view at <code>/builds</code> on the remote cache: the latest run reused three steps and rebuilt <code>web:bundle</code> because <code>packages/web/src/app.js</code> changed.</figcaption>
         </figure>
-      </section>
-
-      <section class="section reveal" id="install">
-        <div class="section__head">
-          <div class="eyebrow">Install</div>
-          <h2>One binary. No runtime.</h2>
-          <p class="section__sub">Pick a package manager or grab a prebuilt binary. Linux builds are statically linked, so there's no glibc version to worry about.</p>
-        </div>
-        <div class="tabs" role="tablist" aria-label="Install method">
-          ${INSTALL_TABS.map((t, i) => `<button class="tab" role="tab" id="tab-${t.id}" aria-controls="panel-install" aria-selected="${i === 0}">${t.label}</button>`).join("")}
-        </div>
-        <div class="cmdline" id="panel-install" role="tabpanel">
-          <span class="cmdline__sigil">$</span>
-          <span class="cmdline__text" id="install-cmd">${INSTALL_TABS[0].cmd}</span>
-          <button class="copy" data-copy-target="install-cmd">copy</button>
-        </div>
-        <p class="cmdline__note" id="install-note">${INSTALL_TABS[0].note}</p>
-        <div class="platforms">${PLATFORMS.map(platformCard).join("")}</div>
       </section>
 
       <section class="section reveal" id="editors">

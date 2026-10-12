@@ -3,7 +3,7 @@
 //! A run's steps are shell scripts, and the thing that most often makes one
 //! behave differently on two machines is not the graph — it's an environment
 //! variable that was set here and isn't there. The graph is drawn before it
-//! runs; this does the same for the environment, so `REQUIRED_ENV`, the
+//! runs; this does the same for the environment, so `required_env`, the
 //! `.env` files a run sources, the `[env]` tables that cascade from
 //! sub-workspace to step, and the bare `$VAR` references inside the commands
 //! are all one list with values attached.
@@ -60,7 +60,7 @@ pub struct EnvVar {
     pub value: Option<String>,
     /// Whether `value` was masked rather than printed.
     pub secret: bool,
-    /// Declared in `REQUIRED_ENV`: the run refuses to start without it.
+    /// Declared in `required_env`: the run refuses to start without it.
     pub required: bool,
     pub origin: Origin,
     /// The `.env` file that supplied it, when `origin` is `EnvFile`.
@@ -79,6 +79,10 @@ pub struct EnvVar {
     /// AWS credential found another way.
     #[serde(default, skip_serializing_if = "crate::format::is_false")]
     pub optional: bool,
+    /// Part of a step's cache key: declared in an `env:` table, in
+    /// `required_env`, or under `cache.env`. Changing it rebuilds that step.
+    #[serde(default, skip_serializing_if = "crate::format::is_false")]
+    pub in_cache_key: bool,
 }
 
 /// Every environment variable a run depends on, resolved as far as the inputs
@@ -87,7 +91,7 @@ pub struct EnvVar {
 pub struct EnvReport {
     /// The `.env` files sourced, in application order.
     pub files: Vec<String>,
-    /// `REQUIRED_ENV`, as declared.
+    /// `required_env`, as declared.
     pub required: Vec<String>,
     /// Required variables that are still empty or unset — the run can't start
     /// until they are supplied.
@@ -155,7 +159,7 @@ impl EnvReport {
                 notes.push(file.clone());
             }
             if var.required {
-                notes.push("REQUIRED_ENV".to_string());
+                notes.push("required_env".to_string());
             }
             if let Some(purpose) = &var.purpose {
                 notes.push(purpose.clone());
@@ -307,6 +311,16 @@ pub fn collect(
     // never optional, however many others treat it as a nice-to-have.
     let mut purposes: BTreeMap<String, String> = BTreeMap::new();
     let mut needed: HashSet<String> = HashSet::new();
+    // What keys the cache — see `CacheConfig::with_step_env`. The member-level
+    // `cache.env` isn't on the step, but a workflow's (and the step's own) is.
+    let mut keyed: HashSet<String> = resolved.required_env.iter().cloned().collect();
+    for step in &resolved.steps {
+        keyed.extend(step.env.keys().cloned());
+        keyed.extend(step.required_env.iter().cloned());
+        if let Some(cache) = &step.cache {
+            keyed.extend(cache.env.iter().cloned());
+        }
+    }
     for step in &resolved.steps {
         for key in step_refs(step) {
             needed.insert(key.clone());
@@ -424,6 +438,7 @@ pub fn collect(
             let secret = value.is_some() && looks_secret(&key);
             let required = resolved.required_env.contains(&key);
             EnvVar {
+                in_cache_key: keyed.contains(&key),
                 purpose: purposes.get(&key).cloned(),
                 optional: purposes.contains_key(&key)
                     && !needed.contains(&key)

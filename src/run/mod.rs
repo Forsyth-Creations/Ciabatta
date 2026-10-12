@@ -134,6 +134,12 @@ pub struct RunStep {
     /// and a dev server should.
     #[serde(skip)]
     pub background: bool,
+    /// Set by the compiler from the workflow's `required_env`: the names this
+    /// step's run refuses to start without, which also key its cache entry.
+    /// `#[serde(skip)]` for the same reason as `background` — it's declared on
+    /// the workflow, not the step.
+    #[serde(skip)]
+    pub required_env: Vec<String>,
     /// Don't fail the whole run when this step fails: its dependents are
     /// skipped, every other branch carries on, and the run reports the failure
     /// at the end. Always applied when a `timeout` expires.
@@ -618,7 +624,7 @@ pub struct PreparedEnv {
     /// `{VAR}` placeholders in `env_file` paths with no value, so the file to
     /// source can't even be named yet.
     pub unresolved_paths: Vec<String>,
-    /// `REQUIRED_ENV` variables that are empty or unset.
+    /// `required_env` variables that are empty or unset.
     pub missing_required: Vec<String>,
     /// The build features this run was started with — every `CIABATTA_FEAT_*`
     /// the resolved environment carries. Reported at the start of the run, and
@@ -679,7 +685,7 @@ impl PreparedEnv {
 
 /// Resolve a run's environment: substitute `{VAR}` placeholders in its
 /// `env_file` paths, source those files over `base`, and check the result
-/// against `REQUIRED_ENV`.
+/// against `required_env`.
 ///
 /// Never runs anything, so both the engine (which does this for real, just
 /// before the first phase) and the daemon's launcher (which does it to decide
@@ -688,7 +694,7 @@ impl PreparedEnv {
 ///
 /// Unresolvable `env_file` paths short-circuit: nothing can be sourced until
 /// the path is known, and a file that *would* have been sourced may be exactly
-/// what supplies the `REQUIRED_ENV` variables — so those aren't reported yet.
+/// what supplies the `required_env` variables — so those aren't reported yet.
 pub fn prepare_env(
     resolved: &ResolvedRun,
     root: &Path,
@@ -844,7 +850,7 @@ fn with_profile(files: &[String], root: &Path, profile: &str) -> Vec<String> {
 /// Return the names from `required` that are absent from `env` or present but
 /// empty (after trimming). An empty result means every required variable is
 /// set, so the run may proceed. Order follows `required` so the reported list
-/// matches how the operator declared `REQUIRED_ENV`.
+/// matches how the operator declared `required_env`.
 fn missing_required_env(required: &[String], env: &HashMap<String, String>) -> Vec<String> {
     required
         .iter()

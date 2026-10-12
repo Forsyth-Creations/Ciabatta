@@ -411,7 +411,7 @@ export function useStartRun() {
  * other reason.
  *
  * The daemon answers 422 with a `missing_env` list rather than starting a run
- * that would abort at its own `REQUIRED_ENV` gate, so the launcher can ask for
+ * that would abort at its own `required_env` gate, so the launcher can ask for
  * the values and post again.
  */
 export function missingEnvFrom(error: unknown): string[] | null {

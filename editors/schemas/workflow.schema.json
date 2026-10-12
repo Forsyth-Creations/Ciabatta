@@ -36,14 +36,21 @@
       "$ref": "./common.schema.json#/$defs/stringOrList",
       "description": ".env file path(s) relative to the sub-workspace, sourced before the graph runs."
     },
+    "required_env": {
+      "type": "array",
+      "description": "Variables that must be set and non-empty, or the run is refused up front. Their values key the cache — as a SHA-256 digest, since this is where tokens are declared — so they never need listing under `cache.env`.",
+      "items": { "type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*$" }
+    },
     "REQUIRED_ENV": {
       "type": "array",
-      "description": "Variables that must be set and non-empty, or the run is refused up front.",
+      "description": "The spelling of `required_env` before 0.6.0. Still read; write `required_env` instead.",
+      "deprecated": true,
+      "deprecationMessage": "Renamed to `required_env`.",
       "items": { "type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*$" }
     },
     "env": {
       "$ref": "./common.schema.json#/$defs/envMap",
-      "description": "Environment variables applied to every step of this workflow."
+      "description": "Environment variables applied to every step of this workflow. Every one keys the cache: a build run with different variables is a different build."
     },
     "tags": {
       "type": "array",

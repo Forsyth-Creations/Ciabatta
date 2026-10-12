@@ -62,8 +62,23 @@ fn serialized<T: Serialize>(value: &T) -> BTreeSet<String> {
 
 /// Compare one type against one schema node, naming both sides of any gap.
 fn agree<T: Serialize>(what: &str, value: &T, schema: &Value, pointer: &str) {
+    agree_except(what, value, schema, pointer, &[]);
+}
+
+/// [`agree`], allowing the schema to also describe older spellings serde
+/// still accepts through an `alias`.
+fn agree_except<T: Serialize>(
+    what: &str,
+    value: &T,
+    schema: &Value,
+    pointer: &str,
+    aliases: &[&str],
+) {
     let rust = serialized(value);
-    let json = declared(schema, pointer);
+    let mut json = declared(schema, pointer);
+    for alias in aliases {
+        json.remove(*alias);
+    }
 
     let missing_from_schema: Vec<_> = rust.difference(&json).collect();
     let missing_from_rust: Vec<_> = json.difference(&rust).collect();
@@ -101,6 +116,9 @@ fn cache() -> crate::cache::CacheConfig {
         env: list(),
         exclude: list(),
         remote: Some(remote()),
+        // `#[serde(skip)]`: filled in from a workflow's `required_env`, never
+        // written in config, so the schemas don't name it.
+        secret_env: Vec::new(),
     }
 }
 
@@ -158,6 +176,7 @@ fn step() -> crate::run::RunStep {
         // Not a config key — `#[serde(skip)]`, set by the compiler on entries
         // of a workflow's `background:` array — so the schemas don't name it.
         background: false,
+        required_env: Vec::new(),
     }
 }
 
@@ -285,7 +304,13 @@ fn the_schemas_describe_exactly_the_fields_ciabatta_reads() {
         "/properties/registries/additionalProperties/properties",
     );
     agree("AiConfig", &ai(), &root, "/properties/ai/properties");
-    agree("Workflow", &workflow(), &flow, "/properties");
+    agree_except(
+        "Workflow",
+        &workflow(),
+        &flow,
+        "/properties",
+        crate::workspace::Workflow::KEY_ALIASES,
+    );
     agree("RunStep", &step(), &common, "/$defs/step/properties");
     agree(
         "FixOption",

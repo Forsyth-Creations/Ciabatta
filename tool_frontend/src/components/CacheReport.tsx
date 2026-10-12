@@ -113,7 +113,11 @@ function rebuildWords(report: CacheReport): string {
     case "never_built":
       return report.previous ? "missed · key changed" : "missed · first build";
     case "inputs_changed":
-      return `missed · ${report.reason.total as number} input(s) changed`;
+      return (report.reason.total as number) === 0
+        ? "missed · key changed"
+        : `missed · ${report.reason.total as number} input(s) changed`;
+    case "env_changed":
+      return `missed · ${(report.reason.vars as string[]).join(", ")} changed`;
     case "outputs_missing":
       return "missed · outputs evicted";
     case "outputs_modified":

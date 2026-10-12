@@ -142,6 +142,10 @@ pub fn plan_graph(
         let config = context.cache_config(step);
         let dir = context.dir(step);
         let workspace = context.workspace(step);
+        // What the step will actually see, `env:` tables included — the same
+        // map the run keys on, so the plan and the run agree.
+        let step_env = with_step_values(step, env);
+        let env = &step_env;
 
         // Only the steps this one actually needs, so an unrelated change
         // upstream in a different branch of the graph doesn't invalidate it.
@@ -236,6 +240,20 @@ pub fn reran_upstream(needs: &[String], unaccounted: &BTreeSet<String>) -> Vec<S
         .collect()
 }
 
+/// The environment a step runs with: `env` with the step's own `env:` table
+/// (workspace, workflow and step, folded together when the graph compiled)
+/// layered on top, which is how the engine hands it to the command.
+pub fn with_step_values(
+    step: &RunStep,
+    env: &BTreeMap<String, String>,
+) -> BTreeMap<String, String> {
+    let mut merged = env.clone();
+    for (key, value) in &step.env {
+        merged.insert(key.clone(), value.clone());
+    }
+    merged
+}
+
 /// The declared environment variables and their current values.
 pub fn declared_env(
     config: &CacheConfig,
@@ -244,7 +262,7 @@ pub fn declared_env(
     config
         .env
         .iter()
-        .map(|name| (name.clone(), env.get(name).cloned().unwrap_or_default()))
+        .map(|name| (name.clone(), config.env_value(name, env)))
         .collect()
 }
 

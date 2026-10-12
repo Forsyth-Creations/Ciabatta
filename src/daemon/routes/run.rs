@@ -480,7 +480,7 @@ async fn start(state: AppState, payload: CreatePayload) -> RouteResult<Json<Valu
     ));
 
     // Pre-flight the environment rather than spawning a run that would only
-    // abort at the engine's `REQUIRED_ENV` gate. 422 carries the variable names
+    // abort at the engine's `required_env` gate. 422 carries the variable names
     // so the launcher can prompt for them and post again.
     let missing = missing_env(&root, &runs, &env)?;
     if !missing.is_empty() {

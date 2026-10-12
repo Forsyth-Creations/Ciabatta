@@ -492,8 +492,13 @@ impl Session {
             });
         }
 
-        let env_map: BTreeMap<String, String> =
-            env.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        // The step's own `env:` values are layered on when its command runs;
+        // they have to be here too, or a variable declared by value would key
+        // on its name alone.
+        let env_map: BTreeMap<String, String> = crate::cache::graph::with_step_values(
+            step,
+            &env.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+        );
         let target = crate::cache::Target {
             name: step.name.clone(),
             workspace: workspace.clone(),
@@ -1103,7 +1108,7 @@ fn rebuild_hints(
         Reason::Forced => {
             hints.push("The run was started with --force, which ignores the cache.".to_string())
         }
-        Reason::InputsChanged { .. } => {}
+        Reason::InputsChanged { .. } | Reason::EnvChanged { .. } => {}
     }
 
     // An upstream that ran without accounting for its outputs holds this step
@@ -1279,6 +1284,38 @@ mod tests {
             }
         }
         outcomes
+    }
+
+    /// A variable a step declares by value keys it on that value. The engine
+    /// layers a step's `env:` on only when the command runs, so the session
+    /// has to apply it itself — it used to key on the name with an empty value,
+    /// and changing `MODE: release` to `MODE: debug` was a cache hit.
+    #[tokio::test]
+    async fn a_value_in_the_steps_env_table_keys_it() {
+        let root = scratch("stepenvvalue");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/lib.rs"), "fn lib() {}").unwrap();
+        let key_for = |mode: &str| {
+            let mut step = cached_step("build", &[], "out");
+            step.env.insert("MODE".into(), mode.into());
+            step
+        };
+
+        let mut session = Session::open(&root, &CiabattaConfig::default()).unwrap();
+        session
+            .before(&key_for("release"), &HashMap::new())
+            .await
+            .unwrap();
+        let release = session.take_report().unwrap();
+        session
+            .before(&key_for("debug"), &HashMap::new())
+            .await
+            .unwrap();
+        let debug = session.take_report().unwrap();
+
+        assert_eq!(release.env, vec!["MODE".to_string()]);
+        assert_ne!(release.key, debug.key);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// The run view's file list is there from the moment the step is decided,

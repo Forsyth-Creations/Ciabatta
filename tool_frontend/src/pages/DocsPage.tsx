@@ -1077,8 +1077,9 @@ const SECTIONS: DocSection[] = [
             </>,
             <>
               <strong>Environment variables</strong> — the values it reads. Some decide{" "}
-              <em>whether</em> it can run at all (<C>REQUIRED_ENV</C>); some decide{" "}
-              <em>what it produces</em>, and those belong in <C>cache.env</C>.
+              <em>whether</em> it can run at all (<C>required_env</C>); others are set by value
+              (<C>env</C>). Both are part of the cache key, so a build run with different
+              variables is a different build.
             </>,
             <>
               <strong>The steps it needs</strong> — named in <C>needs</C>. If one of them produced
@@ -1241,7 +1242,7 @@ cache:
   inputs:  ["packages/api/src/**/*", "packages/api/Cargo.toml", "Cargo.lock"]
   outputs: ["packages/api/target/release/api"]
   exclude: ["packages/api/target"]   # its own output is not one of its inputs
-  env:     [PROFILE]                 # variables the RESULT depends on
+  env:     [PROFILE]                 # optional: env + required_env already key it
 
 steps:
   - name: compile
@@ -1323,15 +1324,30 @@ ciabatta cache status           # what the local cache is holding, and what it s
               ambient environment, CI, <C>-e</C>.
             </>,
             <>
-              <strong>Must it be set?</strong> — <C>REQUIRED_ENV</C>, checked before anything
+              <strong>Must it be set?</strong> — <C>required_env</C>, checked before anything
               runs.
             </>,
             <>
-              <strong>Does the result depend on it?</strong> — <C>cache.env</C>, which folds it
-              into the cache key.
+              <strong>Does the result depend on it?</strong> — always, if it&apos;s declared.
+              Every variable in a workflow&apos;s <C>env</C> and <C>required_env</C> is part of
+              the cache key; <C>cache.env</C> is only for something a build reads from the
+              ambient environment without declaring it.
             </>,
           ]}
         />
+
+        <Pre>{`# packages/api/.ciabatta/workflows/build.yaml
+env:                                  # set for every step, by value
+  MODE: release
+required_env: [API_URL, DEPLOY_TOKEN] # must be set, or the run won't start`}</Pre>
+        <P>
+          Both lists key the cache. <C>required_env</C> values go in as a SHA-256 digest — that is
+          where tokens get declared, and cache manifests are shared through the remote cache — so
+          a new token still rebuilds, but the token itself is never written down. The run page
+          shows <C>required_env</C>, then <C>env</C>, then whatever else the steps read, and
+          marks each variable that is part of a cache key with a fingerprint.{" "}
+          <C>REQUIRED_ENV</C>, the spelling before 0.6.0, still works.
+        </P>
 
         <SubHeading>Where values come from</SubHeading>
         <P>Precedence, weakest first:</P>
@@ -1358,7 +1374,7 @@ workspace:
 
         <SubHeading>Refusing to start without one</SubHeading>
         <Pre>{`# packages/api/.ciabatta/workflows/build.yaml
-REQUIRED_ENV: [API_URL, DATABASE_URL]`}</Pre>
+required_env: [API_URL, DATABASE_URL]`}</Pre>
         <P>
           Checked before the first step runs, so a missing token fails in a second with the name
           of what&apos;s missing, rather than fifteen minutes in with a stack trace. Starting the
@@ -1516,7 +1532,7 @@ owner: API Team
 requires: [sh, cargo]            # checked before anything runs
 tags: [backend]                  # every step here inherits these
 
-REQUIRED_ENV: [API_URL]
+required_env: [API_URL]
 
 # Other packages' workflows that must finish first, on top of whatever
 # workspace.depends_on already says.
@@ -1577,7 +1593,7 @@ steps:
             ["requires", "Executables that must be on PATH, checked before the run starts."],
             ["needs", "Workflows in OTHER packages that must finish first."],
             ["background", "Workflows that must be RUNNING for this one to finish — a mock API, a database. Started first, gate nothing, stopped at the end."],
-            ["REQUIRED_ENV", "Variables that must be set and non-empty, or the run is refused up front."],
+            ["required_env", "Variables that must be set and non-empty, or the run is refused up front."],
             ["env_file", ".env path(s) relative to the package, sourced before the graph runs."],
             ["env", "Variables applied to every step here."],
             ["cache", "What this workflow's builds read, write and key on."],
@@ -1845,9 +1861,9 @@ cd packages/api && ciabatta build           # same as --only api; --all for ever
               for that?&quot;.
             </>,
             <>
-              <strong>Declare the variables your output depends on</strong> in <C>cache.env</C>.
-              The Run page flags every variable a step reads without declaring — that list is your
-              to-do.
+              <strong>Declare the variables your output depends on</strong> in the workflow&apos;s{" "}
+              <C>env</C> or <C>required_env</C> — both key the cache. The Run page flags every
+              variable a step reads without declaring — that list is your to-do.
             </>,
             <>
               <strong>
@@ -1858,7 +1874,7 @@ cd packages/api && ciabatta build           # same as --only api; --all for ever
             </>,
             <>
               <strong>
-                Use <C>REQUIRED_ENV</C> freely.
+                Use <C>required_env</C> freely.
               </strong> Failing in one second with a name beats
               failing in fifteen minutes with a stack trace.
             </>,

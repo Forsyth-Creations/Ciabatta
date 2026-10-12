@@ -95,11 +95,11 @@ pub async fn execute(
 
     // Source any configured `.env` file(s) before anything runs, layering their
     // values under whatever is already resolved (CI / git / `-e`), and gate the
-    // whole flowchart on `REQUIRED_ENV`. The daemon's launcher runs the very
+    // whole flowchart on `required_env`. The daemon's launcher runs the very
     // same check before it spawns us, so it can prompt for what's missing
     // instead of starting a run that would only abort here.
     // The `.env` rules, before anything is sourced:
-    //   * a build that declares REQUIRED_ENV must say where those variables are
+    //   * a build that declares required_env must say where those variables are
     //     documented, or a fresh checkout fails on a variable nobody mentioned;
     //   * a missing `.env` is generated from that template rather than being an
     //     error, which is the whole point of declaring it.
@@ -222,7 +222,7 @@ pub async fn execute(
             let _ = tx
                 .send(ProgressUpdate::Log(
                     name.to_string(),
-                    format!("  • {var} (REQUIRED_ENV) is empty or unset"),
+                    format!("  • {var} (required_env) is empty or unset"),
                 ))
                 .await;
         }
@@ -230,7 +230,7 @@ pub async fn execute(
         // the GUI, and on stderr by the plain runner).
         bail!(
             "Run '{name}' cannot start: env variable(s) empty or unset: {list}. \
-             Set them (with -e {list}=…, or see REQUIRED_ENV in the flowchart) and retry."
+             Set them (with -e {list}=…, or see required_env in the flowchart) and retry."
         );
     }
     let env_vars = &prepared.env;

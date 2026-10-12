@@ -34,7 +34,7 @@ export interface EnvVar {
   /** Masked when `secret`; null when nothing supplies it, or when it `varies`. */
   value: string | null;
   secret: boolean;
-  /** Declared in REQUIRED_ENV — the run refuses to start without it. */
+  /** Declared in `required_env` — the run refuses to start without it. */
   required: boolean;
   origin: EnvOrigin;
   /** The `.env` file that supplied it, when `origin` is `env_file`. */
@@ -50,6 +50,9 @@ export interface EnvVar {
   purpose?: string;
   /** Every step needing it carries on without it, so unset isn't a fault. */
   optional?: boolean;
+  /** Part of a step's cache key (`env:`, `required_env`, or `cache.env`):
+   *  changing it rebuilds that step. Absent on runs recorded before 0.6.0. */
+  in_cache_key?: boolean;
 }
 
 export interface EnvReport {
@@ -95,6 +98,7 @@ export type Decision =
 export type RebuildReason =
   | { kind: "never_built" }
   | { kind: "inputs_changed"; changed: string[]; total: number }
+  | { kind: "env_changed"; vars: string[] }
   | { kind: "outputs_missing"; missing: string[] }
   | { kind: "outputs_modified"; modified: string[] }
   | { kind: "no_outputs" }

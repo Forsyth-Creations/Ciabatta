@@ -301,7 +301,7 @@ the same graph.
 description: Compile the API service
 owner: Ada
 needs: [proto:generate]        # cross-package deps for this workflow
-REQUIRED_ENV: [API_TOKEN]      # refuse to start unless set
+required_env: [API_TOKEN]      # refuse to start unless set
 env_file: .env                 # relative to this package (and the default)
 env_default: .env.default      # the checked-in template .env comes from
 
@@ -773,7 +773,7 @@ so a complex pipeline doesn't clutter `ciabatta.yaml`:
 ```yaml
 # packages/web/.ciabatta/workflows/deploy.yaml — the filename is the name.
 description: Migrate and release the web app
-REQUIRED_ENV: [RUN_TOKEN, AWS_REGION]     # gate the whole graph
+required_env: [RUN_TOKEN, AWS_REGION]     # gate the whole graph
 
 steps:
   - name: build
@@ -818,7 +818,7 @@ They're listed apart, in yellow, in the environment summary before the run, in
 the TUI log, and on the run's page — with a nudge to move them into an env
 profile if the run needs them every time.
 
-**`REQUIRED_ENV`** lists variables the workflow needs. Before anything runs,
+**`required_env`** lists variables the workflow needs. Before anything runs,
 each is checked; if one is empty or unset the run is aborted — the missing
 names are printed to the console and shown in the `--gui` view, and no step runs.
 
@@ -838,14 +838,14 @@ before executing it:
 ```
 Environment for 'web' — 5 variable(s) this run depends on
   sourcing .env
-  API_TOKEN     ••••••••                  [environment · REQUIRED_ENV · used by deploy]
-  AWS_REGION    eu-west-1                 [env file · .env · REQUIRED_ENV · used by deploy]
-  STAGE         prod                      [environment · REQUIRED_ENV · used by build, deploy]
+  API_TOKEN     ••••••••                  [environment · required_env · used by deploy]
+  AWS_REGION    eu-west-1                 [env file · .env · required_env · used by deploy]
+  STAGE         prod                      [environment · required_env · used by build, deploy]
   DATABASE_URL  postgres://localhost/app  [env file · .env]
   JOBS          4                         [config · used by build]
 ```
 
-The list is everything the run is actually wired to: `REQUIRED_ENV`, every key
+The list is everything the run is actually wired to: `required_env`, every key
 in the `.env` files it sources, the `[env]` tables that cascade from
 sub-workspace to workflow to step, and every `$VAR` the step commands, working
 directories and `when` / `skip_if` conditions read. Each line says where the
@@ -933,7 +933,9 @@ cache:
   exclude: [packages/api/target]        # never counted as an input, so a build
                                         # can't invalidate itself with its own
                                         # output
-  env: [PROFILE]                        # variables the RESULT depends on
+  env: [PROFILE]                        # OPTIONAL: extra variables to key on.
+                                        # Every `env:` and `required_env`
+                                        # variable already keys the cache.
 
 steps:
   - name: compile
@@ -970,8 +972,31 @@ A stage has exactly **three** dependencies, and any of them changing is a
 rebuild:
 
 1. its **input files**,
-2. the **environment variables** it declared in `cache.env`,
+2. its **environment variables** — every one it gets from an `env:` table
+   (workspace, workflow or step) and every name in its workflow's
+   `required_env`, plus anything extra listed in `cache.env`,
 3. the **outputs of the stages it needs**.
+
+**Variables key the cache without being repeated.** A workflow declares its
+variables in two places, and both are part of every step's key:
+
+```yaml
+# packages/api/.ciabatta/workflows/build.yaml
+env:                     # set for every step, by value
+  MODE: release
+required_env: [API_URL, DEPLOY_TOKEN]   # must be set, or the run won't start
+```
+
+Change `MODE`, or run with a different `API_URL`, and the steps rebuild.
+`required_env` values go into the key (and the stored manifest, which is
+shared through the remote cache) as a SHA-256 digest, because that is where
+tokens get declared: a new token still invalidates the entry, but the token
+itself is never written down. `cache.env` is only for a variable a build reads
+from the ambient environment without declaring it. (`REQUIRED_ENV`, the
+spelling before 0.6.0, still works.)
+
+The run page shows both lists — `required_env` first, then `env`, then anything
+else the steps read — and marks every variable that is part of a cache key.
 
 The third is what makes a *graph* cacheable rather than just a directory. Change
 a `.proto` file and `proto:generate` misses; its outputs change; every stage
@@ -1430,7 +1455,7 @@ Four rules, in the order they apply:
    two packages that need the same variable declare it in the workspace above
    them, or each declares it for itself.
 
-`REQUIRED_ENV` resolves up that same chain. A sub-library that needs `API_URL`
+`required_env` resolves up that same chain. A sub-library that needs `API_URL`
 does **not** have to document it if the workspace above it already does —
 demanding a template from every package that reads a shared variable would be
 asking the same question once per package, and would make declaring it once
@@ -1473,7 +1498,7 @@ page shows each step's chain, so "which `.env` did this value come from?" is a
 question with a visible answer.
 
 And one requirement that follows from the third: **a workspace whose workflows
-declare `REQUIRED_ENV` must declare `env_default`.** Not bureaucracy — it's what
+declare `required_env` must declare `env_default`.** Not bureaucracy — it's what
 makes rule 3 possible. A repo where the required variables are written down
 somewhere reviewable is a repo a new person can build; one where they aren't is
 a repo where the answer lives in somebody's shell history.
@@ -1559,7 +1584,7 @@ ciabatta convert --script scripts/build.sh
 
 It reads the script and does the tedious part: the tools it calls, the
 environment variables it reads (and which have no fallback, so they belong in
-`REQUIRED_ENV`), the files it writes, and the description sitting in its own
+`required_env`), the files it writes, and the description sitting in its own
 header comment. Everything it finds is printed for review before it's written,
 and what it can't infer it leaves marked rather than guessing.
 

@@ -22,6 +22,7 @@ import {
   Typography,
 } from "@mui/material";
 import KeyIcon from "@mui/icons-material/VpnKey";
+import FingerprintIcon from "@mui/icons-material/Fingerprint";
 
 import type { EnvReport, EnvVar } from "../api/types";
 import { monoFontStack } from "../theme";
@@ -75,7 +76,8 @@ export function EnvVarChip({ variable }: { variable: EnvVar }) {
           {variable.purpose && `${variable.purpose} · `}
           {originText(variable)}
           {variable.optional && " · optional"}
-          {variable.required && " · REQUIRED_ENV"}
+          {variable.required && " · required_env"}
+          {variable.in_cache_key && " · part of the cache key: changing it rebuilds"}
           {variable.secret && " · value hidden because the name looks like a secret"}
           {variable.steps.length > 0 && ` · used by ${variable.steps.join(", ")}`}
         </>
@@ -94,6 +96,12 @@ export function EnvVarChip({ variable }: { variable: EnvVar }) {
         icon={variable.secret ? <KeyIcon /> : undefined}
         label={
           <span style={{ fontFamily: monoFontStack }}>
+            {variable.in_cache_key && (
+              <FingerprintIcon
+                aria-label="keys the cache"
+                sx={{ fontSize: 13, opacity: 0.7, mr: 0.5, verticalAlign: "-2px" }}
+              />
+            )}
             {variable.key}
             <Box component="span" sx={{ opacity: 0.6 }}>
               {" = "}
@@ -160,6 +168,27 @@ export function CustomArguments({ report }: { report: EnvReport }) {
   );
 }
 
+/** One labelled row of variables — nothing at all when there are none. */
+function EnvGroup({ label, hint, vars }: { label: string; hint: string; vars: EnvVar[] }) {
+  if (vars.length === 0) return null;
+  return (
+    <Stack direction="row" spacing={0.75} sx={{ mt: 0.75 }} alignItems="center" flexWrap="wrap" useFlexGap>
+      <Tooltip title={hint}>
+        <Typography
+          variant="caption"
+          color="text.secondary"
+          sx={{ fontFamily: monoFontStack, minWidth: 96 }}
+        >
+          {label}
+        </Typography>
+      </Tooltip>
+      {vars.map((variable) => (
+        <EnvVarChip key={variable.key} variable={variable} />
+      ))}
+    </Stack>
+  );
+}
+
 /**
  * The whole environment a graph depends on: what is set, where it came from,
  * and what is still missing.
@@ -171,10 +200,17 @@ export function CustomArguments({ report }: { report: EnvReport }) {
 export function EnvPanel({ report, title = "Environment" }: { report: EnvReport; title?: string }) {
   if (report.vars.length === 0 && report.files.length === 0) return null;
 
-  // Custom arguments have a block of their own, above.
+  // Custom arguments have a block of their own, above. The rest is grouped
+  // the way a workflow file declares it: `required_env`, then `env`, then
+  // whatever else the steps read from around them.
   const vars = report.vars.filter((v) => v.origin !== "argument");
-  const used = vars.filter((v) => v.steps.length > 0 || v.required);
-  const unused = vars.filter((v) => v.steps.length === 0 && !v.required);
+  const required = vars.filter((v) => v.required);
+  const declared = vars.filter((v) => !v.required && v.origin === "config");
+  const read = vars.filter(
+    (v) => !v.required && v.origin !== "config" && v.steps.length > 0,
+  );
+  const unused = vars.filter((v) => v.steps.length === 0 && !v.required && v.origin !== "config");
+  const keyed = vars.some((v) => v.in_cache_key);
 
   return (
     <Box>
@@ -208,11 +244,20 @@ export function EnvPanel({ report, title = "Environment" }: { report: EnvReport;
         </Alert>
       )}
 
-      <Stack direction="row" spacing={0.75} sx={{ mt: 0.5 }} flexWrap="wrap" useFlexGap>
-        {used.map((variable) => (
-          <EnvVarChip key={variable.key} variable={variable} />
-        ))}
-      </Stack>
+      <EnvGroup
+        label="required_env"
+        hint="must be set, or the run won't start"
+        vars={required}
+      />
+      <EnvGroup label="env" hint="declared in the config, by value" vars={declared} />
+      <EnvGroup label="read by steps" hint="from the environment or a .env file" vars={read} />
+      {keyed && (
+        <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 0.5 }}>
+          <FingerprintIcon sx={{ fontSize: 13, verticalAlign: "-2px", mr: 0.5 }} />
+          part of the cache key — every <code>required_env</code> and <code>env</code> variable
+          is, so changing one rebuilds the steps that see it.
+        </Typography>
+      )}
 
       {unused.length > 0 && (
         <Typography

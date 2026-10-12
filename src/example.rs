@@ -508,7 +508,7 @@ requires: [sh]
 
 # Refuse to start unless these are set, rather than failing halfway through with
 # something unhelpful. Sourced from .env, the environment, CI, or -e flags.
-REQUIRED_ENV: [API_URL]
+required_env: [API_URL]
 
 steps:
   - name: compile
@@ -620,7 +620,7 @@ owner: API Team
 needs: [self:build]
 tags: [release]
 
-REQUIRED_ENV: [CIABATTA_NEXUS_USER, CIABATTA_NEXUS_PASS]
+required_env: [CIABATTA_NEXUS_USER, CIABATTA_NEXUS_PASS]
 
 steps:
   - name: verify
@@ -660,7 +660,7 @@ needs: [self:build]
 tags: [deploy]
 requires: [sh]
 
-REQUIRED_ENV: [DEPLOY_ENV]
+required_env: [DEPLOY_ENV]
 
 steps:
   - name: image
@@ -826,7 +826,7 @@ Nobody wrote that graph down. Each package declared what *it* needs, and
 | Timeouts and retries | `packages/api/.ciabatta/workflows/build.yaml` |
 | A recovery node (`on_error`) | `packages/api/.ciabatta/workflows/build.yaml` → `fix-build` |
 | A step that never exits | `packages/web/.ciabatta/workflows/dev.yaml` → `persistent` |
-| Required variables | `packages/api/.ciabatta/workflows/build.yaml` → `REQUIRED_ENV` |
+| Required variables | `packages/api/.ciabatta/workflows/build.yaml` → `required_env` |
 | `.env` files | `packages/api/.env`, and `.env.example` at the root |
 | A workflow written inline rather than in its own file | `.ciabatta/ciabatta.yaml` → `workflows.smoke` |
 "#,

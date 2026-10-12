@@ -510,7 +510,7 @@ async fn cmd_workflow(
 /// the difference between "works here" and "fails there" is far more often a
 /// variable, an undeclared input, or a package pulled in from three directories
 /// away than it is the graph itself. Ciabatta has already resolved all of it
-/// before the first step runs — `REQUIRED_ENV`, the `.env` files it sources, the
+/// before the first step runs — `required_env`, the `.env` files it sources, the
 /// `[env]` tables that cascade to each step, each target's inputs, outputs and
 /// declared variables — so it may as well say so, in the same spirit as printing
 /// the graph before executing it.
@@ -3424,7 +3424,7 @@ needs: []
 # runs, with the install command from the root's `toolchain:` section.
 requires: []
 
-# REQUIRED_ENV: [API_TOKEN]   # refuse to start unless these are set
+# required_env: [API_TOKEN]   # refuse to start unless these are set
 # env_file: .env              # sourced before the run
 
 steps:
@@ -3554,7 +3554,7 @@ system:
 # workflows:
 #   release:
 #     description: Build the app and publish it
-#     REQUIRED_ENV: [API_TOKEN]        # refuse to start unless these are set
+#     required_env: [API_TOKEN]        # refuse to start unless these are set
 #     steps:
 #       - name: build
 #         run: make dist
@@ -3780,7 +3780,7 @@ workspace:                   # this package's identity (ciabatta init --lib)
                                # default rather than adding to it.
   env_default: .env.default    # the checked-in template `.env` is generated
                                # from. REQUIRED of any package whose workflows
-                               # declare REQUIRED_ENV — see ENVIRONMENT below.
+                               # declare required_env — see ENVIRONMENT below.
   umbrella: true               # on the ROOT config only: "I'm not a package,
                                # just shared toolchain and settings"
 
@@ -3811,7 +3811,7 @@ workflow name. Small packages can write them inline under `workflows:` instead
                                             # workspace.depends_on
   requires: [cargo]                         # tools all its steps need
   env_file: .env.build                      # relative to this package
-  REQUIRED_ENV: [API_TOKEN]                 # refuse to start unless set
+  required_env: [API_TOKEN]                 # refuse to start unless set
   tags: [rust]
 
   env:                                      # vars for all its steps
@@ -3892,7 +3892,9 @@ cache:
   exclude: [target]                     # never counted as an input, so a build
                                         # can't invalidate itself with its own
                                         # output. Does NOT filter `outputs`.
-  env: [PROFILE]                        # variables the RESULT depends on
+  env: [PROFILE]                        # OPTIONAL: extra variables to key on.
+                                        # Every `env:` and `required_env`
+                                        # variable already keys the cache.
 
   remote:                               # the shared cache (project-level: put
     url: http://cache.example.com:8380  # this in the MONOREPO ROOT's config)
@@ -3916,7 +3918,9 @@ cache:
 A stage has exactly THREE dependencies, and any of them changing is a rebuild:
 
   1. its input files,
-  2. the environment variables it declared in `cache.env`,
+  2. its environment variables: every one from an `env:` table (workspace,
+     workflow, step), the workflow's `required_env`, and any extra names in
+     `cache.env`,
   3. the outputs of the stages it `needs`.
 
 The third is what makes a graph cacheable rather than just a directory: change
@@ -4121,7 +4125,7 @@ Three rules, in the order they apply:
      absent, so your edits survive.
 
 And one requirement that follows from the third: a workspace whose workflows
-declare REQUIRED_ENV must declare `env_default`. Not bureaucracy — it's what
+declare required_env must declare `env_default`. Not bureaucracy — it's what
 makes rule 3 possible. A repo where the required variables are written down
 somewhere reviewable is a repo a new person can build.
 
@@ -4429,7 +4433,7 @@ workspace:                   # this package's identity (ciabatta init --lib)
                                # default rather than adding to it.
   env_default: .env.default    # the checked-in template `.env` is generated
                                # from. REQUIRED of any package whose workflows
-                               # declare REQUIRED_ENV — see ENVIRONMENT below.
+                               # declare required_env — see ENVIRONMENT below.
   umbrella: true               # on the ROOT config only: "I'm not a package,
                                # just shared toolchain and settings"
 
@@ -4460,7 +4464,7 @@ workflow name. Small packages can write them inline under `workflows:` instead
                                             # workspace.depends_on
   requires: [cargo]                         # tools all its steps need
   env_file: .env.build                      # relative to this package
-  REQUIRED_ENV: [API_TOKEN]                 # refuse to start unless set
+  required_env: [API_TOKEN]                 # refuse to start unless set
   tags: [rust]
 
   env:                                      # vars for all its steps
@@ -4541,7 +4545,9 @@ cache:
   exclude: [target]                     # never counted as an input, so a build
                                         # can't invalidate itself with its own
                                         # output. Does NOT filter `outputs`.
-  env: [PROFILE]                        # variables the RESULT depends on
+  env: [PROFILE]                        # OPTIONAL: extra variables to key on.
+                                        # Every `env:` and `required_env`
+                                        # variable already keys the cache.
 
   remote:                               # the shared cache (project-level: put
     url: http://cache.example.com:8380  # this in the MONOREPO ROOT's config)
@@ -4565,7 +4571,9 @@ cache:
 A stage has exactly THREE dependencies, and any of them changing is a rebuild:
 
   1. its input files,
-  2. the environment variables it declared in `cache.env`,
+  2. its environment variables: every one from an `env:` table (workspace,
+     workflow, step), the workflow's `required_env`, and any extra names in
+     `cache.env`,
   3. the outputs of the stages it `needs`.
 
 The third is what makes a graph cacheable rather than just a directory: change
@@ -4770,7 +4778,7 @@ Three rules, in the order they apply:
      absent, so your edits survive.
 
 And one requirement that follows from the third: a workspace whose workflows
-declare REQUIRED_ENV must declare `env_default`. Not bureaucracy — it's what
+declare required_env must declare `env_default`. Not bureaucracy — it's what
 makes rule 3 possible. A repo where the required variables are written down
 somewhere reviewable is a repo a new person can build.
 

@@ -296,7 +296,7 @@ pub fn to_workflow_yaml(name: &str, script_rel: &str, analysis: &Analysis) -> St
     }
     if !analysis.required_env.is_empty() {
         out.push_str(&format!(
-            "REQUIRED_ENV: [{}]\n",
+            "required_env: [{}]\n",
             analysis.required_env.join(", ")
         ));
     }

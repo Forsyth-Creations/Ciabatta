@@ -59,7 +59,7 @@
         },
         "env": {
           "type": "array",
-          "description": "Environment variables that are part of the cache key. A build whose result depends on PROFILE must say so, or switching profiles will silently reuse the other one's artifacts.",
+          "description": "Extra environment variables for the cache key. Optional: every variable from `env:` (workspace, workflow, step) and the workflow's `required_env` already keys the cache. List here only what a build reads from the ambient environment without declaring it — PROFILE set in your shell, say.",
           "items": { "type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*$" }
         },
         "exclude": {

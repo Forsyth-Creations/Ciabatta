@@ -200,7 +200,7 @@ const HOW = [
 const DEPLOY_CONFIG_HTML = `<span class="c"># packages/web/.ciabatta/workflows/deploy.yaml</span>
 <span class="c"># The filename is the workflow name. Run it with: ciabatta deploy</span>
 <span class="k">description</span>: <span class="v">Migrate and release the web app</span>
-<span class="new">REQUIRED_ENV</span>: <span class="v">[RUN_TOKEN]</span>            <span class="c"># refuse to start without it</span>
+<span class="new">required_env</span>: <span class="v">[RUN_TOKEN]</span>            <span class="c"># refuse to start without it</span>
 
 <span class="s">steps:</span>
   - <span class="k">name</span>: <span class="v">build</span>

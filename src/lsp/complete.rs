@@ -220,7 +220,10 @@ fn in_workflow(cursor: &Cursor, member: Option<&str>, index: &Index, lines: &[&s
     if cursor.at(&["steps", "when"]) || cursor.at(&["steps", "skip_if"]) {
         return env_vars(index, "compared against this step's condition");
     }
-    if cursor.at(&["REQUIRED_ENV"]) || cursor.ends_with(&["cache", "env"]) {
+    if cursor.at(&["required_env"])
+        || cursor.at(&["REQUIRED_ENV"])
+        || cursor.ends_with(&["cache", "env"])
+    {
         return env_vars(index, "used elsewhere in this repository");
     }
     if cursor.at(&["steps", "from"]) {

@@ -109,12 +109,22 @@ pub struct CacheConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub no_outputs: Option<bool>,
 
-    /// Environment variables that are part of the key. A build whose result
-    /// depends on `PROFILE` must say so, or switching profiles will silently
-    /// reuse the other one's artifacts.
+    /// Extra environment variables for the key. Optional: every variable a
+    /// step gets from `env:` (workspace, workflow, step) and its workflow's
+    /// `required_env` already keys it — see [`Self::with_step_env`]. List here
+    /// only what a build reads from the ambient environment without declaring
+    /// it, like a `PROFILE` set in the shell.
     #[serde(default)]
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub env: Vec<String>,
+
+    /// Of [`Self::env`], the names whose values go into the key and the
+    /// stored manifest as a digest rather than as written: a workflow's
+    /// `required_env`, which is where tokens and credentials are declared.
+    /// Never written in config — filled in from the workflow when a step's
+    /// effective settings are worked out.
+    #[serde(skip)]
+    pub secret_env: Vec<String>,
 
     /// Glob patterns never treated as inputs even when `inputs` would match
     /// them. Build output living under a source tree is the usual case.
@@ -196,6 +206,38 @@ fn default_true() -> bool {
 }
 
 impl CacheConfig {
+    /// The value a declared variable contributes to the key: as written, or
+    /// as `sha256:<digest>` for one of [`Self::secret_env`] — so a changed
+    /// token still changes the key, but the token itself never lands in a
+    /// manifest that is uploaded to a shared server. Unset is empty either way.
+    pub fn env_value(&self, name: &str, env: &BTreeMap<String, String>) -> String {
+        let value = env.get(name).cloned().unwrap_or_default();
+        if !value.is_empty() && self.secret_env.iter().any(|s| s == name) {
+            format!("sha256:{}", hash_bytes(value.as_bytes()))
+        } else {
+            value
+        }
+    }
+
+    /// Fold a step's own environment into what keys it: every variable its
+    /// workspace, workflow and step `env:` give it, and every name in its
+    /// workflow's `required_env`. A build's result depends on the variables it
+    /// was run with, so declaring them once in `env:` / `required_env` is
+    /// enough — `cache.env` only needs whatever else a build reads.
+    pub fn with_step_env(mut self, step: &crate::run::RunStep) -> Self {
+        let mut names: BTreeSet<String> = self.env.iter().cloned().collect();
+        names.extend(step.env.keys().cloned());
+        names.extend(step.required_env.iter().cloned());
+        self.env = names.into_iter().collect();
+        for name in &step.required_env {
+            // A value the file itself writes down is no secret.
+            if !step.env.contains_key(name) && !self.secret_env.contains(name) {
+                self.secret_env.push(name.clone());
+            }
+        }
+        self
+    }
+
     /// Whether caching was asked for. An unset `enabled` is off, the same as
     /// `false` — the difference between the two only matters when one level's
     /// settings are layered over another's.
@@ -812,6 +854,9 @@ pub enum Reason {
         /// How many changed in total, when more than `changed` lists.
         total: usize,
     },
+    /// No input file changed, but variables that key it did — names only,
+    /// since values can be secrets.
+    EnvChanged { vars: Vec<String> },
     /// The entry exists, but the outputs it promised aren't on disk and can't
     /// be restored.
     OutputsMissing { missing: Vec<String> },
@@ -833,6 +878,16 @@ impl Reason {
     pub fn describe(&self) -> String {
         match self {
             Reason::NeverBuilt => "this input set has never been built".to_string(),
+            // Neither a file nor a variable: the command, an upstream step's
+            // output, or the cache settings themselves.
+            Reason::InputsChanged { changed, .. } if changed.is_empty() => {
+                "its key changed though no input file did — its command, an upstream step's \
+                 output, or its cache settings moved"
+                    .to_string()
+            }
+            Reason::EnvChanged { vars } => {
+                format!("variable(s) it keys on changed: {}", vars.join(", "))
+            }
             Reason::InputsChanged { changed, total } => {
                 let listed = changed.join(", ");
                 if *total > changed.len() {
@@ -959,7 +1014,7 @@ pub fn plan(
             .config
             .env
             .iter()
-            .map(|name| (name.clone(), env.get(name).cloned().unwrap_or_default()))
+            .map(|name| (name.clone(), target.config.env_value(name, env)))
             .collect(),
         // Not declared and not per-target: every `CIABATTA_FEAT_*` in the
         // environment, read straight out of the map every caller already
@@ -986,7 +1041,23 @@ pub fn plan(
         // Nothing stored under this key. Say whether that's because the inputs
         // moved (the useful answer) or because it's simply never been built.
         let reason = match store.latest_for(&target.workspace, &target.name)? {
-            Some(previous) => summarize(changed_inputs(&previous.inputs, &key_inputs.inputs)),
+            Some(previous) => {
+                let files = changed_inputs(&previous.inputs, &key_inputs.inputs);
+                let vars: Vec<String> = key_inputs
+                    .env
+                    .keys()
+                    .chain(previous.env.keys())
+                    .filter(|name| key_inputs.env.get(*name) != previous.env.get(*name))
+                    .cloned()
+                    .collect::<BTreeSet<_>>()
+                    .into_iter()
+                    .collect();
+                if files.is_empty() && !vars.is_empty() {
+                    Reason::EnvChanged { vars }
+                } else {
+                    summarize(files)
+                }
+            }
             None => Reason::NeverBuilt,
         };
         return Ok(Decision::Rebuild { key, reason });
@@ -1214,6 +1285,75 @@ mod tests {
             1
         );
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A workflow's `env:` and `required_env` key the cache without being
+    /// repeated under `cache.env`, and a required value — a token, usually —
+    /// goes in as a digest, never as written.
+    #[test]
+    fn a_steps_env_and_required_env_key_it_without_cache_env() {
+        let step = crate::run::RunStep {
+            name: "build".into(),
+            env: [("MODE".to_string(), "release".to_string())]
+                .into_iter()
+                .collect(),
+            required_env: vec!["API_TOKEN".into(), "MODE".into()],
+            ..Default::default()
+        };
+        let config = CacheConfig {
+            env: vec!["PROFILE".into()],
+            ..Default::default()
+        }
+        .with_step_env(&step);
+        assert_eq!(config.env, vec!["API_TOKEN", "MODE", "PROFILE"]);
+        // MODE's value is written in the file, so it isn't treated as secret.
+        assert_eq!(config.secret_env, vec!["API_TOKEN"]);
+
+        let env: BTreeMap<String, String> = [
+            ("API_TOKEN".to_string(), "hunter2".to_string()),
+            ("MODE".to_string(), "release".to_string()),
+        ]
+        .into_iter()
+        .collect();
+        let token = config.env_value("API_TOKEN", &env);
+        assert!(token.starts_with("sha256:") && !token.contains("hunter2"));
+        assert_eq!(config.env_value("MODE", &env), "release");
+        assert_eq!(config.env_value("PROFILE", &env), "");
+
+        // And the key moves when either changes.
+        let dir = scratch("stepenv");
+        write(&dir, "src/main.rs", "fn main() {}");
+        let target = |config: &CacheConfig| Target {
+            name: "build".into(),
+            workspace: ".".into(),
+            dir: dir.clone(),
+            member: None,
+            commands: vec!["make".into()],
+            config: CacheConfig {
+                enabled: Some(true),
+                inputs: vec!["src".into()],
+                outputs: vec!["out".into()],
+                ..config.clone()
+            },
+            upstream: BTreeMap::new(),
+        };
+        let store = store::Store::at(dir.join(".store")).unwrap();
+        let key = |env: &BTreeMap<String, String>| {
+            plan(&target(&config), env, &store)
+                .unwrap()
+                .key()
+                .unwrap()
+                .to_string()
+        };
+        let base = key(&env);
+        let mut other_token = env.clone();
+        other_token.insert("API_TOKEN".into(), "different".into());
+        let mut other_mode = env.clone();
+        other_mode.insert("MODE".into(), "debug".into());
+        assert_ne!(base, key(&other_token));
+        assert_ne!(base, key(&other_mode));
+        assert_eq!(base, key(&env));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

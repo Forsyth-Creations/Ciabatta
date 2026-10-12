@@ -83,7 +83,7 @@
         },
         "env_default": {
           "type": "string",
-          "description": "The checked-in template the .env is generated from when it's missing \u2014 conventionally `.env.default`. Required of any workspace whose workflows declare REQUIRED_ENV.",
+          "description": "The checked-in template the .env is generated from when it's missing \u2014 conventionally `.env.default`. Required of any workspace whose workflows declare required_env.",
           "examples": [
             ".env.default"
           ]

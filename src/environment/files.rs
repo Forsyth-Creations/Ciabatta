@@ -131,7 +131,7 @@ pub fn resolve(meta: &WorkspaceMeta, dir: &Path) -> Resolved {
 
 /// Whether a build depends on environment variables, and so needs a template.
 ///
-/// Deliberately narrow: a run that declares `REQUIRED_ENV` has said, in its own
+/// Deliberately narrow: a run that declares `required_env` has said, in its own
 /// config, that it cannot run without those variables. That's the case where a
 /// missing `.env` becomes a confusing failure several minutes into a build, and
 /// so the case worth requiring a template for. A step that merely *reads* an
@@ -475,10 +475,10 @@ mod tests {
         let dir = scratch("require");
         let bare = WorkspaceMeta::default();
 
-        // No REQUIRED_ENV → nothing to require.
+        // No required_env → nothing to require.
         assert!(require_template(&bare, &dir, &[], "api").is_ok());
 
-        // REQUIRED_ENV with no template → refused, with the fix spelled out.
+        // required_env with no template → refused, with the fix spelled out.
         let err = require_template(&bare, &dir, &["API_URL".to_string()], "api")
             .unwrap_err()
             .to_string();

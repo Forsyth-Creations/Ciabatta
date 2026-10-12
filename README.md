@@ -1449,11 +1449,21 @@ Four rules, in the order they apply:
    without being declared: committing one has already said what the variables
    are. Generation happens at the start of a run, for the project and for every
    sub-workspace it touches, and never overwrites a file that exists.
-4. **Nearest wins, then it looks outward.** A step in `packages/api` reads
-   `packages/api/.env`; anything that file doesn't set comes from the workspace
-   above it, up to the monorepo root. A *sibling's* `.env` is never a fallback —
-   two packages that need the same variable declare it in the workspace above
-   them, or each declares it for itself.
+4. **One environment per run, settled before it starts.** Every `.env` the run
+   touches is read — the root's, and for each sub-workspace with steps in the
+   run, its own and every one between it and the root — and each variable is
+   decided once, for every step:
+
+   1. the terminal ciabatta was started in (the shell, CI, git, `-e`) always
+      wins;
+   2. otherwise the `.env` files, which **must agree**. Two that set a variable
+      differently stop the run before anything executes, naming each file and
+      value;
+   3. otherwise the root's declared `env_default`.
+
+   A step in `packages/api` sees exactly what a step at the root sees. Shared
+   settings belong in the root `.env`; a package's `.env` adds what only it
+   needs.
 
 `required_env` resolves up that same chain. A sub-library that needs `API_URL`
 does **not** have to document it if the workspace above it already does —
@@ -1484,18 +1494,33 @@ workspace:
 ```
 
 ```
+.env.default             SHARED=default     REGION=us      TIER=dev
 .env                     SHARED=from-root   REGION=global
-packages/api/.env        SHARED=from-api
+packages/api/.env        API_URL=http://localhost:8080
 packages/web/.env        SHARED=from-web
 
-api:build   sees  SHARED=from-api   REGION=global    # its own file, then outward
-web:build   sees  SHARED=from-web   REGION=global    # never api's
+every step sees  REGION=global  TIER=dev  API_URL=http://localhost:8080
+SHARED: ✗ conflict — .env=from-root vs packages/web/.env=from-web
 ```
 
-The environment a run *starts* with still beats every file, as it always has:
-the shell, the CI system, and `-e KEY=VALUE` are on top of all of this. The run
-page shows each step's chain, so "which `.env` did this value come from?" is a
-question with a visible answer.
+The report printed before every run (and `--dry-run`) says how each value was
+decided — where it came from, and what it overrode:
+
+```
+Environment for 'build' — 4 variable(s) this run depends on
+  sourcing .env.default, .env, packages/api/.env, packages/web/.env
+  precedence: terminal > .env files (must agree) > .env.default
+  API_URL  http://localhost:8080  [packages/api/.env]
+  REGION   global                 [.env, overrides .env.default]
+  SHARED   (conflict)             [conflict: .env=from-root vs packages/web/.env=from-web]
+  TIER     dev                    [.env.default — not in the terminal or any .env]
+  ✗ conflicting: SHARED — make the .env files agree, or settle it with -e KEY=VALUE
+```
+
+`-e SHARED=…` (or exporting it in the shell) settles a conflict for one run,
+since the terminal always wins. Only a *declared* `env_default` is a fallback: a
+`.env.example` found by its name is often placeholders, and those shouldn't
+quietly satisfy a `required_env`.
 
 And one requirement that follows from the third: **a workspace whose workflows
 declare `required_env` must declare `env_default`.** Not bureaucracy — it's what

@@ -22,7 +22,7 @@ pub mod why;
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
 
 pub use engine::execute;
@@ -500,6 +500,9 @@ pub struct ResolvedRun {
     /// `.env` file paths (relative to the project root) to source before the
     /// run starts, in the order they should be applied.
     pub env_files: Vec<String>,
+    /// The root's `env_default`: what a variable falls back to when neither
+    /// the terminal nor any `.env` sets it. Set by [`with_root_env`].
+    pub env_default: Option<String>,
     pub steps: Vec<RunStep>,
     /// The `(sub-workspace, workflow)` units this run covers.
     ///
@@ -592,35 +595,74 @@ pub fn load_env_files(
     Ok(merged)
 }
 
-/// What one step's own `.env` chain resolved to.
-#[derive(Debug, Clone, Default)]
-pub struct StepEnv {
-    /// What this step sees: its workspace's `.env` layered over everything
-    /// above it, over the environment the run started with.
-    pub env: HashMap<String, String>,
-    /// The files it resolved through, outermost first — nearest last, since
-    /// that's the one that wins.
+/// Fold the root's own env files into a run's: its `.env` (or `env_file`s)
+/// ahead of anything the run already sources, and its `env_default` as the
+/// fallback beneath them all.
+///
+/// Every caller that resolves a run's environment goes through this: the
+/// engine, the pre-run report, and the daemon's launcher and views. Were any of
+/// them to skip it, it would report a variable the root `.env` sets as unset,
+/// or ask for one the run would have found on its own.
+pub fn with_root_env(
+    mut resolved: ResolvedRun,
+    meta: &crate::workspace::WorkspaceMeta,
+    root: &Path,
+) -> ResolvedRun {
+    use crate::environment::files;
+
+    let mut env_files = files::resolve(meta, root).files;
+    for file in resolved.env_files.drain(..) {
+        if !env_files.contains(&file) {
+            env_files.push(file);
+        }
+    }
+    resolved.env_files = env_files;
+    resolved.env_default = files::defaults_file(meta, root);
+    resolved
+}
+
+/// How a variable's value was decided: everything that offered one, so the
+/// report can say what won and what it beat.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Source {
+    /// The environment ciabatta was started with (the terminal, CI, git, or a
+    /// `-e` flag) had a non-empty value. It always wins.
+    pub terminal: bool,
+    /// The `.env` files that set it, all to the same value — or, when they
+    /// don't agree, see [`PreparedEnv::conflicts`].
     pub files: Vec<String>,
+    /// The root's `env_default`, when it sets it.
+    pub default: Option<String>,
+}
+
+/// One variable two `.env` files set differently, with nothing in the
+/// terminal to settle it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Conflict {
+    pub key: String,
+    /// Each file that sets it, and to what — in the order they were read.
+    pub values: Vec<(String, String)>,
 }
 
 /// A run's environment, resolved as far as the inputs allow, plus whatever it
 /// still needs before it may start. Produced by [`prepare_env`].
 #[derive(Debug, Clone, Default)]
 pub struct PreparedEnv {
-    /// What the run's phases see, and what a step with no `.env` of its own
-    /// sees. Only complete when [`is_ready`] is true; otherwise it's as far as
-    /// resolution got.
+    /// What every step and phase of the run sees. One environment for the
+    /// whole run: a step in a sub-workspace sees exactly what a step at the
+    /// root does. Only complete when [`is_ready`] is true; otherwise it's as
+    /// far as resolution got.
     ///
     /// [`is_ready`]: PreparedEnv::is_ready
     pub env: HashMap<String, String>,
-    /// The environment for each step that resolves through `.env` files of its
-    /// own, by step name — its workspace's, then everything above it.
-    ///
-    /// Absent for a step whose chain is empty, which is every step of a plain
-    /// single-project workflow: those see [`Self::env`] and nothing else.
-    pub steps: HashMap<String, StepEnv>,
-    /// The `env_file` paths that were resolved and sourced, in order.
+    /// Every file read, in the order read: the `env_default` first, then each
+    /// `.env` (and its profile sibling).
     pub sourced: Vec<String>,
+    /// How each variable any of those files mentions was decided.
+    pub sources: HashMap<String, Source>,
+    /// Variables the `.env` files disagree on. The run may not start while
+    /// there are any: which value is right is not ciabatta's to guess.
+    pub conflicts: Vec<Conflict>,
     /// `{VAR}` placeholders in `env_file` paths with no value, so the file to
     /// source can't even be named yet.
     pub unresolved_paths: Vec<String>,
@@ -635,38 +677,9 @@ pub struct PreparedEnv {
 impl PreparedEnv {
     /// Whether the run may start.
     pub fn is_ready(&self) -> bool {
-        self.unresolved_paths.is_empty() && self.missing_required.is_empty()
-    }
-
-    /// The environment one step sees: its own chain when it has one, the run's
-    /// otherwise.
-    pub fn for_step(&self, step: &str) -> &HashMap<String, String> {
-        self.steps.get(step).map(|s| &s.env).unwrap_or(&self.env)
-    }
-
-    /// The `.env` files one step resolved through, outermost first. Empty for a
-    /// step that just sees the run's own environment.
-    pub fn files_for(&self, step: &str) -> &[String] {
-        self.steps
-            .get(step)
-            .map(|s| s.files.as_slice())
-            .unwrap_or(&[])
-    }
-
-    /// Every file this run sourced anywhere — the run's own first, then the
-    /// steps' chains, in step-name order so a report doesn't reshuffle.
-    pub fn all_sourced(&self) -> Vec<String> {
-        let mut all = self.sourced.clone();
-        let mut names: Vec<&String> = self.steps.keys().collect();
-        names.sort();
-        for name in names {
-            for file in &self.steps[name].files {
-                if !all.contains(file) {
-                    all.push(file.clone());
-                }
-            }
-        }
-        all
+        self.unresolved_paths.is_empty()
+            && self.missing_required.is_empty()
+            && self.conflicts.is_empty()
     }
 
     /// Every variable a caller must supply before the run can start, in the
@@ -681,11 +694,91 @@ impl PreparedEnv {
         }
         all
     }
+
+    /// The conflicts as an error worth reading, or `None` when there are none.
+    /// Secret-looking values are masked: this lands in CI logs.
+    pub fn conflict_message(&self) -> Option<String> {
+        if self.conflicts.is_empty() {
+            return None;
+        }
+        let mut out = String::from(
+            "These variables are set differently by the .env files this run sources:\n",
+        );
+        for conflict in &self.conflicts {
+            out.push_str(&format!("  {}\n", conflict.key));
+            let width = conflict
+                .values
+                .iter()
+                .map(|(f, _)| f.len())
+                .max()
+                .unwrap_or(0);
+            for (file, value) in &conflict.values {
+                out.push_str(&format!(
+                    "    {file:width$}  = {}\n",
+                    envdeps::shown(&conflict.key, value)
+                ));
+            }
+        }
+        let keys: Vec<&str> = self.conflicts.iter().map(|c| c.key.as_str()).collect();
+        out.push_str(&format!(
+            "Every step of a run shares one environment, so these must agree. Set each in \
+             one file (the root .env, for anything shared), make the files match, or \
+             settle it for this run with -e {}=…",
+            keys.join("=… -e ")
+        ));
+        Some(out)
+    }
+}
+
+/// One level of the environment: a file, and its profile sibling over it.
+struct Level {
+    /// Each key it sets, with the file that set it (the sibling, when the
+    /// sibling speaks) and the value.
+    values: HashMap<String, (String, String)>,
+}
+
+/// Read one file, and its `.<profile>` sibling over it when there is one.
+fn read_level(
+    file: &str,
+    root: &Path,
+    profile: Option<&str>,
+    sourced: &mut Vec<String>,
+) -> Result<Level> {
+    let mut read = vec![file.to_string()];
+    if let Some(profile) = profile {
+        let sibling = crate::environment::profiles::overlay(file, profile);
+        if root.join(&sibling).is_file() {
+            read.push(sibling);
+        }
+    }
+    let mut values = HashMap::new();
+    for rel in read {
+        let path = root.join(&rel);
+        let content = std::fs::read_to_string(&path)
+            .with_context(|| format!("Failed to read env file '{}'", path.display()))?;
+        for (key, value) in parse_env_content(&content) {
+            values.insert(key, (rel.clone(), value));
+        }
+        if !sourced.contains(&rel) {
+            sourced.push(rel);
+        }
+    }
+    Ok(Level { values })
 }
 
 /// Resolve a run's environment: substitute `{VAR}` placeholders in its
-/// `env_file` paths, source those files over `base`, and check the result
-/// against `required_env`.
+/// `env_file` paths, settle one environment from every file the run touches,
+/// and check the result against `required_env`.
+///
+/// **One environment for the whole run.** Every `.env` the run touches — the
+/// root's, and each sub-workspace's chain up to it — is read, and a value is
+/// decided once, for every step:
+///
+/// 1. the environment ciabatta was started with (terminal, CI, git, `-e`)
+///    always wins;
+/// 2. otherwise the `.env` files, which must agree — two that set a variable
+///    differently are a [`Conflict`], and the run doesn't start;
+/// 3. otherwise the root's `env_default`.
 ///
 /// Never runs anything, so both the engine (which does this for real, just
 /// before the first phase) and the daemon's launcher (which does it to decide
@@ -723,91 +816,103 @@ pub fn prepare_env(
         });
     }
 
-    // An env profile layers each file's `.<profile>` sibling straight after
-    // it, so the profile wins where it says something and the ordinary file
-    // answers everything else.
-    let profile = active_profile(base);
-    if let Some(profile) = profile.as_deref() {
-        files = with_profile(&files, root, profile);
-    }
-
-    let env = if files.is_empty() {
-        base.clone()
-    } else {
-        load_env_files(&files, root, base)?
-    };
-
-    // Each step that has a chain of its own resolves through it — from the
-    // outermost workspace down to the one it belongs to, so the nearest file
-    // wins and anything it doesn't set falls back outward.
-    //
-    // Layered over `base` rather than over the run's environment on purpose: a
-    // value already sourced from an outer `.env` would otherwise be pinned
-    // there and a package's own `.env` could never override it, which is the
-    // one thing proximity has to be able to do.
-    let mut steps: HashMap<String, StepEnv> = HashMap::new();
+    // The run's own files are required; each step's chain is a search path,
+    // where a level with no `.env` — or one a fresh checkout hasn't generated
+    // yet — is simply skipped.
     for step in &resolved.steps {
-        if step.env_files.is_empty() {
-            continue;
-        }
-        // A chain is a search path: a level with no `.env` — or one whose file
-        // a fresh checkout hasn't generated yet — falls through to the next
-        // rather than failing the run. A file the *project itself* declared is
-        // still required; that list is `resolved.env_files`, loaded above.
-        let mut chain: Vec<String> = Vec::new();
         for raw in &step.env_files {
             if crate::config::unresolved_vars(raw, base).is_empty() {
                 let path = crate::config::substitute_vars(raw, base)?;
-                if root.join(&path).is_file() {
-                    chain.push(path);
+                if root.join(&path).is_file() && !files.contains(&path) {
+                    files.push(path);
                 }
             }
         }
-        if let Some(profile) = profile.as_deref() {
-            chain = with_profile(&chain, root, profile);
+    }
+
+    let profile = active_profile(base);
+    let profile = profile.as_deref();
+    let mut sourced: Vec<String> = Vec::new();
+
+    let defaults = match resolved
+        .env_default
+        .as_deref()
+        .filter(|file| root.join(file).is_file())
+    {
+        Some(file) => Some(read_level(file, root, profile, &mut sourced)?),
+        None => None,
+    };
+
+    let mut levels: Vec<Level> = Vec::new();
+    // A profile sibling of a root `.env` that doesn't exist still applies.
+    if let Some(profile) = profile {
+        use crate::environment::files::DEFAULT_ENV_FILE;
+        let sibling = crate::environment::profiles::overlay(DEFAULT_ENV_FILE, profile);
+        if !root.join(DEFAULT_ENV_FILE).is_file()
+            && root.join(&sibling).is_file()
+            && !files.contains(&sibling)
+        {
+            levels.push(read_level(&sibling, root, None, &mut sourced)?);
         }
-        steps.insert(
-            step.name.clone(),
-            StepEnv {
-                env: load_env_files(&chain, root, base)?,
-                files: chain,
+    }
+    for file in &files {
+        levels.push(read_level(file, root, profile, &mut sourced)?);
+    }
+
+    let mut keys: BTreeSet<&String> = levels.iter().flat_map(|l| l.values.keys()).collect();
+    if let Some(defaults) = &defaults {
+        keys.extend(defaults.values.keys());
+    }
+
+    let mut env = base.clone();
+    let mut sources: HashMap<String, Source> = HashMap::new();
+    let mut conflicts: Vec<Conflict> = Vec::new();
+    for key in keys {
+        let offered: Vec<(String, String)> = levels
+            .iter()
+            .filter_map(|level| level.values.get(key).cloned())
+            .collect();
+        let default = defaults.as_ref().and_then(|d| d.values.get(key).cloned());
+        let terminal = base.get(key).is_some_and(|v| !v.trim().is_empty());
+
+        if !terminal {
+            let mut distinct: Vec<&String> = offered.iter().map(|(_, v)| v).collect();
+            distinct.sort();
+            distinct.dedup();
+            if distinct.len() > 1 {
+                conflicts.push(Conflict {
+                    key: key.clone(),
+                    values: offered.clone(),
+                });
+            } else if let Some((_, value)) = offered.first().or(default.as_ref()) {
+                env.insert(key.clone(), value.clone());
+            }
+        }
+
+        sources.insert(
+            key.clone(),
+            Source {
+                terminal,
+                files: offered.into_iter().map(|(file, _)| file).collect(),
+                default: default.map(|(file, _)| file),
             },
         );
     }
 
-    // The gate asks whether *anything* supplies each required variable, since a
-    // requirement declared by one sub-workspace is answered by that
-    // sub-workspace's own `.env`. Which step then sees which value is a matter
-    // of proximity, decided above.
-    let mut supplied = env.clone();
-    for scope in steps.values() {
-        for (key, value) in &scope.env {
-            if supplied.get(key).is_none_or(|v| v.trim().is_empty()) {
-                supplied.insert(key.clone(), value.clone());
-            }
-        }
-    }
-    let missing_required = missing_required_env(&resolved.required_env, &supplied);
+    let missing_required = missing_required_env(&resolved.required_env, &env);
 
-    // Features last, once every `.env` in the chain has been layered in — a
-    // `CIABATTA_FEAT_*` set in a file is a feature exactly as much as one set
-    // on the command line, and reading them before the files were sourced
-    // would silently make only the latter count.
-    //
-    // Resolved per scope rather than once: a step with its own `.env` chain
-    // may see a feature its neighbours don't, and `CIABATTA_FEATURES` has to
-    // agree with the `CIABATTA_FEAT_*` variables sitting beside it.
-    let mut env = env;
+    // Features last, once every file has been layered in — a `CIABATTA_FEAT_*`
+    // set in a file is a feature exactly as much as one set on the command
+    // line, and reading them before the files were sourced would silently make
+    // only the latter count.
     let features = crate::environment::features::Features::from_env(&env);
     features.export_into(&mut env);
-    for scope in steps.values_mut() {
-        crate::environment::features::Features::from_env(&scope.env).export_into(&mut scope.env);
-    }
 
     Ok(PreparedEnv {
         env,
-        steps,
-        sourced: files,
+        sourced,
+        sources,
+        conflicts,
         unresolved_paths,
         missing_required,
         features,
@@ -819,32 +924,6 @@ fn active_profile(base: &HashMap<String, String>) -> Option<String> {
     base.get(crate::environment::profiles::PROFILE_VAR)
         .map(|p| p.trim().to_string())
         .filter(|p| crate::environment::profiles::valid_name(p))
-}
-
-/// `files` with each one's profile overlay inserted after it, where there is
-/// one — and the root's own overlay first, when the root sources no `.env` of
-/// its own for it to sit beside.
-fn with_profile(files: &[String], root: &Path, profile: &str) -> Vec<String> {
-    use crate::environment::files::DEFAULT_ENV_FILE;
-    use crate::environment::profiles::overlay;
-
-    let mut out: Vec<String> = Vec::with_capacity(files.len() * 2);
-    // Only when the root has no `.env` at all: if it has one, the overlay
-    // belongs after it, which the loop below sees to wherever it's sourced.
-    let root_overlay = overlay(DEFAULT_ENV_FILE, profile);
-    if !root.join(DEFAULT_ENV_FILE).is_file() && root.join(&root_overlay).is_file() {
-        out.push(root_overlay);
-    }
-    for file in files {
-        if !out.contains(file) {
-            out.push(file.clone());
-        }
-        let layered = overlay(file, profile);
-        if root.join(&layered).is_file() && !out.contains(&layered) {
-            out.push(layered);
-        }
-    }
-    out
 }
 
 /// Return the names from `required` that are absent from `env` or present but
@@ -1245,39 +1324,6 @@ mod tests {
         list.steps
     }
 
-    /// A profile overlays each env file with its sibling, after it, so the
-    /// profile wins where it speaks and the base answers everything else.
-    #[test]
-    fn an_env_profile_layers_each_file_with_its_sibling() {
-        let root =
-            std::env::temp_dir().join(format!("ciab_profile_overlay_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(root.join("api")).unwrap();
-        std::fs::write(root.join(".env"), "REGION=us\nTIER=dev\n").unwrap();
-        std::fs::write(root.join(".env.staging"), "REGION=eu\n").unwrap();
-        std::fs::write(root.join("api/.env"), "PORT=1\n").unwrap();
-
-        let files = vec![".env".to_string(), "api/.env".to_string()];
-        assert_eq!(
-            with_profile(&files, &root, "staging"),
-            [".env", ".env.staging", "api/.env"],
-        );
-
-        let base: HashMap<String, String> = HashMap::new();
-        let merged = load_env_files(&with_profile(&files, &root, "staging"), &root, &base).unwrap();
-        assert_eq!(merged["REGION"], "eu");
-        assert_eq!(merged["TIER"], "dev");
-
-        // No root `.env`: the root's overlay still applies, first.
-        std::fs::remove_file(root.join(".env")).unwrap();
-        assert_eq!(
-            with_profile(&["api/.env".to_string()], &root, "staging"),
-            [".env.staging", "api/.env"],
-        );
-
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
     #[test]
     fn valid_linear_and_dag_flowcharts_pass() {
         let steps = steps_from(
@@ -1551,93 +1597,181 @@ name = "a"
         assert!(prepared.sourced.is_empty());
     }
 
-    /// Proximity: a step reads its own workspace's `.env` first, and falls back
-    /// outward for anything that file doesn't set.
-    #[test]
-    fn a_steps_env_resolves_nearest_first_and_falls_back_outward() {
-        let dir = std::env::temp_dir().join(format!("ciab_proximity_{}", std::process::id()));
+    fn scratch_dir(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("ciab_{name}_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("packages/api")).unwrap();
         std::fs::create_dir_all(dir.join("packages/web")).unwrap();
-        std::fs::write(dir.join(".env"), "REGION=global\nSHARED=from-root\n").unwrap();
-        std::fs::write(
-            dir.join("packages/api/.env"),
-            "SHARED=from-api\nAPI_ONLY=yes\n",
-        )
-        .unwrap();
-        std::fs::write(dir.join("packages/web/.env"), "SHARED=from-web\n").unwrap();
+        dir
+    }
 
-        let step = |name: &str, files: &[&str]| RunStep {
+    fn chained(name: &str, files: &[&str]) -> RunStep {
+        RunStep {
             name: name.to_string(),
             run: Some("true".into()),
             env_files: files.iter().map(|f| f.to_string()).collect(),
             ..Default::default()
-        };
+        }
+    }
+
+    /// One environment for the whole run: a step in a sub-workspace and a step
+    /// at the root see the same values, gathered from every `.env` touched.
+    #[test]
+    fn every_step_shares_one_environment_from_every_env_file() {
+        let dir = scratch_dir("shared_env");
+        std::fs::write(dir.join(".env"), "REGION=global\nSHARED=same\n").unwrap();
+        std::fs::write(dir.join("packages/api/.env"), "SHARED=same\nAPI_ONLY=yes\n").unwrap();
+        std::fs::write(dir.join("packages/web/.env"), "WEB_ONLY=yes\n").unwrap();
+
         let resolved = ResolvedRun {
+            required_env: vec!["API_ONLY".to_string()],
             steps: vec![
-                step("api:build", &[".env", "packages/api/.env"]),
-                step("web:build", &[".env", "packages/web/.env"]),
-                step("root:lint", &[]),
+                chained("api:build", &[".env", "packages/api/.env"]),
+                chained("web:build", &[".env", "packages/web/.env"]),
+                // A level nobody created is skipped, not an error.
+                chained("lib:build", &[".env", "packages/lib/.env"]),
             ],
             ..Default::default()
         };
 
         let prepared = prepare_env(&resolved, &dir, &HashMap::new()).unwrap();
-
-        // Nearest wins.
-        assert_eq!(prepared.for_step("api:build")["SHARED"], "from-api");
-        assert_eq!(prepared.for_step("web:build")["SHARED"], "from-web");
-        // What the nearest file doesn't set comes from higher up.
-        assert_eq!(prepared.for_step("api:build")["REGION"], "global");
-        // And a sibling's file is not a fallback.
-        assert!(!prepared.for_step("web:build").contains_key("API_ONLY"));
-        // A step with no chain of its own just sees the run's environment.
-        assert!(!prepared.for_step("root:lint").contains_key("SHARED"));
+        assert!(prepared.conflicts.is_empty());
+        assert!(
+            prepared.is_ready(),
+            "API_ONLY is set by a file the run touches"
+        );
+        for key in ["REGION", "SHARED", "API_ONLY", "WEB_ONLY"] {
+            assert!(prepared.env.contains_key(key), "{key} missing");
+        }
+        assert_eq!(
+            prepared.sources["SHARED"].files,
+            [".env", "packages/api/.env"],
+            "both files that agree are credited"
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// The environment a run was started with still beats every file, and a
-    /// chain that names a file nobody created falls through rather than failing.
+    /// Two files disagreeing is an error naming both, unless the terminal
+    /// settles it — the terminal always wins.
     #[test]
-    fn the_ambient_environment_still_wins_and_a_missing_level_is_skipped() {
-        let dir = std::env::temp_dir().join(format!("ciab_prox2_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(dir.join("packages/api")).unwrap();
+    fn disagreeing_env_files_are_a_conflict_the_terminal_can_settle() {
+        let dir = scratch_dir("env_conflict");
+        std::fs::write(dir.join(".env"), "SHARED=from-root\n").unwrap();
         std::fs::write(dir.join("packages/api/.env"), "SHARED=from-api\n").unwrap();
 
         let resolved = ResolvedRun {
-            required_env: vec!["SHARED".to_string()],
-            steps: vec![RunStep {
-                name: "api:build".into(),
-                run: Some("true".into()),
-                // `.env` at the root was never created — a fresh checkout that
-                // hasn't generated one yet.
-                env_files: vec![".env".into(), "packages/api/.env".into()],
-                ..Default::default()
-            }],
+            steps: vec![
+                chained("api:build", &[".env", "packages/api/.env"]),
+                chained("root:lint", &[".env"]),
+            ],
             ..Default::default()
         };
 
         let prepared = prepare_env(&resolved, &dir, &HashMap::new()).unwrap();
-        assert_eq!(prepared.for_step("api:build")["SHARED"], "from-api");
-        assert_eq!(prepared.files_for("api:build"), ["packages/api/.env"]);
-        assert!(
-            prepared.is_ready(),
-            "a required variable supplied by the package that needs it satisfies the gate"
+        assert!(!prepared.is_ready());
+        assert_eq!(
+            prepared.conflicts,
+            vec![Conflict {
+                key: "SHARED".into(),
+                values: vec![
+                    (".env".into(), "from-root".into()),
+                    ("packages/api/.env".into(), "from-api".into()),
+                ],
+            }]
         );
+        let message = prepared.conflict_message().unwrap();
+        assert!(message.contains("packages/api/.env") && message.contains("from-api"));
+        assert!(!prepared.env.contains_key("SHARED"), "no value is guessed");
 
-        // `-e SHARED=…` (or the shell, or CI) beats the file, as it always has.
-        let prepared = prepare_env(
-            &resolved,
-            &dir,
-            &env(&[("SHARED", "from-the-command-line")]),
+        let prepared =
+            prepare_env(&resolved, &dir, &env(&[("SHARED", "from-the-terminal")])).unwrap();
+        assert!(prepared.conflicts.is_empty() && prepared.is_ready());
+        assert_eq!(prepared.env["SHARED"], "from-the-terminal");
+        assert!(prepared.sources["SHARED"].terminal);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The root's `env_default` answers what nothing else does, and loses to
+    /// both a `.env` and the terminal.
+    #[test]
+    fn env_default_is_the_fallback_beneath_every_env_file() {
+        let dir = scratch_dir("env_default");
+        std::fs::create_dir_all(dir.join(".ciabatta")).unwrap();
+        std::fs::write(
+            dir.join(".ciabatta/.env.default"),
+            "VERSION=0.0.0\nTARGET=dev\nREGION=us\n",
         )
         .unwrap();
-        assert_eq!(
-            prepared.for_step("api:build")["SHARED"],
-            "from-the-command-line"
+        std::fs::write(dir.join(".env"), "VERSION=1.2.3\n").unwrap();
+
+        let meta = crate::workspace::WorkspaceMeta {
+            env_default: Some(".ciabatta/.env.default".into()),
+            ..Default::default()
+        };
+        let resolved = with_root_env(
+            ResolvedRun {
+                required_env: vec!["TARGET".into()],
+                ..Default::default()
+            },
+            &meta,
+            &dir,
         );
+        assert_eq!(resolved.env_files, [".env"]);
+        assert_eq!(
+            resolved.env_default.as_deref(),
+            Some(".ciabatta/.env.default")
+        );
+
+        let prepared = prepare_env(&resolved, &dir, &env(&[("REGION", "eu")])).unwrap();
+        assert!(prepared.is_ready(), "the default satisfies required_env");
+        // A `.env` beats the default — and differing from it is no conflict.
+        assert_eq!(prepared.env["VERSION"], "1.2.3");
+        assert!(prepared.conflicts.is_empty());
+        // Nothing else sets it: the default answers.
+        assert_eq!(prepared.env["TARGET"], "dev");
+        // The terminal beats them all.
+        assert_eq!(prepared.env["REGION"], "eu");
+        assert_eq!(prepared.sourced, [".ciabatta/.env.default", ".env"]);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A profile overlays each env file with its sibling, so the profile wins
+    /// where it speaks and the base answers everything else.
+    #[test]
+    fn an_env_profile_layers_each_file_with_its_sibling() {
+        let dir = scratch_dir("profile_overlay");
+        std::fs::write(dir.join(".env"), "REGION=us\nTIER=dev\n").unwrap();
+        std::fs::write(dir.join(".env.staging"), "REGION=eu\n").unwrap();
+        std::fs::write(dir.join("packages/api/.env"), "PORT=1\n").unwrap();
+
+        let resolved = ResolvedRun {
+            env_files: vec![".env".into(), "packages/api/.env".into()],
+            ..Default::default()
+        };
+        let staging = env(&[(crate::environment::profiles::PROFILE_VAR, "staging")]);
+        let prepared = prepare_env(&resolved, &dir, &staging).unwrap();
+        assert_eq!(
+            prepared.sourced,
+            [".env", ".env.staging", "packages/api/.env"]
+        );
+        assert_eq!(prepared.env["REGION"], "eu");
+        assert_eq!(prepared.env["TIER"], "dev");
+        assert!(
+            prepared.conflicts.is_empty(),
+            "a sibling overriding its base is no conflict"
+        );
+
+        // No root `.env`: the root's overlay still applies, first.
+        std::fs::remove_file(dir.join(".env")).unwrap();
+        let resolved = ResolvedRun {
+            env_files: vec!["packages/api/.env".into()],
+            ..Default::default()
+        };
+        let prepared = prepare_env(&resolved, &dir, &staging).unwrap();
+        assert_eq!(prepared.sourced, [".env.staging", "packages/api/.env"]);
 
         std::fs::remove_dir_all(&dir).ok();
     }

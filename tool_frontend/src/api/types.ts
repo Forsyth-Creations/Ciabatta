@@ -20,7 +20,20 @@ export interface Project {
 }
 
 /** Where an environment variable's effective value comes from. */
-export type EnvOrigin = "environment" | "env_file" | "config" | "argument" | "unset";
+export type EnvOrigin =
+  | "environment"
+  | "env_file"
+  | "default"
+  | "conflict"
+  | "config"
+  | "argument"
+  | "unset";
+
+/** One `.env` file's say in a conflict. Masked when the name looks secret. */
+export interface ConflictValue {
+  file: string;
+  value: string;
+}
 
 /**
  * One environment variable a graph depends on.
@@ -37,8 +50,14 @@ export interface EnvVar {
   /** Declared in `required_env` — the run refuses to start without it. */
   required: boolean;
   origin: EnvOrigin;
-  /** The `.env` file that supplied it, when `origin` is `env_file`. */
+  /** The file(s) that supplied it: the agreeing `.env` files for `env_file`,
+   *  the `env_default` for `default`. */
   file: string | null;
+  /** The files it beat. The terminal beats every file; a `.env` beats the
+   *  `env_default`. Absent when it beat nothing. */
+  overrides?: string[];
+  /** When `origin` is `conflict`: each `.env` that sets it, and to what. */
+  conflict?: ConflictValue[];
   steps: string[];
   /** Set by several steps to different values, so there's no single one. */
   varies: boolean;
@@ -58,6 +77,8 @@ export interface EnvVar {
 export interface EnvReport {
   /** The `.env` files sourced, in application order. */
   files: string[];
+  /** The root's `env_default`, the fallback beneath every `.env`. */
+  default?: string | null;
   required: string[];
   /** Required variables still empty or unset. */
   missing: string[];

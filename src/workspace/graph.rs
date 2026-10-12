@@ -168,6 +168,7 @@ pub fn into_run(graph: WorkflowGraph) -> Result<crate::run::ResolvedRun> {
         post: None,
         required_env: graph.required_env,
         env_files: graph.env_files,
+        env_default: None,
         steps: crate::run::topo_order(&steps),
         units,
     })
@@ -935,10 +936,8 @@ fn compile(
 /// The `.env` files a member's steps resolve through, outermost first.
 ///
 /// The monorepo root, then every sub-workspace between it and this member, then
-/// the member itself — so the member's own file answers first and anything it
-/// doesn't set falls back outward. Siblings are not in the chain: two packages
-/// that need the same variable declare it in the workspace above them, or each
-/// declares it for itself.
+/// the member itself. The run reads every step's chain into one shared
+/// environment, where the files must agree; see [`crate::run::prepare_env`].
 fn env_chain(workspace: &Workspace, member: &Member) -> Vec<String> {
     crate::environment::files::chain(&env_layers(workspace, member))
 }
@@ -1504,8 +1503,8 @@ mod tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
-    /// Proximity: a package's own `.env` answers first, the workspaces above it
-    /// answer for what it doesn't set, and a sibling's file is never consulted.
+    /// A package's chain is its ancestry: the root, the workspaces between, and
+    /// its own `.env` — a sibling's file isn't part of *its* chain.
     #[test]
     fn a_steps_env_chain_runs_from_the_root_down_to_its_own_workspace() {
         let root = scratch("chain");
@@ -1547,7 +1546,7 @@ mod tests {
         assert_eq!(
             chain("api"),
             vec![".env".to_string(), "packages/api/.env".to_string()],
-            "the root first, the package last — the nearest file wins"
+            "the root first, the package last"
         );
         assert_eq!(
             chain("docs"),

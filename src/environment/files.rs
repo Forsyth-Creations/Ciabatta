@@ -129,6 +129,19 @@ pub fn resolve(meta: &WorkspaceMeta, dir: &Path) -> Resolved {
     }
 }
 
+/// The root's declared `env_default`, when it's actually there — the outermost
+/// layer of every chain, so anything no `.env` sets falls back to it.
+///
+/// Only a *declared* template counts. A conventional `.env.example` found by
+/// its name is often placeholders (`API_KEY=your-key-here`), and treating those
+/// as values would quietly satisfy a `required_env` that ought to stop the run.
+/// Declaring `env_default` is the workspace saying its values are real defaults.
+pub fn defaults_file(meta: &WorkspaceMeta, root: &Path) -> Option<String> {
+    meta.env_default
+        .clone()
+        .filter(|file| root.join(file).is_file())
+}
+
 /// Whether a build depends on environment variables, and so needs a template.
 ///
 /// Deliberately narrow: a run that declares `required_env` has said, in its own
@@ -343,15 +356,12 @@ pub struct Layer<'a> {
 
 /// The env files a step resolves through, outermost first.
 ///
-/// **Proximity, with fallback outward.** A step in `packages/api` reads
-/// `packages/api/.env` — and, for anything that file doesn't set, the values
-/// from the workspace above it, up to the monorepo root. Layered in that order
-/// so the nearest file wins, which is what "this package's settings" has to
-/// mean to be worth writing.
+/// The *ancestry* of the step's own workspace: its file, and every one above
+/// it up to the monorepo root. Every file in every step's chain is read into
+/// the run's one shared environment (see [`crate::run::prepare_env`]), where
+/// the files must agree — so a package's `.env` adds what only it needs, and
+/// what's shared lives in the workspace above.
 ///
-/// The chain is the *ancestry* of the step's own workspace and nothing else. A
-/// sibling package's `.env` is not a fallback: two packages that need the same
-/// variable say so in the workspace above them, or each says it for itself.
 /// The chain is a *search path*, not a list of requirements: a level with no
 /// `.env` simply falls through to the next, and a level whose file hasn't been
 /// generated yet (see [`generate_from_template`]) is listed all the same,

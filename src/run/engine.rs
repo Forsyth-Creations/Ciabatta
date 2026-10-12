@@ -131,17 +131,10 @@ pub async fn execute(
     }
 
     // With the files in place, fold the project's own env files into the run's
-    // — `.env` by default, or whatever `env_file` names instead. A compiled
-    // workflow's members don't come in here: each of their steps carries its
-    // own chain, so one member's settings can't be read by another's steps.
-    let mut resolved = resolved;
-    let workspace_files = crate::environment::files::resolve(&meta, root);
-    for file in workspace_files.files {
-        if !resolved.env_files.contains(&file) {
-            resolved.env_files.insert(0, file);
-        }
-    }
-    let resolved = resolved;
+    // — `.env` (or whatever `env_file` names), and its `env_default` beneath.
+    // Each step's chain is read too, and every step then shares the one
+    // environment they settle on.
+    let resolved = crate::run::with_root_env(resolved, &meta, root);
 
     let prepared = prepare_env(&resolved, root, env_vars)?;
     for file in &prepared.sourced {
@@ -196,6 +189,18 @@ pub async fn execute(
                     .to_string(),
             ))
             .await;
+    }
+
+    // Two `.env` files disagreeing is stopped before anything else: every step
+    // shares one environment, and which file is right isn't ours to guess.
+    if let Some(message) = prepared.conflict_message() {
+        eprintln!("[{name}] ✗ run aborted — conflicting env values");
+        for line in message.lines() {
+            let _ = tx
+                .send(ProgressUpdate::Log(name.to_string(), line.to_string()))
+                .await;
+        }
+        bail!("Run '{name}' cannot start.\n{message}");
     }
 
     if !prepared.is_ready() {
@@ -441,7 +446,7 @@ async fn run_dag(
     // talks to had been launched at all.
     if !dry_run {
         for step in resolved.steps.iter().filter(|s| s.background) {
-            let step_env = env.for_step(&step.name);
+            let step_env = &env.env;
             persistent.push(start_persistent(step, workflow, root, step_env, ctl, tx).await?);
             state.insert(step.name.as_str(), StepState::Started);
         }
@@ -514,7 +519,7 @@ async fn run_dag(
                 // *own* environment: its workspace's `.env` first, then
                 // outward. Two members of a monorepo can set the same variable
                 // to different values and each of their steps sees its own.
-                let step_env = env.for_step(&step.name);
+                let step_env = &env.env;
 
                 if let Some(reason) = super::step_skip_reason(step, step_env)? {
                     state.insert(step.name.as_str(), StepState::Skipped);
@@ -677,7 +682,7 @@ async fn run_dag(
             break;
         };
         let pending = pending_tokens.remove(step.name.as_str());
-        let step_env = env.for_step(&step.name);
+        let step_env = &env.env;
 
         // Whatever happened, the sandbox has to be dealt with before the
         // outcome is: a success owes its outputs to the real tree, and a

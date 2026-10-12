@@ -1351,14 +1351,16 @@ required_env: [API_URL, DEPLOY_TOKEN] # must be set, or the run won't start`}</P
 
         <SubHeading>Where values come from</SubHeading>
         <P>Precedence, weakest first:</P>
-        <Pre>{`.env files  →  CI-derived  →  the ambient environment  →  -e KEY=VALUE`}</Pre>
+        <Pre>{`env_default  →  .env files (must agree)  →  CI-derived  →  the ambient environment  →  -e KEY=VALUE`}</Pre>
         <P>
-          <strong>Among the files themselves, nearest wins.</strong> A step in{" "}
-          <C>packages/api</C> reads <C>packages/api/.env</C>; whatever that file doesn&apos;t set
-          comes from the workspace above it, up to the monorepo root. A sibling package&apos;s{" "}
-          <C>.env</C> is never a fallback. Each step&apos;s chain is listed under the step on the{" "}
-          <Link to="/run">Run page</Link>, so &quot;which file did this value come from?&quot; has
-          a visible answer.
+          <strong>One environment per run, settled before it starts.</strong> Every{" "}
+          <C>.env</C> the run touches is read — the root&apos;s, and each sub-workspace&apos;s up
+          to it — and every step sees the same values. The files must agree: two that set a
+          variable differently stop the run before anything executes, naming each file and
+          value, unless the terminal (or <C>-e</C>) settles it. What no <C>.env</C> sets falls
+          back to the root&apos;s declared <C>env_default</C>. The report before each run, and
+          the <Link to="/run">Run page</Link>, say where each value came from and what it
+          overrode.
         </P>
         <Pre>{`# packages/api/.ciabatta/ciabatta.yaml
 workspace:

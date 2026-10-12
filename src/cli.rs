@@ -595,9 +595,19 @@ pub enum CacheCommand {
 
 #[derive(Subcommand, Debug)]
 pub enum EnvCommand {
-    /// List the env profiles this workspace has — every `.env.<name>` file,
-    /// grouped by name — for `--env-profile <name>`.
+    /// List the env profiles this workspace has — every `.ciabatta/.env.<name>`
+    /// file, grouped by name — and which one each `.env` was copied from.
     List,
+    /// Elect a profile: copy each workspace's `.ciabatta/.env.<name>` into its
+    /// `.env`. A `.env` that isn't an unedited copy of a profile is backed up
+    /// to `.env.bak` (or the next free `.env.bak.N`) first.
+    Use {
+        /// The profile to elect, e.g. `dev` for `.ciabatta/.env.dev`.
+        name: String,
+        /// Say what would be copied and backed up, and change nothing.
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -814,8 +824,9 @@ pub struct WorkflowArgs {
     #[arg(short = 'j', long, value_name = "N")]
     pub jobs: Option<usize>,
 
-    /// Run with an env profile: each `.env` the run sources is overlaid with
-    /// its `.env.<NAME>` sibling, so the profile only has to hold what differs.
+    /// Run with an env profile: each workspace's `.ciabatta/.env.<NAME>` is
+    /// copied into its `.env` first (as `ciabatta env use <NAME>` does), backing
+    /// up a `.env` that isn't an unedited profile copy to `.env.bak`.
     /// `ciabatta env list` shows the profiles this workspace has.
     #[arg(long = "env-profile", alias = "env_profile", value_name = "NAME")]
     pub env_profile: Option<String>,

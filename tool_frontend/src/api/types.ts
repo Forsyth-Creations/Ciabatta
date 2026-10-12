@@ -46,6 +46,10 @@ export interface EnvVar {
   origin: EnvOrigin;
   /** The file that supplied it, when `origin` is `env_file` or `default`. */
   file: string | null;
+  /** What kind of file that is, which is why it was searched where it was. */
+  via?: "workflow" | "profile" | "env" | "default" | null;
+  /** Why the value won, as a sentence. Absent on runs recorded before 0.6.1. */
+  reason?: string | null;
   /** Files that also set it, later in the search, and so lost to the winner.
    *  Absent when nothing else set it. */
   overrides?: string[];
@@ -75,6 +79,8 @@ export interface EnvReport {
   missing: string[];
   /** The env profile the run was started with (`--env-profile`). */
   profile?: string | null;
+  /** Why that profile is in use, or why there's none. Absent before 0.6.1. */
+  profile_reason?: string | null;
   vars: EnvVar[];
 }
 

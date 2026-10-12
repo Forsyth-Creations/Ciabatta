@@ -1347,7 +1347,7 @@ function FocusNote({
   const detail = variable
     ? `${variable.purpose ? `${variable.purpose} — ` : ""}${
         variable.steps.length > 0 ? `read by ${variable.steps.join(", ")}` : "no step reads this"
-      }`
+      }${variable.reason ? ` · ${variable.reason}` : ""}`
     : producer
       ? `${producer.deps.output_files} file(s), ${humanizeBytes(
           producer.deps.output_bytes,

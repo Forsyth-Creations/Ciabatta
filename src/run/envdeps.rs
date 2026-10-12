@@ -17,7 +17,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use super::{ResolvedRun, RunStep, prepare_env, with_env_levels};
+use super::{FileKind, ResolvedRun, RunStep, prepare_env, with_env_levels};
 use crate::config::CiabattaConfig;
 
 /// Where a variable's effective value comes from.
@@ -55,6 +55,13 @@ pub struct EnvVar {
     pub origin: Origin,
     /// The file that supplied it, when `origin` is `EnvFile` or `Default`.
     pub file: Option<String>,
+    /// What kind of file that is — a workflow's, a profile's, a `.env`, or a
+    /// defaults file — which is why it was searched where it was.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub via: Option<FileKind>,
+    /// Why the value won, in a sentence: shown beside it on the run page.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
     /// The files that also set it, later in the search, and so lost to the
     /// winner — the terminal, or the first file to set it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -96,6 +103,9 @@ pub struct EnvReport {
     /// The env profile the run was started with (`--env-profile`), if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile: Option<String>,
+    /// Why that profile is the one in use — or why there is none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile_reason: Option<String>,
 }
 
 impl EnvReport {
@@ -115,8 +125,8 @@ impl EnvReport {
             "Environment for '{workflow}' — {} variable(s) this run depends on\n",
             self.vars.len()
         ));
-        if let Some(profile) = &self.profile {
-            out.push_str(&format!("  profile  {profile}\n"));
+        if let Some(reason) = &self.profile_reason {
+            out.push_str(&format!("  profile: {reason}\n"));
         }
         // The rule every value below was decided by, so the notes beside each
         // one read as an application of it rather than as trivia.
@@ -176,6 +186,11 @@ impl EnvReport {
                 width = width,
                 value_width = value_width
             ));
+            // The same sentence the run page shows, so the terminal never
+            // knows less than the browser about why a value won.
+            if let Some(reason) = &var.reason {
+                out.push_str(&format!("  {:width$}  ↳ {reason}\n", "", width = width));
+            }
         }
 
         if !self.missing.is_empty() {
@@ -200,7 +215,14 @@ impl EnvReport {
         };
         match var.origin {
             Origin::Environment => beat("terminal"),
-            Origin::EnvFile => beat(var.file.as_deref().unwrap_or("env file")),
+            Origin::EnvFile => {
+                let file = var.file.as_deref().unwrap_or("env file");
+                match var.via {
+                    Some(FileKind::Profile) => beat(&format!("{file} (profile)")),
+                    Some(FileKind::Workflow) => beat(&format!("{file} (workflow)")),
+                    _ => beat(file),
+                }
+            }
             Origin::Default => beat(&format!(
                 "{} (default)",
                 var.file.as_deref().unwrap_or("env default")
@@ -296,6 +318,7 @@ pub fn collect(
         .as_ref()
         .map(|p| p.sources.clone())
         .unwrap_or_default();
+    let (profile, profile_reason) = crate::environment::profiles::choice(base);
 
     // Which steps touch which variable, and what a step's own `[env]` sets it
     // to. `BTreeMap`s keep both the variable list and each variable's step list
@@ -398,9 +421,9 @@ pub fn collect(
                 None => match source.files.split_first() {
                     Some((winner, rest)) => {
                         overrides.extend(rest.iter().cloned());
-                        let origin = match source.from_default {
-                            true => Origin::Default,
-                            false => Origin::EnvFile,
+                        let origin = match source.kind {
+                            Some(FileKind::Default) => Origin::Default,
+                            _ => Origin::EnvFile,
                         };
                         (origin, Some(winner.clone()), value, false)
                     }
@@ -408,9 +431,24 @@ pub fn collect(
                 },
             };
 
+            let via = match origin {
+                Origin::EnvFile | Origin::Default => source.kind,
+                _ => None,
+            };
+            let reason = reason(
+                origin,
+                via,
+                file.as_deref(),
+                &overrides,
+                profile.as_deref(),
+                files.len(),
+            );
+
             let secret = value.is_some() && looks_secret(&key);
             let required = resolved.required_env.contains(&key);
             EnvVar {
+                via,
+                reason,
                 in_cache_key: keyed.contains(&key),
                 purpose: purposes.get(&key).cloned(),
                 optional: purposes.contains_key(&key)
@@ -439,11 +477,56 @@ pub fn collect(
         required: resolved.required_env.clone(),
         missing,
         vars,
-        profile: base
-            .get(crate::environment::profiles::PROFILE_VAR)
-            .filter(|p| !p.trim().is_empty())
-            .cloned(),
+        profile,
+        profile_reason: Some(profile_reason),
     }
+}
+
+/// Why a variable has the value it has, as a sentence: what supplied it, why
+/// that source comes first, and what it overrode.
+fn reason(
+    origin: Origin,
+    via: Option<FileKind>,
+    file: Option<&str>,
+    overrides: &[String],
+    profile: Option<&str>,
+    searched: usize,
+) -> Option<String> {
+    let file = file.unwrap_or("an env file");
+    let why = match origin {
+        Origin::Environment => "set in the terminal, which always wins".to_string(),
+        Origin::Config => {
+            "set by a step's [env] table, on top of the run's environment".to_string()
+        }
+        Origin::Argument => return None,
+        Origin::Unset => {
+            return Some(format!(
+                "not set in the terminal or in any of the {searched} env file(s) searched"
+            ));
+        }
+        Origin::EnvFile | Origin::Default => match via {
+            Some(FileKind::Workflow) => format!(
+                "{file} is named by the workflow (env_file), which is searched before every \
+                 workspace's files"
+            ),
+            Some(FileKind::Profile) => format!(
+                "{file} belongs to the active profile ({}), which is searched before the .env \
+                 beside it",
+                profile.unwrap_or("?")
+            ),
+            Some(FileKind::Default) => {
+                format!("{file} is a defaults file, and nothing searched before it sets this")
+            }
+            _ => format!(
+                "{file} is the first .env in the search (from where the run started, up to \
+                 the root) to set it"
+            ),
+        },
+    };
+    Some(match overrides.is_empty() {
+        true => why,
+        false => format!("{why}; it overrides {}", overrides.join(", ")),
+    })
 }
 
 /// A variable a step needs that its own text doesn't mention.
@@ -864,6 +947,58 @@ mod tests {
         let version = find(&report, "VERSION");
         assert_eq!(version.origin, Origin::Environment);
         assert_eq!(version.overrides, [".env", ".ciabatta/.env.default"]);
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Every value carries the reason it won, and the report names the
+    /// profile and why it's the one in use.
+    #[test]
+    fn each_value_and_the_profile_come_with_a_reason() {
+        let root = std::env::temp_dir().join(format!("ciab_envdeps_reason_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join(".env"), "REGION=us\n").unwrap();
+        std::fs::write(root.join(".env.staging"), "REGION=eu\n").unwrap();
+
+        let resolved = ResolvedRun {
+            required_env: vec!["MISSING".to_string()],
+            steps: vec![step("build", "deploy $REGION")],
+            ..Default::default()
+        };
+        use crate::environment::profiles::{PROFILE_FROM_VAR, PROFILE_VAR};
+        let base = env(&[(PROFILE_VAR, "staging"), (PROFILE_FROM_VAR, "flag")]);
+        let report = collect(&resolved, &root, &base, None);
+
+        assert_eq!(report.profile.as_deref(), Some("staging"));
+        let why = report.profile_reason.clone().unwrap();
+        assert!(why.contains("--env-profile staging"), "{why}");
+
+        let region = find(&report, "REGION");
+        assert_eq!(region.via, Some(FileKind::Profile));
+        let reason = region.reason.clone().unwrap();
+        assert!(reason.contains("active profile (staging)"), "{reason}");
+        assert!(reason.contains("overrides .env"), "{reason}");
+        let missing = find(&report, "MISSING").reason.clone().unwrap();
+        assert!(missing.contains("not set in the terminal"), "{missing}");
+
+        // The terminal's own profile, and no profile at all, say so too.
+        let report = collect(&resolved, &root, &env(&[(PROFILE_VAR, "staging")]), None);
+        assert!(report.profile_reason.unwrap().contains("in the terminal"));
+        let report = collect(&resolved, &root, &env(&[]), None);
+        assert!(report.profile.is_none());
+        assert!(
+            report
+                .profile_reason
+                .as_deref()
+                .unwrap()
+                .starts_with("none")
+        );
+        let text = report.render("build").unwrap();
+        assert!(
+            text.contains("↳ .env is the first .env in the search"),
+            "{text}"
+        );
 
         std::fs::remove_dir_all(&root).ok();
     }

@@ -21,6 +21,47 @@ use std::path::Path;
 /// The variable a run's profile travels in.
 pub const PROFILE_VAR: &str = "CIABATTA_ENV_PROFILE";
 
+/// Where the profile in [`PROFILE_VAR`] was chosen, when ciabatta set it:
+/// `flag` for `--env-profile`, `launcher` for the browser's run launcher.
+/// Absent means it came from the terminal.
+pub const PROFILE_FROM_VAR: &str = "CIABATTA_ENV_PROFILE_FROM";
+
+/// The profile a run uses and why — or, when it uses none, why not. The
+/// reason is shown beside the profile wherever a run reports its environment,
+/// so nobody has to guess which `.env.<profile>` files were searched.
+pub fn choice(env: &std::collections::HashMap<String, String>) -> (Option<String>, String) {
+    let Some(profile) = env
+        .get(PROFILE_VAR)
+        .map(|p| p.trim())
+        .filter(|p| !p.is_empty())
+    else {
+        return (
+            None,
+            format!(
+                "none — no --env-profile given and {PROFILE_VAR} unset, so no \
+                 .env.<profile> files were searched"
+            ),
+        );
+    };
+    if !valid_name(profile) {
+        return (
+            None,
+            format!("none — {PROFILE_VAR}={profile} isn't a valid profile name, so it was ignored"),
+        );
+    }
+    let chosen = match env.get(PROFILE_FROM_VAR).map(String::as_str) {
+        Some("flag") => format!("--env-profile {profile} on the command line"),
+        Some("launcher") => "chosen in the run launcher".to_string(),
+        _ => format!("{PROFILE_VAR}={profile} in the terminal"),
+    };
+    (
+        Some(profile.to_string()),
+        format!(
+            "{profile} — {chosen}, so each workspace's .env.{profile} is searched before its .env"
+        ),
+    )
+}
+
 /// Suffixes that mark a template rather than a profile — `.env.example` is
 /// what a `.env` is generated from, not a set of values to run with.
 const NOT_PROFILES: &[&str] = &["default", "example", "sample", "template", "tmp", "bak"];

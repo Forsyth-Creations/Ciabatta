@@ -157,14 +157,15 @@ pub async fn execute(
     // steps see, and the arguments exist nowhere but in the command that was
     // typed — so they're marked (⚑, drawn in yellow) and the log says where
     // they'd be better kept.
-    if let Some(profile) = env_vars.get(crate::environment::profiles::PROFILE_VAR) {
-        let _ = tx
-            .send(ProgressUpdate::Log(
-                name.to_string(),
-                format!("env profile: {profile}"),
-            ))
-            .await;
-    }
+    // The profile is named with why it's the one in use — or why there's
+    // none — since it decides which `.env.<profile>` files were searched.
+    let (_, profile_reason) = crate::environment::profiles::choice(env_vars);
+    let _ = tx
+        .send(ProgressUpdate::Log(
+            name.to_string(),
+            format!("env profile: {profile_reason}"),
+        ))
+        .await;
     let mut custom: Vec<(&String, &String)> = prepared
         .env
         .iter()

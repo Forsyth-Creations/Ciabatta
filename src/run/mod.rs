@@ -658,6 +658,21 @@ pub fn with_env_levels(
     resolved
 }
 
+/// What kind of file a value came from — which is why it was searched where
+/// it was, and so why it won.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FileKind {
+    /// Named by a workflow (`env_file:`), searched before every workspace.
+    Workflow,
+    /// The active profile's sibling of a `.env`, searched before it.
+    Profile,
+    /// A workspace's `.env` (or `env_file`).
+    Env,
+    /// A workspace's defaults file, searched after its `.env`.
+    Default,
+}
+
 /// How a variable's value was decided: every file that offered one, so the
 /// report can say what won and what it beat.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -668,8 +683,8 @@ pub struct Source {
     /// Every file that sets it, in search order — the first is the one that
     /// won, unless `terminal`.
     pub files: Vec<String>,
-    /// Whether the winning file is a defaults file (`env_default`).
-    pub from_default: bool,
+    /// What kind of file the winner is, when a file won.
+    pub kind: Option<FileKind>,
 }
 
 /// A run's environment, resolved as far as the inputs allow, plus whatever it
@@ -774,17 +789,17 @@ pub fn prepare_env(
         });
     }
 
-    // The search, in order: (file, must it exist, is it a defaults file).
+    // The search, in order: (file, must it exist, what kind of file).
     let profile = active_profile(base);
     let sibling = |file: &str| -> Option<String> {
         profile
             .as_deref()
             .map(|p| crate::environment::profiles::overlay(file, p))
     };
-    let mut search: Vec<(String, bool, bool)> = Vec::new();
-    let push = |search: &mut Vec<(String, bool, bool)>, file: String, needed, default| {
+    let mut search: Vec<(String, bool, FileKind)> = Vec::new();
+    let push = |search: &mut Vec<(String, bool, FileKind)>, file: String, needed, kind| {
         if !search.iter().any(|(f, _, _)| *f == file) {
-            search.push((file, needed, default));
+            search.push((file, needed, kind));
         }
     };
 
@@ -804,9 +819,9 @@ pub fn prepare_env(
     }
     for (file, needed) in workflow_files.into_iter().rev() {
         if let Some(sibling) = sibling(&file) {
-            push(&mut search, sibling, false, false);
+            push(&mut search, sibling, false, FileKind::Profile);
         }
-        push(&mut search, file, needed, false);
+        push(&mut search, file, needed, FileKind::Workflow);
     }
 
     // Then each workspace, nearest first: its profile siblings, its files
@@ -814,21 +829,21 @@ pub fn prepare_env(
     for level in &resolved.env_levels {
         for file in level.files.iter().rev() {
             if let Some(sibling) = sibling(file) {
-                push(&mut search, sibling, false, false);
+                push(&mut search, sibling, false, FileKind::Profile);
             }
         }
         for file in level.files.iter().rev() {
-            push(&mut search, file.clone(), false, false);
+            push(&mut search, file.clone(), false, FileKind::Env);
         }
         if let Some(default) = &level.default {
-            push(&mut search, default.clone(), false, true);
+            push(&mut search, default.clone(), false, FileKind::Default);
         }
     }
 
     let mut sourced: Vec<String> = Vec::new();
     let mut env = base.clone();
     let mut sources: HashMap<String, Source> = HashMap::new();
-    for (file, needed, default) in search {
+    for (file, needed, kind) in search {
         let path = root.join(&file);
         if !needed && !path.is_file() {
             continue;
@@ -847,7 +862,7 @@ pub fn prepare_env(
                 ..Default::default()
             });
             if source.files.is_empty() && !source.terminal {
-                source.from_default = default;
+                source.kind = Some(kind);
                 env.insert(key, value);
             }
             source.files.push(file.clone());
@@ -876,9 +891,7 @@ pub fn prepare_env(
 
 /// The env profile a run was started with, when it was started with one.
 fn active_profile(base: &HashMap<String, String>) -> Option<String> {
-    base.get(crate::environment::profiles::PROFILE_VAR)
-        .map(|p| p.trim().to_string())
-        .filter(|p| crate::environment::profiles::valid_name(p))
+    crate::environment::profiles::choice(base).0
 }
 
 /// Return the names from `required` that are absent from `env` or present but
@@ -1599,7 +1612,10 @@ name = "a"
         );
         // A nearer workspace's default still beats the root's `.env`.
         assert_eq!(prepared.env["API_DEFAULT"], "yes");
-        assert!(prepared.sources["API_DEFAULT"].from_default);
+        assert_eq!(
+            prepared.sources["API_DEFAULT"].kind,
+            Some(FileKind::Default)
+        );
         // What the nearest doesn't set comes from further up.
         assert_eq!(prepared.env["REGION"], "global");
         assert_eq!(prepared.env["TIER"], "dev");

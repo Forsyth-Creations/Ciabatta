@@ -469,6 +469,10 @@ async fn start(state: AppState, payload: CreatePayload) -> RouteResult<Json<Valu
             crate::environment::profiles::PROFILE_VAR.to_string(),
             profile.to_string(),
         );
+        env.insert(
+            crate::environment::profiles::PROFILE_FROM_VAR.to_string(),
+            "launcher".to_string(),
+        );
     }
 
     // Fail fast on a bad flowchart, before anything is spawned. The resolved

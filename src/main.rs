@@ -464,11 +464,19 @@ async fn cmd_workflow(
     source_ciabatta_vars(&mut vars, &ws.root, announce);
     // Custom arguments last: they were typed for this run, so they win.
     vars.extend(cli::parse_custom_args(custom_args)?);
+    // Where the profile came from travels with it, so the report can say why
+    // it's the one in use. A marker inherited from an outer run says nothing
+    // about this one.
+    vars.remove(environment::profiles::PROFILE_FROM_VAR);
     if let Some(profile) = &args.env_profile {
         environment::profiles::require(&ws.root, profile)?;
         vars.insert(
             environment::profiles::PROFILE_VAR.to_string(),
             profile.clone(),
+        );
+        vars.insert(
+            environment::profiles::PROFILE_FROM_VAR.to_string(),
+            "flag".to_string(),
         );
     }
     report_env_drift(&ws.root, &graph.env_files, announce);
@@ -4141,9 +4149,10 @@ Four rules, in the order they apply:
        the workspace you ran from, then each one up to the root, each as:
          .env.<profile>  >  .env  >  .env.default
 
-     A required_env variable none of them sets stops the run. The report
-     printed before each run says which file each value came from and what
-     it overrode.
+     The profile is chosen first: --env-profile, else CIABATTA_ENV_PROFILE
+     from the terminal, else none. A required_env variable none of them sets
+     stops the run. The report printed before each run names the profile and
+     why, and gives every variable the reason its value won.
 
 And one requirement that follows from the third: a workspace whose workflows
 declare required_env must declare `env_default`. Not bureaucracy — it's what
@@ -4806,9 +4815,10 @@ Four rules, in the order they apply:
        the workspace you ran from, then each one up to the root, each as:
          .env.<profile>  >  .env  >  .env.default
 
-     A required_env variable none of them sets stops the run. The report
-     printed before each run says which file each value came from and what
-     it overrode.
+     The profile is chosen first: --env-profile, else CIABATTA_ENV_PROFILE
+     from the terminal, else none. A required_env variable none of them sets
+     stops the run. The report printed before each run names the profile and
+     why, and gives every variable the reason its value won.
 
 And one requirement that follows from the third: a workspace whose workflows
 declare required_env must declare `env_default`. Not bureaucracy — it's what

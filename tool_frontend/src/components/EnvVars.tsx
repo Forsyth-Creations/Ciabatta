@@ -77,7 +77,7 @@ export function EnvVarChip({ variable }: { variable: EnvVar }) {
       title={
         <>
           {variable.purpose && `${variable.purpose} · `}
-          {originText(variable)}
+          {variable.reason ?? originText(variable)}
           {variable.optional && " · optional"}
           {variable.required && " · required_env"}
           {variable.in_cache_key && " · part of the cache key: changing it rebuilds"}
@@ -221,8 +221,20 @@ export function EnvPanel({ report, title = "Environment" }: { report: EnvReport;
         <Typography variant="overline" color="text.secondary">
           {title} — {report.vars.length} variable(s) this graph depends on
         </Typography>
-        {report.profile && (
-          <Chip size="small" color="secondary" variant="outlined" label={`profile: ${report.profile}`} />
+        {(report.profile || report.profile_reason) && (
+          <Tooltip title={report.profile_reason ?? ""}>
+            <Chip
+              size="small"
+              color={report.profile ? "secondary" : "default"}
+              variant="outlined"
+              label={`profile: ${report.profile ?? "none"}`}
+            />
+          </Tooltip>
+        )}
+        {report.profile_reason && (
+          <Typography variant="caption" color="text.secondary">
+            {report.profile_reason}
+          </Typography>
         )}
         {report.files.length > 0 && (
           <Typography variant="caption" color="text.secondary" sx={{ fontFamily: monoFontStack }}>

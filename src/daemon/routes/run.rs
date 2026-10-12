@@ -732,13 +732,9 @@ fn missing_env(
     for (_, resolved) in runs {
         // Folded in the way the engine will, or a variable the root `.env`
         // sets would be asked for all the same.
-        let resolved = crate::run::with_root_env(resolved.clone(), &meta, root);
+        let resolved = crate::run::with_env_levels(resolved.clone(), root, root, &meta);
         let prepared =
             crate::run::prepare_env(&resolved, root, env).map_err(RouteError::bad_request)?;
-        // No value to prompt for settles a conflict between two files.
-        if let Some(message) = prepared.conflict_message() {
-            return Err(RouteError::bad_request(message));
-        }
         for var in prepared.missing() {
             if !missing.contains(&var) {
                 missing.push(var);

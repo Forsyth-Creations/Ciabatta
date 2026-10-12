@@ -475,6 +475,15 @@ async fn cmd_workflow(
 
     let name = graph.label();
     let resolved = workspace::graph::into_run(graph)?;
+    // The environment is searched from where the command was run, up to the
+    // root: `cd packages/api && ciabatta build` reads `packages/api/.env`
+    // first, and every step of the run then shares what that search found.
+    let resolved = run::with_env_levels(
+        resolved,
+        &ws.root,
+        &cwd,
+        &cfg.workspace.clone().unwrap_or_default(),
+    );
 
     if args.gui {
         // The daemon owns the run, so it compiles the graph itself from the
@@ -4109,7 +4118,7 @@ when their session lapses, never how to be them.
 ENVIRONMENT
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-Three rules, in the order they apply:
+Four rules, in the order they apply:
 
   1. `.env` is the default. A workspace that says nothing gets `.env` from its
      own directory. Nobody should have to configure the conventional thing.
@@ -4123,6 +4132,18 @@ Three rules, in the order they apply:
      does. Naming it means ciabatta GENERATES the `.env` rather than failing on
      a variable the developer has never heard of. It's only ever created when
      absent, so your edits survive.
+
+  4. One environment per run, found by a search. For each variable the first
+     of these to set it wins, and every step of the run sees that value:
+
+       the terminal (shell, CI, git, -e)                always wins
+       env files the workflows name (`env_file:`)
+       the workspace you ran from, then each one up to the root, each as:
+         .env.<profile>  >  .env  >  .env.default
+
+     A required_env variable none of them sets stops the run. The report
+     printed before each run says which file each value came from and what
+     it overrode.
 
 And one requirement that follows from the third: a workspace whose workflows
 declare required_env must declare `env_default`. Not bureaucracy — it's what
@@ -4762,7 +4783,7 @@ when their session lapses, never how to be them.
 ENVIRONMENT
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-Three rules, in the order they apply:
+Four rules, in the order they apply:
 
   1. `.env` is the default. A workspace that says nothing gets `.env` from its
      own directory. Nobody should have to configure the conventional thing.
@@ -4776,6 +4797,18 @@ Three rules, in the order they apply:
      does. Naming it means ciabatta GENERATES the `.env` rather than failing on
      a variable the developer has never heard of. It's only ever created when
      absent, so your edits survive.
+
+  4. One environment per run, found by a search. For each variable the first
+     of these to set it wins, and every step of the run sees that value:
+
+       the terminal (shell, CI, git, -e)                always wins
+       env files the workflows name (`env_file:`)
+       the workspace you ran from, then each one up to the root, each as:
+         .env.<profile>  >  .env  >  .env.default
+
+     A required_env variable none of them sets stops the run. The report
+     printed before each run says which file each value came from and what
+     it overrode.
 
 And one requirement that follows from the third: a workspace whose workflows
 declare required_env must declare `env_default`. Not bureaucracy — it's what

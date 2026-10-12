@@ -168,7 +168,7 @@ pub fn into_run(graph: WorkflowGraph) -> Result<crate::run::ResolvedRun> {
         post: None,
         required_env: graph.required_env,
         env_files: graph.env_files,
-        env_default: None,
+        env_levels: Vec::new(),
         steps: crate::run::topo_order(&steps),
         units,
     })
@@ -685,8 +685,6 @@ fn compile(
             .flat_map(|s| s.needs.iter().map(|n| n.as_str()))
             .collect();
 
-        let member_chain = env_chain(workspace, member);
-
         let mut unit_exits: Vec<String> = Vec::new();
         for step in &workflow.steps {
             let mut compiled = step.clone();
@@ -755,11 +753,10 @@ fn compile(
             compiled.env = env;
             compiled.required_env = workflow.required_env.clone();
 
-            // The `.env` files this step resolves through, outermost first: the
-            // workspaces above it, then its own, then whatever the workflow
-            // names. Its own answers first; anything it doesn't set falls back
-            // outward. A sibling package's `.env` is never in the chain.
-            compiled.env_files = member_chain.clone();
+            // The files this step's workflow names. The workspaces' own `.env`
+            // files aren't listed per step: the run searches them once, from
+            // where it was started up to the root (`run::with_env_levels`).
+            compiled.env_files = Vec::new();
             for file in &workflow.env_file {
                 let path = join_rel(&member.rel, file);
                 if !compiled.env_files.contains(&path) {
@@ -869,7 +866,6 @@ fn compile(
             bail!("'{unit}' is used as a background target, but has no steps to run.");
         }
 
-        let member_chain = env_chain(workspace, member);
         let own: HashSet<&str> = workflow.steps.iter().map(|s| s.name.as_str()).collect();
 
         for step in &workflow.steps {
@@ -904,7 +900,7 @@ fn compile(
             env.extend(step.env.clone());
             compiled.env = env;
             compiled.required_env = workflow.required_env.clone();
-            compiled.env_files = member_chain.clone();
+            compiled.env_files = Vec::new();
             for file in &workflow.env_file {
                 let path = join_rel(&member.rel, file);
                 if !compiled.env_files.contains(&path) {
@@ -933,22 +929,10 @@ fn compile(
     Ok(graph)
 }
 
-/// The `.env` files a member's steps resolve through, outermost first.
-///
-/// The monorepo root, then every sub-workspace between it and this member, then
-/// the member itself. The run reads every step's chain into one shared
-/// environment, where the files must agree; see [`crate::run::prepare_env`].
-fn env_chain(workspace: &Workspace, member: &Member) -> Vec<String> {
-    crate::environment::files::chain(&env_layers(workspace, member))
-}
-
 /// The workspaces a member's environment resolves through, outermost first.
 ///
 /// The monorepo root, then every sub-workspace between it and this member, then
-/// the member itself — the same order [`env_chain`] turns into file paths, and
-/// the same order a required variable is looked for in. Kept as its own
-/// function because those two callers must not be able to disagree about what
-/// "upwards" means.
+/// the member itself — the order a required variable is looked for in.
 fn env_layers<'a>(
     workspace: &'a Workspace,
     member: &'a Member,
@@ -960,7 +944,6 @@ fn env_layers<'a>(
     // its `.env` is still the outermost thing a step falls back to.
     if member.rel != "." {
         layers.push(Layer {
-            rel: ".",
             dir: &workspace.root,
             meta: &workspace.root_meta,
         });
@@ -975,14 +958,12 @@ fn env_layers<'a>(
     between.sort_by_key(|other| other.rel.matches('/').count());
     for other in between {
         layers.push(Layer {
-            rel: &other.rel,
             dir: &other.dir,
             meta: &other.meta,
         });
     }
 
     layers.push(Layer {
-        rel: &member.rel,
         dir: &member.dir,
         meta: &member.meta,
     });
@@ -1496,17 +1477,29 @@ mod tests {
         );
         assert_eq!(
             graph.steps[0].env_files,
-            vec!["packages/api/.env", "packages/api/.env.build"],
-            "rebased onto the monorepo root, nearest last"
+            vec!["packages/api/.env.build"],
+            "only the workflow's own files, rebased onto the monorepo root — \
+             the workspace's `.env` is searched once, for the whole run"
         );
         assert_eq!(graph.required_env, vec!["API_TOKEN".to_string()]);
         std::fs::remove_dir_all(&root).ok();
     }
 
-    /// A package's chain is its ancestry: the root, the workspaces between, and
-    /// its own `.env` — a sibling's file isn't part of *its* chain.
+    fn levels_from(root: &Path, start: &Path) -> Vec<crate::run::EnvLevel> {
+        crate::run::with_env_levels(
+            crate::run::ResolvedRun::default(),
+            root,
+            start,
+            &Default::default(),
+        )
+        .env_levels
+    }
+
+    /// The search runs from the workspace the run started in up to the root:
+    /// a sibling's `.env` is never on it, and a run from the root reads only
+    /// the root's.
     #[test]
-    fn a_steps_env_chain_runs_from_the_root_down_to_its_own_workspace() {
+    fn the_env_search_runs_from_where_the_run_started_up_to_the_root() {
         let root = scratch("chain");
         std::fs::create_dir_all(root.join(CIABATTA_DIR)).unwrap();
         std::fs::write(
@@ -1514,57 +1507,33 @@ mod tests {
             "[workspace]\nname = \"repo\"\numbrella = true\n",
         )
         .unwrap();
-        std::fs::write(root.join(".env"), "SHARED=from-root\n").unwrap();
+        std::fs::write(root.join(".env.default"), "A=1\n").unwrap();
 
         let api = member(&root, "packages/api", "[workspace]\nname = \"api\"\n");
-        std::fs::write(api.join(".env"), "SHARED=from-api\n").unwrap();
-        workflow(&api, "build", "[[steps]]\nname = \"b\"\nrun = \"true\"\n");
+        member(&root, "packages/web", "[workspace]\nname = \"web\"\n");
+        std::fs::create_dir_all(api.join("src")).unwrap();
 
-        // A sibling with a `.env` of its own, and one with none at all: the
-        // first must not leak into the second's chain, and the second falls
-        // back to the root.
-        let web = member(&root, "packages/web", "[workspace]\nname = \"web\"\n");
-        std::fs::write(web.join(".env"), "SHARED=from-web\n").unwrap();
-        workflow(&web, "build", "[[steps]]\nname = \"b\"\nrun = \"true\"\n");
-
-        let docs = member(&root, "docs", "[workspace]\nname = \"docs\"\n");
-        workflow(&docs, "build", "[[steps]]\nname = \"b\"\nrun = \"true\"\n");
-
-        let ws = Workspace::load(&root).unwrap();
-        let graph = build(&ws, "build", &Selection::default()).unwrap();
-
-        let chain = |member: &str| -> Vec<String> {
-            graph
-                .steps
-                .iter()
-                .find(|s| s.workspace.as_deref() == Some(member))
-                .unwrap()
-                .env_files
-                .clone()
+        let files = |levels: Vec<crate::run::EnvLevel>| -> Vec<Vec<String>> {
+            levels.into_iter().map(|l| l.files).collect()
         };
-
         assert_eq!(
-            chain("api"),
-            vec![".env".to_string(), "packages/api/.env".to_string()],
-            "the root first, the package last"
+            files(levels_from(&root, &api.join("src"))),
+            [vec!["packages/api/.env"], vec![".env"]],
+            "from a directory inside a package: that package, then the root"
         );
+        assert_eq!(files(levels_from(&root, &root)), [vec![".env"]]);
         assert_eq!(
-            chain("docs"),
-            vec![".env".to_string()],
-            "a package with no `.env` of its own resolves higher"
-        );
-        assert!(
-            !chain("api").iter().any(|f| f.contains("web")),
-            "a sibling's `.env` is not a fallback"
+            levels_from(&root, &root)[0].default.as_deref(),
+            Some(".env.default")
         );
 
         std::fs::remove_dir_all(&root).ok();
     }
 
-    /// A workspace nested inside another is a level of its own: the chain picks
-    /// up every enclosing workspace, and only the enclosing ones.
+    /// A workspace nested inside another is a level of its own: the search
+    /// picks up every enclosing workspace, nearest first, and only those.
     #[test]
-    fn the_chain_picks_up_every_enclosing_workspace() {
+    fn the_env_search_picks_up_every_enclosing_workspace() {
         let root = scratch("nested");
         std::fs::create_dir_all(root.join(CIABATTA_DIR)).unwrap();
         std::fs::write(
@@ -1572,24 +1541,27 @@ mod tests {
             "[workspace]\nname = \"repo\"\numbrella = true\n",
         )
         .unwrap();
-
-        let services = member(&root, "services", "[workspace]\nname = \"services\"\n");
-        std::fs::write(services.join(".env"), "TIER=services\n").unwrap();
-
-        let api = member(&root, "services/api", "[workspace]\nname = \"api\"\n");
-        std::fs::write(api.join(".env"), "TIER=api\n").unwrap();
-        workflow(&api, "build", "[[steps]]\nname = \"b\"\nrun = \"true\"\n");
-
+        member(&root, "services", "[workspace]\nname = \"services\"\n");
+        let api = member(
+            &root,
+            "services/api",
+            "[workspace]\nname = \"api\"\nenv_file = [\".env\", \".env.local\"]\n",
+        );
         // A near-miss on the path prefix: `services-legacy` encloses nothing.
-        let legacy = member(&root, "services-legacy", "[workspace]\nname = \"legacy\"\n");
-        std::fs::write(legacy.join(".env"), "TIER=legacy\n").unwrap();
+        member(&root, "services-legacy", "[workspace]\nname = \"legacy\"\n");
 
-        let ws = Workspace::load(&root).unwrap();
-        let graph = build(&ws, "build", &Selection::default()).unwrap();
+        let levels: Vec<Vec<String>> = levels_from(&root, &api)
+            .into_iter()
+            .map(|l| l.files)
+            .collect();
         assert_eq!(
-            graph.steps[0].env_files,
-            vec!["services/.env".to_string(), "services/api/.env".to_string()],
-            "outermost first, and `services-legacy` is a sibling, not a parent"
+            levels,
+            [
+                vec!["services/api/.env", "services/api/.env.local"],
+                vec!["services/.env"],
+                vec![".env"],
+            ],
+            "nearest first, and `services-legacy` is a sibling, not a parent"
         );
 
         std::fs::remove_dir_all(&root).ok();

@@ -17,7 +17,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use super::{ResolvedRun, RunStep, prepare_env, with_root_env};
+use super::{ResolvedRun, RunStep, prepare_env, with_env_levels};
 use crate::config::CiabattaConfig;
 
 /// Where a variable's effective value comes from.
@@ -27,15 +27,11 @@ pub enum Origin {
     /// The environment ciabatta itself was launched with — your shell, the CI
     /// system, or a `-e` flag. Beats every declared source.
     Environment,
-    /// A `.env` file the run sources (see `file`) — every one that sets it
-    /// agreeing on the value.
+    /// The first `.env` file in the search that sets it (see `file`).
     EnvFile,
-    /// The root's `env_default` (see `file`): neither the terminal nor any
-    /// `.env` sets it.
+    /// A workspace's defaults file (see `file`): nothing searched before it
+    /// sets it.
     Default,
-    /// Two `.env` files set it differently and the terminal doesn't settle it
-    /// (see `conflict`). The run won't start.
-    Conflict,
     /// A declared `[env]` table: a sub-workspace's, a workflow's, or a step's.
     Config,
     /// A custom argument given after `...` on the command line, which became a
@@ -57,16 +53,12 @@ pub struct EnvVar {
     /// Declared in `required_env`: the run refuses to start without it.
     pub required: bool,
     pub origin: Origin,
-    /// The file(s) that supplied it: the agreeing `.env` files when `origin`
-    /// is `EnvFile`, the `env_default` when it's `Default`.
+    /// The file that supplied it, when `origin` is `EnvFile` or `Default`.
     pub file: Option<String>,
-    /// The files it beat — what would have supplied it had the winner not.
-    /// The terminal beats every file; a `.env` beats the `env_default`.
+    /// The files that also set it, later in the search, and so lost to the
+    /// winner — the terminal, or the first file to set it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub overrides: Vec<String>,
-    /// When `origin` is `Conflict`: each `.env` that sets it, and to what.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub conflict: Vec<ConflictValue>,
     /// Steps that read it or declare it — the edges to draw on a graph.
     pub steps: Vec<String>,
     /// Set by several steps to different values, so there is no single one.
@@ -87,24 +79,13 @@ pub struct EnvVar {
     pub in_cache_key: bool,
 }
 
-/// One file's say in a [`Origin::Conflict`]. The value is masked when the name
-/// looks secret.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct ConflictValue {
-    pub file: String,
-    pub value: String,
-}
-
 /// Every environment variable a run depends on, resolved as far as the inputs
 /// allow.
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct EnvReport {
-    /// The `.env` files sourced, in application order.
+    /// The env files searched, in order: for each variable the first that
+    /// sets it wins, after the terminal.
     pub files: Vec<String>,
-    /// The root's `env_default`, the fallback beneath every `.env`, when one
-    /// is declared and present.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub default: Option<String>,
     /// `required_env`, as declared.
     pub required: Vec<String>,
     /// Required variables that are still empty or unset — the run can't start
@@ -137,18 +118,15 @@ impl EnvReport {
         if let Some(profile) = &self.profile {
             out.push_str(&format!("  profile  {profile}\n"));
         }
-        if !self.files.is_empty() {
-            out.push_str(&format!("  sourcing {}\n", self.files.join(", ")));
-        }
         // The rule every value below was decided by, so the notes beside each
         // one read as an application of it rather than as trivia.
-        let fallback = match &self.default {
-            Some(default) => format!(" > {default}"),
-            None => String::new(),
-        };
-        out.push_str(&format!(
-            "  precedence: terminal > .env files (must agree){fallback}\n"
-        ));
+        match self.files.is_empty() {
+            true => out.push_str("  precedence: terminal only (no env files found)\n"),
+            false => out.push_str(&format!(
+                "  precedence: terminal > {} (first to set it wins)\n",
+                self.files.join(" > ")
+            )),
+        }
 
         // Custom arguments are shown on their own, by `render_arguments`.
         let rows: Vec<(&EnvVar, String)> = self
@@ -156,11 +134,10 @@ impl EnvReport {
             .iter()
             .filter(|var| var.origin != Origin::Argument)
             .map(|var| {
-                let value = match (&var.value, var.varies, var.origin) {
-                    (Some(value), _, _) => value.clone(),
-                    (None, _, Origin::Conflict) => "(conflict)".to_string(),
-                    (None, true, _) => "(set per step)".to_string(),
-                    (None, false, _) => "(unset)".to_string(),
+                let value = match (&var.value, var.varies) {
+                    (Some(value), _) => value.clone(),
+                    (None, true) => "(set per step)".to_string(),
+                    (None, false) => "(unset)".to_string(),
                 };
                 (var, value)
             })
@@ -201,18 +178,6 @@ impl EnvReport {
             ));
         }
 
-        let conflicted: Vec<&str> = self
-            .vars
-            .iter()
-            .filter(|v| v.origin == Origin::Conflict)
-            .map(|v| v.key.as_str())
-            .collect();
-        if !conflicted.is_empty() {
-            out.push_str(&format!(
-                "  ✗ conflicting: {} — make the .env files agree, or settle it with -e KEY=VALUE\n",
-                conflicted.join(", ")
-            ));
-        }
         if !self.missing.is_empty() {
             out.push_str(&format!(
                 "  ✗ still needed: {} — set them with -e KEY=VALUE\n",
@@ -236,24 +201,13 @@ impl EnvReport {
         match var.origin {
             Origin::Environment => beat("terminal"),
             Origin::EnvFile => beat(var.file.as_deref().unwrap_or("env file")),
-            Origin::Default => format!(
-                "{} — not in the terminal or any .env",
+            Origin::Default => beat(&format!(
+                "{} (default)",
                 var.file.as_deref().unwrap_or("env default")
-            ),
-            Origin::Conflict => {
-                let said: Vec<String> = var
-                    .conflict
-                    .iter()
-                    .map(|c| format!("{}={}", c.file, c.value))
-                    .collect();
-                format!("conflict: {}", said.join(" vs "))
-            }
+            )),
             Origin::Config => "config [env]".to_string(),
             Origin::Argument => "argument".to_string(),
-            Origin::Unset => match &self.default {
-                Some(default) => format!("unset — not in the terminal, any .env, or {default}"),
-                None => "unset — not in the terminal or any .env".to_string(),
-            },
+            Origin::Unset => "unset — not in the terminal or any env file searched".to_string(),
         }
     }
 }
@@ -318,12 +272,13 @@ pub fn collect(
     base: &HashMap<String, String>,
     config: Option<&CiabattaConfig>,
 ) -> EnvReport {
-    // The root's own files, folded in exactly as the engine will — or a
-    // variable only the root `.env` sets would be reported as unset.
+    // Where the environment is searched, settled exactly as the engine will
+    // — or a variable only the root `.env` sets would be reported as unset. A
+    // run the CLI already settled keeps its levels.
     let meta = config
         .and_then(|config| config.workspace.clone())
         .unwrap_or_default();
-    let resolved = &with_root_env(resolved.clone(), &meta, root);
+    let resolved = &with_env_levels(resolved.clone(), root, root, &meta);
 
     // The engine's own resolution, so the values reported are the values the
     // steps will actually see.
@@ -340,15 +295,6 @@ pub fn collect(
     let sources = prepared
         .as_ref()
         .map(|p| p.sources.clone())
-        .unwrap_or_default();
-    let conflicts: HashMap<String, Vec<(String, String)>> = prepared
-        .as_ref()
-        .map(|p| {
-            p.conflicts
-                .iter()
-                .map(|c| (c.key.clone(), c.values.clone()))
-                .collect()
-        })
         .unwrap_or_default();
 
     // Which steps touch which variable, and what a step's own `[env]` sets it
@@ -430,9 +376,9 @@ pub fn collect(
             let value = env.get(&key).filter(|v| !v.trim().is_empty()).cloned();
             let terminal = base.get(&key).is_some_and(|v| !v.trim().is_empty());
 
-            // Every step sees one environment, so a value is decided once:
-            // the terminal, else the `.env` files (which must agree), else the
-            // root's `env_default`. A step's own `[env]` is layered on top.
+            // Every step sees one environment, decided by one search: the
+            // terminal, else the first env file to set it. A step's own `[env]`
+            // is layered on top.
             let mut overrides: Vec<String> = Vec::new();
             let (origin, file, value, varies) = match step_values {
                 Some(values) if values.len() > 1 => (Origin::Config, None, None, true),
@@ -442,23 +388,24 @@ pub fn collect(
                     values.iter().next().cloned().filter(|v| !v.is_empty()),
                     false,
                 ),
-                None if conflicts.contains_key(&key) => (Origin::Conflict, None, None, false),
                 None if terminal && key.starts_with(crate::cli::CUSTOM_ARG_PREFIX) => {
                     (Origin::Argument, None, value, false)
                 }
                 None if terminal => {
                     overrides.extend(source.files.iter().cloned());
-                    overrides.extend(source.default.iter().cloned());
                     (Origin::Environment, None, value, false)
                 }
-                None if !source.files.is_empty() => {
-                    overrides.extend(source.default.iter().cloned());
-                    (Origin::EnvFile, Some(source.files.join(", ")), value, false)
-                }
-                None if source.default.is_some() => {
-                    (Origin::Default, source.default.clone(), value, false)
-                }
-                None => (Origin::Unset, None, None, false),
+                None => match source.files.split_first() {
+                    Some((winner, rest)) => {
+                        overrides.extend(rest.iter().cloned());
+                        let origin = match source.from_default {
+                            true => Origin::Default,
+                            false => Origin::EnvFile,
+                        };
+                        (origin, Some(winner.clone()), value, false)
+                    }
+                    None => (Origin::Unset, None, None, false),
+                },
             };
 
             let secret = value.is_some() && looks_secret(&key);
@@ -476,18 +423,6 @@ pub fn collect(
                 origin,
                 file,
                 overrides,
-                conflict: conflicts
-                    .get(&key)
-                    .map(|values| {
-                        values
-                            .iter()
-                            .map(|(file, value)| ConflictValue {
-                                file: file.clone(),
-                                value: shown(&key, value),
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default(),
                 steps: users.get(&key).cloned().unwrap_or_default(),
                 varies,
                 key,
@@ -501,7 +436,6 @@ pub fn collect(
 
     EnvReport {
         files,
-        default: resolved.env_default.clone(),
         required: resolved.required_env.clone(),
         missing,
         vars,
@@ -868,10 +802,11 @@ mod tests {
     }
 
     /// The Padua case: a `required_env` no step's command mentions, set only
-    /// in the `.env` the steps' chains reach, used to be reported unset.
+    /// in the root `.env`, used to be reported unset. The report also says
+    /// how each value was decided.
     #[test]
-    fn a_required_variable_nobody_reads_is_resolved_from_the_steps_env_files() {
-        let root = std::env::temp_dir().join(format!("ciab_envdeps_chain_{}", std::process::id()));
+    fn a_required_variable_nobody_reads_is_found_in_the_root_env() {
+        let root = std::env::temp_dir().join(format!("ciab_envdeps_padua_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join(".ciabatta")).unwrap();
         std::fs::write(root.join(".env"), "VERSION=0.0.0\n").unwrap();
@@ -881,11 +816,9 @@ mod tests {
         )
         .unwrap();
 
-        let mut build = step("build", "make");
-        build.env_files = vec![".env".to_string()];
         let resolved = ResolvedRun {
             required_env: vec!["VERSION".to_string()],
-            steps: vec![build],
+            steps: vec![step("build", "make")],
             ..Default::default()
         };
         let config = CiabattaConfig {
@@ -911,44 +844,26 @@ mod tests {
         let text = report.render("build-checks").unwrap();
         assert!(
             text.contains(
-                "precedence: terminal > .env files (must agree) > .ciabatta/.env.default"
-            )
-        );
-        assert!(
-            text.contains(".env, overrides .ciabatta/.env.default"),
+                "precedence: terminal > .env > .ciabatta/.env.default (first to set it wins)"
+            ),
             "{text}"
         );
-
-        std::fs::remove_dir_all(&root).ok();
-    }
-
-    #[test]
-    fn a_conflict_is_reported_with_every_file_and_value() {
-        let root =
-            std::env::temp_dir().join(format!("ciab_envdeps_conflict_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(root.join("api")).unwrap();
-        std::fs::write(root.join(".env"), "STAGE=dev\n").unwrap();
-        std::fs::write(root.join("api/.env"), "STAGE=prod\n").unwrap();
-
-        let mut build = step("api:build", "deploy $STAGE");
-        build.env_files = vec![".env".to_string(), "api/.env".to_string()];
-        let resolved = ResolvedRun {
-            steps: vec![build],
-            ..Default::default()
-        };
-        let report = collect(&resolved, &root, &env(&[]), None);
-
-        let stage = find(&report, "STAGE");
-        assert_eq!(stage.origin, Origin::Conflict);
-        assert!(stage.value.is_none());
-        assert_eq!(stage.conflict.len(), 2);
-        let text = report.render("deploy").unwrap();
         assert!(
-            text.contains("conflict: .env=dev vs api/.env=prod"),
+            text.contains("[.env, overrides .ciabatta/.env.default"),
             "{text}"
         );
-        assert!(text.contains("✗ conflicting: STAGE"), "{text}");
+        assert!(text.contains("[.ciabatta/.env.default (default)"), "{text}");
+
+        // The terminal beats every file, and the report says which it beat.
+        let report = collect(
+            &resolved,
+            &root,
+            &env(&[("VERSION", "1.0.0")]),
+            Some(&config),
+        );
+        let version = find(&report, "VERSION");
+        assert_eq!(version.origin, Origin::Environment);
+        assert_eq!(version.overrides, [".env", ".ciabatta/.env.default"]);
 
         std::fs::remove_dir_all(&root).ok();
     }

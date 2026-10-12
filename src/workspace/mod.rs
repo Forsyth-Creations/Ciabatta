@@ -342,8 +342,8 @@ pub struct Workspace {
     /// The root's own `[workspace]` table, umbrella or not.
     ///
     /// An umbrella root isn't a member — it isn't a package — but it is still a
-    /// level every step resolves its environment through, so its config has to
-    /// be reachable. See [`crate::environment::files::chain`].
+    /// level every run searches its environment through, so its config has to
+    /// be reachable. See [`crate::run::with_env_levels`].
     pub root_meta: WorkspaceMeta,
     /// `[toolchain]` entries, merged root-first so a member may add its own.
     pub toolchain: BTreeMap<String, ToolSpec>,

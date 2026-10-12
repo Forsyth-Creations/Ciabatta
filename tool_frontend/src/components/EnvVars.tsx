@@ -42,7 +42,7 @@ export function envValueText(variable: EnvVar): string {
  * somebody hunting for a fault that isn't there.
  */
 export function unsetProblem(variable: EnvVar): boolean {
-  return (variable.origin === "unset" && !variable.optional) || variable.origin === "conflict";
+  return variable.origin === "unset" && !variable.optional;
 }
 
 /** Where the value came from, in the words the config uses — and what it beat. */
@@ -54,11 +54,7 @@ export function originText(variable: EnvVar): string {
     case "env_file":
       return `from ${variable.file ?? "an env file"}${beat}`;
     case "default":
-      return `from ${variable.file ?? "the env default"} — not in the terminal or any .env`;
-    case "conflict":
-      return `the .env files disagree (${(variable.conflict ?? [])
-        .map((c) => `${c.file}=${c.value}`)
-        .join(" vs ")}) — the run won't start`;
+      return `from the defaults file ${variable.file ?? ""}${beat}`;
     case "config":
       return "from an [env] table in the config";
     case "argument":

@@ -130,11 +130,10 @@ pub async fn execute(
             .await;
     }
 
-    // With the files in place, fold the project's own env files into the run's
-    // — `.env` (or whatever `env_file` names), and its `env_default` beneath.
-    // Each step's chain is read too, and every step then shares the one
-    // environment they settle on.
-    let resolved = crate::run::with_root_env(resolved, &meta, root);
+    // With the files in place, settle where the environment is searched: the
+    // workspace the run was started from up to the root. The CLI has usually
+    // decided already; a run that arrives without it starts at the root.
+    let resolved = crate::run::with_env_levels(resolved, root, root, &meta);
 
     let prepared = prepare_env(&resolved, root, env_vars)?;
     for file in &prepared.sourced {
@@ -189,18 +188,6 @@ pub async fn execute(
                     .to_string(),
             ))
             .await;
-    }
-
-    // Two `.env` files disagreeing is stopped before anything else: every step
-    // shares one environment, and which file is right isn't ours to guess.
-    if let Some(message) = prepared.conflict_message() {
-        eprintln!("[{name}] ✗ run aborted — conflicting env values");
-        for line in message.lines() {
-            let _ = tx
-                .send(ProgressUpdate::Log(name.to_string(), line.to_string()))
-                .await;
-        }
-        bail!("Run '{name}' cannot start.\n{message}");
     }
 
     if !prepared.is_ready() {

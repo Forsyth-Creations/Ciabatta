@@ -42,8 +42,7 @@ import ContentCopyIcon from "@mui/icons-material/ContentCopy";
 import CheckIcon from "@mui/icons-material/Check";
 
 import type { RunState, StepView, WorkflowView } from "../api/run";
-import { executionOrder } from "./layout";
-import { StatusIcon } from "./StatusIcon";
+import { StatusIcon, executionOrder } from "@ciabatta/graphs";
 import { monoFontStack } from "../theme";
 
 /**

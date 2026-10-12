@@ -379,6 +379,29 @@ __metadata:
   languageName: node
   linkType: hard
 
+"@ciabatta/graphs@workspace:*, @ciabatta/graphs@workspace:packages/graphs":
+  version: 0.0.0-use.local
+  resolution: "@ciabatta/graphs@workspace:packages/graphs"
+  dependencies:
+    "@emotion/react": "npm:^11.13.3"
+    "@emotion/styled": "npm:^11.13.0"
+    "@mui/icons-material": "npm:^6.1.6"
+    "@mui/material": "npm:^6.1.6"
+    "@types/react": "npm:^18.3.12"
+    "@xyflow/react": "npm:^12.11.2"
+    react: "npm:^18.3.1"
+    react-dom: "npm:^18.3.1"
+    typescript: "npm:^5.6.3"
+  peerDependencies:
+    "@emotion/react": ^11.13.3
+    "@emotion/styled": ^11.13.0
+    "@mui/icons-material": ^6.1.6
+    "@mui/material": ^6.1.6
+    react: ^18.3.1
+    react-dom: ^18.3.1
+  languageName: unknown
+  linkType: soft
+
 "@emotion/babel-plugin@npm:^11.13.5":
   version: 11.13.5
   resolution: "@emotion/babel-plugin@npm:11.13.5"
@@ -2540,6 +2563,7 @@ __metadata:
   version: 0.0.0-use.local
   resolution: "ciabatta-remote-cache-web@workspace:remote-cache-web"
   dependencies:
+    "@ciabatta/graphs": "workspace:*"
     "@emotion/react": "npm:^11.13.3"
     "@emotion/styled": "npm:^11.13.0"
     "@fontsource/barlow": "npm:^5.3.0"
@@ -2551,6 +2575,7 @@ __metadata:
     "@types/react": "npm:^18.3.12"
     "@types/react-dom": "npm:^18.3.1"
     "@vitejs/plugin-react": "npm:^4.3.3"
+    "@xyflow/react": "npm:^12.11.2"
     react: "npm:^18.3.1"
     react-dom: "npm:^18.3.1"
     typescript: "npm:^5.6.3"
@@ -2571,6 +2596,7 @@ __metadata:
   version: 0.0.0-use.local
   resolution: "ciabatta-tool-frontend@workspace:tool_frontend"
   dependencies:
+    "@ciabatta/graphs": "workspace:*"
     "@emotion/react": "npm:^11.13.3"
     "@emotion/styled": "npm:^11.13.0"
     "@fontsource/barlow": "npm:^5.3.0"

@@ -21,8 +21,13 @@ import { type Edge, type Node } from "@xyflow/react";
 
 import type { PlannedStep } from "../api/types";
 import type { WorkflowGraph } from "../api/workspace";
-import { GraphCanvas } from "./GraphCanvas";
-import { ROUTED_EDGE, layeredLayout, routeKey, type LayoutEdge } from "./layout";
+import {
+  GraphCanvas,
+  ROUTED_EDGE,
+  layeredLayout,
+  routeKey,
+  type LayoutEdge,
+} from "@ciabatta/graphs";
 import { monoFontStack } from "../theme";
 
 const NODE_WIDTH = 210;

@@ -55,7 +55,6 @@ import {
 import { humanizeBytes } from "../api/cache";
 import type { EnvVar } from "../api/types";
 import { LogView } from "../components/LogView";
-import { GraphCanvas } from "../components/GraphCanvas";
 import { RecreateDrawer } from "../components/RecreateDrawer";
 import { EnvPrompt } from "../components/EnvPrompt";
 import {
@@ -66,13 +65,24 @@ import {
   unsetProblem,
 } from "../components/EnvVars";
 import {
+  GraphCanvas,
   ROUTED_EDGE,
+  STEP_LAYOUT,
+  STEP_LINE,
+  STEP_NODE_WIDTH,
+  StatusIcon,
+  StepLine,
+  StepNodeBody,
   executionOrder,
   layeredLayout,
+  oneLine,
   routeKey,
+  statusColour,
+  statusLabel,
+  stepNodeHeight,
+  stepNodeStyle,
   type LayoutEdge,
-} from "../components/layout";
-import { StatusIcon, statusColour, statusLabel } from "../components/StatusIcon";
+} from "@ciabatta/graphs";
 import {
   CacheIcon,
   CacheReportView,
@@ -119,29 +129,10 @@ const isDependencyNode = (id: string) => isFileNode(id) || envKeyOf(id) !== null
 /** How far the graph fades what the focused node doesn't reach. */
 const DIMMED = 0.18;
 
-/**
- * How wide a step node is drawn.
- *
- * Fixed rather than fitted, because the layout has to know: it places columns a
- * set distance apart, and a node that grows past that distance reaches into the
- * lane the next column's edges arrive through — which is how a line ends up
- * drawn across the middle of a node.
- */
-const NODE_WIDTH = 210;
+/** The shared step node's geometry, renamed for this file's many uses. */
+const NODE_WIDTH = STEP_NODE_WIDTH;
+const LINE = STEP_LINE;
 
-/**
- * The lines a step node is built from, each a fixed height.
- *
- * Fixed because the layout has to know each node's height before react-flow
- * has drawn it: handles hang off the middle of a node, and a wire routed to
- * where the layout *thought* the middle was arrives a few pixels off it and
- * kinks. And fixed per node rather than measured, so a node doesn't grow when
- * its step finishes and gains a time — which shoved the rest of its column
- * down mid-run.
- */
-const LINE = { name: 16, small: 14 } as const;
-/** A step node's border and padding, top and bottom together. */
-const STEP_CHROME = 2 * 2 + 6 * 2;
 /** A variable or file-set node: two lines, and its chrome. */
 const DEPENDENCY_HEIGHT = 46;
 
@@ -149,17 +140,12 @@ const DEPENDENCY_HEIGHT = 46;
 function nodeHeight(id: string, byName: Map<string, StepView>, inspect: boolean): number {
   const step = byName.get(id);
   if (!step) return DEPENDENCY_HEIGHT;
-  return (
-    STEP_CHROME +
-    LINE.name +
-    // The timing line is always there, so a step's node is the same height
-    // before it runs as after.
-    LINE.small +
-    (step.workspace ? LINE.small : 0) +
-    (step.background ? LINE.small : 0) +
-    // Inspect mode's cache line, there for every step whether or not the
-    // cache has spoken yet — for the same reason the timing line is.
-    (inspect && !step.recover ? LINE.small : 0)
+  return stepNodeHeight(
+    Boolean(step.workspace),
+    (step.background ? 1 : 0) +
+      // Inspect mode's cache line, there for every step whether or not the
+      // cache has spoken yet — so the node doesn't grow when it does.
+      (inspect && !step.recover ? 1 : 0),
   );
 }
 
@@ -982,69 +968,33 @@ function NodeLabel({
   order: number | null;
   inspect: boolean;
 }) {
-  // The id is "<workspace>:<step>" (or "<workspace>:<workflow>:<step>"), and
-  // repeating the workspace in both lines just wastes the node's width.
-  const short =
-    step.workspace && step.name.startsWith(`${step.workspace}:`)
-      ? step.name.slice(step.workspace.length + 1)
-      : step.name;
-
   return (
-    <Stack direction="row" spacing={0.75} alignItems="center" sx={{ minWidth: 0, width: "100%" }}>
-      {order !== null && (
-        <Box
-          sx={{
-            flexShrink: 0,
-            minWidth: 18,
-            height: 18,
-            px: 0.5,
-            borderRadius: 9,
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            bgcolor: "action.selected",
-            color: "text.secondary",
-            fontFamily: monoFontStack,
-            fontSize: 10,
-            fontWeight: 700,
-            lineHeight: 1,
-          }}
-        >
-          {order}
-        </Box>
-      )}
-      {/* No tooltip: the node has its own hover, and two would fight. */}
-      <StatusIcon status={step.status} title={null} />
-      {/* Every line is one line high, cut off rather than wrapped: the node's
-          height is fixed (see `nodeHeight`), and the full name is in the
-          title and the step panel. */}
-      <Box sx={{ minWidth: 0, flexGrow: 1, textAlign: "left" }} title={step.name}>
-        {step.workspace && (
-          <Box sx={{ ...oneLine(LINE.small), fontSize: 10, opacity: 0.75, fontFamily: monoFontStack }}>
-            {step.workspace}
-          </Box>
-        )}
-        <Box sx={{ ...oneLine(LINE.name), fontWeight: 600 }}>{short}</Box>
-        <Box sx={{ ...oneLine(LINE.small), fontSize: 10, opacity: 0.7, fontFamily: monoFontStack }}>
-          {/* A step served from the cache is "skipped" to the engine, but
-              that word belongs to steps a condition left out. */}
-          {wasReused(step.cache)
-            ? `from cache${step.finished_at ? ` · ${clockTime(step.finished_at)}` : ""}`
-            : step.started_at && step.finished_at
-              ? `${elapsedOf(step, 0)} · ${clockTime(step.finished_at)}`
-              : statusLabel(step.status).toLowerCase()}
-        </Box>
-        {step.background && (
-          <Box sx={{ ...oneLine(LINE.small), fontSize: 10, opacity: 0.7 }}>
-            background · nothing waits for it
-          </Box>
-        )}
-        {inspect && !step.recover && <InspectLine step={step} />}
-      </Box>
-      {/* The node was served from the cache rather than run: say so where
-          the eye already is, and let a click on it explain. */}
-      {step.cache && wasReused(step.cache) && <CacheIcon report={step.cache} />}
-    </Stack>
+    <StepNodeBody
+      name={step.name}
+      workspace={step.workspace}
+      status={step.status}
+      order={order}
+      detail={
+        // A step served from the cache is "skipped" to the engine, but that
+        // word belongs to steps a condition left out.
+        wasReused(step.cache)
+          ? `from cache${step.finished_at ? ` · ${clockTime(step.finished_at)}` : ""}`
+          : step.started_at && step.finished_at
+            ? `${elapsedOf(step, 0)} · ${clockTime(step.finished_at)}`
+            : statusLabel(step.status).toLowerCase()
+      }
+      extra={
+        <>
+          {step.background && (
+            <StepLine mono={false}>background · nothing waits for it</StepLine>
+          )}
+          {inspect && !step.recover && <InspectLine step={step} />}
+        </>
+      }
+      // The node was served from the cache rather than run: say so where the
+      // eye already is, and let a click on it explain.
+      adornment={step.cache && wasReused(step.cache) && <CacheIcon report={step.cache} />}
+    />
   );
 }
 
@@ -1069,17 +1019,6 @@ function InspectLine({ step }: { step: StepView }) {
       )}
     </Box>
   );
-}
-
-/** One line of text at exactly `height`, ending in an ellipsis if it's long. */
-function oneLine(height: number) {
-  return {
-    height,
-    lineHeight: `${height}px`,
-    overflow: "hidden",
-    whiteSpace: "nowrap",
-    textOverflow: "ellipsis",
-  } as const;
 }
 
 /**
@@ -1620,13 +1559,9 @@ function buildFlow(
     layoutEdges,
     (id) => nodeData(id, byName, groups, sequence, showOrder, workflow, inspect),
     {
-      // A column has to be wider than the widest node it can hold, or a long
-      // step name grows its node into the next column and the edges arriving
-      // there run over it. `NODE_WIDTH` caps the node; this leaves a gap the
-      // wires can turn in.
-      columnWidth: NODE_WIDTH + 130,
-      nodeWidth: NODE_WIDTH,
-      rowGap: 26,
+      // The shared run-graph spacing: columns wide enough for a capped node
+      // plus a gap the wires can turn in.
+      ...STEP_LAYOUT,
       heightOf: (id) => nodeHeight(id, byName, inspect),
       // Variables and input files are inputs to the run, not steps of it, so
       // they take columns of their own to the left — variables outside the
@@ -1847,24 +1782,22 @@ function nodeStyle(
 
   const step = byName.get(id);
   if (step) {
-    return {
-      ...common,
-      // Recovery nodes are dashed: they're branches you hope never run.
-      border: `2px ${step.recover ? "dashed" : "solid"} ${
-        picked
-          ? theme.palette.secondary.main
-          : // In inspect mode the border is the cache's verdict, not the
-            // step's: the status is still the glyph beside the name.
-            inspect && !step.recover
-            ? cacheTone(step.cache, theme)
-            : // Reused is as good an outcome as ran-and-passed.
-              wasReused(step.cache)
-              ? theme.palette.success.main
-              : statusColor(step.status, theme)
-      }`,
-      fontSize: 12,
-      padding: "6px 12px",
-    };
+    return stepNodeStyle({
+      theme,
+      height: common.height,
+      opacity: common.opacity,
+      picked,
+      dashed: step.recover,
+      border:
+        // In inspect mode the border is the cache's verdict, not the step's:
+        // the status is still the glyph beside the name.
+        inspect && !step.recover
+          ? cacheTone(step.cache, theme)
+          : // Reused is as good an outcome as ran-and-passed.
+            wasReused(step.cache)
+            ? theme.palette.success.main
+            : statusColor(step.status, theme),
+    });
   }
 
   // Dependency nodes: dashed like the edges that leave them, because a file set

@@ -35,16 +35,7 @@ import {
   ProjectSaved,
   RateGauge,
 } from "../components/charts";
-import {
-  ChartCard,
-  EmptyRow,
-  Mono,
-  Prose,
-  Section,
-  StatTile,
-  Tag,
-  When,
-} from "../components/ui";
+import { ChartCard, EmptyRow, Mono, Prose, Section, StatTile, Tag, When } from "../components/ui";
 import { ago, human, rate, saved } from "../format";
 import { useLoad } from "../useLoad";
 
@@ -54,7 +45,12 @@ export function Overview({ refreshKey }: { refreshKey: number }) {
   const { data: s, error, loading } = useLoad(() => api<Stats>("/api/stats"), refreshKey);
   const [span, setSpan] = useState<number>(30);
 
-  if (error) return <Alert severity="error" sx={{ mt: 3 }}>{error}</Alert>;
+  if (error)
+    return (
+      <Alert severity="error" sx={{ mt: 3 }}>
+        {error}
+      </Alert>
+    );
   if (!s) return loading ? <LinearProgress sx={{ mt: 3 }} /> : null;
 
   const a = s.activity;
@@ -232,7 +228,10 @@ export function Overview({ refreshKey }: { refreshKey: number }) {
         />
       </Box>
 
-      <Section title="Worth a look" sub="What to change to get more out of this cache, most costly first.">
+      <Section
+        title="Worth a look"
+        sub="What to change to get more out of this cache, most costly first."
+      >
         <Stack spacing={1}>
           {s.insights.length === 0 ? (
             <Alert icon={<CheckCircleIcon />} severity="success" variant="outlined">
@@ -268,9 +267,7 @@ export function Overview({ refreshKey }: { refreshKey: number }) {
         title="Time saved"
         sub="Every hit hands back a build somebody would otherwise have waited for. Summed across every runner, so it can outpace the clock."
       >
-        <Box
-          sx={{ display: "grid", gap: 2, gridTemplateColumns: { xs: "1fr", lg: "3fr 2fr" } }}
-        >
+        <Box sx={{ display: "grid", gap: 2, gridTemplateColumns: { xs: "1fr", lg: "3fr 2fr" } }}>
           <ChartCard title="Build time saved per day" sub={`Last ${span} days, by UTC day`}>
             <DailySaved daily={a.daily} span={span} />
           </ChartCard>
@@ -280,20 +277,27 @@ export function Overview({ refreshKey }: { refreshKey: number }) {
         </Box>
       </Section>
 
-      <Section title="Where the misses are" sub="Lookups per project, and the targets that missed most.">
-        <Box
-          sx={{ display: "grid", gap: 2, gridTemplateColumns: { xs: "1fr", lg: "1fr 1fr" } }}
-        >
+      <Section
+        title="Where the misses are"
+        sub="Lookups per project, and the targets that missed most."
+      >
+        <Box sx={{ display: "grid", gap: 2, gridTemplateColumns: { xs: "1fr", lg: "1fr 1fr" } }}>
           <ChartCard title="Projects" sub="Busiest ten, by lookups">
             <ProjectLookups projects={s.projects} />
           </ChartCard>
-          <ChartCard title="Targets that miss most" sub="Each miss was a full build somebody waited for">
+          <ChartCard
+            title="Targets that miss most"
+            sub="Each miss was a full build somebody waited for"
+          >
             <MissingTargets projects={s.projects} />
           </ChartCard>
         </Box>
       </Section>
 
-      <Section title="Projects" sub="Expand a project for the targets that miss most — the ones to look at first.">
+      <Section
+        title="Projects"
+        sub="Expand a project for the targets that miss most — the ones to look at first."
+      >
         <ProjectsTable projects={s.projects} />
       </Section>
 
@@ -319,7 +323,10 @@ export function Overview({ refreshKey }: { refreshKey: number }) {
                   </TableCell>
                   <TableCell>{e.project_name}</TableCell>
                   <TableCell>
-                    <Tag kind={e.kind} label={e.kind === "touch" ? `kept ${e.count} alive` : e.kind} />
+                    <Tag
+                      kind={e.kind}
+                      label={e.kind === "touch" ? `kept ${e.count} alive` : e.kind}
+                    />
                   </TableCell>
                   <TableCell>
                     <Mono>{e.target ?? ""}</Mono>
@@ -358,7 +365,10 @@ export function Overview({ refreshKey }: { refreshKey: number }) {
             </ChartCard>
           )}
           <EntryTable title="Largest entries" entries={s.largest} />
-          <EntryTable title="Least recently used — first to be evicted" entries={s.least_recently_used} />
+          <EntryTable
+            title="Least recently used — first to be evicted"
+            entries={s.least_recently_used}
+          />
         </Box>
       </Section>
     </Box>

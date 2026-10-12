@@ -42,7 +42,9 @@ export function lastDays(count: number): string[] {
   const out: string[] = [];
   const today = new Date();
   for (let i = count - 1; i >= 0; i--) {
-    const d = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate() - i));
+    const d = new Date(
+      Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate() - i),
+    );
     out.push(d.toISOString().slice(0, 10));
   }
   return out;
@@ -56,22 +58,32 @@ export function shortDay(day: string): string {
   });
 }
 
+const MINUTE = 60_000;
+const HOUR = 60 * MINUTE;
+const DAY = 24 * HOUR;
+const YEAR = 365 * DAY;
+
 /**
- * A long span of saved time, at the two largest units that matter: "3d 4h",
- * "5h 12m", "42m", "18s". Saved time adds up across every runner, so days are
- * a real unit here.
+ * A long span of saved time, at the two largest units that matter: "2y 40d",
+ * "3d 4h", "5h 12m", "42m", "18s". Saved time adds up across every runner, so
+ * a busy cache reaches days quickly and, given long enough, years.
  */
 export function saved(ms: number | null | undefined): string {
-  const s = Math.floor((ms ?? 0) / 1000);
-  if (s < 60) return `${s}s`;
-  const m = Math.floor(s / 60);
-  if (m < 60) return `${m}m`;
-  const h = Math.floor(m / 60);
-  if (h < 24) return `${h}h ${m % 60}m`;
-  return `${Math.floor(h / 24)}d ${h % 24}h`;
+  const t = ms ?? 0;
+  if (t < MINUTE) return `${Math.floor(t / 1000)}s`;
+  if (t < HOUR) return `${Math.floor(t / MINUTE)}m`;
+  if (t < DAY) return `${Math.floor(t / HOUR)}h ${Math.floor((t % HOUR) / MINUTE)}m`;
+  if (t < YEAR) return `${Math.floor(t / DAY)}d ${Math.floor((t % DAY) / HOUR)}h`;
+  return `${Math.floor(t / YEAR)}y ${Math.floor((t % YEAR) / DAY)}d`;
 }
 
-/** Hours, for a chart axis. */
-export function hours(ms: number): number {
-  return ms / 3_600_000;
+/**
+ * The unit a chart of saved time should count in, picked from its largest
+ * value so the axis reads "3y" rather than "26,280h".
+ */
+export function timeUnit(maxMs: number): { ms: number; suffix: string } {
+  if (maxMs >= 2 * YEAR) return { ms: YEAR, suffix: "y" };
+  if (maxMs >= 2 * DAY) return { ms: DAY, suffix: "d" };
+  if (maxMs >= 2 * HOUR) return { ms: HOUR, suffix: "h" };
+  return { ms: MINUTE, suffix: "m" };
 }

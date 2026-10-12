@@ -30,10 +30,7 @@ import { monoFontStack } from "../theme";
 import { useLoad } from "../useLoad";
 
 export function Users({ refreshKey }: { refreshKey: number }) {
-  const { data, error, loading, reload } = useLoad(
-    () => api<UsersData>("/api/users"),
-    refreshKey,
-  );
+  const { data, error, loading, reload } = useLoad(() => api<UsersData>("/api/users"), refreshKey);
   const [name, setName] = useState("");
   const [readOnly, setReadOnly] = useState(false);
   const [admin, setAdmin] = useState(false);
@@ -41,7 +38,12 @@ export function Users({ refreshKey }: { refreshKey: number }) {
   const [revoking, setRevoking] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
 
-  if (error) return <Alert severity="error" sx={{ mt: 3 }}>{error}</Alert>;
+  if (error)
+    return (
+      <Alert severity="error" sx={{ mt: 3 }}>
+        {error}
+      </Alert>
+    );
   if (!data) return loading ? <LinearProgress sx={{ mt: 3 }} /> : null;
 
   const open = data.mode === "open" || data.mode === "none";
@@ -61,7 +63,12 @@ export function Users({ refreshKey }: { refreshKey: number }) {
 
       {created && (
         // The one moment this value exists in readable form, so give it room.
-        <Alert severity="success" variant="outlined" sx={{ mb: 2 }} onClose={() => setCreated(null)}>
+        <Alert
+          severity="success"
+          variant="outlined"
+          sx={{ mb: 2 }}
+          onClose={() => setCreated(null)}
+        >
           <Typography sx={{ fontWeight: 600 }}>Token for {created.user.name}</Typography>
           <Box
             component="code"
@@ -118,7 +125,9 @@ export function Users({ refreshKey }: { refreshKey: number }) {
               onChange={(e) => setName(e.target.value)}
             />
             <FormControlLabel
-              control={<Checkbox checked={readOnly} onChange={(e) => setReadOnly(e.target.checked)} />}
+              control={
+                <Checkbox checked={readOnly} onChange={(e) => setReadOnly(e.target.checked)} />
+              }
               label="read-only"
             />
             {/* An admin can only be granted by the operator's config on an open
@@ -162,7 +171,9 @@ export function Users({ refreshKey }: { refreshKey: number }) {
                     />
                   )}
                 </TableCell>
-                <TableCell>{u.admin ? "admin" : u.read_only ? "read-only" : "read/write"}</TableCell>
+                <TableCell>
+                  {u.admin ? "admin" : u.read_only ? "read-only" : "read/write"}
+                </TableCell>
                 <TableCell sx={{ color: "text.secondary" }}>
                   {u.created_at ? new Date(u.created_at).toLocaleString() : "—"}
                 </TableCell>

@@ -20,7 +20,12 @@ export function Releases({ refreshKey }: { refreshKey: number }) {
     () => api<{ releases: Release[] }>("/api/releases"),
     refreshKey,
   );
-  if (error) return <Alert severity="error" sx={{ mt: 3 }}>{error}</Alert>;
+  if (error)
+    return (
+      <Alert severity="error" sx={{ mt: 3 }}>
+        {error}
+      </Alert>
+    );
   if (!data) return loading ? <LinearProgress sx={{ mt: 3 }} /> : null;
   const releases = data.releases ?? [];
 

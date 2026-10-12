@@ -28,8 +28,7 @@ import { useTheme } from "@mui/material/styles";
 import type { Theme } from "@mui/material/styles";
 import type { Edge, Node } from "@xyflow/react";
 
-import { GraphCanvas } from "../components/GraphCanvas";
-import { ROUTED_EDGE, layeredLayout, routeKey } from "../components/layout";
+import { GraphCanvas, ROUTED_EDGE, layeredLayout, routeKey } from "@ciabatta/graphs";
 import { PageHeader } from "../components/Page";
 import { monoFontStack } from "../theme";
 

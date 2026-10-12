@@ -4,6 +4,7 @@
     "private": true,
     "packageManager": "yarn@4.17.0",
     "workspaces": [
+        "packages/graphs",
         "frontend",
         "src",
         "tool_frontend",

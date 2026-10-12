@@ -1997,6 +1997,12 @@ Three separate front ends live in this repo:
   MUI X Charts), also compiled into the binary. Build it with
   `yarn workspace ciabatta-remote-cache-web build`; `yarn dev` inside it
   proxies `/api` to a cache server on 8380 (or `CIABATTA_CACHE_URL`).
+
+Both apps draw run graphs with **`packages/graphs/`** (`@ciabatta/graphs`) —
+the react-flow canvas, the layered layout and its routed wires, and the step
+node — so a build opened from the cache looks exactly like a run on the
+daemon. It's linked TypeScript source with no build step of its own; each app
+compiles it in.
 - **`frontend/`** — the public docs site on GitHub Pages, with download links
   and usage instructions. See the
   [project site](https://forsyth-creations.github.io/Ciabatta/).

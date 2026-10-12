@@ -198,9 +198,5 @@ export function EmptyRow({ colSpan, children }: { colSpan: number; children: Rea
 /** Backticked names in server prose read as code. */
 export function Prose({ text }: { text: string }) {
   const parts = text.split(/`([^`]+)`/g);
-  return (
-    <>
-      {parts.map((part, i) => (i % 2 === 1 ? <Mono key={i}>{part}</Mono> : part))}
-    </>
-  );
+  return <>{parts.map((part, i) => (i % 2 === 1 ? <Mono key={i}>{part}</Mono> : part))}</>;
 }

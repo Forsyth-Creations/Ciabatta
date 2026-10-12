@@ -19,7 +19,7 @@ import { Gauge, gaugeClasses } from "@mui/x-charts/Gauge";
 import { LineChart } from "@mui/x-charts/LineChart";
 
 import type { Day, ProjectStats } from "../api";
-import { compact, hours, lastDays, rate, saved, shortDay } from "../format";
+import { compact, lastDays, rate, saved, shortDay, timeUnit } from "../format";
 import { NoData, useChartColors } from "./ui";
 
 const count = (v: number | null) => (v === null ? "" : v.toLocaleString());
@@ -212,7 +212,13 @@ export function RateGauge({
 }
 
 /** How full the store is against its retention limit. */
-export function CapacityGauge({ percent: pct, height = 150 }: { percent: number; height?: number }) {
+export function CapacityGauge({
+  percent: pct,
+  height = 150,
+}: {
+  percent: number;
+  height?: number;
+}) {
   const theme = useTheme();
   const clamped = Math.min(100, pct);
   const fill =
@@ -255,9 +261,7 @@ export function ProjectLookups({ projects }: { projects: ProjectStats[] }) {
   const sx = useAxisSx();
   const busy = projects
     .filter((p) => p.counters.hits + p.counters.misses > 0)
-    .sort(
-      (a, b) => b.counters.hits + b.counters.misses - (a.counters.hits + a.counters.misses),
-    )
+    .sort((a, b) => b.counters.hits + b.counters.misses - (a.counters.hits + a.counters.misses))
     .slice(0, 10);
   const height = Math.max(160, 56 + busy.length * 34);
   if (busy.length === 0) {
@@ -275,8 +279,7 @@ export function ProjectLookups({ projects }: { projects: ProjectStats[] }) {
         {
           scaleType: "band" as const,
           data: busy.map((p) => p.project.name),
-          valueFormatter: (name: string, ctx) =>
-            ctx.location === "tick" ? clip(18)(name) : name,
+          valueFormatter: (name: string, ctx) => (ctx.location === "tick" ? clip(18)(name) : name),
         },
       ]}
       xAxis={[{ valueFormatter: (v: number) => compact(v) }]}
@@ -362,13 +365,6 @@ export function MissingTargets({ projects }: { projects: ProjectStats[] }) {
   );
 }
 
-/** Axis ticks for saved time: hours, or minutes while the numbers are small. */
-function timeAxis(maxMs: number) {
-  return maxMs >= 2 * 3_600_000
-    ? (v: number) => `${compact(v)}h`
-    : (v: number) => `${compact(v * 60)}m`;
-}
-
 /** Build time the cache handed back each day — the payoff, in hours. */
 export function DailySaved({
   daily,
@@ -384,6 +380,7 @@ export function DailySaved({
   const every = useTickEvery(span);
   const { days, rows } = daysOf(daily, span);
   const ms = rows.map((r) => r?.saved_ms ?? 0);
+  const unit = timeUnit(Math.max(0, ...ms));
   if (!daily || ms.every((v) => v === 0)) {
     return (
       <NoData height={height}>
@@ -408,14 +405,14 @@ export function DailySaved({
           tickLabelInterval: (_v: string, i: number) => i % every === 0,
         },
       ]}
-      yAxis={[{ valueFormatter: timeAxis(Math.max(...ms)) }]}
+      yAxis={[{ valueFormatter: (v: number) => `${compact(v)}${unit.suffix}` }]}
       series={[
         {
           id: "saved",
           label: "Build time saved",
           color: colors.hit,
-          data: ms.map(hours),
-          valueFormatter: (v: number | null) => (v === null ? "" : saved(v * 3_600_000)),
+          data: ms.map((v) => v / unit.ms),
+          valueFormatter: (v: number | null) => (v === null ? "" : saved(v * unit.ms)),
         },
       ]}
       slotProps={{ legend: { hidden: true } }}
@@ -435,7 +432,7 @@ export function ProjectSaved({ projects }: { projects: ProjectStats[] }) {
     return <NoData height={160}>No project has been saved any build time yet.</NoData>;
   }
   const height = Math.max(160, 40 + top.length * 34);
-  const max = Math.max(...top.map((p) => p.counters.saved_ms ?? 0));
+  const unit = timeUnit(Math.max(...top.map((p) => p.counters.saved_ms ?? 0)));
   return (
     <BarChart
       height={height}
@@ -448,18 +445,17 @@ export function ProjectSaved({ projects }: { projects: ProjectStats[] }) {
         {
           scaleType: "band" as const,
           data: top.map((p) => p.project.name),
-          valueFormatter: (name: string, ctx) =>
-            ctx.location === "tick" ? clip(18)(name) : name,
+          valueFormatter: (name: string, ctx) => (ctx.location === "tick" ? clip(18)(name) : name),
         },
       ]}
-      xAxis={[{ valueFormatter: timeAxis(max) }]}
+      xAxis={[{ valueFormatter: (v: number) => `${compact(v)}${unit.suffix}` }]}
       series={[
         {
           id: "saved",
           label: "Build time saved",
           color: colors.hit,
-          data: top.map((p) => hours(p.counters.saved_ms ?? 0)),
-          valueFormatter: (v: number | null) => (v === null ? "" : saved(v * 3_600_000)),
+          data: top.map((p) => (p.counters.saved_ms ?? 0) / unit.ms),
+          valueFormatter: (v: number | null) => (v === null ? "" : saved(v * unit.ms)),
         },
       ]}
       slotProps={{ legend: { hidden: true } }}

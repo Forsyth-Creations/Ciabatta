@@ -17,6 +17,9 @@ cache:
     - "remote-cache-web/index.html"
     - "remote-cache-web/package.json"
     - "remote-cache-web/vite.config.ts"
+    # Shared source this app compiles in.
+    - "packages/graphs/src/**/*"
+    - "packages/graphs/package.json"
   outputs: ["remote-cache-web/dist/**/*"]
 
 steps:

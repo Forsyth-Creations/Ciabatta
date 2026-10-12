@@ -3,6 +3,8 @@ import {
   Alert,
   Box,
   Card,
+  Dialog,
+  IconButton,
   LinearProgress,
   Table,
   TableBody,
@@ -13,6 +15,8 @@ import {
   Typography,
   useTheme,
 } from "@mui/material";
+import CloseIcon from "@mui/icons-material/Close";
+import { StepGraph, type GraphStep } from "@ciabatta/graphs";
 import { BarChart } from "@mui/x-charts/BarChart";
 import { PieChart } from "@mui/x-charts/PieChart";
 
@@ -42,7 +46,12 @@ export function Builds({ refreshKey }: { refreshKey: number }) {
   );
   const [open, setOpen] = useState<string | null>(null);
 
-  if (error) return <Alert severity="error" sx={{ mt: 3 }}>{error}</Alert>;
+  if (error)
+    return (
+      <Alert severity="error" sx={{ mt: 3 }}>
+        {error}
+      </Alert>
+    );
   if (!data) return loading ? <LinearProgress sx={{ mt: 3 }} /> : null;
   const builds = data.builds ?? [];
 
@@ -71,7 +80,7 @@ export function Builds({ refreshKey }: { refreshKey: number }) {
         </Box>
       </Section>
 
-      <Section title="History" sub="Newest first. Click one for the flow it ran.">
+      <Section title="History" sub="Newest first. Click one to open the flow it ran.">
         <TableContainer component={Card}>
           <Table size="small">
             <TableHead>
@@ -143,7 +152,7 @@ export function Builds({ refreshKey }: { refreshKey: number }) {
         </TableContainer>
       </Section>
 
-      {open && <BuildDetail id={open} />}
+      <BuildDialog id={open} onClose={() => setOpen(null)} />
     </Box>
   );
 }
@@ -256,7 +265,31 @@ function Reuse({ builds }: { builds: BuildSummary[] }) {
   );
 }
 
-function BuildDetail({ id }: { id: string }) {
+/** A build, opened over the list: its flow up top, its steps below. */
+function BuildDialog({ id, onClose }: { id: string | null; onClose: () => void }) {
+  return (
+    <Dialog
+      open={id !== null}
+      onClose={onClose}
+      maxWidth={false}
+      PaperProps={{
+        sx: {
+          width: "90vw",
+          height: "90vh",
+          maxWidth: "none",
+          maxHeight: "none",
+          m: 0,
+          display: "flex",
+          flexDirection: "column",
+        },
+      }}
+    >
+      {id && <BuildDetail id={id} onClose={onClose} />}
+    </Dialog>
+  );
+}
+
+function BuildDetail({ id, onClose }: { id: string; onClose: () => void }) {
   const [project, build] = id.split("/");
   const { data, error } = useLoad(
     () =>
@@ -265,26 +298,89 @@ function BuildDetail({ id }: { id: string }) {
       ),
     id,
   );
-  if (error) return <Alert severity="error" sx={{ mt: 3 }}>{error}</Alert>;
-  if (!data) return <LinearProgress sx={{ mt: 3 }} />;
+  const [picked, setPicked] = useState<string | null>(null);
+
+  const header = (title: React.ReactNode, outcome?: string) => (
+    <Box
+      sx={{
+        display: "flex",
+        alignItems: "center",
+        gap: 1.5,
+        px: 2.5,
+        py: 1.25,
+        borderBottom: 1,
+        borderColor: "divider",
+      }}
+    >
+      <Typography variant="h2" noWrap sx={{ fontSize: "1.15rem", flex: 1 }}>
+        {title}
+      </Typography>
+      {outcome && <Tag kind={outcome} />}
+      <IconButton size="small" onClick={onClose} aria-label="Close">
+        <CloseIcon fontSize="small" />
+      </IconButton>
+    </Box>
+  );
+
+  if (error) {
+    return (
+      <>
+        {header("Build")}
+        <Alert severity="error" sx={{ m: 2 }}>
+          {error}
+        </Alert>
+      </>
+    );
+  }
+  if (!data) {
+    return (
+      <>
+        {header("Build")}
+        <LinearProgress />
+      </>
+    );
+  }
+
   const b = data.build;
+  const stepsReused = b.steps.filter((s) => s.status === "reused").length;
   const facts: [string, React.ReactNode][] = [
     ["started", new Date(b.started_at).toLocaleString()],
     ["took", duration(b.duration_ms)],
+    ["steps", `${b.steps.length} · ${stepsReused} reused`],
     ["branch", b.branch && <Mono>{b.branch}</Mono>],
-    ["commit", b.commit && <Mono>{b.commit}</Mono>],
+    ["commit", b.commit && <Mono title={b.commit}>{b.commit.slice(0, 12)}</Mono>],
     ["tag", b.tag && <Mono>{b.tag}</Mono>],
     ["build", b.build_number],
-    ["by", [b.user, b.host].filter(Boolean).join("@")],
+    ["by", [b.user, b.host].filter(Boolean).join("@") || b.reported_by],
     ["ci", b.ci],
     ["ciabatta", b.version],
   ];
+
   return (
-    <Section
-      title={`${data.project_name || project} · ${b.workflow}`}
-      action={<Tag kind={b.outcome} />}
-    >
-      <Box sx={{ display: "flex", flexWrap: "wrap", columnGap: 3, rowGap: 0.5, mb: 2 }}>
+    <>
+      {header(
+        <>
+          {data.project_name || project}
+          <Box component="span" sx={{ color: "text.secondary", mx: 1 }}>
+            ·
+          </Box>
+          <Mono>{b.workflow}</Mono>
+        </>,
+        b.outcome,
+      )}
+      <Box
+        sx={{
+          display: "flex",
+          flexWrap: "wrap",
+          columnGap: 3,
+          rowGap: 0.5,
+          px: 2.5,
+          py: 1,
+          borderBottom: 1,
+          borderColor: "divider",
+          bgcolor: "action.hover",
+        }}
+      >
         {facts
           .filter(([, v]) => v)
           .map(([k, v]) => (
@@ -297,15 +393,31 @@ function BuildDetail({ id }: { id: string }) {
           ))}
       </Box>
       {b.error && (
-        <Alert severity="error" sx={{ mb: 2, fontFamily: monoFontStack }}>
+        <Alert severity="error" sx={{ mx: 2.5, mt: 1.5, fontFamily: monoFontStack }}>
           {b.error}
         </Alert>
       )}
-      {/* A recovery node that was never entered is a branch the run didn't
-          take; it stays in the table, but drawing it would hang it off nothing. */}
-      <Flow steps={b.steps.filter((s) => !(s.kind === "recover" && s.status === "not run"))} />
-      <TableContainer component={Card} sx={{ mt: 2 }}>
-        <Table size="small">
+      <Box sx={{ flex: "1 1 60%", minHeight: 240, p: 2, pb: 1 }}>
+        {/* The same graph the daemon's run page draws, from @ciabatta/graphs.
+            A recovery node that was never entered is a branch the run didn't
+            take; it stays in the table, but drawing it would hang it off nothing. */}
+        <StepGraph
+          height="100%"
+          steps={b.steps
+            .filter((s) => !(s.kind === "recover" && s.status === "not run"))
+            .map(graphStep)}
+          onStepClick={(name) => {
+            setPicked(name);
+            document
+              .getElementById(stepRowId(name))
+              ?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+          }}
+        />
+      </Box>
+      <TableContainer
+        sx={{ flex: "1 1 40%", minHeight: 120, borderTop: 1, borderColor: "divider" }}
+      >
+        <Table size="small" stickyHeader>
           <TableHead>
             <TableRow>
               <TableCell>Step</TableCell>
@@ -318,7 +430,7 @@ function BuildDetail({ id }: { id: string }) {
           </TableHead>
           <TableBody>
             {b.steps.map((s) => (
-              <TableRow key={s.name}>
+              <TableRow key={s.name} id={stepRowId(s.name)} hover selected={picked === s.name}>
                 <TableCell>
                   <Mono>{s.name}</Mono>{" "}
                   <Typography component="span" variant="caption" color="text.secondary">
@@ -349,146 +461,29 @@ function BuildDetail({ id }: { id: string }) {
           </TableBody>
         </Table>
       </TableContainer>
-    </Section>
+    </>
   );
 }
 
+const stepRowId = (name: string) => `step-row-${name}`;
+
 /**
- * The flow as layers: each step one column to the right of the furthest step
- * it needs, so everything a step waits for sits to its left.
+ * A reported step, as the shared graph wants it.
+ *
+ * The server's record calls a cache hit `reused` and a recovery branch nobody
+ * entered `not run`; the graph's vocabulary is the daemon's, where a reused
+ * step succeeded (and is marked as reused) and an unreached one is pending.
  */
-function Flow({ steps }: { steps: Step[] }) {
-  const theme = useTheme();
-  const colors = useChartColors();
-  const byName = new Map(steps.map((s) => [s.name, s]));
-  const depth = new Map<string, number>();
-  const depthOf = (name: string, seen = new Set<string>()): number => {
-    if (depth.has(name)) return depth.get(name)!;
-    if (seen.has(name)) return 0;
-    seen.add(name);
-    const needs = (byName.get(name)?.needs ?? []).filter((n) => byName.has(n));
-    const d = needs.length ? 1 + Math.max(...needs.map((n) => depthOf(n, seen))) : 0;
-    depth.set(name, d);
-    return d;
+function graphStep(s: Step): GraphStep {
+  const reused = s.status === "reused";
+  const status = reused ? "success" : s.status === "not run" ? "pending" : s.status;
+  return {
+    name: s.name,
+    workspace: s.workspace,
+    status,
+    needs: s.needs,
+    reused,
+    recover: s.kind === "recover",
+    detail: [reused ? "from cache" : s.status, duration(s.duration_ms)].filter(Boolean).join(" · "),
   };
-  steps.forEach((s) => depthOf(s.name));
-  const columns: Step[][] = [];
-  steps.forEach((s) => (columns[depth.get(s.name)!] ??= []).push(s));
-
-  const W = 190;
-  const H = 62;
-  const GX = 60;
-  const GY = 14;
-  const PAD = 16;
-  const at = new Map<string, { x: number; y: number }>();
-  columns.forEach((column, x) =>
-    column.forEach((s, y) => at.set(s.name, { x: PAD + x * (W + GX), y: PAD + y * (H + GY) })),
-  );
-  const width = PAD * 2 + columns.length * (W + GX) - GX;
-  const height = PAD * 2 + Math.max(1, ...columns.map((c) => c.length)) * (H + GY) - GY;
-
-  const edge = (s: Step) => {
-    switch (s.status) {
-      case "success":
-      case "reused":
-        return colors.success;
-      case "failed":
-        return colors.failed;
-      default:
-        return theme.palette.divider;
-    }
-  };
-
-  return (
-    <Box
-      sx={{
-        overflow: "auto",
-        maxHeight: 520,
-        border: 1,
-        borderColor: "divider",
-        borderRadius: 1,
-        bgcolor: "background.default",
-      }}
-    >
-      <Box sx={{ position: "relative", width, height }}>
-        <svg width={width} height={height} style={{ position: "absolute", inset: 0 }}>
-          {steps.flatMap((s) =>
-            (s.needs ?? []).map((n) => {
-              const from = at.get(n);
-              const to = at.get(s.name);
-              if (!from || !to) return null;
-              const x1 = from.x + W;
-              const y1 = from.y + H / 2;
-              const x2 = to.x;
-              const y2 = to.y + H / 2;
-              const mid = (x1 + x2) / 2;
-              return (
-                <path
-                  key={`${n}->${s.name}`}
-                  d={`M${x1},${y1} C${mid},${y1} ${mid},${y2} ${x2},${y2}`}
-                  fill="none"
-                  stroke={theme.palette.divider}
-                  strokeWidth={1.5}
-                />
-              );
-            }),
-          )}
-        </svg>
-        {steps.map((s) => {
-          const p = at.get(s.name)!;
-          const faded = s.status === "skipped" || s.status === "not run";
-          const detail = [
-            s.status,
-            s.cache === "hit" || s.cache === "fresh" ? "from cache" : "",
-            duration(s.duration_ms),
-          ]
-            .filter(Boolean)
-            .join(" · ");
-          return (
-            <Box
-              key={s.name}
-              title={s.note ?? ""}
-              sx={{
-                position: "absolute",
-                left: p.x,
-                top: p.y,
-                width: W,
-                height: H,
-                px: 1,
-                py: 0.75,
-                borderRadius: 1,
-                fontSize: "0.8rem",
-                bgcolor: "background.paper",
-                border: 1,
-                borderColor: "divider",
-                borderLeft: `4px solid ${edge(s)}`,
-                borderStyle: s.status === "reused" ? "dashed" : "solid",
-                borderLeftStyle: "solid",
-                opacity: faded ? 0.65 : 1,
-                overflow: "hidden",
-              }}
-            >
-              <Box
-                sx={{
-                  fontFamily: monoFontStack,
-                  fontWeight: 600,
-                  whiteSpace: "nowrap",
-                  overflow: "hidden",
-                  textOverflow: "ellipsis",
-                }}
-              >
-                {s.name}
-              </Box>
-              <Box sx={{ color: "text.secondary", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-                {s.workspace || s.kind || ""}
-              </Box>
-              <Box sx={{ color: "text.secondary", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-                {detail}
-              </Box>
-            </Box>
-          );
-        })}
-      </Box>
-    </Box>
-  );
 }

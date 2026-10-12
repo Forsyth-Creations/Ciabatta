@@ -11,6 +11,7 @@
     "clean": "rm -rf dist node_modules/.vite"
   },
   "dependencies": {
+    "@ciabatta/graphs": "workspace:*",
     "@emotion/react": "^11.13.3",
     "@emotion/styled": "^11.13.0",
     "@fontsource/barlow": "^5.3.0",
@@ -19,6 +20,7 @@
     "@mui/material": "^6.1.6",
     "@mui/system": "^6.1.6",
     "@mui/x-charts": "^7.29.1",
+    "@xyflow/react": "^12.11.2",
     "react": "^18.3.1",
     "react-dom": "^18.3.1"
   },

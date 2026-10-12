@@ -20,7 +20,8 @@ import Tooltip from "@mui/material/Tooltip";
 import type { SvgIconComponent } from "@mui/icons-material";
 import type { Theme } from "@mui/material/styles";
 
-import type { StepStatus } from "../api/run";
+/** A step's state, as the engine reports it. */
+export type StepStatus = "pending" | "running" | "success" | "failed" | "skipped";
 
 /** A run's verdict, which is a step status plus "somebody stopped it". */
 export type RunStatus = StepStatus | "stopped";

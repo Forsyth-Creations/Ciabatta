@@ -13,6 +13,11 @@ import react from "@vitejs/plugin-react";
 export default defineConfig({
   plugins: [react()],
   base: "/",
+  resolve: {
+    // `@ciabatta/graphs` is linked source shared with the other app; one copy
+    // of each of these, or react-flow and MUI each see two Reacts/themes.
+    dedupe: ["react", "react-dom", "@mui/material", "@emotion/react", "@xyflow/react"],
+  },
   build: {
     outDir: "dist",
     // The bundle is embedded in the Rust binary, so keep an eye on its size.

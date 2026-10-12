@@ -232,7 +232,17 @@ pub fn humanize_ms(ms: u64) -> String {
     if minutes < 60 {
         return format!("{}m {}s", minutes, seconds % 60);
     }
-    format!("{}h {}m", minutes / 60, minutes % 60)
+    let hours = minutes / 60;
+    if hours < 24 {
+        return format!("{}h {}m", hours, minutes % 60);
+    }
+    // Saved build time is summed across every machine using a cache, so a
+    // busy one runs to days and, given long enough, to years.
+    let days = hours / 24;
+    if days < 365 {
+        return format!("{}d {}h", days, hours % 24);
+    }
+    format!("{}y {}d", days / 365, days % 365)
 }
 
 // ─── cache init ─────────────────────────────────────────────────────────────
@@ -1092,5 +1102,8 @@ mod tests {
         assert_eq!(humanize_ms(4_200), "4s");
         assert_eq!(humanize_ms(90_000), "1m 30s");
         assert_eq!(humanize_ms(3_600_000 + 120_000), "1h 2m");
+        const HOUR: u64 = 3_600_000;
+        assert_eq!(humanize_ms(26 * HOUR), "1d 2h");
+        assert_eq!(humanize_ms((365 * 2 + 40) * 24 * HOUR), "2y 40d");
     }
 }

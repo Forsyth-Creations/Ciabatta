@@ -29,8 +29,7 @@ import type { Node } from "@xyflow/react";
 
 import { api } from "../api/client";
 import { ErrorNote, Loading, PageHeader, RequireProject } from "../components/Page";
-import { GraphCanvas } from "../components/GraphCanvas";
-import { radialLayout, toEdges } from "../components/layout";
+import { GraphCanvas, radialLayout, toEdges } from "@ciabatta/graphs";
 import { monoFontStack } from "../theme";
 
 interface BrainNode {

@@ -299,10 +299,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/users/{name}", delete(revoke_user))
         .route("/api/release", get(get_release))
         .route("/api/release/{platform}", get(download_release))
-        // The admin page, last so no API path can be shadowed by it.
-        .route("/", get(admin_page))
-        .route("/builds", get(admin_page))
-        .route("/releases", get(admin_page))
+        // The admin app, as the fallback, so no API path can be shadowed by it.
+        .fallback(super::web::serve)
         .layer(DefaultBodyLimit::max(MAX_ARTIFACT_BYTES))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
@@ -684,6 +682,7 @@ async fn stats(
             "last_miss_at": last(|p| p.last_miss_at.as_deref()),
             "last_saved_at": last(|p| p.last_upload_at.as_deref()),
             "last_eviction": recorded.last_eviction,
+            "daily": recorded.daily,
             "recent": recorded.recent.iter().take(40).map(|event| {
                 let mut value = serde_json::to_value(event).unwrap_or_default();
                 value["project_name"] = json!(names.get(&event.project).cloned().unwrap_or_else(|| event.project.clone()));
@@ -818,6 +817,7 @@ async fn get_entry(
                 key: Some(&key),
                 user: Some(&identity.name),
                 bytes: entry.size,
+                saved_ms: entry.duration_ms,
             });
             state.store.touch(&scoped)?;
             Ok(Json(entry))
@@ -830,6 +830,7 @@ async fn get_entry(
                 key: Some(&key),
                 user: Some(&identity.name),
                 bytes: 0,
+                saved_ms: 0,
             });
             Err(ApiError::not_found(format!("No cache entry for {key}")))
         }
@@ -894,6 +895,7 @@ async fn touch_entries(
             key: None,
             user: Some(&identity.name),
             bytes: 0,
+            saved_ms: 0,
         });
     }
 
@@ -1134,6 +1136,7 @@ async fn put_entry(
         key: Some(&key),
         user: Some(&identity.name),
         bytes: entry.size,
+        saved_ms: 0,
     });
     Ok(Json(json!({ "ok": true, "key": key })))
 }
@@ -1224,18 +1227,6 @@ fn safe_relative(raw: &str) -> ApiResult<std::path::PathBuf> {
         return Err(ApiError::bad_request("an artifact path can't be empty"));
     }
     Ok(out)
-}
-
-/// The admin page.
-///
-/// Unauthenticated, because it has to be: on a server that wants credentials,
-/// this is where you sign in to get one. The page itself is inert — every
-/// action it offers goes through the API, which does check.
-async fn admin_page() -> impl IntoResponse {
-    (
-        [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
-        super::page::ADMIN_PAGE,
-    )
 }
 
 // ─── Users ──────────────────────────────────────────────────────────────────

@@ -44,7 +44,7 @@ import {
   type RunSummary,
 } from "../api/run";
 import { EnvPrompt } from "../components/EnvPrompt";
-import { StatusIcon, statusLabel } from "../components/StatusIcon";
+import { StatusIcon, statusLabel } from "@ciabatta/graphs";
 import { EnvDriftBanner } from "../components/EnvDriftBanner";
 import { ErrorNote, Loading, PageHeader, RequireProject } from "../components/Page";
 import { monoFontStack } from "../theme";

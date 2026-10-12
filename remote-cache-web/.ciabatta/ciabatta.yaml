@@ -1,0 +1,8 @@
+# This package's ciabatta configuration.
+# Run `ciabatta config reference` for the full schema.
+workspace:
+  name: remote-cache-web
+  description: The remote cache server's admin app, embedded in the binary
+  owner: Henry Forsyth
+  tags: []
+  requires: []

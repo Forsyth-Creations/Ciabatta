@@ -63,6 +63,10 @@ const STAGES = [
 const COMMANDS = [
   ["ciabatta &lt;WORKFLOW&gt;", "Run that workflow across every package that defines one, in dependency order. Add --gui for a live browser view."],
   ["ciabatta build test", "Fold several workflows into one graph, so a shared dependency runs once instead of twice."],
+  ["ciabatta dry-run build", "What the cache would reuse and what it would rebuild — and for a rebuild, exactly which files changed."],
+  ["ciabatta deploy --release v1.4.2", "Run a workflow against one release: its release-pull steps fetch exactly that version."],
+  ["ciabatta releases list", "Every published release, locally and on the team's remote cache. <code>push</code> / <code>pull</code> do it by hand."],
+  ["ciabatta remote-cache start", "Run the shared cache your team builds against — with a build feed and a release list on its own page."],
   ["ciabatta release --filter kind:push", "Run only part of a graph — by kind, tag, package, owner or step name."],
   ["ciabatta &lt;WORKFLOW&gt; --graph", "Draw the resolved graph and run nothing."],
   ["ciabatta list", "Every workflow in the monorepo, its owner, and what it needs."],
@@ -150,6 +154,48 @@ const DOCKER_CONFIG_HTML = `<span class="c"># An "ecr" registry auto-logs in via
     <span class="new">local_image</span>: <span class="v">app:latest</span>              <span class="c"># a local image (name or name:tag)</span>
     <span class="k">publish_path</span>: <span class="v">"app:{CIABATTA_COMMIT}"</span>  <span class="c"># remote ref (repo[:tag])</span>`;
 
+// Annotated release example: publish on a tag, deploy any version later.
+const RELEASE_HTML = `<span class="c"># packages/api/.ciabatta/workflows/build.yaml — CI, on a tag</span>
+<span class="s">steps:</span>
+  - <span class="k">name</span>: <span class="v">compile</span>
+    <span class="k">run</span>: <span class="v">make dist</span>
+
+  - <span class="k">name</span>: <span class="v">publish</span>
+    <span class="new">kind</span>: <span class="v">release-push</span>          <span class="c"># version: the git tag on HEAD</span>
+    <span class="new">needs</span>: <span class="v">[compile]</span>
+    <span class="new">release</span>:
+      <span class="k">files</span>: <span class="v">["dist/**"]</span>
+
+<span class="c"># packages/api/.ciabatta/workflows/deploy.yaml</span>
+<span class="s">steps:</span>
+  - <span class="k">name</span>: <span class="v">fetch</span>
+    <span class="new">kind</span>: <span class="v">release-pull</span>          <span class="c"># version: --release / $CIABATTA_RELEASE</span>
+
+  - <span class="k">name</span>: <span class="v">ship</span>
+    <span class="new">needs</span>: <span class="v">[fetch]</span>
+    <span class="k">run</span>: <span class="v">./scripts/deploy.sh dist/</span>`;
+
+// Annotated cache example.
+const CACHE_HTML = `<span class="c"># packages/web/.ciabatta/workflows/build.yaml</span>
+<span class="s">cache:</span>
+  <span class="k">enabled</span>: <span class="v">true</span>
+  <span class="new">inputs</span>:  <span class="v">["packages/web/src/**.js",</span>   <span class="c"># what the build READS</span>
+            <span class="v">"packages/web/package.json"]</span>
+  <span class="new">outputs</span>: <span class="v">["packages/web/dist"]</span>        <span class="c"># what it WRITES</span>
+  <span class="k">env</span>: <span class="v">[NODE_ENV]</span>                       <span class="c"># what the RESULT depends on</span>
+
+<span class="s">steps:</span>
+  - <span class="k">name</span>: <span class="v">bundle</span>
+    <span class="new">needs</span>: <span class="v">[api:package]</span>
+    <span class="k">run</span>: <span class="v">npm run build</span>`;
+
+const HOW = [
+  { n: "1", h: "Each package says what it does", p: "A workflow file per name — <code>build.yaml</code>, <code>test.yaml</code>, <code>deploy.yaml</code> — next to the code it builds, with an owner and a description." },
+  { n: "2", h: "One command compiles one graph", p: "<code>ciabatta build</code> folds every package's <code>build</code> into a single DAG and runs it in dependency order, independent branches in parallel." },
+  { n: "3", h: "The cache skips what didn't change", p: "Each step is keyed on the files it reads, the variables it declares, and what its upstream steps produced. Unchanged? Restored, locally or from the team's cache." },
+  { n: "4", h: "Releases ship exactly what was built", p: "A <code>release-push</code> step publishes outputs under a version; <code>ciabatta deploy --release v1.4.2</code> fetches exactly those files, any time later." },
+];
+
 // Annotated deploy flowchart example.
 const DEPLOY_CONFIG_HTML = `<span class="c"># packages/web/.ciabatta/workflows/deploy.yaml</span>
 <span class="c"># The filename is the workflow name. Run it with: ciabatta deploy</span>
@@ -210,12 +256,12 @@ function render() {
       <div class="topbar__inner">
         <span class="brand"><span class="brand__loaf">🍞</span> ciabatta <span class="brand__ver">v${VERSION}</span></span>
         <span class="topbar__spacer"></span>
+        <a class="topbar__link" href="#how">How it works</a>
+        <a class="topbar__link" href="#cache">Caching</a>
+        <a class="topbar__link" href="#releases">Releases</a>
+        <a class="topbar__link" href="#remote">Remote cache</a>
         <a class="topbar__link" href="#install">Install</a>
-        <a class="topbar__link" href="#editors">Editors</a>
-        <a class="topbar__link" href="#config">Config</a>
-        <a class="topbar__link" href="#s3">S3</a>
-        <a class="topbar__link" href="#docker">Containers</a>
-        <a class="topbar__link" href="#deploy">Deploy</a>
+        <a class="topbar__link" href="#config">Publishing</a>
         <a class="topbar__link" href="#commands">Commands</a>
         <a class="topbar__cta" href="${REPO}">GitHub ↗</a>
       </div>
@@ -224,12 +270,13 @@ function render() {
     <div class="wrap">
       <section class="hero">
         <div>
-          <span class="hero__eyebrow">artifact publishing, made easy</span>
-          <h1>One pattern for <em>everything you run.</em></h1>
+          <span class="hero__eyebrow">monorepo builds · release management</span>
+          <h1>Build the whole monorepo. <em>Ship exactly what you built.</em></h1>
           <p class="hero__lede">
-            Ciabatta publishes and pulls build artifacts across Nexus, Artifactory,
-            S3, Docker, and ECR — now with first-class npm and PyPI publishing
-            through Nexus. One declarative graph, run in dependency order, with a live terminal UI.
+            Ciabatta turns every package's workflows into one dependency graph, skips
+            every step whose inputs didn't change — on your laptop or from the team's
+            shared cache — and publishes versioned releases you can deploy, by version,
+            whenever you like. One binary, YAML next to your code, and a web view of every run.
           </p>
           <div class="hero__actions">
             <a class="btn btn--primary" href="#install">Get Ciabatta</a>
@@ -243,7 +290,12 @@ function render() {
 
     <div class="strip">
       <div class="strip__inner">
-        <span class="strip__label">Publishes to</span>
+        <span class="strip__label">One graph for</span>
+        <span class="chip"><span class="dot"></span>build</span>
+        <span class="chip"><span class="dot"></span>test</span>
+        <span class="chip chip--new"><span class="dot"></span>release (new)</span>
+        <span class="chip"><span class="dot"></span>deploy</span>
+        <span class="strip__label" style="margin-left:18px">Publishes to</span>
         <span class="chip"><span class="dot"></span>Nexus</span>
         <span class="chip"><span class="dot"></span>Artifactory</span>
         <span class="chip"><span class="dot"></span>S3</span>
@@ -254,6 +306,83 @@ function render() {
     </div>
 
     <div class="wrap">
+      <section class="section reveal" id="how">
+        <div class="section__head">
+          <div class="eyebrow">How it works</div>
+          <h2>Every package's workflow, one graph.</h2>
+          <p class="section__sub">This is a real run of the example monorepo (<code>ciabatta init --example</code>) after one source file changed in <code>web</code>: <code>proto</code> is already up to date, <code>api</code> is restored from the cache, and only <code>web:bundle</code> runs — with the reason on the node.</p>
+        </div>
+        <div class="grid" style="grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));">
+          ${HOW.map((h) => `<div class="fcard"><div class="fcard__icon">${h.n}</div><h3>${h.h}</h3><p>${h.p}</p></div>`).join("")}
+        </div>
+        <figure class="shot" style="margin-top:26px; max-width:100%;">
+          <img src="screens/run-graph.png" alt="A run graph across four packages: proto, common, api and web, with cache decisions and keys on each node." loading="lazy" />
+          <figcaption>The run page in the web app (<code>ciabatta build --gui</code>) with <b>Inspect cache</b> on: each node says what the cache made of it — <i>reused · restored</i>, <i>missed · 1 input changed</i> — and the start of its cache key.</figcaption>
+        </figure>
+      </section>
+
+      <section class="section reveal" id="cache">
+        <div class="section__head">
+          <div class="eyebrow">Caching</div>
+          <h2>A cache you can audit, file by file.</h2>
+          <p class="section__sub">A step declares what it reads and writes. Change any of it and the step reruns; leave it alone and its outputs come back — verified against their recorded hashes before they're written. When something doesn't hit, ciabatta says which file moved.</p>
+        </div>
+        <div class="split">
+          <pre class="code">${CACHE_HTML}</pre>
+          <div class="grid" style="grid-template-columns: 1fr;">
+            <div class="fcard"><div class="fcard__icon">🔑</div><h3>Three dependencies, all in the key</h3><p>Input files, declared variables, and the outputs of upstream steps. Change a <code>.proto</code> and everything downstream rebuilds — each step able to say why.</p></div>
+            <div class="fcard"><div class="fcard__icon">🔍</div><h3>See every file and its hash</h3><p>Click a step in inspect mode for every input and output behind its key, with the SHA-256 <code>sha256sum</code> prints. Copy the list and check it with <code>sha256sum -c</code>.</p></div>
+            <div class="fcard"><div class="fcard__icon">🧪</div><h3>Ask before you build</h3><p><code>ciabatta dry-run build</code> prints what would be reused and what would rebuild, with the diff that explains each miss.</p></div>
+          </div>
+        </div>
+        <figure class="shot" style="margin-top:26px; max-width:100%;">
+          <img src="screens/inspect-hashes.png" alt="The cache inspector for web:bundle: its full key, and each input file with its size and SHA-256." loading="lazy" />
+          <figcaption>Inspecting <code>web:bundle</code>: the full key it was looked up under, and every input (or output) file with its hash — filterable, and copyable as a <code>sha256sum -c</code> file.</figcaption>
+        </figure>
+      </section>
+
+      <section class="section reveal" id="releases">
+        <div class="section__head">
+          <div class="eyebrow">Releases</div>
+          <h2>Publish a version. Deploy it whenever.</h2>
+          <p class="section__sub">A release is a labelled cache entry: the outputs of a build, stored under a name and a version instead of its inputs, shared through the team's cache, and never evicted. Build it once on the tag; deploy that exact build from anywhere, as often as you like.</p>
+        </div>
+        <div class="split">
+          <pre class="code">${RELEASE_HTML}</pre>
+          <div class="grid" style="grid-template-columns: 1fr;">
+            <div class="fcard"><div class="fcard__icon">🏷</div><h3>The version is explicit</h3><p>A push takes <code>release.version</code>, then <code>$CIABATTA_RELEASE</code>, then the git tag on HEAD — so a tag build publishes with no config. A pull never guesses: <code>--release v1.4.2</code>.</p></div>
+            <div class="fcard"><div class="fcard__icon">🔒</div><h3>Immutable by default</h3><p>Re-running a push with the same files is a no-op; different files under an existing version are refused unless you say <code>overwrite: true</code>.</p></div>
+            <div class="fcard"><div class="fcard__icon">⌨</div><h3>Or by hand</h3><p><code>ciabatta releases list</code>, <code>releases push v1.4.2 --file 'dist/**'</code>, <code>releases pull v1.4.2 --into ./out</code>.</p></div>
+          </div>
+        </div>
+        <div class="cmdline" style="margin-top:22px;">
+          <span class="cmdline__sigil">$</span>
+          <span class="cmdline__text" id="release-cmd">ciabatta deploy --release v1.4.2</span>
+          <button class="copy" data-copy-target="release-cmd">copy</button>
+        </div>
+        <figure class="shot" style="margin-top:26px;">
+          <img src="screens/releases.png" alt="The remote cache's Releases view listing api v1.1.0 and v1.0.0." loading="lazy" />
+          <figcaption>Every project's releases, on the remote cache's own page.</figcaption>
+        </figure>
+      </section>
+
+      <section class="section reveal" id="remote">
+        <div class="section__head">
+          <div class="eyebrow">The remote cache</div>
+          <h2>One server for the team — and a record of every build.</h2>
+          <p class="section__sub"><code>ciabatta remote-cache start</code> runs a small server your laptops and CI runners share: what one machine built, every other one restores. Each run reports itself when it finishes — who, which branch and commit, how it ended, and the flow it ran, step by step, with what the cache reused.</p>
+        </div>
+        <div class="grid">
+          <div class="fcard"><div class="fcard__icon">📜</div><h3>A build feed</h3><p>Every run, newest first, across every project. Open one for its graph and each step's status, timing and cache key. Metadata only — logs stay where they ran.</p></div>
+          <div class="fcard"><div class="fcard__icon">💡</div><h3>Insights, not just counters</h3><p>Which targets miss most, which are uploaded but never reused, what retention evicts next — each phrased as the change to make.</p></div>
+          <div class="fcard"><div class="fcard__icon">🔐</div><h3>Token or LDAP, over HTTPS</h3><p>Read-only access for pull-request CI, write access for main; TLS terminated by the server itself, with a self-signed certificate one flag away.</p></div>
+        </div>
+        <figure class="shot" style="margin-top:26px;">
+          <img src="screens/builds-feed.png" alt="The remote cache's Builds view: a feed of builds with branch, commit and reuse counts, and one build opened into its flow and steps." loading="lazy" />
+          <figcaption>The <b>Builds</b> view at <code>/builds</code> on the remote cache: the latest run reused three steps and rebuilt <code>web:bundle</code> because <code>packages/web/src/app.js</code> changed.</figcaption>
+        </figure>
+      </section>
+
       <section class="section reveal" id="install">
         <div class="section__head">
           <div class="eyebrow">Install</div>
@@ -314,7 +443,7 @@ function render() {
 
       <section class="section reveal" id="config">
         <div class="section__head">
-          <div class="eyebrow">Configuration</div>
+          <div class="eyebrow">Publishing to registries</div>
           <h2>Point it at a Nexus repo — raw, npm, or PyPI.</h2>
           <p class="section__sub">Set the bare Nexus host once, then choose the <code>repository</code> and <code>format</code> per registry. Raw files upload over HTTP; npm and PyPI publish with their native tools.</p>
         </div>
@@ -473,17 +602,17 @@ function render() {
         <a href="${REPO}/releases/latest">Releases</a>
         <a href="${REPO}/blob/main/README.md">Docs</a>
       </div>
-      <p class="footer__fine">Ciabatta v${VERSION} · MIT License · Artifact publishing made easy</p>
+      <p class="footer__fine">Ciabatta v${VERSION} · MIT License · Monorepo builds and releases, from one graph</p>
     </footer>
   `;
 }
 
-// ── The signature terminal: a replay of `ciabatta release` ───────────────────
+// ── The signature terminal: a replay of `ciabatta build` ─────────────────────
 function terminalHTML() {
   const recipes = [
-    { name: "proto", stages: ["generate", "build", "test", "publish"] },
-    { name: "api", stages: ["build", "test", "package", "publish"] },
-    { name: "web", stages: ["build", "test", "bundle", "publish"] },
+    { name: "proto", stages: ["generate", "lint", "test", "release"] },
+    { name: "api", stages: ["compile", "test", "package", "release"] },
+    { name: "web", stages: ["install", "test", "bundle", "release"] },
   ];
   return `
     <div class="term" id="term" aria-label="Terminal replay of ciabatta release">
@@ -491,11 +620,11 @@ function terminalHTML() {
         <span class="term__dot term__dot--r"></span>
         <span class="term__dot term__dot--y"></span>
         <span class="term__dot term__dot--g"></span>
-        <span class="term__title">ciabatta release</span>
+        <span class="term__title">ciabatta build</span>
       </div>
       <div class="term__body">
-        <div class="term__prompt"><span class="sigil">$</span> <span class="cmd">ciabatta release</span></div>
-        <div class="term__caption"><span class="loaf">🍞</span> 3 packages, in dependency order</div>
+        <div class="term__prompt"><span class="sigil">$</span> <span class="cmd">ciabatta build</span></div>
+        <div class="term__caption"><span class="loaf">🍞</span> 3 packages, one graph, in dependency order</div>
         ${recipes.map((r, ri) => `
           <div class="trecipe" data-recipe="${ri}">
             <span class="trecipe__name">${r.name}</span>
@@ -507,7 +636,7 @@ function terminalHTML() {
               <span class="tbar"><span class="tbar__fill"></span></span>
             </span>
           </div>`).join("")}
-        <div class="term__done" id="term-done">✓ done · 3 packages in 2.4s</div>
+        <div class="term__done" id="term-done">✓ done · cache: 7 reused, 4 built — about 3m12s not spent</div>
       </div>
     </div>`;
 }

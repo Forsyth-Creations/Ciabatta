@@ -30,6 +30,7 @@
 
 pub mod activity;
 pub mod auth;
+pub mod builds;
 pub mod client;
 pub mod page;
 pub mod projects;

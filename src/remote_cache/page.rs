@@ -135,6 +135,30 @@ try {
   .muted { color: var(--muted); }
   .hidden { display: none; }
   .two { display: grid; grid-template-columns: repeat(auto-fit, minmax(20rem, 1fr)); gap: 1rem; }
+  nav.views { display: flex; gap: .25rem; margin: 1rem 0 0; border-bottom: 1px solid var(--line); }
+  nav.views a {
+    padding: .45rem .9rem; color: var(--muted); text-decoration: none; border-bottom: 2px solid transparent;
+    margin-bottom: -1px;
+  }
+  nav.views a[aria-current="page"] { color: var(--fg); border-bottom-color: var(--accent); }
+  .tag.success, .tag.reused { color: var(--good); border-color: var(--good); }
+  .tag.failed { color: var(--bad); border-color: var(--bad); }
+  .tag.stopped, .tag.skipped { color: var(--warn); border-color: var(--warn); }
+  .flow { position: relative; overflow: auto; background: var(--bg); border: 1px solid var(--line); border-radius: 8px; }
+  .flow svg { position: absolute; left: 0; top: 0; pointer-events: none; }
+  .flow svg path { fill: none; stroke: var(--line); stroke-width: 1.5; }
+  .node {
+    position: absolute; width: 190px; padding: .4rem .55rem; border-radius: 6px; font-size: .8rem;
+    background: var(--card); border: 1px solid var(--line); border-left-width: 4px; overflow: hidden;
+  }
+  .node b { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .node small { display: block; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .node.success { border-left-color: var(--good); }
+  .node.reused { border-left-color: var(--good); border-style: dashed; border-left-style: solid; }
+  .node.failed { border-left-color: var(--bad); }
+  .node.skipped, .node.not-run { border-left-color: var(--line); opacity: .7; }
+  .facts { display: flex; flex-wrap: wrap; gap: .4rem 1.25rem; margin: .5rem 0 1rem; font-size: .88rem; }
+  .facts span { color: var(--muted); }
 </style>
 </head>
 <body>
@@ -154,6 +178,11 @@ try {
     </div>
   </div>
 
+  <nav class="views" aria-label="Views">
+    <a href="/" data-view="cache">Cache</a>
+    <a href="/builds" data-view="builds">Builds</a>
+  </nav>
+
   <div id="error" class="note bad hidden"></div>
 
   <!-- Sign in, when the server wants credentials. -->
@@ -167,7 +196,7 @@ try {
     </form>
   </section>
 
-  <section id="stats-section" class="hidden">
+  <section id="stats-section" class="hidden" data-view-of="cache">
     <h2>At a glance</h2>
     <p class="sub" id="since"></p>
     <div class="grid" id="stats"></div>
@@ -211,7 +240,22 @@ try {
     </div>
   </section>
 
-  <section id="users-section" class="hidden">
+  <section id="builds-section" class="hidden" data-view-of="builds">
+    <h2>Builds</h2>
+    <p class="sub">Every run reported by a checkout using this cache, newest first. Click one for the flow it ran.</p>
+    <div class="card scroll" style="padding:0">
+      <table>
+        <thead><tr>
+          <th>Finished</th><th>Project</th><th>Workflow</th><th>Outcome</th>
+          <th>Branch · commit</th><th>Who</th><th class="num">Steps</th><th class="num">Took</th>
+        </tr></thead>
+        <tbody id="builds"></tbody>
+      </table>
+    </div>
+    <div id="build-detail"></div>
+  </section>
+
+  <section id="users-section" class="hidden" data-view-of="cache">
     <h2>Users</h2>
     <p class="sub" id="users-sub"></p>
 
@@ -331,6 +375,160 @@ function rate(value) {
 function stat(label, value, small = "", extra = "") {
   return `<div class="stat"><span>${esc(label)}</span><b>${value}</b>` +
     (small ? `<small>${small}</small>` : "") + extra + `</div>`;
+}
+
+// ─── Views ───────────────────────────────────────────────────────────────────
+// One page, several views, switched in place: following a link would reload
+// the page and drop the session token, which lives only in memory.
+let view = location.pathname.replace(/\/+$/, "").endsWith("/builds") ? "builds" : "cache";
+let openBuild = null;
+
+function showView() {
+  document.querySelectorAll("nav.views a").forEach((a) => {
+    if (a.dataset.view === view) a.setAttribute("aria-current", "page");
+    else a.removeAttribute("aria-current");
+  });
+  document.querySelectorAll("[data-view-of]").forEach((section) => {
+    if (section.dataset.viewOf !== view) section.classList.add("hidden");
+  });
+}
+document.querySelectorAll("nav.views a").forEach((a) => {
+  a.onclick = (event) => {
+    event.preventDefault();
+    view = a.dataset.view;
+    history.pushState(null, "", a.getAttribute("href"));
+    refresh();
+  };
+});
+window.onpopstate = () => {
+  view = location.pathname.replace(/\/+$/, "").endsWith("/builds") ? "builds" : "cache";
+  refresh();
+};
+
+function duration(ms) {
+  if (ms === null || ms === undefined) return "";
+  const s = Math.round(ms / 1000);
+  if (s < 60) return (ms / 1000).toFixed(1) + "s";
+  if (s < 3600) return Math.floor(s / 60) + "m" + String(s % 60).padStart(2, "0") + "s";
+  return Math.floor(s / 3600) + "h" + String(Math.floor(s / 60) % 60).padStart(2, "0") + "m";
+}
+
+async function loadBuilds() {
+  const data = await api("/api/builds?limit=200");
+  const rows = (data.builds || []).map((b) => {
+    const ref = [b.branch, b.commit ? b.commit.slice(0, 8) : null].filter(Boolean).join(" · ");
+    const who = [b.user, b.host].filter(Boolean).join("@") || b.reported_by || "";
+    const key = b.project + "/" + b.id;
+    return `<tr class="expandable" data-build="${esc(key)}">
+      <td>${when(b.finished_at)}</td>
+      <td>${esc(b.project_name || b.project)}</td>
+      <td class="mono">${esc(b.workflow)}</td>
+      <td><span class="tag ${esc(b.outcome)}">${esc(b.outcome)}</span></td>
+      <td class="mono">${esc(ref) || '<span class="muted">—</span>'}${b.tag ? ` <span class="tag">${esc(b.tag)}</span>` : ""}</td>
+      <td>${esc(who)}${b.ci ? ` <span class="muted">· ${esc(b.ci)}</span>` : ""}</td>
+      <td class="num">${b.step_count} <span class="muted">· ${b.reused} reused</span></td>
+      <td class="num">${esc(duration(b.duration_ms))}</td>
+    </tr>`;
+  });
+  $("builds").innerHTML = rows.join("") ||
+    `<tr><td colspan="8" class="muted">No builds reported yet. Any <code>ciabatta</code> run in a workspace whose <code>cache.remote</code> points here is recorded when it finishes.</td></tr>`;
+  document.querySelectorAll("tr[data-build]").forEach((row) => {
+    row.onclick = () => {
+      openBuild = openBuild === row.dataset.build ? null : row.dataset.build;
+      loadBuild();
+    };
+  });
+  $("builds-section").classList.remove("hidden");
+  await loadBuild();
+}
+
+async function loadBuild() {
+  const panel = $("build-detail");
+  if (!openBuild) { panel.innerHTML = ""; return; }
+  const [project, id] = openBuild.split("/");
+  let data;
+  try {
+    data = await api(`/api/projects/${encodeURIComponent(project)}/builds/${encodeURIComponent(id)}`);
+  } catch (e) { panel.innerHTML = `<div class="note bad">${esc(e.message)}</div>`; return; }
+  const b = data.build;
+  const fact = (label, value) => value ? `<div><span>${esc(label)}</span> ${value}</div>` : "";
+  panel.innerHTML = `<h2>${esc(data.project_name || project)} · <span class="mono">${esc(b.workflow)}</span>
+      <span class="tag ${esc(b.outcome)}">${esc(b.outcome)}</span></h2>
+    <div class="facts">
+      ${fact("started", esc(new Date(b.started_at).toLocaleString()))}
+      ${fact("took", esc(duration(b.duration_ms)))}
+      ${fact("branch", b.branch ? `<code>${esc(b.branch)}</code>` : "")}
+      ${fact("commit", b.commit ? `<code>${esc(b.commit)}</code>` : "")}
+      ${fact("tag", b.tag ? `<code>${esc(b.tag)}</code>` : "")}
+      ${fact("build", b.build_number ? esc(b.build_number) : "")}
+      ${fact("by", esc([b.user, b.host].filter(Boolean).join("@")))}
+      ${fact("ci", esc(b.ci || ""))}
+      ${fact("ciabatta", esc(b.version))}
+    </div>
+    ${b.error ? `<div class="note bad mono">${esc(b.error)}</div>` : ""}
+    <div class="flow" id="flow"></div>
+    <h3>Steps</h3>
+    <div class="card scroll" style="padding:0"><table>
+      <thead><tr><th>Step</th><th>Status</th><th>Cache</th><th>Key</th><th class="num">Took</th><th>Note</th></tr></thead>
+      <tbody>${b.steps.map((s) => `<tr>
+        <td class="mono">${esc(s.name)}${s.workspace ? ` <span class="muted">${esc(s.workspace)}</span>` : ""}</td>
+        <td><span class="tag ${esc(s.status.replace(" ", "-"))}">${esc(s.status)}</span></td>
+        <td>${esc(s.cache || "")}${s.cache_source ? ` <span class="muted">· ${esc(s.cache_source)}</span>` : ""}</td>
+        <td class="mono" title="${esc(s.cache_key || "")}">${esc((s.cache_key || "").slice(0, 12))}</td>
+        <td class="num">${esc(duration(s.duration_ms))}</td>
+        <td class="muted">${prose(s.note || "")}</td>
+      </tr>`).join("")}</tbody>
+    </table></div>`;
+  // A recovery node that was never entered is a branch the run didn't take;
+  // it stays in the table, but drawing it would hang it off nothing.
+  drawFlow($("flow"), b.steps.filter((s) => !(s.kind === "recover" && s.status === "not run")));
+}
+
+// The flow as layers: each step one column to the right of the furthest step
+// it needs, so everything a step waits for sits to its left.
+function drawFlow(box, steps) {
+  const byName = new Map(steps.map((s) => [s.name, s]));
+  const depth = new Map();
+  const depthOf = (name, seen = new Set()) => {
+    if (depth.has(name)) return depth.get(name);
+    if (seen.has(name)) return 0;
+    seen.add(name);
+    const step = byName.get(name);
+    const needs = (step ? step.needs : []).filter((n) => byName.has(n));
+    const d = needs.length ? 1 + Math.max(...needs.map((n) => depthOf(n, seen))) : 0;
+    depth.set(name, d);
+    return d;
+  };
+  steps.forEach((s) => depthOf(s.name));
+  const columns = [];
+  steps.forEach((s) => { const d = depth.get(s.name); (columns[d] = columns[d] || []).push(s); });
+
+  const W = 190, H = 62, GX = 60, GY = 14, PAD = 16;
+  const at = new Map();
+  columns.forEach((column, x) => column.forEach((s, y) => at.set(s.name, {
+    x: PAD + x * (W + GX), y: PAD + y * (H + GY),
+  })));
+  const width = PAD * 2 + columns.length * (W + GX) - GX;
+  const height = PAD * 2 + Math.max(1, ...columns.map((c) => c.length)) * (H + GY) - GY;
+
+  const edges = [];
+  steps.forEach((s) => (s.needs || []).forEach((n) => {
+    const from = at.get(n), to = at.get(s.name);
+    if (!from || !to) return;
+    const x1 = from.x + W, y1 = from.y + H / 2, x2 = to.x, y2 = to.y + H / 2, mid = (x1 + x2) / 2;
+    edges.push(`<path d="M${x1},${y1} C${mid},${y1} ${mid},${y2} ${x2},${y2}"/>`);
+  }));
+  const nodes = steps.map((s) => {
+    const p = at.get(s.name);
+    const cls = s.status.replace(" ", "-");
+    const detail = [s.status, s.cache === "hit" || s.cache === "fresh" ? "from cache" : "", duration(s.duration_ms)]
+      .filter(Boolean).join(" · ");
+    return `<div class="node ${esc(cls)}" style="left:${p.x}px;top:${p.y}px;height:${H}px" title="${esc(s.note || "")}">
+      <b class="mono">${esc(s.name)}</b><small>${esc(s.workspace || s.kind || "")}</small><small>${esc(detail)}</small></div>`;
+  });
+  box.style.height = Math.min(height, 520) + "px";
+  box.innerHTML = `<div style="position:relative;width:${width}px;height:${height}px">
+    <svg width="${width}" height="${height}">${edges.join("")}</svg>${nodes.join("")}</div>`;
 }
 
 // ─── Loading ─────────────────────────────────────────────────────────────────
@@ -561,6 +759,7 @@ async function refresh() {
   button.disabled = true;
   button.textContent = "Refreshing…";
   try {
+    showView();
     const ready = await loadHealth();
     if (!ready) {
       $("login-section").classList.remove("hidden");
@@ -568,8 +767,14 @@ async function refresh() {
       try { await loadUsers(); } catch { /* needs a session; fine */ }
       return;
     }
-    await loadStats();
-    await loadUsers();
+    showView();
+    if (view === "builds") {
+      await loadBuilds();
+    } else {
+      await loadStats();
+      await loadUsers();
+    }
+    showView();
     stamp();
   } catch (e) { showError(e.message); }
   finally {
@@ -652,7 +857,13 @@ mod tests {
     /// Every endpoint the page calls has to exist on the server.
     #[test]
     fn the_page_only_calls_routes_the_server_serves() {
-        for route in ["/api/health", "/api/stats", "/api/users", "/api/auth/login"] {
+        for route in [
+            "/api/health",
+            "/api/stats",
+            "/api/users",
+            "/api/auth/login",
+            "/api/builds",
+        ] {
             assert!(
                 ADMIN_PAGE.contains(route),
                 "expected the page to use {route}"

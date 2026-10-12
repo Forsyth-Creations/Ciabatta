@@ -1350,16 +1350,65 @@ required_env: [API_URL, DEPLOY_TOKEN] # must be set, or the run won't start`}</P
         </P>
 
         <SubHeading>Where values come from</SubHeading>
-        <P>Precedence, weakest first:</P>
-        <Pre>{`.env files  →  CI-derived  →  the ambient environment  →  -e KEY=VALUE`}</Pre>
         <P>
-          <strong>Among the files themselves, nearest wins.</strong> A step in{" "}
-          <C>packages/api</C> reads <C>packages/api/.env</C>; whatever that file doesn&apos;t set
-          comes from the workspace above it, up to the monorepo root. A sibling package&apos;s{" "}
-          <C>.env</C> is never a fallback. Each step&apos;s chain is listed under the step on the{" "}
-          <Link to="/run">Run page</Link>, so &quot;which file did this value come from?&quot; has
-          a visible answer.
+          Every variable is decided once per run, and every step sees that value. The search
+          runs top to bottom, and <strong>the first source that sets the variable wins</strong>:
         </P>
+        <Pre>{`1. the terminal                     shell, CI, git-derived CIABATTA_*, -e KEY=VALUE
+2. workflow env files               env_file: on a workflow, e.g. .ciabatta/.env.{DEPLOY_ENV}
+3. the workspace you ran from       .env.<profile>  >  .env  >  .env.default
+4. each enclosing workspace         .env.<profile>  >  .env  >  .env.default
+   …
+5. the monorepo root                .env.<profile>  >  .env  >  .env.default`}</Pre>
+        <Bullets
+          items={[
+            <>
+              <strong>The terminal always wins.</strong> Exporting a variable, or passing{" "}
+              <C>-e KEY=VALUE</C>, overrides every file, for that run only.
+            </>,
+            <>
+              <strong>Workflow files come next.</strong> A workflow&apos;s own <C>env_file</C>{" "}
+              is more specific than any workspace&apos;s <C>.env</C>. One whose{" "}
+              <C>{"{PLACEHOLDER}"}</C> is unset is skipped.
+            </>,
+            <>
+              <strong>Where you run from matters.</strong>{" "}
+              <C>cd packages/api &amp;&amp; ciabatta build</C> searches <C>packages/api</C>{" "}
+              first, then each workspace above it, then the root. A sibling package&apos;s
+              files are never searched.
+            </>,
+            <>
+              <strong>Within one workspace,</strong> the active profile&apos;s{" "}
+              <C>.env.&lt;profile&gt;</C> beats <C>.env</C>, which beats the defaults file:{" "}
+              <C>env_default</C> if declared, otherwise a <C>.env.default</C> beside it. A{" "}
+              <C>.env.example</C> is never a source of values.
+            </>,
+            <>
+              <strong>Nothing found?</strong> The variable is unset, and a{" "}
+              <C>required_env</C> variable that is unset stops the run before any step starts.
+            </>,
+          ]}
+        />
+        <P>
+          The <strong>profile</strong> is chosen first: <C>--env-profile &lt;name&gt;</C> (or
+          the launcher&apos;s profile picker), else <C>CIABATTA_ENV_PROFILE</C> from the
+          terminal, else none. The report before each run groups the variables under a header
+          per source file, naming where they came from and why that source won; every variable
+          on the <Link to="/run">Run page</Link> carries the same reason, and which files it
+          overrode:
+        </P>
+        <Pre>{`$ cd packages/api && ciabatta build --env-profile staging
+Environment for 'build' — 4 variable(s) this run depends on
+  profile: staging — --env-profile staging on the command line, so each workspace's .env.staging is searched before its .env
+  precedence: terminal > packages/api/.env.staging > packages/api/.env > .env > .env.default (first to set it wins)
+  packages/api/.env.staging (profile staging) — the active profile's file, searched before the .env beside it
+    API     staged
+  packages/api/.env — the first .env in the search (from where the run started, up to the root) to set these
+    SHARED  from-api  [overrides .env · used by api:hello]
+  .env — the first .env in the search (from where the run started, up to the root) to set these
+    REGION  global    [overrides .env.default]
+  .env.default (defaults) — nothing searched before it sets these
+    TIER    dev`}</Pre>
         <Pre>{`# packages/api/.ciabatta/ciabatta.yaml
 workspace:
   env_file: .env              # the default; set it to point somewhere else

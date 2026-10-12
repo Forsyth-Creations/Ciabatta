@@ -130,18 +130,10 @@ pub async fn execute(
             .await;
     }
 
-    // With the files in place, fold the project's own env files into the run's
-    // — `.env` by default, or whatever `env_file` names instead. A compiled
-    // workflow's members don't come in here: each of their steps carries its
-    // own chain, so one member's settings can't be read by another's steps.
-    let mut resolved = resolved;
-    let workspace_files = crate::environment::files::resolve(&meta, root);
-    for file in workspace_files.files {
-        if !resolved.env_files.contains(&file) {
-            resolved.env_files.insert(0, file);
-        }
-    }
-    let resolved = resolved;
+    // With the files in place, settle where the environment is searched: the
+    // workspace the run was started from up to the root. The CLI has usually
+    // decided already; a run that arrives without it starts at the root.
+    let resolved = crate::run::with_env_levels(resolved, root, root, &meta);
 
     let prepared = prepare_env(&resolved, root, env_vars)?;
     for file in &prepared.sourced {
@@ -165,14 +157,15 @@ pub async fn execute(
     // steps see, and the arguments exist nowhere but in the command that was
     // typed — so they're marked (⚑, drawn in yellow) and the log says where
     // they'd be better kept.
-    if let Some(profile) = env_vars.get(crate::environment::profiles::PROFILE_VAR) {
-        let _ = tx
-            .send(ProgressUpdate::Log(
-                name.to_string(),
-                format!("env profile: {profile}"),
-            ))
-            .await;
-    }
+    // The profile is named with why it's the one in use — or why there's
+    // none — since it decides which `.env.<profile>` files were searched.
+    let (_, profile_reason) = crate::environment::profiles::choice(env_vars);
+    let _ = tx
+        .send(ProgressUpdate::Log(
+            name.to_string(),
+            format!("env profile: {profile_reason}"),
+        ))
+        .await;
     let mut custom: Vec<(&String, &String)> = prepared
         .env
         .iter()
@@ -441,7 +434,7 @@ async fn run_dag(
     // talks to had been launched at all.
     if !dry_run {
         for step in resolved.steps.iter().filter(|s| s.background) {
-            let step_env = env.for_step(&step.name);
+            let step_env = &env.env;
             persistent.push(start_persistent(step, workflow, root, step_env, ctl, tx).await?);
             state.insert(step.name.as_str(), StepState::Started);
         }
@@ -514,7 +507,7 @@ async fn run_dag(
                 // *own* environment: its workspace's `.env` first, then
                 // outward. Two members of a monorepo can set the same variable
                 // to different values and each of their steps sees its own.
-                let step_env = env.for_step(&step.name);
+                let step_env = &env.env;
 
                 if let Some(reason) = super::step_skip_reason(step, step_env)? {
                     state.insert(step.name.as_str(), StepState::Skipped);
@@ -677,7 +670,7 @@ async fn run_dag(
             break;
         };
         let pending = pending_tokens.remove(step.name.as_str());
-        let step_env = env.for_step(&step.name);
+        let step_env = &env.env;
 
         // Whatever happened, the sandbox has to be dealt with before the
         // outcome is: a success owes its outputs to the real tree, and a

@@ -20,7 +20,14 @@ export interface Project {
 }
 
 /** Where an environment variable's effective value comes from. */
-export type EnvOrigin = "environment" | "env_file" | "config" | "argument" | "unset";
+export type EnvOrigin =
+  | "environment"
+  | "env_file"
+  | "default"
+  | "config"
+  | "argument"
+  | "unset";
+
 
 /**
  * One environment variable a graph depends on.
@@ -37,8 +44,15 @@ export interface EnvVar {
   /** Declared in `required_env` — the run refuses to start without it. */
   required: boolean;
   origin: EnvOrigin;
-  /** The `.env` file that supplied it, when `origin` is `env_file`. */
+  /** The file that supplied it, when `origin` is `env_file` or `default`. */
   file: string | null;
+  /** What kind of file that is, which is why it was searched where it was. */
+  via?: "workflow" | "profile" | "env" | "default" | null;
+  /** Why the value won, as a sentence. Absent on runs recorded before 0.6.1. */
+  reason?: string | null;
+  /** Files that also set it, later in the search, and so lost to the winner.
+   *  Absent when nothing else set it. */
+  overrides?: string[];
   steps: string[];
   /** Set by several steps to different values, so there's no single one. */
   varies: boolean;
@@ -57,12 +71,16 @@ export interface EnvVar {
 
 export interface EnvReport {
   /** The `.env` files sourced, in application order. */
+  /** The env files searched, in order: after the terminal, the first to set
+   *  a variable wins. */
   files: string[];
   required: string[];
   /** Required variables still empty or unset. */
   missing: string[];
   /** The env profile the run was started with (`--env-profile`). */
   profile?: string | null;
+  /** Why that profile is in use, or why there's none. Absent before 0.6.1. */
+  profile_reason?: string | null;
   vars: EnvVar[];
 }
 

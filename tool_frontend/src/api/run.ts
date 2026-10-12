@@ -70,11 +70,8 @@ export interface StepView extends Timed {
   /** Variables this step reads — in its command, cwd, or conditions. */
   env_refs: string[];
   /**
-   * The `.env` files this step resolves through, outermost first — its own
-   * workspace's last, since the nearest file wins.
-   *
-   * Empty for a step that just sees the run's environment, which is every step
-   * of a plain single-project workflow.
+   * The env files this step's workflow names (`env_file:`). The run searches
+   * them ahead of every workspace's `.env`; empty for a workflow naming none.
    */
   env_files: string[];
 

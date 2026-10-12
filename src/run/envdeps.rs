@@ -17,7 +17,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use super::{ResolvedRun, RunStep, parse_env_content, prepare_env};
+use super::{FileKind, ResolvedRun, RunStep, prepare_env, with_env_levels};
 use crate::config::CiabattaConfig;
 
 /// Where a variable's effective value comes from.
@@ -27,8 +27,11 @@ pub enum Origin {
     /// The environment ciabatta itself was launched with — your shell, the CI
     /// system, or a `-e` flag. Beats every declared source.
     Environment,
-    /// A `.env` file the run sources (see `file`).
+    /// The first `.env` file in the search that sets it (see `file`).
     EnvFile,
+    /// A workspace's defaults file (see `file`): nothing searched before it
+    /// sets it.
+    Default,
     /// A declared `[env]` table: a sub-workspace's, a workflow's, or a step's.
     Config,
     /// A custom argument given after `...` on the command line, which became a
@@ -36,19 +39,6 @@ pub enum Origin {
     Argument,
     /// Nothing supplies it. Steps reading it will see an empty string.
     Unset,
-}
-
-impl Origin {
-    /// A short word for the terminal report.
-    pub fn label(self) -> &'static str {
-        match self {
-            Origin::Environment => "environment",
-            Origin::EnvFile => "env file",
-            Origin::Config => "config",
-            Origin::Argument => "argument",
-            Origin::Unset => "unset",
-        }
-    }
 }
 
 /// One environment variable a run depends on.
@@ -63,8 +53,19 @@ pub struct EnvVar {
     /// Declared in `required_env`: the run refuses to start without it.
     pub required: bool,
     pub origin: Origin,
-    /// The `.env` file that supplied it, when `origin` is `EnvFile`.
+    /// The file that supplied it, when `origin` is `EnvFile` or `Default`.
     pub file: Option<String>,
+    /// What kind of file that is — a workflow's, a profile's, a `.env`, or a
+    /// defaults file — which is why it was searched where it was.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub via: Option<FileKind>,
+    /// Why the value won, in a sentence: shown beside it on the run page.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// The files that also set it, later in the search, and so lost to the
+    /// winner — the terminal, or the first file to set it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub overrides: Vec<String>,
     /// Steps that read it or declare it — the edges to draw on a graph.
     pub steps: Vec<String>,
     /// Set by several steps to different values, so there is no single one.
@@ -89,7 +90,8 @@ pub struct EnvVar {
 /// allow.
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct EnvReport {
-    /// The `.env` files sourced, in application order.
+    /// The env files searched, in order: for each variable the first that
+    /// sets it wins, after the terminal.
     pub files: Vec<String>,
     /// `required_env`, as declared.
     pub required: Vec<String>,
@@ -101,6 +103,9 @@ pub struct EnvReport {
     /// The env profile the run was started with (`--env-profile`), if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile: Option<String>,
+    /// Why that profile is the one in use — or why there is none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile_reason: Option<String>,
 }
 
 impl EnvReport {
@@ -110,21 +115,31 @@ impl EnvReport {
 
     /// The report as a block of terminal text, or `None` when a run depends on
     /// no variables at all (in which case there is nothing worth saying).
-    pub fn render(&self, workflow: &str) -> Option<String> {
+    pub fn render(&self, workflow: &str, colour: bool) -> Option<String> {
+        use owo_colors::{OwoColorize, Style};
+
         if self.is_empty() {
             return None;
         }
+        let paint = |style: Style| crate::color::paint(colour, style);
+        let faint = paint(Style::new().dimmed());
 
         let mut out = String::new();
         out.push_str(&format!(
             "Environment for '{workflow}' — {} variable(s) this run depends on\n",
             self.vars.len()
         ));
-        if let Some(profile) = &self.profile {
-            out.push_str(&format!("  profile  {profile}\n"));
+        if let Some(reason) = &self.profile_reason {
+            out.push_str(&format!("  profile: {reason}\n"));
         }
-        if !self.files.is_empty() {
-            out.push_str(&format!("  sourcing {}\n", self.files.join(", ")));
+        // The rule every value below was decided by, so the notes beside each
+        // one read as an application of it rather than as trivia.
+        match self.files.is_empty() {
+            true => out.push_str("  precedence: terminal only (no env files found)\n"),
+            false => out.push_str(&format!(
+                "  precedence: terminal > {} (first to set it wins)\n",
+                self.files.join(" > ")
+            )),
         }
 
         // Custom arguments are shown on their own, by `render_arguments`.
@@ -142,6 +157,7 @@ impl EnvReport {
             })
             .collect();
 
+        // One width for every group, so the columns line up down the report.
         let width = rows.iter().map(|(v, _)| v.key.len()).max().unwrap_or(0);
         // Long values (a connection string, a path list) shouldn't push every
         // annotation off the right of the terminal, so the value column is
@@ -153,40 +169,183 @@ impl EnvReport {
             .max()
             .unwrap_or(0);
 
-        for (var, value) in &rows {
-            let mut notes: Vec<String> = vec![var.origin.label().to_string()];
-            if let Some(file) = &var.file {
-                notes.push(file.clone());
+        // Grouped by where the value came from — each source file its own
+        // group — in the order the search consults them, so the report reads
+        // top to bottom the way the values were decided. The header says where
+        // and why once; the rows say only what's particular to each.
+        let mut groups: Vec<(Group, Option<String>)> = Vec::new();
+        for (var, _) in &rows {
+            let key = (
+                Group::of(var),
+                var.file.clone().filter(|_| Group::of(var).has_file()),
+            );
+            if !groups.contains(&key) {
+                groups.push(key);
             }
-            if var.required {
-                notes.push("required_env".to_string());
-            }
-            if let Some(purpose) = &var.purpose {
-                notes.push(purpose.clone());
-            }
-            if var.optional {
-                notes.push("optional".to_string());
-            }
-            if !var.steps.is_empty() {
-                notes.push(format!("used by {}", var.steps.join(", ")));
-            }
+        }
+        let searched = |file: &Option<String>| {
+            file.as_ref()
+                .and_then(|f| self.files.iter().position(|x| x == f))
+                .unwrap_or(0)
+        };
+        groups.sort_by_key(|(group, file)| (*group, searched(file)));
+
+        for (group, file) in &groups {
+            let style = paint(group.colour());
+            let heading = paint(group.colour().bold());
+            let (title, why) =
+                group.header(file.as_deref(), self.profile.as_deref(), self.files.len());
             out.push_str(&format!(
-                "  {:width$}  {:value_width$}  [{}]\n",
-                var.key,
-                value,
-                notes.join(" · "),
-                width = width,
-                value_width = value_width
+                "  {} {}\n",
+                title.style(heading),
+                format!("— {why}").style(faint),
             ));
+            for (var, value) in rows.iter().filter(|(var, _)| {
+                Group::of(var) == *group && (!group.has_file() || var.file == *file)
+            }) {
+                let mut notes: Vec<String> = Vec::new();
+                if !var.overrides.is_empty() {
+                    notes.push(format!("overrides {}", var.overrides.join(", ")));
+                }
+                if var.required {
+                    notes.push("required_env".to_string());
+                }
+                if let Some(purpose) = &var.purpose {
+                    notes.push(purpose.clone());
+                }
+                if var.optional {
+                    notes.push("optional".to_string());
+                }
+                if var.varies {
+                    notes.push("set differently by different steps".to_string());
+                }
+                if !var.steps.is_empty() {
+                    notes.push(format!("used by {}", var.steps.join(", ")));
+                }
+                // A required variable nothing set is the one line that stops
+                // the run; it's red whatever else it is.
+                let key_style = match *group == Group::Unset && !var.optional {
+                    true => paint(Style::new().red().bold()),
+                    false => style,
+                };
+                // Padded only when notes follow, so a bare row has no
+                // trailing whitespace.
+                let rest = match notes.is_empty() {
+                    true => value.clone(),
+                    false => format!(
+                        "{value:value_width$}  {}",
+                        format!("[{}]", notes.join(" · ")).style(faint)
+                    ),
+                };
+                out.push_str(&format!(
+                    "    {}  {rest}\n",
+                    format!("{:width$}", var.key).style(key_style),
+                ));
+            }
         }
 
         if !self.missing.is_empty() {
             out.push_str(&format!(
-                "  ✗ still needed: {} — set them with -e KEY=VALUE\n",
-                self.missing.join(", ")
+                "  {}\n",
+                format!(
+                    "✗ still needed: {} — set them with -e KEY=VALUE",
+                    self.missing.join(", ")
+                )
+                .style(paint(Style::new().red()))
             ));
         }
         Some(out)
+    }
+}
+
+/// Where a variable's value came from, as the report groups them — in the
+/// order the search consults them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Group {
+    Terminal,
+    Workflow,
+    Profile,
+    EnvFile,
+    Default,
+    Config,
+    Unset,
+}
+
+impl Group {
+    fn of(var: &EnvVar) -> Group {
+        match (var.origin, var.via) {
+            (Origin::Environment | Origin::Argument, _) => Group::Terminal,
+            (Origin::Config, _) => Group::Config,
+            (Origin::Unset, _) => Group::Unset,
+            (Origin::Default, _) | (_, Some(FileKind::Default)) => Group::Default,
+            (_, Some(FileKind::Workflow)) => Group::Workflow,
+            (_, Some(FileKind::Profile)) => Group::Profile,
+            (Origin::EnvFile, _) => Group::EnvFile,
+        }
+    }
+
+    /// Whether the group is split by source file.
+    fn has_file(self) -> bool {
+        matches!(
+            self,
+            Group::Workflow | Group::Profile | Group::EnvFile | Group::Default
+        )
+    }
+
+    /// The header over a group: where its values came from, and why that
+    /// source won.
+    fn header(
+        self,
+        file: Option<&str>,
+        profile: Option<&str>,
+        searched: usize,
+    ) -> (String, String) {
+        let file = file.unwrap_or("?");
+        match self {
+            Group::Terminal => (
+                "terminal".into(),
+                "set in the terminal, which always wins".into(),
+            ),
+            Group::Workflow => (
+                format!("{file} (workflow env_file)"),
+                "named by the workflow, searched before every workspace's files".into(),
+            ),
+            Group::Profile => (
+                format!("{file} (profile {})", profile.unwrap_or("?")),
+                "the active profile's file, searched before the .env beside it".into(),
+            ),
+            Group::EnvFile => (
+                file.to_string(),
+                "the first .env in the search (from where the run started, up to the root) \
+                 to set these"
+                    .into(),
+            ),
+            Group::Default => (
+                format!("{file} (defaults)"),
+                "nothing searched before it sets these".into(),
+            ),
+            Group::Config => (
+                "step [env] tables".into(),
+                "set on the step itself, on top of the run's environment".into(),
+            ),
+            Group::Unset => (
+                "unset".into(),
+                format!("not set in the terminal or in any of the {searched} env file(s) searched"),
+            ),
+        }
+    }
+
+    fn colour(self) -> owo_colors::Style {
+        use owo_colors::Style;
+        match self {
+            Group::Terminal => Style::new().magenta(),
+            Group::Workflow => Style::new().blue(),
+            Group::Profile => Style::new().cyan(),
+            Group::EnvFile => Style::new().green(),
+            Group::Default => Style::new().dimmed(),
+            Group::Config => Style::new().yellow(),
+            Group::Unset => Style::new().dimmed(),
+        }
     }
 }
 
@@ -250,6 +409,14 @@ pub fn collect(
     base: &HashMap<String, String>,
     config: Option<&CiabattaConfig>,
 ) -> EnvReport {
+    // Where the environment is searched, settled exactly as the engine will
+    // — or a variable only the root `.env` sets would be reported as unset. A
+    // run the CLI already settled keeps its levels.
+    let meta = config
+        .and_then(|config| config.workspace.clone())
+        .unwrap_or_default();
+    let resolved = &with_env_levels(resolved.clone(), root, root, &meta);
+
     // The engine's own resolution, so the values reported are the values the
     // steps will actually see.
     let prepared = prepare_env(resolved, root, base).ok();
@@ -259,47 +426,14 @@ pub fn collect(
         .unwrap_or_else(|| base.clone());
     let files = prepared
         .as_ref()
-        .map(|p| p.all_sourced())
-        .unwrap_or_default();
-    let missing = prepared.as_ref().map(|p| p.missing()).unwrap_or_default();
-
-    // Which `.env` file last defined each key, and to what. Read once per file,
-    // then consulted per scope: the run's own chain, and each step's.
-    let mut parsed: HashMap<String, Vec<(String, String)>> = HashMap::new();
-    for rel in &files {
-        let Ok(content) = std::fs::read_to_string(root.join(rel)) else {
-            continue;
-        };
-        parsed.insert(rel.clone(), parse_env_content(&content));
-    }
-    let supplier = |chain: &[String], key: &str| -> Option<(String, String)> {
-        // Last file in the chain that defines it — the nearest workspace's,
-        // which is the one whose value the step actually sees.
-        chain.iter().rev().find_map(|rel| {
-            parsed.get(rel).and_then(|pairs| {
-                pairs
-                    .iter()
-                    .rev()
-                    .find(|(k, _)| k == key)
-                    .map(|(_, v)| (rel.clone(), v.clone()))
-            })
-        })
-    };
-
-    let run_chain = prepared
-        .as_ref()
         .map(|p| p.sourced.clone())
         .unwrap_or_default();
-    // The scope each step resolves in: its own chain when it has one, the
-    // run's otherwise.
-    let scope_of = |step: &str| -> (Vec<String>, HashMap<String, String>) {
-        match prepared.as_ref() {
-            Some(p) if !p.files_for(step).is_empty() => {
-                (p.files_for(step).to_vec(), p.for_step(step).clone())
-            }
-            _ => (run_chain.clone(), env.clone()),
-        }
-    };
+    let missing = prepared.as_ref().map(|p| p.missing()).unwrap_or_default();
+    let sources = prepared
+        .as_ref()
+        .map(|p| p.sources.clone())
+        .unwrap_or_default();
+    let (profile, profile_reason) = crate::environment::profiles::choice(base);
 
     // Which steps touch which variable, and what a step's own `[env]` sets it
     // to. `BTreeMap`s keep both the variable list and each variable's step list
@@ -357,9 +491,7 @@ pub fn collect(
     // sources, and everything its steps read.
     let mut keys: HashSet<String> = HashSet::new();
     keys.extend(resolved.required_env.iter().cloned());
-    for pairs in parsed.values() {
-        keys.extend(pairs.iter().map(|(key, _)| key.clone()));
-    }
+    keys.extend(sources.keys().cloned());
     keys.extend(users.keys().cloned());
     // Custom arguments are reported whether or not a step reads them: they
     // were typed for this run, and one nothing reads is probably misspelled.
@@ -378,66 +510,60 @@ pub fn collect(
         .into_iter()
         .map(|key| {
             let step_values = declared.get(&key);
+            let source = sources.get(&key).cloned().unwrap_or_default();
+            let value = env.get(&key).filter(|v| !v.trim().is_empty()).cloned();
+            let terminal = base.get(&key).is_some_and(|v| !v.trim().is_empty());
 
-            // What the steps that read this variable actually see. With `.env`
-            // files resolved by proximity, two steps can read the same name and
-            // get different values — so the scopes are asked one by one rather
-            // than one run-wide map being taken as the answer.
-            let readers = users.get(&key).cloned().unwrap_or_default();
-            let mut scopes: Vec<(Vec<String>, HashMap<String, String>)> =
-                readers.iter().map(|step| scope_of(step)).collect();
-            if scopes.is_empty() {
-                scopes.push((run_chain.clone(), env.clone()));
-            }
-
-            let mut seen: Vec<(Option<String>, Option<String>)> = Vec::new();
-            for (chain, resolved_env) in &scopes {
-                let value = resolved_env
-                    .get(&key)
-                    .filter(|v| !v.trim().is_empty())
-                    .cloned();
-                // A file only supplied the value if `base` didn't already have
-                // one — a sourced file never overrides the real environment.
-                let file = match base.get(&key) {
-                    Some(v) if !v.trim().is_empty() => None,
-                    _ => supplier(chain, &key).map(|(file, _)| file),
-                };
-                let entry = (value, file);
-                if !seen.contains(&entry) {
-                    seen.push(entry);
-                }
-            }
-
-            let disagree = seen.len() > 1;
-            let (ambient, from_file) = seen.into_iter().next().unwrap_or((None, None));
-
-            // Precedence mirrors the engine: what the step's own chain resolved
-            // to is what it sees, unless the step declares its own value, which
+            // Every step sees one environment, decided by one search: the
+            // terminal, else the first env file to set it. A step's own `[env]`
             // is layered on top.
-            let (origin, file, value, varies) = match (ambient, step_values) {
-                (_, Some(values)) if values.len() > 1 => (Origin::Config, None, None, true),
-                (_, Some(values)) => (
+            let mut overrides: Vec<String> = Vec::new();
+            let (origin, file, value, varies) = match step_values {
+                Some(values) if values.len() > 1 => (Origin::Config, None, None, true),
+                Some(values) => (
                     Origin::Config,
                     None,
                     values.iter().next().cloned().filter(|v| !v.is_empty()),
                     false,
                 ),
-                // The readers disagree: there is no single value to report, and
-                // claiming one would be worse than saying so.
-                (_, None) if disagree => (Origin::EnvFile, None, None, true),
-                (Some(value), None) => match from_file {
-                    Some(file) => (Origin::EnvFile, Some(file), Some(value), false),
-                    None if key.starts_with(crate::cli::CUSTOM_ARG_PREFIX) => {
-                        (Origin::Argument, None, Some(value), false)
+                None if terminal && key.starts_with(crate::cli::CUSTOM_ARG_PREFIX) => {
+                    (Origin::Argument, None, value, false)
+                }
+                None if terminal => {
+                    overrides.extend(source.files.iter().cloned());
+                    (Origin::Environment, None, value, false)
+                }
+                None => match source.files.split_first() {
+                    Some((winner, rest)) => {
+                        overrides.extend(rest.iter().cloned());
+                        let origin = match source.kind {
+                            Some(FileKind::Default) => Origin::Default,
+                            _ => Origin::EnvFile,
+                        };
+                        (origin, Some(winner.clone()), value, false)
                     }
-                    None => (Origin::Environment, None, Some(value), false),
+                    None => (Origin::Unset, None, None, false),
                 },
-                (None, None) => (Origin::Unset, None, None, false),
             };
+
+            let via = match origin {
+                Origin::EnvFile | Origin::Default => source.kind,
+                _ => None,
+            };
+            let reason = reason(
+                origin,
+                via,
+                file.as_deref(),
+                &overrides,
+                profile.as_deref(),
+                files.len(),
+            );
 
             let secret = value.is_some() && looks_secret(&key);
             let required = resolved.required_env.contains(&key);
             EnvVar {
+                via,
+                reason,
                 in_cache_key: keyed.contains(&key),
                 purpose: purposes.get(&key).cloned(),
                 optional: purposes.contains_key(&key)
@@ -449,6 +575,7 @@ pub fn collect(
                 required,
                 origin,
                 file,
+                overrides,
                 steps: users.get(&key).cloned().unwrap_or_default(),
                 varies,
                 key,
@@ -465,11 +592,56 @@ pub fn collect(
         required: resolved.required_env.clone(),
         missing,
         vars,
-        profile: base
-            .get(crate::environment::profiles::PROFILE_VAR)
-            .filter(|p| !p.trim().is_empty())
-            .cloned(),
+        profile,
+        profile_reason: Some(profile_reason),
     }
+}
+
+/// Why a variable has the value it has, as a sentence: what supplied it, why
+/// that source comes first, and what it overrode.
+fn reason(
+    origin: Origin,
+    via: Option<FileKind>,
+    file: Option<&str>,
+    overrides: &[String],
+    profile: Option<&str>,
+    searched: usize,
+) -> Option<String> {
+    let file = file.unwrap_or("an env file");
+    let why = match origin {
+        Origin::Environment => "set in the terminal, which always wins".to_string(),
+        Origin::Config => {
+            "set by a step's [env] table, on top of the run's environment".to_string()
+        }
+        Origin::Argument => return None,
+        Origin::Unset => {
+            return Some(format!(
+                "not set in the terminal or in any of the {searched} env file(s) searched"
+            ));
+        }
+        Origin::EnvFile | Origin::Default => match via {
+            Some(FileKind::Workflow) => format!(
+                "{file} is named by the workflow (env_file), which is searched before every \
+                 workspace's files"
+            ),
+            Some(FileKind::Profile) => format!(
+                "{file} belongs to the active profile ({}), which is searched before the .env \
+                 beside it",
+                profile.unwrap_or("?")
+            ),
+            Some(FileKind::Default) => {
+                format!("{file} is a defaults file, and nothing searched before it sets this")
+            }
+            _ => format!(
+                "{file} is the first .env in the search (from where the run started, up to \
+                 the root) to set it"
+            ),
+        },
+    };
+    Some(match overrides.is_empty() {
+        true => why,
+        false => format!("{why}; it overrides {}", overrides.join(", ")),
+    })
 }
 
 /// A variable a step needs that its own text doesn't mention.
@@ -637,7 +809,7 @@ fn condition_ref(cond: &str) -> Option<String> {
 /// far below the cost of printing one that isn't.
 pub fn looks_secret(key: &str) -> bool {
     let key = key.to_ascii_uppercase();
-    const NEEDLES: [&str; 8] = [
+    const NEEDLES: [&str; 9] = [
         "SECRET",
         "TOKEN",
         "PASSWORD",
@@ -646,6 +818,9 @@ pub fn looks_secret(key: &str) -> bool {
         "PRIVATE",
         "APIKEY",
         "AUTH",
+        // A webhook URL carries its own credential in the path: whoever has
+        // it can post as you.
+        "WEBHOOK",
     ];
     // `_PASS` and `_PWD` as suffixes only: as substrings they'd catch
     // `BYPASS_CACHE` and `PWD`, which are neither.
@@ -653,7 +828,6 @@ pub fn looks_secret(key: &str) -> bool {
         || key.ends_with("_PASS")
         || key.ends_with("_PWD")
         || key.ends_with("_KEY")
-        || key.ends_with("_PASS")
         || key == "KEY"
         || key == "PASS"
 }
@@ -825,6 +999,141 @@ mod tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
+    /// The Padua case: a `required_env` no step's command mentions, set only
+    /// in the root `.env`, used to be reported unset. The report also says
+    /// how each value was decided.
+    #[test]
+    fn a_required_variable_nobody_reads_is_found_in_the_root_env() {
+        let root = std::env::temp_dir().join(format!("ciab_envdeps_padua_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join(".ciabatta")).unwrap();
+        std::fs::write(root.join(".env"), "VERSION=0.0.0\n").unwrap();
+        std::fs::write(
+            root.join(".ciabatta/.env.default"),
+            "VERSION=9.9.9\nTARGET=dev\n",
+        )
+        .unwrap();
+
+        let resolved = ResolvedRun {
+            required_env: vec!["VERSION".to_string()],
+            steps: vec![step("build", "make")],
+            ..Default::default()
+        };
+        let config = CiabattaConfig {
+            workspace: Some(crate::workspace::WorkspaceMeta {
+                env_default: Some(".ciabatta/.env.default".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let report = collect(&resolved, &root, &env(&[]), Some(&config));
+
+        let version = find(&report, "VERSION");
+        assert_eq!(version.value.as_deref(), Some("0.0.0"));
+        assert_eq!(version.origin, Origin::EnvFile);
+        assert_eq!(version.file.as_deref(), Some(".env"));
+        assert_eq!(version.overrides, [".ciabatta/.env.default"]);
+        assert!(report.missing.is_empty());
+
+        let target = find(&report, "TARGET");
+        assert_eq!(target.origin, Origin::Default);
+        assert_eq!(target.value.as_deref(), Some("dev"));
+
+        let text = report.render("build-checks", false).unwrap();
+        assert!(
+            text.contains(
+                "precedence: terminal > .env > .ciabatta/.env.default (first to set it wins)"
+            ),
+            "{text}"
+        );
+        // Grouped under a header per source, in search order; each row keeps
+        // only what's its own.
+        let env_at = text
+            .find("  .env — the first .env in the search")
+            .expect(&text);
+        let default_at = text
+            .find("  .ciabatta/.env.default (defaults) — nothing searched before it")
+            .expect(&text);
+        assert!(env_at < default_at, "{text}");
+        assert!(
+            text.contains("overrides .ciabatta/.env.default · required_env"),
+            "{text}"
+        );
+        assert!(text.contains("    TARGET   dev\n"), "{text}");
+        assert!(!text.contains('\u{1b}'), "no colour asked for, none given");
+        assert!(
+            report
+                .render("build-checks", true)
+                .unwrap()
+                .contains('\u{1b}')
+        );
+
+        // The terminal beats every file, and the report says which it beat.
+        let report = collect(
+            &resolved,
+            &root,
+            &env(&[("VERSION", "1.0.0")]),
+            Some(&config),
+        );
+        let version = find(&report, "VERSION");
+        assert_eq!(version.origin, Origin::Environment);
+        assert_eq!(version.overrides, [".env", ".ciabatta/.env.default"]);
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Every value carries the reason it won, and the report names the
+    /// profile and why it's the one in use.
+    #[test]
+    fn each_value_and_the_profile_come_with_a_reason() {
+        let root = std::env::temp_dir().join(format!("ciab_envdeps_reason_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join(".env"), "REGION=us\n").unwrap();
+        std::fs::write(root.join(".env.staging"), "REGION=eu\n").unwrap();
+
+        let resolved = ResolvedRun {
+            required_env: vec!["MISSING".to_string()],
+            steps: vec![step("build", "deploy $REGION")],
+            ..Default::default()
+        };
+        use crate::environment::profiles::{PROFILE_FROM_VAR, PROFILE_VAR};
+        let base = env(&[(PROFILE_VAR, "staging"), (PROFILE_FROM_VAR, "flag")]);
+        let report = collect(&resolved, &root, &base, None);
+
+        assert_eq!(report.profile.as_deref(), Some("staging"));
+        let why = report.profile_reason.clone().unwrap();
+        assert!(why.contains("--env-profile staging"), "{why}");
+
+        let region = find(&report, "REGION");
+        assert_eq!(region.via, Some(FileKind::Profile));
+        let reason = region.reason.clone().unwrap();
+        assert!(reason.contains("active profile (staging)"), "{reason}");
+        assert!(reason.contains("overrides .env"), "{reason}");
+        let missing = find(&report, "MISSING").reason.clone().unwrap();
+        assert!(missing.contains("not set in the terminal"), "{missing}");
+
+        // The terminal's own profile, and no profile at all, say so too.
+        let report = collect(&resolved, &root, &env(&[(PROFILE_VAR, "staging")]), None);
+        assert!(report.profile_reason.unwrap().contains("in the terminal"));
+        let report = collect(&resolved, &root, &env(&[]), None);
+        assert!(report.profile.is_none());
+        assert!(
+            report
+                .profile_reason
+                .as_deref()
+                .unwrap()
+                .starts_with("none")
+        );
+        let text = report.render("build", false).unwrap();
+        assert!(
+            text.contains("unset — not set in the terminal or in any of the 1 env file(s)"),
+            "{text}"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
     #[test]
     fn secret_looking_names_are_masked() {
         for key in [
@@ -832,6 +1141,7 @@ mod tests {
             "AWS_SECRET_ACCESS_KEY",
             "CIABATTA_NEXUS_PASS",
             "db_password",
+            "TF_VAR_discord_webhook",
         ] {
             assert!(looks_secret(key), "{key} should be treated as a secret");
         }

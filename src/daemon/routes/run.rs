@@ -469,6 +469,10 @@ async fn start(state: AppState, payload: CreatePayload) -> RouteResult<Json<Valu
             crate::environment::profiles::PROFILE_VAR.to_string(),
             profile.to_string(),
         );
+        env.insert(
+            crate::environment::profiles::PROFILE_FROM_VAR.to_string(),
+            "launcher".to_string(),
+        );
     }
 
     // Fail fast on a bad flowchart, before anything is spawned. The resolved
@@ -724,10 +728,17 @@ fn missing_env(
     runs: &[(String, crate::run::ResolvedRun)],
     env: &HashMap<String, String>,
 ) -> RouteResult<Vec<String>> {
+    let meta = crate::config::load_config(root)
+        .ok()
+        .and_then(|config| config.workspace)
+        .unwrap_or_default();
     let mut missing: Vec<String> = Vec::new();
     for (_, resolved) in runs {
+        // Folded in the way the engine will, or a variable the root `.env`
+        // sets would be asked for all the same.
+        let resolved = crate::run::with_env_levels(resolved.clone(), root, root, &meta);
         let prepared =
-            crate::run::prepare_env(resolved, root, env).map_err(RouteError::bad_request)?;
+            crate::run::prepare_env(&resolved, root, env).map_err(RouteError::bad_request)?;
         for var in prepared.missing() {
             if !missing.contains(&var) {
                 missing.push(var);

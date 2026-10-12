@@ -45,13 +45,16 @@ export function unsetProblem(variable: EnvVar): boolean {
   return variable.origin === "unset" && !variable.optional;
 }
 
-/** Where the value came from, in the words the config uses. */
+/** Where the value came from, in the words the config uses — and what it beat. */
 export function originText(variable: EnvVar): string {
+  const beat = variable.overrides?.length ? `, overriding ${variable.overrides.join(", ")}` : "";
   switch (variable.origin) {
     case "environment":
-      return "from the environment ciabatta was started with";
+      return `from the terminal ciabatta was started in${beat}`;
     case "env_file":
-      return `from ${variable.file ?? "an env file"}`;
+      return `from ${variable.file ?? "an env file"}${beat}`;
+    case "default":
+      return `from the defaults file ${variable.file ?? ""}${beat}`;
     case "config":
       return "from an [env] table in the config";
     case "argument":
@@ -74,7 +77,7 @@ export function EnvVarChip({ variable }: { variable: EnvVar }) {
       title={
         <>
           {variable.purpose && `${variable.purpose} · `}
-          {originText(variable)}
+          {variable.reason ?? originText(variable)}
           {variable.optional && " · optional"}
           {variable.required && " · required_env"}
           {variable.in_cache_key && " · part of the cache key: changing it rebuilds"}
@@ -218,8 +221,20 @@ export function EnvPanel({ report, title = "Environment" }: { report: EnvReport;
         <Typography variant="overline" color="text.secondary">
           {title} — {report.vars.length} variable(s) this graph depends on
         </Typography>
-        {report.profile && (
-          <Chip size="small" color="secondary" variant="outlined" label={`profile: ${report.profile}`} />
+        {(report.profile || report.profile_reason) && (
+          <Tooltip title={report.profile_reason ?? ""}>
+            <Chip
+              size="small"
+              color={report.profile ? "secondary" : "default"}
+              variant="outlined"
+              label={`profile: ${report.profile ?? "none"}`}
+            />
+          </Tooltip>
+        )}
+        {report.profile_reason && (
+          <Typography variant="caption" color="text.secondary">
+            {report.profile_reason}
+          </Typography>
         )}
         {report.files.length > 0 && (
           <Typography variant="caption" color="text.secondary" sx={{ fontFamily: monoFontStack }}>

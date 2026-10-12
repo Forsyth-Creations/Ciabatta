@@ -1449,11 +1449,10 @@ Four rules, in the order they apply:
    without being declared: committing one has already said what the variables
    are. Generation happens at the start of a run, for the project and for every
    sub-workspace it touches, and never overwrites a file that exists.
-4. **Nearest wins, then it looks outward.** A step in `packages/api` reads
-   `packages/api/.env`; anything that file doesn't set comes from the workspace
-   above it, up to the monorepo root. A *sibling's* `.env` is never a fallback —
-   two packages that need the same variable declare it in the workspace above
-   them, or each declares it for itself.
+4. **One environment per run, found by a search** from the terminal, through
+   the workflow's own env files, then from the workspace you ran in up to the
+   root. The first source to set a variable wins. See
+   [How a value is chosen](#how-a-value-is-chosen).
 
 `required_env` resolves up that same chain. A sub-library that needs `API_URL`
 does **not** have to document it if the workspace above it already does —
@@ -1483,25 +1482,69 @@ workspace:
   env_default: .env.default    # the checked-in template
 ```
 
-```
-.env                     SHARED=from-root   REGION=global
-packages/api/.env        SHARED=from-api
-packages/web/.env        SHARED=from-web
-
-api:build   sees  SHARED=from-api   REGION=global    # its own file, then outward
-web:build   sees  SHARED=from-web   REGION=global    # never api's
-```
-
-The environment a run *starts* with still beats every file, as it always has:
-the shell, the CI system, and `-e KEY=VALUE` are on top of all of this. The run
-page shows each step's chain, so "which `.env` did this value come from?" is a
-question with a visible answer.
-
 And one requirement that follows from the third: **a workspace whose workflows
 declare `required_env` must declare `env_default`.** Not bureaucracy — it's what
 makes rule 3 possible. A repo where the required variables are written down
 somewhere reviewable is a repo a new person can build; one where they aren't is
 a repo where the answer lives in somebody's shell history.
+
+### How a value is chosen
+
+Every variable is decided once per run, and every step sees that value. The
+search runs top to bottom; **the first source that sets the variable wins**,
+and everything below it is ignored for that variable:
+
+```
+1. the terminal                     shell, CI, git-derived CIABATTA_*, -e KEY=VALUE
+2. workflow env files               env_file: on a workflow, e.g. .ciabatta/.env.{DEPLOY_ENV}
+3. the workspace you ran from       .env.<profile>  >  .env  >  .env.default
+4. each enclosing workspace         .env.<profile>  >  .env  >  .env.default
+   …
+5. the monorepo root                .env.<profile>  >  .env  >  .env.default
+```
+
+- **The terminal always wins.** Exporting a variable, or passing
+  `-e KEY=VALUE`, overrides every file, for that run only.
+- **Workflow files come next.** A workflow that names its own `env_file` (say,
+  per deploy target) is more specific than any workspace's `.env`. An
+  `env_file` whose `{PLACEHOLDER}` is unset is skipped.
+- **Where you run from matters.** `cd packages/api && ciabatta build` searches
+  `packages/api` first, then each workspace above it, then the root. Run from
+  the root and only the root's files are searched. A sibling package's files
+  are never searched.
+- **Within one workspace,** the active profile's `.env.<profile>` beats `.env`,
+  which beats the defaults file. The defaults file is `env_default` if declared,
+  otherwise a `.env.default` beside the `.env`. A `.env.example` is never a
+  source of values, because it often holds placeholders.
+- **Nothing found?** The variable is unset. If it's in `required_env`, the run
+  stops before any step executes and names it.
+
+The **profile** is chosen before the search starts: `--env-profile <name>` on
+the command line (or the run launcher's profile picker), else
+`CIABATTA_ENV_PROFILE` from the terminal, else none.
+
+The report printed before every run (and by `--dry-run`) shows the search order,
+then groups the variables by the file they came from. Each group has a header
+naming the source and why it won, colour-coded by kind in a terminal: magenta
+for the terminal, blue for workflow files, cyan for profile files, green for
+`.env` files, dim for defaults, yellow for step `[env]` tables, red for
+required variables nothing set. The run page shows the same reasons when you
+hover over or select a variable:
+
+```
+$ cd packages/api && ciabatta build --env-profile staging
+Environment for 'build' — 4 variable(s) this run depends on
+  profile: staging — --env-profile staging on the command line, so each workspace's .env.staging is searched before its .env
+  precedence: terminal > packages/api/.env.staging > packages/api/.env > .env > .env.default (first to set it wins)
+  packages/api/.env.staging (profile staging) — the active profile's file, searched before the .env beside it
+    API     staged
+  packages/api/.env — the first .env in the search (from where the run started, up to the root) to set these
+    SHARED  from-api  [overrides .env · used by api:hello]
+  .env — the first .env in the search (from where the run started, up to the root) to set these
+    REGION  global    [overrides .env.default]
+  .env.default (defaults) — nothing searched before it sets these
+    TIER    dev
+```
 
 `ciabatta watch` sources the same files a run would and prints exactly what it
 resolved before the command starts, so a watched dev server and a `dev` workflow
@@ -1510,9 +1553,9 @@ step can't quietly see different environments.
 ### Env profiles
 
 A profile is a file next to a `.env`, named after it — `.env.staging`,
-`packages/api/.env.ci`. `--env-profile staging` (or `--env_profile`) sources each
-`.env` the run already reads and then its `.staging` sibling on top, so a profile
-only holds what differs:
+`packages/api/.env.ci`. With `--env-profile staging` (or `--env_profile`), each
+workspace's `.env.staging` is searched just before its `.env`, so a profile only
+needs to hold what differs:
 
 ```bash
 ciabatta env list                        # the profiles here, and their files

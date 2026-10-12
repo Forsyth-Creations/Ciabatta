@@ -1234,13 +1234,13 @@ function StepDetails({ step, env, now }: { step: StepView; env: EnvVar[]; now: n
 
       {(step.env_files?.length ?? 0) > 0 && (
         <Stack direction="row" spacing={0.75} flexWrap="wrap" useFlexGap alignItems="baseline">
-          <Tooltip title="The .env files this step resolves through, outermost first. Its own workspace's file answers first; anything that file doesn't set falls back outward.">
+          <Tooltip title="The env files this step's workflow names (env_file). The run searches them ahead of every workspace's .env, and every step shares what the search finds.">
             <Typography variant="caption" color="text.secondary">
               env files
             </Typography>
           </Tooltip>
           <Typography variant="caption" sx={{ fontFamily: monoFontStack, wordBreak: "break-all" }}>
-            {step.env_files.join(" → ")}
+            {step.env_files.join(", ")}
           </Typography>
         </Stack>
       )}
@@ -1347,7 +1347,7 @@ function FocusNote({
   const detail = variable
     ? `${variable.purpose ? `${variable.purpose} — ` : ""}${
         variable.steps.length > 0 ? `read by ${variable.steps.join(", ")}` : "no step reads this"
-      }`
+      }${variable.reason ? ` · ${variable.reason}` : ""}`
     : producer
       ? `${producer.deps.output_files} file(s), ${humanizeBytes(
           producer.deps.output_bytes,

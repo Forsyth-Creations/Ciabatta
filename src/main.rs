@@ -464,17 +464,34 @@ async fn cmd_workflow(
     source_ciabatta_vars(&mut vars, &ws.root, announce);
     // Custom arguments last: they were typed for this run, so they win.
     vars.extend(cli::parse_custom_args(custom_args)?);
+    // Where the profile came from travels with it, so the report can say why
+    // it's the one in use. A marker inherited from an outer run says nothing
+    // about this one.
+    vars.remove(environment::profiles::PROFILE_FROM_VAR);
     if let Some(profile) = &args.env_profile {
         environment::profiles::require(&ws.root, profile)?;
         vars.insert(
             environment::profiles::PROFILE_VAR.to_string(),
             profile.clone(),
         );
+        vars.insert(
+            environment::profiles::PROFILE_FROM_VAR.to_string(),
+            "flag".to_string(),
+        );
     }
     report_env_drift(&ws.root, &graph.env_files, announce);
 
     let name = graph.label();
     let resolved = workspace::graph::into_run(graph)?;
+    // The environment is searched from where the command was run, up to the
+    // root: `cd packages/api && ciabatta build` reads `packages/api/.env`
+    // first, and every step of the run then shares what that search found.
+    let resolved = run::with_env_levels(
+        resolved,
+        &ws.root,
+        &cwd,
+        &cfg.workspace.clone().unwrap_or_default(),
+    );
 
     if args.gui {
         // The daemon owns the run, so it compiles the graph itself from the
@@ -537,7 +554,15 @@ fn report_run_dependencies(
         say(text);
     }
     let report = run::envdeps::collect(resolved, root, vars, Some(&cfg));
-    if let Some(text) = report.render(name) {
+    // Coloured only when the stream it lands on is a terminal: this prints
+    // before the run decides its own colour, and a redirected report stays
+    // greppable.
+    use std::io::IsTerminal;
+    let colour = color::for_stream(match to_stderr {
+        true => std::io::stderr().is_terminal(),
+        false => std::io::stdout().is_terminal(),
+    });
+    if let Some(text) = report.render(name, colour) {
         say(text);
     }
     // Custom arguments are set apart, in yellow: they exist for this run only,
@@ -4109,7 +4134,7 @@ when their session lapses, never how to be them.
 ENVIRONMENT
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-Three rules, in the order they apply:
+Four rules, in the order they apply:
 
   1. `.env` is the default. A workspace that says nothing gets `.env` from its
      own directory. Nobody should have to configure the conventional thing.
@@ -4123,6 +4148,19 @@ Three rules, in the order they apply:
      does. Naming it means ciabatta GENERATES the `.env` rather than failing on
      a variable the developer has never heard of. It's only ever created when
      absent, so your edits survive.
+
+  4. One environment per run, found by a search. For each variable the first
+     of these to set it wins, and every step of the run sees that value:
+
+       the terminal (shell, CI, git, -e)                always wins
+       env files the workflows name (`env_file:`)
+       the workspace you ran from, then each one up to the root, each as:
+         .env.<profile>  >  .env  >  .env.default
+
+     The profile is chosen first: --env-profile, else CIABATTA_ENV_PROFILE
+     from the terminal, else none. A required_env variable none of them sets
+     stops the run. The report printed before each run names the profile and
+     why, and gives every variable the reason its value won.
 
 And one requirement that follows from the third: a workspace whose workflows
 declare required_env must declare `env_default`. Not bureaucracy — it's what
@@ -4762,7 +4800,7 @@ when their session lapses, never how to be them.
 ENVIRONMENT
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-Three rules, in the order they apply:
+Four rules, in the order they apply:
 
   1. `.env` is the default. A workspace that says nothing gets `.env` from its
      own directory. Nobody should have to configure the conventional thing.
@@ -4776,6 +4814,19 @@ Three rules, in the order they apply:
      does. Naming it means ciabatta GENERATES the `.env` rather than failing on
      a variable the developer has never heard of. It's only ever created when
      absent, so your edits survive.
+
+  4. One environment per run, found by a search. For each variable the first
+     of these to set it wins, and every step of the run sees that value:
+
+       the terminal (shell, CI, git, -e)                always wins
+       env files the workflows name (`env_file:`)
+       the workspace you ran from, then each one up to the root, each as:
+         .env.<profile>  >  .env  >  .env.default
+
+     The profile is chosen first: --env-profile, else CIABATTA_ENV_PROFILE
+     from the terminal, else none. A required_env variable none of them sets
+     stops the run. The report printed before each run names the profile and
+     why, and gives every variable the reason its value won.
 
 And one requirement that follows from the third: a workspace whose workflows
 declare required_env must declare `env_default`. Not bureaucracy — it's what

@@ -129,6 +129,20 @@ pub fn resolve(meta: &WorkspaceMeta, dir: &Path) -> Resolved {
     }
 }
 
+/// A workspace's defaults file, when it's actually there: its declared
+/// `env_default`, or else a `.env.default` beside it. Searched after the
+/// workspace's `.env`, so anything the `.env` doesn't set falls back to it.
+///
+/// Only those two. A conventional `.env.example` found by its name is often
+/// placeholders (`API_KEY=your-key-here`), and treating those as values would
+/// quietly satisfy a `required_env` that ought to stop the run.
+pub fn defaults_file(meta: &WorkspaceMeta, dir: &Path) -> Option<String> {
+    meta.env_default
+        .clone()
+        .or_else(|| Some(TEMPLATE_NAMES[0].to_string()))
+        .filter(|file| dir.join(file).is_file())
+}
+
 /// Whether a build depends on environment variables, and so needs a template.
 ///
 /// Deliberately narrow: a run that declares `required_env` has said, in its own
@@ -329,52 +343,13 @@ pub fn generate_from_template(
     Ok(Some(destination))
 }
 
-/// One layer of the chain a step resolves its environment through: a workspace
-/// directory, and the config that says what it sources.
+/// One workspace in the chain a required variable is looked for in: a
+/// workspace directory, and the config that says what it sources.
 pub struct Layer<'a> {
-    /// The workspace directory, relative to the run root (`.` for the root
-    /// itself). Env file paths are reported joined onto this.
-    pub rel: &'a str,
     /// Its absolute directory, for deciding whether the default `.env` is
     /// actually there.
     pub dir: &'a Path,
     pub meta: &'a WorkspaceMeta,
-}
-
-/// The env files a step resolves through, outermost first.
-///
-/// **Proximity, with fallback outward.** A step in `packages/api` reads
-/// `packages/api/.env` — and, for anything that file doesn't set, the values
-/// from the workspace above it, up to the monorepo root. Layered in that order
-/// so the nearest file wins, which is what "this package's settings" has to
-/// mean to be worth writing.
-///
-/// The chain is the *ancestry* of the step's own workspace and nothing else. A
-/// sibling package's `.env` is not a fallback: two packages that need the same
-/// variable say so in the workspace above them, or each says it for itself.
-/// The chain is a *search path*, not a list of requirements: a level with no
-/// `.env` simply falls through to the next, and a level whose file hasn't been
-/// generated yet (see [`generate_from_template`]) is listed all the same,
-/// because by the time the run sources it, it will be there.
-pub fn chain(layers: &[Layer<'_>]) -> Vec<String> {
-    let mut files: Vec<String> = Vec::new();
-    for layer in layers {
-        let mut found = resolve(layer.meta, layer.dir).files;
-        // A workspace with a checked-in template but no `.env` yet still
-        // belongs in the chain: a fresh checkout generates the file before it
-        // sources anything, and leaving the level out would send its steps
-        // looking one workspace too far up.
-        if found.is_empty() && template_for(layer.meta, layer.dir).is_some() {
-            found.push(target_file(layer.meta));
-        }
-        for file in found {
-            let path = join_rel(layer.rel, &file);
-            if !files.contains(&path) {
-                files.push(path);
-            }
-        }
-    }
-    files
 }
 
 /// The file a workspace's `.env` is generated as: whatever `env_file` names
@@ -577,61 +552,6 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&empty);
-    }
-
-    /// The chain is the ancestry of a step's own workspace: nearest last, and a
-    /// level with nothing to source simply isn't in it.
-    #[test]
-    fn a_chain_lists_each_level_that_has_something_to_source() {
-        let root = scratch("chain");
-        std::fs::create_dir_all(root.join("packages/api")).unwrap();
-        std::fs::write(root.join(".env"), "SHARED=root\n").unwrap();
-        std::fs::write(root.join("packages/api/.env"), "SHARED=api\n").unwrap();
-        let api = root.join("packages/api");
-        let middle = root.join("packages");
-        std::fs::create_dir_all(&middle).unwrap();
-
-        let bare = WorkspaceMeta::default();
-        let files = chain(&[
-            Layer {
-                rel: ".",
-                dir: &root,
-                meta: &bare,
-            },
-            Layer {
-                rel: "packages",
-                dir: &middle,
-                meta: &bare,
-            },
-            Layer {
-                rel: "packages/api",
-                dir: &api,
-                meta: &bare,
-            },
-        ]);
-        assert_eq!(
-            files,
-            vec![".env".to_string(), "packages/api/.env".to_string()],
-            "`packages` has no `.env`, so it contributes nothing"
-        );
-
-        // A level with only a template still belongs in the chain: the run
-        // generates the file before it sources anything.
-        let fresh = scratch("chain_fresh");
-        std::fs::create_dir_all(fresh.join("packages/api")).unwrap();
-        std::fs::write(fresh.join("packages/api/.env.default"), "A=1\n").unwrap();
-        let api = fresh.join("packages/api");
-        assert_eq!(
-            chain(&[Layer {
-                rel: "packages/api",
-                dir: &api,
-                meta: &bare,
-            }]),
-            vec!["packages/api/.env".to_string()]
-        );
-
-        let _ = std::fs::remove_dir_all(&root);
-        let _ = std::fs::remove_dir_all(&fresh);
     }
 
     #[test]

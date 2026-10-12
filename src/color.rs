@@ -101,8 +101,21 @@ fn styled(style: Style) -> Style {
     paint(enabled(), style)
 }
 
-fn paint(enabled: bool, style: Style) -> Style {
+/// `style` when `enabled`, otherwise a style that paints nothing — for output
+/// that decides for itself whether it's in colour, like a report printed
+/// before a run's own decision is made.
+pub fn paint(enabled: bool, style: Style) -> Style {
     if enabled { style } else { Style::new() }
+}
+
+/// Whether text bound for a stream should be coloured: it's a terminal, and
+/// nobody set `NO_COLOR`.
+pub fn for_stream(is_terminal: bool) -> bool {
+    wanted(
+        Consumer::Terminal,
+        std::env::var_os("NO_COLOR").is_some(),
+        is_terminal,
+    )
 }
 
 /// Something worked.

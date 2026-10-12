@@ -181,6 +181,7 @@ try {
   <nav class="views" aria-label="Views">
     <a href="/" data-view="cache">Cache</a>
     <a href="/builds" data-view="builds">Builds</a>
+    <a href="/releases" data-view="releases">Releases</a>
   </nav>
 
   <div id="error" class="note bad hidden"></div>
@@ -253,6 +254,20 @@ try {
       </table>
     </div>
     <div id="build-detail"></div>
+  </section>
+
+  <section id="releases-section" class="hidden" data-view-of="releases">
+    <h2>Releases</h2>
+    <p class="sub">Versions published by a <code>kind: release-push</code> step or <code>ciabatta releases push</code>. Retention never evicts these.</p>
+    <div class="card scroll" style="padding:0">
+      <table>
+        <thead><tr>
+          <th>Project</th><th>Release</th><th>Version</th><th>Published</th><th>Commit</th>
+          <th class="num">Files</th><th class="num">Size</th>
+        </tr></thead>
+        <tbody id="releases"></tbody>
+      </table>
+    </div>
   </section>
 
   <section id="users-section" class="hidden" data-view-of="cache">
@@ -380,7 +395,13 @@ function stat(label, value, small = "", extra = "") {
 // ─── Views ───────────────────────────────────────────────────────────────────
 // One page, several views, switched in place: following a link would reload
 // the page and drop the session token, which lives only in memory.
-let view = location.pathname.replace(/\/+$/, "").endsWith("/builds") ? "builds" : "cache";
+function viewFromPath() {
+  const path = location.pathname.replace(/\/+$/, "");
+  if (path.endsWith("/builds")) return "builds";
+  if (path.endsWith("/releases")) return "releases";
+  return "cache";
+}
+let view = viewFromPath();
 let openBuild = null;
 
 function showView() {
@@ -401,7 +422,7 @@ document.querySelectorAll("nav.views a").forEach((a) => {
   };
 });
 window.onpopstate = () => {
-  view = location.pathname.replace(/\/+$/, "").endsWith("/builds") ? "builds" : "cache";
+  view = viewFromPath();
   refresh();
 };
 
@@ -440,6 +461,21 @@ async function loadBuilds() {
   });
   $("builds-section").classList.remove("hidden");
   await loadBuild();
+}
+
+async function loadReleases() {
+  const data = await api("/api/releases");
+  $("releases").innerHTML = (data.releases || []).map((r) => `<tr>
+      <td>${esc(r.project_name || r.project)}</td>
+      <td class="mono">${esc(r.name)}</td>
+      <td class="mono"><b>${esc(r.version)}</b></td>
+      <td>${when(r.created_at)}</td>
+      <td class="mono" title="${esc(r.commit || "")}">${esc((r.commit || "").slice(0, 8)) || '<span class="muted">—</span>'}</td>
+      <td class="num">${r.files}</td>
+      <td class="num">${esc(human(r.size))}</td>
+    </tr>`).join("") ||
+    `<tr><td colspan="7" class="muted">No releases yet. Add a <code>kind: release-push</code> step to a workflow, or run <code>ciabatta releases push</code>.</td></tr>`;
+  $("releases-section").classList.remove("hidden");
 }
 
 async function loadBuild() {
@@ -770,6 +806,8 @@ async function refresh() {
     showView();
     if (view === "builds") {
       await loadBuilds();
+    } else if (view === "releases") {
+      await loadReleases();
     } else {
       await loadStats();
       await loadUsers();
@@ -863,6 +901,7 @@ mod tests {
             "/api/users",
             "/api/auth/login",
             "/api/builds",
+            "/api/releases",
         ] {
             assert!(
                 ADMIN_PAGE.contains(route),

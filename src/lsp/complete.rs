@@ -55,7 +55,8 @@ impl Item {
     }
 }
 
-/// The phases `kind:` recognises. Only `push` and `pull` change behaviour —
+/// The phases `kind:` recognises. Only `push`, `pull` and the two release
+/// kinds change behaviour —
 /// the rest label the node on the graph — but offering the set is how a repo
 /// ends up using one vocabulary instead of six.
 const PHASES: &[(&str, &str)] = &[
@@ -73,6 +74,14 @@ const PHASES: &[(&str, &str)] = &[
     (
         "pull",
         "Fetches an artifact from `registry:` — a built-in action",
+    ),
+    (
+        "release-push",
+        "Publishes `release.files` as a versioned release — a built-in action",
+    ),
+    (
+        "release-pull",
+        "Fetches a versioned release (`--release`) — a built-in action",
     ),
 ];
 

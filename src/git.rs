@@ -51,6 +51,14 @@ pub fn local_git_vars(root: &Path) -> Result<HashMap<String, String>> {
     Ok(vars)
 }
 
+/// The tag pointing exactly at HEAD, if there is one — what a release built
+/// from a tagged commit is named after when nothing else names it.
+pub fn exact_tag(root: &Path) -> Option<String> {
+    run_git(root, &["describe", "--tags", "--exact-match", "HEAD"])
+        .ok()
+        .filter(|tag| !tag.is_empty())
+}
+
 /// List up to `limit` commit SHAs reachable from `refname` (a branch, tag, or
 /// commit), most recent first. Used by the pull best-hash fallback to walk a
 /// branch's history looking for the newest commit that has a published artifact.

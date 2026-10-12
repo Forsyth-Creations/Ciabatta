@@ -153,6 +153,16 @@
           "body": { "name": "${1:fetch}", "kind": "pull", "from": "${2}" }
         },
         {
+          "label": "release push step",
+          "description": "Publish build outputs as a versioned release — by default under the git tag on HEAD.",
+          "body": { "name": "${1:release}", "kind": "release-push", "needs": ["${2:build}"], "release": { "files": ["${3:dist/**}"] } }
+        },
+        {
+          "label": "release pull step",
+          "description": "Fetch a release's files — the version comes from `--release` / $CIABATTA_RELEASE.",
+          "body": { "name": "${1:fetch}", "kind": "release-pull" }
+        },
+        {
           "label": "recovery node",
           "description": "Offer fixes when a step fails; reach it with that step's `on_error`.",
           "body": { "name": "${1:fix}", "recover": true, "message": "${2:What should happen?}", "options": [{ "label": "${3:Retry}", "run": "${4}" }] }
@@ -212,8 +222,8 @@
         },
         "kind": {
           "type": "string",
-          "description": "The phase this step belongs to. Free-form and cosmetic (it labels the node on the graph) except for `push` and `pull`, which select the built-in registry action.",
-          "examples": ["setup", "build", "test", "deploy", "push", "pull"]
+          "description": "The phase this step belongs to. Free-form and cosmetic (it labels the node on the graph) except for `push` and `pull`, which select the built-in registry action, and `release-push` and `release-pull`, which publish or fetch a versioned release (see `release`).",
+          "examples": ["setup", "build", "test", "deploy", "push", "pull", "release-push", "release-pull"]
         },
         "registry": {
           "type": "string",
@@ -237,6 +247,35 @@
         "strip_prefix": {
           "type": "string",
           "description": "For the glob-list form of `publish_path`: a leading path fragment stripped from each matched file before it is joined under {CIABATTA_PATH}."
+        },
+        "release": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "For a `kind: release-push` / `kind: release-pull` step: a versioned release, stored in the cache (and shared through `cache.remote`) under its name and version rather than its inputs, and never evicted.",
+          "properties": {
+            "name": {
+              "type": "string",
+              "description": "Which release. Defaults to the step's sub-workspace, or the project's name for a plain project."
+            },
+            "version": {
+              "type": "string",
+              "description": "The version, with {VAR} substitution (e.g. \"{CIABATTA_TAG}\"). Defaults to $CIABATTA_RELEASE (set by `--release`), and for a push then to the git tag on HEAD.",
+              "examples": ["{CIABATTA_TAG}", "{CIABATTA_RELEASE}"]
+            },
+            "files": {
+              "type": "array",
+              "items": { "type": "string" },
+              "description": "Push: globs for the files to publish, relative to the step's working directory. A directory means everything under it."
+            },
+            "into": {
+              "type": "string",
+              "description": "Pull: where to write the files, relative to the step's working directory. Defaults to the directory itself."
+            },
+            "overwrite": {
+              "type": "boolean",
+              "description": "Push: replace an existing release of this version whose files differ. Off by default — a release is immutable."
+            }
+          }
         },
         "from": {
           "type": "string",
@@ -318,6 +357,10 @@
         {
           "if": { "properties": { "kind": { "enum": ["push", "pull"] } }, "required": ["kind"] },
           "then": { "required": ["registry"] }
+        },
+        {
+          "if": { "properties": { "kind": { "const": "release-push" } }, "required": ["kind"] },
+          "then": { "required": ["release"] }
         }
       ]
     }

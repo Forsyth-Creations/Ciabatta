@@ -148,6 +148,13 @@ fn step() -> crate::run::RunStep {
         retry: Some(one()),
         options: vec![fix_option()],
         cache: Some(cache()),
+        release: Some(crate::run::release::ReleaseSpec {
+            name: Some(one()),
+            version: Some(one()),
+            files: list(),
+            into: Some(one()),
+            overwrite: true,
+        }),
         // Not a config key — `#[serde(skip)]`, set by the compiler on entries
         // of a workflow's `background:` array — so the schemas don't name it.
         background: false,

@@ -530,7 +530,14 @@ impl Store {
 
         // Least recently used first, so both the size and count passes evict
         // from the front.
-        let mut entries = self.list()?;
+        // Releases are kept until somebody deletes them: they're found by
+        // version, not by use, and "v1.4.2 aged out" is not an answer a deploy
+        // can do anything with.
+        let mut entries: Vec<Entry> = self
+            .list()?
+            .into_iter()
+            .filter(|e| !crate::run::release::is_release(e))
+            .collect();
         entries.sort_by(|a, b| a.last_touched().cmp(b.last_touched()));
 
         let mut kept: Vec<Entry> = Vec::with_capacity(entries.len());

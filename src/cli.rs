@@ -517,6 +517,14 @@ pub enum Commands {
     ///
     /// Captured raw and re-parsed as [`WorkflowArgs`], which is why the flags
     /// after the name behave exactly as they do under `ciabatta workflow`.
+    /// Versioned releases: named, never-evicted snapshots of build outputs,
+    /// published by a `kind: release-push` step and fetched back by a
+    /// `kind: release-pull` one — or by hand, with these commands.
+    Releases {
+        #[command(subcommand)]
+        command: ReleasesCommand,
+    },
+
     #[command(external_subcommand)]
     External(Vec<String>),
 }
@@ -776,6 +784,13 @@ pub struct WorkflowArgs {
     #[arg(short = 'e', long = "env", value_name = "KEY=VALUE")]
     pub env: Vec<String>,
 
+    /// The release this run works with: what a `kind: release-pull` step
+    /// fetches and a `kind: release-push` step publishes, unless the step
+    /// names a `release.version` of its own. Shorthand for
+    /// `-e CIABATTA_RELEASE=<VERSION>`.
+    #[arg(long, value_name = "VERSION")]
+    pub release: Option<String>,
+
     /// Show the graph and everything it would do, without executing a step.
     #[arg(long)]
     pub dry_run: bool,
@@ -860,6 +875,45 @@ impl WorkflowArgs {
     pub fn use_tui(&self) -> bool {
         self.tui && !self.no_tui
     }
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ReleasesCommand {
+    /// List the releases this project has published, locally and on its
+    /// remote cache.
+    List {
+        /// Only releases with this name.
+        #[arg(long)]
+        name: Option<String>,
+    },
+    /// Fetch a release's files into a directory.
+    Pull {
+        /// The version to fetch. Defaults to $CIABATTA_RELEASE.
+        version: Option<String>,
+        /// Which release, when a project publishes several. Defaults to the
+        /// project's name.
+        #[arg(long)]
+        name: Option<String>,
+        /// Where to write the files. Defaults to the current directory.
+        #[arg(long, value_name = "DIR")]
+        into: Option<std::path::PathBuf>,
+    },
+    /// Publish files as a release, the way a `kind: release-push` step does.
+    Push {
+        /// The version to publish. Defaults to $CIABATTA_RELEASE, then to the
+        /// git tag on HEAD.
+        version: Option<String>,
+        /// Globs for the files to publish, relative to the current directory.
+        #[arg(long = "file", short = 'f', value_name = "GLOB", required = true)]
+        files: Vec<String>,
+        /// Which release, when a project publishes several. Defaults to the
+        /// project's name.
+        #[arg(long)]
+        name: Option<String>,
+        /// Replace an existing release of this version with different files.
+        #[arg(long)]
+        overwrite: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]

@@ -196,6 +196,7 @@ artifacts are published from. For workflows it goes one level further out: the
 | `ciabatta dry-run [TARGET...]` | What a run would reuse from the cache and what it would rebuild — and for a rebuild, exactly what changed. Runs nothing. `--diff` for the lines. |
 | `ciabatta cache <init\|status\|prune\|clean>` | Set up and inspect the build cache. `init [WORKFLOW]` proposes inputs and outputs from what's actually in the directory and writes them into that workflow's file. |
 | `ciabatta remote-cache <init\|start\|login\|logout\|status\|add-user>` | Run or connect to a shared cache the whole team reads from. |
+| `ciabatta releases <list\|push\|pull>` | Versioned releases: list what's been published, or push and pull one by hand. See [Releases](#releases). |
 | `ciabatta self update` | Update this binary from the remote cache that serves it, verified against the SHA-256 it advertises. |
 | `ciabatta convert --script PATH` | Turn an existing script into a workflow: its tools, its variables, its outputs, and the description in its header. |
 | `ciabatta register` | Tell the daemon this checkout exists, so it shows up in the web app's project switcher. `init` does this for you. |
@@ -232,6 +233,8 @@ Useful flags on any workflow (`ciabatta build`, `ciabatta release`, …):
 - `--isolated` — don't follow dependencies out of what you selected, for when
   everything upstream is already built.
 - `-e, --env KEY=VALUE` — set a variable for every step. Repeatable.
+- `--release VERSION` — the release a `kind: release-pull` step fetches (and a
+  push publishes, unless the step names a version). Sets `CIABATTA_RELEASE`.
 - `--tui` — run inside the live terminal UI. **Runs print plain text by
   default**, which is what CI wants and what you can pipe; the TUI is opt-in.
   (`--no-tui` is still accepted and does nothing.)
@@ -946,6 +949,10 @@ which is the fastest way to check you got the prefix right.
 `ciabatta cache init` writes the prefix for you — run it in the package and it
 proposes paths already rooted correctly.
 
+Patterns are globs, and `**` means "at any depth" however you write it:
+`src/**/*.rs`, `src/**.rs` and `**.json` all work — `**.json` is every `.json`
+file below the workspace root.
+
 A step can narrow it further with its own `cache:`, layered over the workflow's
 field by field — so a step that declares only `env:` keeps the workflow's inputs
 and outputs, and does not silently turn caching off by failing to mention
@@ -1018,6 +1025,14 @@ cache:
 graph; click it for the entry it used. *Inspect cache*, in a run's header,
 shows what the cache decided for every step — reused, missed and why, or blocked
 by an upstream step — with what to change for each.
+
+In inspect mode every node also shows the start of its **cache key**, and
+clicking a step lists **every file behind that key with its SHA-256** — the
+inputs the key was computed from and the outputs that were stored (or, while
+the step is still building, the outputs on disk right now). The hashes are the
+ones `sha256sum` prints, and the copy button gives the list in the format
+`sha256sum -c` checks, so "is the cache seeing the file I think it is?" is a
+question you can answer by hand.
 
 ### Proving the inputs are right: `--authoritative`
 
@@ -1144,6 +1159,20 @@ page, add one `admin: true` user to `auth.users` in the config, set
 `auth.mode: token`, and restart. Server-managed users live in
 `<storage>/users.json`; config-declared ones stay yours, and the page will
 neither shadow nor delete them.
+
+### Builds, kept on the server
+
+Every run in a workspace with a `cache.remote` reports itself to the server
+when it finishes: the workflow, how it ended and how long it took, who ran it
+and where (and under which CI system), the branch, commit and tag, and **the
+flow it ran** — every step with what it needed, its status and timing, and
+what the cache made of it (reused from where, under which key, or why not).
+Metadata only: logs never leave the machine that produced them.
+
+The server's page has a **Builds** view — also at `/builds` — listing them
+newest first across every project; click one to see its flow drawn as a graph
+and its steps in a table. The latest 500 builds per project are kept, and a
+project's go with it when it is forgotten.
 
 ### TLS
 
@@ -1306,6 +1335,73 @@ advertised is the content, which is also what the client verifies.
 Nothing updates automatically. A build tool that swaps its own binary out from
 under a running CI job is a bad build tool; this notices, tells you, and waits
 to be asked.
+
+## Releases
+
+A cache entry is found by what went *into* a build, and ages out when nobody
+asks for it. That's right for skipping work and wrong for shipping it: a deploy
+wants "the files of v1.4.2", whatever the tree looks like today, still there
+next month. A **release** is a labelled cache entry — the same verified
+artifacts, shared through the same remote cache — stored under a name and a
+version instead of its inputs, and **never evicted** by retention.
+
+Two step kinds put releases on the graph:
+
+```yaml
+# packages/api/.ciabatta/workflows/build.yaml — runs in CI on a tag
+steps:
+  - name: compile
+    run: make dist
+  - name: publish
+    kind: release-push
+    needs: [compile]
+    release:
+      files: ["dist/**"]          # relative to the step's directory
+
+# packages/api/.ciabatta/workflows/deploy.yaml
+steps:
+  - name: fetch
+    kind: release-pull            # writes dist/ back where the push found it
+  - name: ship
+    needs: [fetch]
+    run: ./scripts/deploy.sh dist/
+```
+
+```bash
+ciabatta deploy --release v1.4.2    # fetch exactly that build, then deploy it
+```
+
+**The version is always explicit.** A push uses `release.version` if the step
+sets one (with `{VAR}` substitution, e.g. `"{CIABATTA_TAG}"`), else
+`$CIABATTA_RELEASE`, else the **git tag on HEAD** — so a tag build in CI
+publishes under its tag with no configuration at all. A pull uses
+`release.version` or `$CIABATTA_RELEASE`, which `--release <VERSION>` sets, and
+never guesses: deploying "whatever was latest" is how the wrong build reaches
+production.
+
+**A release is immutable.** Re-running a push with the same files is a no-op,
+so a retried CI job doesn't fail; pushing *different* files under an existing
+version is refused unless the step sets `release.overwrite: true`.
+
+The release's **name** defaults to the step's sub-workspace (or the project's
+name in a plain project), so a package's build and deploy workflows agree
+without saying so; set `release.name` to fetch another package's release.
+`release.into` puts pulled files somewhere other than the step's directory.
+
+Releases work without a remote cache — they're kept in this machine's cache —
+but they're meant to be shared: with a `cache.remote` configured, a push that
+can't reach the server fails rather than quietly keeping the release to itself.
+
+By hand:
+
+```bash
+ciabatta releases list                         # local and remote, newest first
+ciabatta releases push v1.4.2 --file 'dist/**' # what a release-push step does
+ciabatta releases pull v1.4.2 --into ./out     # what a release-pull step does
+```
+
+The remote cache's page lists every project's releases under **Releases**
+(also at `/releases`).
 
 ## Environment files
 

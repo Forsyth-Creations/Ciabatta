@@ -15,6 +15,7 @@ pub mod envdeps;
 pub mod filter;
 pub mod history;
 pub mod isolate;
+pub mod release;
 pub mod transfer;
 pub mod view;
 pub mod why;
@@ -258,6 +259,11 @@ pub struct RunStep {
     /// do — most steps inherit and never write this.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cache: Option<crate::cache::CacheConfig>,
+
+    /// For a `kind: release-push` / `kind: release-pull` step: which release,
+    /// which version, and which files. See [`release`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub release: Option<release::ReleaseSpec>,
 }
 
 /// One fix choice on a recovery node.
@@ -316,7 +322,16 @@ impl RunStep {
     /// recovery node that only presents options. A transfer step counts: its
     /// action is the built-in registry move.
     pub fn has_action(&self) -> bool {
-        self.script.is_some() || self.run.is_some() || self.direction().is_some()
+        self.script.is_some()
+            || self.run.is_some()
+            || self.direction().is_some()
+            || self.release_direction().is_some()
+    }
+
+    /// Whether this is a `kind: release-push` or `kind: release-pull` step,
+    /// and which.
+    pub fn release_direction(&self) -> Option<release::Direction> {
+        release::Direction::of_kind(self.kind.as_deref()?)
     }
 
     /// The transfer direction this step's `kind` selects, or `None` for an
@@ -1076,6 +1091,20 @@ pub fn validate_flowchart(steps: &[RunStep], run_name: &str) -> Result<()> {
         } else if !step.has_action() {
             bail!(
                 "Step '{}' in run '{}' has no `script`, `run`, or `workflow` to execute.",
+                step.name,
+                run_name
+            );
+        }
+
+        // A release push with nothing to publish can only fail at run time,
+        // after the build it was waiting on — say so before anything runs.
+        if step.release_direction() == Some(release::Direction::Push)
+            && step.script.is_none()
+            && step.run.is_none()
+            && step.release.as_ref().is_none_or(|r| r.files.is_empty())
+        {
+            bail!(
+                "Step '{}' in run '{}' is a `kind: release-push` with no `release.files`                  — list the globs of what to publish.",
                 step.name,
                 run_name
             );

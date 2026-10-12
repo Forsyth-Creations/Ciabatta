@@ -1246,6 +1246,10 @@ cache:
 steps:
   - name: compile
     run: cargo build --release`}</Pre>
+        <P>
+          Patterns are globs, and <C>**</C> means &quot;at any depth&quot; however it&apos;s
+          written: <C>src/**/*.rs</C>, <C>src/**.rs</C> and <C>**.json</C> all work.
+        </P>
         <Alert severity="warning" sx={{ my: 2, maxWidth: "78ch" }}>
           <strong>Paths are relative to the workspace root, wherever the block is written.</strong>{" "}
           One project is one cache, so one directory has to be what those paths mean. Getting the
@@ -1810,6 +1814,12 @@ ciabatta build --only api --isolated        # …and don't follow them at all`}<
               on the run&apos;s page points these out.
             </>,
             <>
+              <strong>Check what the cache is hashing.</strong> In cache inspect mode each node
+              shows the start of its key, and clicking a step lists every input and output behind
+              that key with its SHA-256 — the value <C>sha256sum</C> prints — with a copy button
+              that produces a <C>sha256sum -c</C> file.
+            </>,
+            <>
               <strong>Workspace names can&apos;t contain <C>:</C></strong> — it&apos;s how steps
               and sub-workflows are addressed (<C>api:compile</C>), so <C>api:v2</C> would be
               ambiguous. Ciabatta refuses the name and suggests one; a directory with a colon in
@@ -2199,6 +2209,16 @@ ciabatta remote-cache status         # hit rate, storage, retention`}</Pre>
           trace left in your project.
         </P>
 
+        <SubHeading>Builds, kept on the server</SubHeading>
+        <P>
+          Every run in a workspace with a <C>cache.remote</C> reports itself when it finishes: the
+          workflow, how it ended, who ran it and where, the branch, commit and tag, and{" "}
+          <strong>the flow it ran</strong> — each step with what it needed, its status and timing,
+          and what the cache made of it. Metadata only; logs never leave the machine. The
+          server&apos;s page lists them under <strong>Builds</strong> (also at <C>/builds</C>),
+          and opening one draws its flow as a graph. The latest 500 per project are kept.
+        </P>
+
         <SubHeading>Handing out ciabatta itself</SubHeading>
         <P>
           Point the server at the binaries you want your team on. It hashes them, mentions the
@@ -2212,6 +2232,66 @@ ciabatta remote-cache status         # hit rate, storage, retention`}</Pre>
           Nothing updates automatically. A build tool that swaps its own binary out from under a
           running CI job is a bad build tool; this notices, tells you, and waits to be asked.
         </P>
+      </>
+    ),
+  },
+  {
+    id: "releases",
+    group: "Reference",
+    title: "Releases",
+    body: (
+      <>
+        <P>
+          A cache entry is found by what went <em>into</em> a build and ages out when nobody asks
+          for it — right for skipping work, wrong for shipping it. A <strong>release</strong> is
+          a labelled cache entry: the same verified artifacts, shared through the same remote
+          cache, stored under a name and a version instead of its inputs, and{" "}
+          <strong>never evicted</strong>.
+        </P>
+        <Pre>{`# build.yaml — runs in CI on a tag
+steps:
+  - name: compile
+    run: make dist
+  - name: publish
+    kind: release-push
+    needs: [compile]
+    release:
+      files: ["dist/**"]        # relative to the step's directory
+
+# deploy.yaml
+steps:
+  - name: fetch
+    kind: release-pull          # writes dist/ back where the push found it
+  - name: ship
+    needs: [fetch]
+    run: ./scripts/deploy.sh dist/`}</Pre>
+        <Pre>{`ciabatta deploy --release v1.4.2`}</Pre>
+        <Bullets
+          items={[
+            <>
+              <strong>The version is explicit.</strong> A push uses <C>release.version</C> (with{" "}
+              <C>{"{VAR}"}</C> substitution), else <C>$CIABATTA_RELEASE</C>, else the git tag on
+              HEAD — so a tag build publishes under its tag with no configuration. A pull uses{" "}
+              <C>release.version</C> or <C>$CIABATTA_RELEASE</C> (what <C>--release</C> sets),
+              and never guesses.
+            </>,
+            <>
+              <strong>A release is immutable.</strong> The same files again is a no-op; different
+              files under an existing version are refused unless <C>release.overwrite: true</C>.
+            </>,
+            <>
+              <strong>Names default to the step&apos;s sub-workspace</strong>, so a package&apos;s
+              build and deploy workflows agree; set <C>release.name</C> to fetch another
+              package&apos;s, and <C>release.into</C> to write somewhere else.
+            </>,
+            <>
+              <C>ciabatta releases list</C>, <C>ciabatta releases push v1.4.2 --file
+              &apos;dist/**&apos;</C> and <C>ciabatta releases pull v1.4.2 --into ./out</C> do the
+              same by hand. The remote cache&apos;s page lists every release under{" "}
+              <strong>Releases</strong>.
+            </>,
+          ]}
+        />
       </>
     ),
   },

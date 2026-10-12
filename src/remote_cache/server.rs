@@ -284,6 +284,8 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/projects/{id}/builds/{build}", get(get_build))
         .route("/api/builds", get(build_feed))
+        .route("/api/projects/{id}/releases", get(list_releases))
+        .route("/api/releases", get(all_releases))
         .route("/api/projects/{id}/cache/touch", post(touch_entries))
         .route(
             "/api/projects/{id}/cache/{key}",
@@ -300,6 +302,7 @@ pub fn router(state: AppState) -> Router {
         // The admin page, last so no API path can be shadowed by it.
         .route("/", get(admin_page))
         .route("/builds", get(admin_page))
+        .route("/releases", get(admin_page))
         .layer(DefaultBodyLimit::max(MAX_ARTIFACT_BYTES))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
@@ -633,7 +636,11 @@ async fn stats(
     };
     let mut by_size: Vec<&Entry> = entries.iter().collect();
     by_size.sort_by_key(|e| std::cmp::Reverse(e.size));
-    let mut by_age: Vec<&Entry> = entries.iter().collect();
+    // "First to be evicted" must not list what retention never evicts.
+    let mut by_age: Vec<&Entry> = entries
+        .iter()
+        .filter(|e| !crate::run::release::is_release(e))
+        .collect();
     by_age.sort_by(|a, b| a.last_touched().cmp(b.last_touched()));
 
     let max_bytes = state.config.retention.max_size_bytes().ok().flatten();
@@ -1012,6 +1019,53 @@ async fn build_feed(
         })
         .collect();
     Ok(Json(json!({ "builds": builds })))
+}
+
+/// A project's releases, newest first. See [`crate::run::release`].
+async fn list_releases(
+    State(state): State<AppState>,
+    headers: header::HeaderMap,
+    Path(id): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    state.identify(&headers)?;
+    require_project(&state, &id)?;
+    let mut releases: Vec<crate::run::release::ReleaseInfo> = state
+        .store
+        .list()?
+        .iter()
+        .filter(|e| e.workspace == id)
+        .filter_map(crate::run::release::ReleaseInfo::of)
+        .collect();
+    releases.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    Ok(Json(json!({ "releases": releases })))
+}
+
+/// Every project's releases, for the page.
+async fn all_releases(
+    State(state): State<AppState>,
+    headers: header::HeaderMap,
+) -> ApiResult<Json<serde_json::Value>> {
+    state.identify(&headers)?;
+    let names: std::collections::BTreeMap<String, String> = state
+        .projects
+        .list()
+        .into_iter()
+        .map(|p| (p.id, p.name))
+        .collect();
+    let mut releases: Vec<serde_json::Value> = state
+        .store
+        .list()?
+        .iter()
+        .filter_map(|entry| {
+            let info = crate::run::release::ReleaseInfo::of(entry)?;
+            let mut value = serde_json::to_value(&info).ok()?;
+            value["project"] = json!(entry.workspace);
+            value["project_name"] = json!(names.get(&entry.workspace).cloned().unwrap_or_default());
+            Some(value)
+        })
+        .collect();
+    releases.sort_by(|a, b| b["created_at"].as_str().cmp(&a["created_at"].as_str()));
+    Ok(Json(json!({ "releases": releases })))
 }
 
 /// What every checkout of this project has run.

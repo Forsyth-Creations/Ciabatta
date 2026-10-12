@@ -285,6 +285,10 @@ async fn main() -> Result<()> {
             cmd_remote_cache(subcommand).await?;
         }
 
+        Commands::Releases { command } => {
+            cmd_releases(command).await?;
+        }
+
         Commands::Zelf { subcommand } => {
             cmd_self(subcommand).await?;
         }
@@ -328,11 +332,15 @@ fn unknown_workflow(err: &anyhow::Error) -> bool {
 /// so an unknown name gets an extra line pointing at `--help` — otherwise
 /// `ciabatta pusj` would only ever complain about workflows.
 async fn cmd_workflow(
-    args: cli::WorkflowArgs,
+    mut args: cli::WorkflowArgs,
     bare_name: bool,
     custom_args: &[String],
 ) -> Result<()> {
     let cwd = env::current_dir().context("Failed to get current directory")?;
+    if let Some(version) = args.release.take() {
+        args.env
+            .push(format!("{}={version}", run::release::RELEASE_VAR));
+    }
 
     // No workflow named: show what there is to run rather than erroring out.
     let Some(first) = args.workflow.clone() else {
@@ -2274,6 +2282,150 @@ fn this_hostname() -> Option<String> {
         .or_else(|| std::fs::read_to_string("/etc/hostname").ok())
         .map(|name| name.trim().to_string())
         .filter(|name| !name.is_empty())
+}
+
+/// `ciabatta releases …`: list, fetch and publish releases by hand. The same
+/// operations a `kind: release-pull` / `kind: release-push` step performs.
+async fn cmd_releases(command: cli::ReleasesCommand) -> Result<()> {
+    use run::release;
+
+    let cwd = env::current_dir().context("Failed to get current directory")?;
+    // The monorepo root, not the nearest package: releases live in the cache
+    // a run from the root uses.
+    let root = workspace::Workspace::discover(&cwd)
+        .map(|ws| ws.root)
+        .ok()
+        .or_else(|| find_root(&cwd))
+        .context("Not inside a ciabatta project (no .ciabatta directory above here)")?;
+    let config = load_config(&root)?;
+    let store = cache::store::Store::for_project(&root)?;
+    let shared = release::connect(&config, &root).await?;
+    let mut vars: HashMap<String, String> = env::vars().collect();
+    // What a push records about where it came from, as a `--local` run would.
+    if let Ok(git) = git::local_git_vars(&root) {
+        for (key, value) in git {
+            vars.entry(key).or_insert(value);
+        }
+    }
+
+    // With no --name, the one release name there is — or a list to pick from.
+    let pick_name =
+        |name: Option<String>, known: &[(release::ReleaseInfo, String)]| -> Result<String> {
+            if let Some(name) = name {
+                return Ok(name);
+            }
+            let mut names: Vec<&str> = known.iter().map(|(r, _)| r.name.as_str()).collect();
+            names.sort();
+            names.dedup();
+            match names.as_slice() {
+                [only] => Ok(only.to_string()),
+                [] => Ok(release::default_name(None, &config, &root)),
+                several => bail!(
+                    "This project has several releases ({}); pick one with --name.",
+                    several.join(", ")
+                ),
+            }
+        };
+
+    match command {
+        cli::ReleasesCommand::List { name } => {
+            let all = release::list(&store, shared.as_ref()).await?;
+            let shown: Vec<_> = all
+                .iter()
+                .filter(|(r, _)| name.as_ref().is_none_or(|n| &r.name == n))
+                .collect();
+            if shown.is_empty() {
+                println!(
+                    "No releases yet. Publish one with a `kind: release-push` step, or                      `ciabatta releases push <VERSION> --file <GLOB>`."
+                );
+                return Ok(());
+            }
+            println!(
+                "{:<20} {:<16} {:<22} {:>6} {:>10}  WHERE",
+                "NAME", "VERSION", "CREATED", "FILES", "SIZE"
+            );
+            for (info, place) in shown {
+                println!(
+                    "{:<20} {:<16} {:<22} {:>6} {:>10}  {}",
+                    info.name,
+                    info.version,
+                    info.created_at
+                        .chars()
+                        .take(19)
+                        .collect::<String>()
+                        .replace('T', " "),
+                    info.files,
+                    cache::store::human_size(info.size),
+                    place
+                );
+            }
+        }
+        cli::ReleasesCommand::Pull {
+            version,
+            name,
+            into,
+        } => {
+            let version = release::resolve_version(
+                version.as_deref(),
+                &vars,
+                &root,
+                release::Direction::Pull,
+            )?;
+            let known = if name.is_none() {
+                release::list(&store, shared.as_ref()).await?
+            } else {
+                Vec::new()
+            };
+            let name = pick_name(name, &known)?;
+            let into = into.unwrap_or_else(|| cwd.clone());
+            let (files, from) =
+                release::pull(&store, shared.as_ref(), &name, &version, &into).await?;
+            println!(
+                "Fetched {name}@{version} from {from}: {} file(s) into {}",
+                files.len(),
+                into.display()
+            );
+        }
+        cli::ReleasesCommand::Push {
+            version,
+            files,
+            name,
+            overwrite,
+        } => {
+            let version = release::resolve_version(
+                version.as_deref(),
+                &vars,
+                &root,
+                release::Direction::Push,
+            )?;
+            let name = name.unwrap_or_else(|| release::default_name(None, &config, &root));
+            match release::push(
+                &store,
+                shared.as_ref(),
+                &name,
+                &version,
+                &cwd,
+                &files,
+                overwrite,
+                &vars,
+            )
+            .await?
+            {
+                release::Pushed::Unchanged => {
+                    println!("{name}@{version} is already released with exactly these files.")
+                }
+                release::Pushed::Published { files, shared } => println!(
+                    "Released {name}@{version}: {files} file(s){}",
+                    if shared {
+                        " — shared through the remote cache"
+                    } else {
+                        ", in this machine's cache only (configure cache.remote to share it)"
+                    }
+                ),
+            }
+        }
+    }
+    Ok(())
 }
 
 /// The remote cache URL this workspace is configured to use, if any.

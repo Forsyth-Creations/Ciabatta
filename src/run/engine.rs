@@ -1554,6 +1554,24 @@ async fn run_step_action(
             // which is how a project keeps its own publishing script while
             // still being a node on the graph.
             match step.transfer() {
+                // A release step is the same idea pointed at the cache: the
+                // built-in action, unless the step brings a command of its own.
+                _ if step.release_direction().is_some() && script.is_none() && run.is_none() => {
+                    let direction = step.release_direction().expect("checked above");
+                    let action = crate::run::release::run_step(
+                        step, direction, config, root, &cwd, env_vars, dry_run, &mut sink,
+                    );
+                    match limit {
+                        None => action.await,
+                        Some(limit) => match tokio::time::timeout(limit, action).await {
+                            Ok(result) => result,
+                            Err(_) => Err(anyhow::Error::new(TimedOut).context(format!(
+                                "timed out after {} and was killed",
+                                format_duration(limit)
+                            ))),
+                        },
+                    }
+                }
                 Some(transfer) if script.is_none() && run.is_none() => {
                     let action = transfer::run(
                         step,

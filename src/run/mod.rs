@@ -140,12 +140,41 @@ pub struct RunStep {
     /// the workflow, not the step.
     #[serde(skip)]
     pub required_env: Vec<String>,
+    /// Set by the compiler from the workflow's `env` list: the variables this
+    /// step's workflow says it uses. Their values come from the run's own
+    /// environment — the terminal, then the `.env` search, which a profile
+    /// decides — and every one of them keys the step's cache entry.
+    /// `#[serde(skip)]` for the same reason as `required_env`.
+    #[serde(skip)]
+    pub declared_env: Vec<String>,
+    /// What the cache knows this step as: `<member>:<workflow>:<step>`, set by
+    /// the workflow compiler.
+    ///
+    /// The graph's own node id can't be used for that. It is shortened to
+    /// `<member>:<step>` when a member contributes only one workflow to the
+    /// graph, so the same target compiled into two different workflows' graphs
+    /// would get two different names — and two different cache keys, and
+    /// rebuild in each. `None` outside a workflow graph, where the step's name
+    /// is already all there is.
+    #[serde(skip)]
+    pub cache_id: Option<String>,
     /// Don't fail the whole run when this step fails: its dependents are
     /// skipped, every other branch carries on, and the run reports the failure
     /// at the end. Always applied when a `timeout` expires.
     #[serde(default)]
     #[serde(skip_serializing_if = "crate::format::is_false")]
     pub continue_on_error: bool,
+    /// Treat this step failing as a warning: the failure is reported, but the
+    /// step counts as done — its dependents run, and the run itself still
+    /// succeeds. For a stage whose result is worth knowing about but not worth
+    /// stopping for: a linter being phased in, an optional upload, a report.
+    ///
+    /// The difference from [`Self::continue_on_error`] is what happens next:
+    /// that one stops this branch and fails the run at the end, this one does
+    /// neither.
+    #[serde(default)]
+    #[serde(skip_serializing_if = "crate::format::is_false")]
+    pub warn_on_error: bool,
 
     // ─── Phase & placement ──────────────────────────────────────────────────
     /// The special, identifiable phase this step belongs to: `setup`, `build`,
@@ -321,6 +350,11 @@ pub struct Transfer<'a> {
 }
 
 impl RunStep {
+    /// The name the cache keys this step under — see [`Self::cache_id`].
+    pub fn cache_name(&self) -> &str {
+        self.cache_id.as_deref().unwrap_or(&self.name)
+    }
+
     /// Whether this node runs an action of its own, as opposed to a pure
     /// recovery node that only presents options. A transfer step counts: its
     /// action is the built-in registry move.

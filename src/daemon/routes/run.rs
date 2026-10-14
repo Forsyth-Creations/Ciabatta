@@ -689,6 +689,11 @@ fn trace(run: u64, update: &runner::ProgressUpdate) {
                 tracing::warn!(run, %workflow, %step, "step failed")
             }
         }
+        P::StepWarned {
+            workflow,
+            step,
+            detail,
+        } => tracing::warn!(run, %workflow, %step, %detail, "step failed as a warning"),
         P::StepSkipped {
             workflow,
             step,

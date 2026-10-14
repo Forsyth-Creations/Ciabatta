@@ -220,6 +220,11 @@
           "default": false,
           "description": "Don't fail the whole run when this step fails: its dependents are skipped, every other branch carries on, and the failure is reported at the end. Always applied when a `timeout` expires."
         },
+        "warn_on_error": {
+          "type": "boolean",
+          "default": false,
+          "description": "Treat this step failing as a warning: the failure is reported, but the step counts as done — its dependents still run, and the run still succeeds. Unlike `continue_on_error`, nothing is skipped and the run doesn't fail at the end."
+        },
         "kind": {
           "type": "string",
           "description": "The phase this step belongs to. Free-form and cosmetic (it labels the node on the graph) except for `push` and `pull`, which select the built-in registry action, and `release-push` and `release-pull`, which publish or fetch a versioned release (see `release`).",

@@ -29,6 +29,8 @@ import ManageSearchIcon from "@mui/icons-material/ManageSearch";
 import StopIcon from "@mui/icons-material/Stop";
 import ReplayIcon from "@mui/icons-material/Replay";
 import TerminalIcon from "@mui/icons-material/Terminal";
+import RequiredIcon from "@mui/icons-material/Emergency";
+import OptionalIcon from "@mui/icons-material/HelpOutline";
 import { IconButton } from "@mui/material";
 import { useTheme } from "@mui/material/styles";
 import type { Theme } from "@mui/material/styles";
@@ -1581,7 +1583,7 @@ function buildFlow(
 
   const nodes: Node[] = positioned.map((node) => ({
     ...node,
-    style: nodeStyle(node.id, byName, theme, focus, inspect),
+    style: nodeStyle(node.id, byName, theme, focus, inspect, node.data?.variable as EnvVar | undefined),
   }));
   const route = (source: string, target: string) => ({
     route: routes.get(routeKey(source, target)),
@@ -1690,14 +1692,38 @@ function buildFlow(
   return { nodes, edges };
 }
 
-/** The colour a variable is drawn in: unset is a problem, the rest are inputs. */
+/**
+ * What a workflow file says about a variable: `required_env` makes it
+ * required, its `env` list makes it optional. Anything else is a variable the
+ * steps happen to read, which the workflow never declared either way.
+ */
+type EnvRole = "required" | "optional" | null;
+
+function envRole(variable: EnvVar): EnvRole {
+  if (variable.required) return "required";
+  if (variable.declared) return "optional";
+  return null;
+}
+
+/**
+ * The colour a variable is drawn in: unset-and-required is a problem, and
+ * otherwise what the workflow declared it as decides — so required and
+ * optional variables can be told apart at a glance, before reading a label.
+ */
 function envColour(variable: EnvVar, theme: Theme): string {
   if (unsetProblem(variable)) return theme.palette.error.main;
-  // An optional variable nobody set is a fact, not a fault: drawn quietly.
+  // Gold for required and sky for optional: two hues that can't be mistaken
+  // for each other, in either theme. (The theme's `secondary` is the same gold
+  // as `warning`, so it can't stand for a third kind of variable here.)
+  const role = envRole(variable);
+  if (role === "required") return theme.palette.warning.main;
+  if (role === "optional") return theme.palette.info.main;
+  // A custom argument: typed for this run only.
+  if (variable.origin === "argument") return theme.palette.primary.light;
+  // An undeclared variable nobody set is a fact, not a fault: drawn quietly.
   if (variable.origin === "unset") return theme.palette.text.disabled;
-  // A custom argument: typed for this run only, in the colour it has elsewhere.
-  if (variable.origin === "argument") return theme.palette.warning.main;
-  return theme.palette.secondary.main;
+  // Read by a step without the workflow declaring it either way: neutral.
+  return theme.palette.text.secondary;
 }
 
 /** What each kind of node puts on the canvas. */
@@ -1729,6 +1755,7 @@ function nodeData(
     const variable = workflow.env.vars.find((v) => v.key === key);
     return {
       label: variable ? <EnvNodeLabel variable={variable} /> : key,
+      variable,
       status: "pending" as StepStatus,
     };
   }
@@ -1756,6 +1783,7 @@ function nodeStyle(
   theme: Theme,
   focus: Focus,
   inspect: boolean,
+  variable?: EnvVar,
 ): React.CSSProperties {
   // The ring marks the node that was *clicked*, not everything the click lit
   // up. With a step's whole upstream chain lit, ringing all of it would say
@@ -1807,11 +1835,16 @@ function nodeStyle(
     ? id.startsWith("in::")
       ? theme.palette.info.main
       : theme.palette.success.main
-    : theme.palette.secondary.main;
+    : variable
+      ? envColour(variable, theme)
+      : theme.palette.secondary.main;
+  // A required variable is drawn solid and heavier: the run can't start
+  // without it, so it isn't an aside the way an optional one is.
+  const required = variable !== undefined && envRole(variable) === "required";
 
   return {
     ...common,
-    border: `${picked ? 2 : 1}px ${picked ? "solid" : "dashed"} ${colour}`,
+    border: `${picked || required ? 2 : 1}px ${picked || required ? "solid" : "dashed"} ${colour}`,
     borderRadius: envKeyOf(id) !== null ? 18 : 8,
     fontSize: 11,
     padding: "0 10px",
@@ -1875,22 +1908,68 @@ function FileNodeLabel({ deps, kind }: { deps: TargetDeps; kind: "reads" | "writ
   );
 }
 
-/** A variable on the canvas: its name, and underneath it the value. */
+/** What a role is called on a node, and what hovering it explains. */
+const ENV_ROLE: Record<"required" | "optional", { tag: string; why: string }> = {
+  required: {
+    tag: "required",
+    why: "required_env — the run refuses to start without it",
+  },
+  optional: {
+    tag: "optional",
+    why: "env — the workflow uses it; its value comes from .env and may be unset",
+  },
+};
+
+/**
+ * A variable on the canvas: its name, and underneath it the value — with a
+ * glyph and a tag in the variable's colour when the workflow file declared it,
+ * `✱` for required and `?` for optional.
+ */
 function EnvNodeLabel({ variable }: { variable: EnvVar }) {
+  const theme = useTheme();
+  const role = envRole(variable);
+  const colour = envColour(variable, theme);
+  const Icon = role === "required" ? RequiredIcon : OptionalIcon;
+  const title = [
+    variable.key,
+    role && ENV_ROLE[role].why,
+    variable.purpose,
+  ]
+    .filter(Boolean)
+    .join(" — ");
   return (
-    <Box
-      sx={{ fontFamily: monoFontStack, minWidth: 0, flexGrow: 1 }}
-      title={variable.purpose ? `${variable.key} — ${variable.purpose}` : variable.key}
-    >
-      <Box sx={{ ...oneLine(LINE.name), fontWeight: 700 }}>{variable.key}</Box>
-      <Box
-        sx={{
-          ...oneLine(LINE.name),
-          opacity: 0.75,
-          fontStyle: variable.value === null ? "italic" : "normal",
-        }}
-      >
-        {envValueText(variable)}
+    <Box sx={{ fontFamily: monoFontStack, minWidth: 0, flexGrow: 1 }} title={title}>
+      <Box sx={{ display: "flex", alignItems: "center", gap: 0.5, minWidth: 0 }}>
+        {role && <Icon sx={{ fontSize: 12, color: colour, flexShrink: 0 }} />}
+        <Box sx={{ ...oneLine(LINE.name), fontWeight: 700, minWidth: 0 }}>{variable.key}</Box>
+      </Box>
+      <Box sx={{ display: "flex", alignItems: "baseline", gap: 0.75, minWidth: 0 }}>
+        <Box
+          sx={{
+            ...oneLine(LINE.name),
+            opacity: 0.75,
+            minWidth: 0,
+            fontStyle: variable.value === null ? "italic" : "normal",
+          }}
+        >
+          {envValueText(variable)}
+        </Box>
+        {role && (
+          <Box
+            component="span"
+            sx={{
+              ml: "auto",
+              flexShrink: 0,
+              fontSize: 9,
+              fontWeight: 700,
+              letterSpacing: "0.04em",
+              textTransform: "uppercase",
+              color: colour,
+            }}
+          >
+            {ENV_ROLE[role].tag}
+          </Box>
+        )}
       </Box>
     </Box>
   );

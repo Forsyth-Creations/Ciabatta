@@ -1975,6 +1975,17 @@ async fn run_plain(
                 let time = took(&mut clocks, &format!("step:{workflow}:{step}"));
                 println!("{}   {mark} step: {step} {time}", tag(&workflow))
             }
+            ProgressUpdate::StepWarned {
+                workflow,
+                step,
+                detail,
+            } => {
+                println!(
+                    "{}   {} step: {step} failed as a warning (warn_on_error), the run carries on: {detail}",
+                    tag(&workflow),
+                    "⚠".style(color::warn())
+                )
+            }
             ProgressUpdate::StepSkipped {
                 workflow,
                 step,
@@ -3879,8 +3890,10 @@ workflow name. Small packages can write them inline under `workflows:` instead
   required_env: [API_TOKEN]                 # refuse to start unless set
   tags: [rust]
 
-  env:                                      # vars for all its steps
-    PROFILE: release
+  env: [PROFILE, RUST_LOG]                  # vars its steps use, BY NAME:
+                                            # the values come from .env (and
+                                            # so from the env profile), never
+                                            # from here. May be unset.
 
   steps:
     - name: compile
@@ -3909,6 +3922,9 @@ workflow name. Small packages can write them inline under `workflows:` instead
                                             #   ciabatta watch --list
       continue_on_error: true               # its failure skips dependents but
                                             # doesn't stop the run
+      warn_on_error: true                   # or: its failure is only a
+                                            # warning — dependents still run
+                                            # and the run still succeeds
       kind: push                            # push | pull select the built-in
                                             # registry transfer; setup | build |
                                             # test | deploy | anything else is
@@ -4546,8 +4562,10 @@ workflow name. Small packages can write them inline under `workflows:` instead
   required_env: [API_TOKEN]                 # refuse to start unless set
   tags: [rust]
 
-  env:                                      # vars for all its steps
-    PROFILE: release
+  env: [PROFILE, RUST_LOG]                  # vars its steps use, BY NAME:
+                                            # the values come from .env (and
+                                            # so from the env profile), never
+                                            # from here. May be unset.
 
   steps:
     - name: compile
@@ -4576,6 +4594,9 @@ workflow name. Small packages can write them inline under `workflows:` instead
                                             #   ciabatta watch --list
       continue_on_error: true               # its failure skips dependents but
                                             # doesn't stop the run
+      warn_on_error: true                   # or: its failure is only a
+                                            # warning — dependents still run
+                                            # and the run still succeeds
       kind: push                            # push | pull select the built-in
                                             # registry transfer; setup | build |
                                             # test | deploy | anything else is

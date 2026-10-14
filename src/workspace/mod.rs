@@ -175,12 +175,20 @@ pub struct Workflow {
     #[serde(default, rename = "required_env", alias = "REQUIRED_ENV")]
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub required_env: Vec<String>,
-    /// Environment variables applied to every step of this workflow. Every one
-    /// of them keys the cache: a build run with different variables is a
-    /// different build.
-    #[serde(default)]
-    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
-    pub env: BTreeMap<String, String>,
+    /// The environment variables this workflow's steps use, by name.
+    ///
+    /// Names only, never values: which value a variable has is decided by the
+    /// `.env` the run sources — and so by the env profile elected for it — or
+    /// by the terminal. Writing a value here would be a second place to set
+    /// it, and the one a profile can't switch. Unlike `required_env`, a
+    /// variable listed here may be unset.
+    ///
+    /// Every one of them keys the cache, and the run page shows each with the
+    /// value the run was started with: a build run with different variables is
+    /// a different build.
+    #[serde(default, deserialize_with = "env_names")]
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub env: Vec<String>,
     /// Free-form labels for search.
     #[serde(default)]
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -240,6 +248,38 @@ pub struct Workflow {
     #[serde(default)]
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub background: Vec<String>,
+}
+
+/// A workflow's `env`: a list of variable names, or one name on its own.
+///
+/// A map — the shape before 0.6.4, which set values in the workflow file — is
+/// refused with the way out spelled, rather than having its values silently
+/// dropped, because a build that quietly lost its settings would be worse than
+/// one that stops and says where they go now.
+fn env_names<'de, D>(deserializer: D) -> std::result::Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Shape {
+        One(String),
+        Many(Vec<String>),
+        Map(BTreeMap<String, serde_json::Value>),
+    }
+    match Shape::deserialize(deserializer)? {
+        Shape::One(name) => Ok(vec![name]),
+        Shape::Many(names) => Ok(names),
+        Shape::Map(map) => {
+            let names: Vec<&str> = map.keys().map(String::as_str).collect();
+            Err(serde::de::Error::custom(format!(
+                "a workflow's `env` is a list of variable names, not a map of values — \
+                 write `env: [{}]` and set the values in the workspace's .env (or the \
+                 .ciabatta/.env.<profile> it is copied from)",
+                names.join(", ")
+            )))
+        }
+    }
 }
 
 impl Workflow {
@@ -1162,7 +1202,7 @@ mod tests {
             requires: vec!["r".into()],
             env_file: vec![".env".into()],
             required_env: vec!["E".into()],
-            env: [("K".to_string(), "V".to_string())].into_iter().collect(),
+            env: vec!["K".to_string()],
             tags: vec!["t".into()],
             cache: Some(Default::default()),
             steps: vec![Default::default()],

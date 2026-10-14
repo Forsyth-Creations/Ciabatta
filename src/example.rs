@@ -510,6 +510,12 @@ requires: [sh]
 # something unhelpful. Sourced from .env, the environment, CI, or -e flags.
 required_env: [API_URL]
 
+# Variables the build uses, by name only. Their values come from the .env — and
+# so from whichever env profile is elected — and, unlike required_env, they may
+# be unset. Both lists key the cache, and the run page draws each one with its
+# value.
+env: [LOG_LEVEL]
+
 steps:
   - name: compile
     description: Compile the service binary into dist/api
@@ -558,6 +564,15 @@ steps:
     description: Unit tests — no I/O, milliseconds
     run: "echo 'api: 128 unit tests passed'"
     tags: [fast]
+
+  - name: lint
+    description: The new lint rules, being phased in — worth hearing about, not worth stopping for
+    run: "echo 'api: 3 lint warnings'"
+    needs: [unit]
+    tags: [fast]
+    # A failure here is a warning: the step counts as done, anything behind it
+    # still runs, and the run still succeeds.
+    warn_on_error: true
 
   - name: integration
     description: Talks to a database; slower, and occasionally flaky

@@ -87,6 +87,68 @@ pub struct ServerConfig {
     /// this lately" but "has anybody".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stale_after: Option<String>,
+
+    /// Who may clear the whole cache from the admin page, beyond being an
+    /// admin. See [`ClearConfig`].
+    #[serde(default)]
+    pub clear: ClearConfig,
+}
+
+/// The guard on "clear all": a password that has to be typed before every
+/// artifact the cache holds is deleted.
+///
+/// ```yaml
+/// clear:
+///   # SHA-256 of the password, so this file isn't the password itself:
+///   #   printf %s 'the password' | sha256sum
+///   password_sha256: "…"
+///   # …or read the password itself from the server's environment.
+///   password_env: CIABATTA_CLEAR_PASSWORD
+/// ```
+///
+/// Without either, clearing still needs an admin (anyone, on an `open`
+/// server) and the page's own confirmation. With one, it needs the password
+/// too — the difference between "an admin clicked a button" and "somebody
+/// meant to".
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct ClearConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub password_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub password_env: Option<String>,
+}
+
+impl ClearConfig {
+    /// The SHA-256 the typed password must hash to, when one is configured.
+    /// A `password_env` naming an unset variable counts as configured — and
+    /// matches nothing — so a deployment that forgot to set it fails closed.
+    pub fn expected_sha256(&self) -> Option<String> {
+        if let Some(hash) = self.password_sha256.as_deref().map(str::trim) {
+            return Some(hash.to_ascii_lowercase());
+        }
+        let name = self.password_env.as_deref()?;
+        Some(match std::env::var(name) {
+            Ok(password) if !password.is_empty() => crate::cache::hash_bytes(password.as_bytes()),
+            _ => String::new(),
+        })
+    }
+
+    /// Whether clearing asks for a password.
+    pub fn password_required(&self) -> bool {
+        self.password_sha256.is_some() || self.password_env.is_some()
+    }
+
+    /// Whether `typed` is the password. True when none is configured.
+    pub fn accepts(&self, typed: Option<&str>) -> bool {
+        match self.expected_sha256() {
+            None => true,
+            Some(expected) if expected.is_empty() => false,
+            Some(expected) => {
+                let typed = crate::cache::hash_bytes(typed.unwrap_or_default().as_bytes());
+                crate::remote_cache::auth::constant_time_eq(&typed, &expected)
+            }
+        }
+    }
 }
 
 /// How much the server says about the traffic it serves.
@@ -312,6 +374,17 @@ auth:
   #   # Verify the directory's certificate. Turn this off only against a test
   #   # server — with it off, LDAPS is an encrypted channel to whoever answered.
   #   tls_verify: true
+
+# ─── Clearing the cache ────────────────────────────────────────────────────────
+# The admin page can delete every artifact at once (the statistics stay), for
+# when a cache has been filled with something it shouldn't have. It always asks
+# for confirmation; set one of these to require a password as well.
+#
+# clear:
+#   # SHA-256 of the password:  printf %s 'the password' | sha256sum
+#   password_sha256: "…"
+#   # …or the password itself, from the server's environment.
+#   # password_env: CIABATTA_CLEAR_PASSWORD
 
 # ─── Handing out ciabatta itself ───────────────────────────────────────────────
 # Point these at the binaries you want your team on. The server hashes them,

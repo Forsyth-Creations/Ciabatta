@@ -131,6 +131,12 @@ pub fn plan_graph(
     // downstream of them can be reused on the strength of an unchanged key.
     let mut unaccounted: BTreeSet<String> = BTreeSet::new();
     let mut planned: Vec<Planned> = Vec::new();
+    // What each step is called in the cache, so an upstream edge keys on the
+    // same stable name the step it points at is stored under.
+    let cache_names: BTreeMap<&str, &str> = steps
+        .iter()
+        .map(|s| (s.name.as_str(), s.cache_name()))
+        .collect();
 
     for step in steps {
         // A recovery node isn't part of the success graph and has no build to
@@ -153,15 +159,16 @@ pub fn plan_graph(
             .needs
             .iter()
             .filter_map(|need| {
-                fingerprints
-                    .get(need)
-                    .map(|hash| (need.clone(), hash.clone()))
+                fingerprints.get(need).map(|hash| {
+                    let name = cache_names.get(need.as_str()).copied().unwrap_or(need);
+                    (name.to_string(), hash.clone())
+                })
             })
             .collect();
 
         let member = context.member(step);
         let target = Target {
-            name: step.name.clone(),
+            name: step.cache_name().to_string(),
             workspace: workspace.clone(),
             dir: dir.clone(),
             member: member.clone(),
@@ -208,7 +215,14 @@ pub fn plan_graph(
         let diff = if matches!(decision, Decision::Rebuild { .. }) {
             let declared = declared_env(&config, env);
             store
-                .explain(&workspace, &step.name, &dir, &inputs, &declared, &upstream)?
+                .explain(
+                    &workspace,
+                    step.cache_name(),
+                    &dir,
+                    &inputs,
+                    &declared,
+                    &upstream,
+                )?
                 .filter(|d| !d.is_empty())
         } else {
             None

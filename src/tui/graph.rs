@@ -402,6 +402,9 @@ fn detail(frame: &mut Frame, area: Rect, step: Option<&RunStep>, graph: &Workflo
     if step.continue_on_error {
         field("on failure", "the rest of the graph carries on".into());
     }
+    if step.warn_on_error {
+        field("on failure", "a warning; dependents still run".into());
+    }
     if !step.when.is_empty() {
         field("when", step.when.join(" and "));
     }

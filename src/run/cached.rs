@@ -37,6 +37,9 @@ pub struct Session {
     root: PathBuf,
     /// Step name → fingerprint of what it produced. The third dependency.
     fingerprints: BTreeMap<String, String>,
+    /// Step name → the name the cache knows it by ([`RunStep::cache_name`]),
+    /// for every step seen so far.
+    cache_names: HashMap<String, String>,
     /// Steps that ran without being able to say what they produced: they
     /// declare no `cache.outputs`, or they failed and were recovered around.
     ///
@@ -354,6 +357,7 @@ impl Session {
             config: config.clone(),
             root: root.to_path_buf(),
             fingerprints: BTreeMap::new(),
+            cache_names: HashMap::new(),
             unaccounted: BTreeSet::new(),
             remote: None,
             reused_locally: Vec::new(),
@@ -456,13 +460,19 @@ impl Session {
         let member = context.member(step);
         let workspace = context.workspace(step);
 
+        self.cache_names
+            .insert(step.name.clone(), step.cache_name().to_string());
+        // Keyed by what each upstream step is called in the cache, not on this
+        // graph: the same edge compiled into another workflow's graph has to
+        // produce the same key.
         let upstream: BTreeMap<String, String> = step
             .needs
             .iter()
             .filter_map(|need| {
-                self.fingerprints
-                    .get(need)
-                    .map(|hash| (need.clone(), hash.clone()))
+                self.fingerprints.get(need).map(|hash| {
+                    let name = self.cache_names.get(need).unwrap_or(need);
+                    (name.clone(), hash.clone())
+                })
             })
             .collect();
 
@@ -500,7 +510,7 @@ impl Session {
             &env.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
         );
         let target = crate::cache::Target {
-            name: step.name.clone(),
+            name: step.cache_name().to_string(),
             workspace: workspace.clone(),
             dir: dir.clone(),
             member: member.clone(),
@@ -588,7 +598,7 @@ impl Session {
         if let Some(key) = decision.key() {
             let inspection = crate::cache::store::Inspection {
                 key: key.to_string(),
-                target: step.name.clone(),
+                target: step.cache_name().to_string(),
                 workspace: workspace.clone(),
                 decided_at: crate::cache::store::now(),
                 inputs: inputs.clone(),
@@ -638,7 +648,7 @@ impl Session {
                 report.reason = Some(reason.clone());
                 report.previous = self
                     .store
-                    .latest_for(&workspace, &step.name)
+                    .latest_for(&workspace, step.cache_name())
                     .ok()
                     .flatten()
                     .map(|e| EntryInfo::from(&e));
@@ -648,7 +658,7 @@ impl Session {
                     .store
                     .explain(
                         &workspace,
-                        &step.name,
+                        step.cache_name(),
                         &dir,
                         &inputs,
                         &env_declared,
@@ -807,7 +817,7 @@ impl Session {
         }
 
         let build = Build {
-            target: step.name.clone(),
+            target: step.cache_name().to_string(),
             workspace,
             inputs,
             outputs,

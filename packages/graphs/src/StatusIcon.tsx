@@ -12,6 +12,7 @@
 
 import CheckCircleIcon from "@mui/icons-material/CheckCircle";
 import ErrorIcon from "@mui/icons-material/Error";
+import WarningIcon from "@mui/icons-material/Warning";
 import AutorenewIcon from "@mui/icons-material/Autorenew";
 import RemoveCircleOutlineIcon from "@mui/icons-material/RemoveCircleOutline";
 import RadioButtonUncheckedIcon from "@mui/icons-material/RadioButtonUnchecked";
@@ -21,7 +22,7 @@ import type { SvgIconComponent } from "@mui/icons-material";
 import type { Theme } from "@mui/material/styles";
 
 /** A step's state, as the engine reports it. */
-export type StepStatus = "pending" | "running" | "success" | "failed" | "skipped";
+export type StepStatus = "pending" | "running" | "success" | "failed" | "skipped" | "warning";
 
 /** A run's verdict, which is a step status plus "somebody stopped it". */
 export type RunStatus = StepStatus | "stopped";
@@ -50,6 +51,14 @@ const LOOKS: Record<RunStatus, Look> = {
     Icon: ErrorIcon,
     colour: (theme) => theme.palette.error.main,
     label: "failed",
+  },
+  // Failed, but marked `warn_on_error`: it counts as done, so the run carries
+  // on — drawn as its own state, because "passed" would hide the failure and
+  // "failed" would say the run stopped when it didn't.
+  warning: {
+    Icon: WarningIcon,
+    colour: (theme) => theme.palette.warning.main,
+    label: "failed as a warning — the run carried on",
   },
   skipped: {
     Icon: RemoveCircleOutlineIcon,

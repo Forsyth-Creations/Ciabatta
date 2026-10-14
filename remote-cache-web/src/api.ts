@@ -137,6 +137,8 @@ export interface Stats {
     last_miss_at: string | null;
     last_saved_at: string | null;
     last_eviction: { at: string; removed: number; freed: number } | null;
+    /** The last "clear all". Absent until somebody has cleared the cache. */
+    last_clear?: { at: string; by: string; removed: number; freed: number } | null;
     /** Older servers don't send this; the charts say so rather than break. */
     daily?: Record<string, Day>;
     recent: Event[];
@@ -145,6 +147,8 @@ export interface Stats {
   largest: EntrySummary[];
   least_recently_used: EntrySummary[];
   retention: { description: string };
+  /** Whether "clear all" asks for a password. Absent from older servers. */
+  clear?: { password_required: boolean };
   sessions: number;
   tls: boolean;
   projects: ProjectStats[];

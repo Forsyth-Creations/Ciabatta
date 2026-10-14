@@ -689,6 +689,7 @@ fn compile(
         for step in &workflow.steps {
             let mut compiled = step.clone();
             compiled.name = node_id(unit, &step.name);
+            compiled.cache_id = Some(format!("{}:{}:{}", unit.member, unit.workflow, step.name));
             compiled.workspace = Some(member.name.clone());
             compiled.cwd = Some(member.rel.clone());
 
@@ -748,10 +749,13 @@ fn compile(
             // written last so it wins.
             let mut env = workspace.env.clone();
             env.extend(member.meta.env.clone());
-            env.extend(workflow.env.clone());
             env.extend(step.env.clone());
             compiled.env = env;
             compiled.required_env = workflow.required_env.clone();
+            // The workflow's `env` names variables rather than setting them:
+            // their values come from the run's environment, which the `.env`
+            // search (and so the elected profile) decides.
+            compiled.declared_env = workflow.env.clone();
 
             // The files this step's workflow names. The workspaces' own `.env`
             // files aren't listed per step: the run searches them once, from
@@ -871,6 +875,7 @@ fn compile(
         for step in &workflow.steps {
             let mut compiled = step.clone();
             compiled.name = node_id(unit, &step.name);
+            compiled.cache_id = Some(format!("{}:{}:{}", unit.member, unit.workflow, step.name));
             compiled.workspace = Some(member.name.clone());
             compiled.cwd = Some(member.rel.clone());
             compiled.background = true;
@@ -896,10 +901,13 @@ fn compile(
             );
             let mut env = workspace.env.clone();
             env.extend(member.meta.env.clone());
-            env.extend(workflow.env.clone());
             env.extend(step.env.clone());
             compiled.env = env;
             compiled.required_env = workflow.required_env.clone();
+            // The workflow's `env` names variables rather than setting them:
+            // their values come from the run's environment, which the `.env`
+            // search (and so the elected profile) decides.
+            compiled.declared_env = workflow.env.clone();
             compiled.env_files = Vec::new();
             for file in &workflow.env_file {
                 let path = join_rel(&member.rel, file);
@@ -1429,7 +1437,7 @@ mod tests {
         workflow(
             &api,
             "build",
-            "requires = [\"protoc\"]\n[env]\nSHARED = \"from-workflow\"\n\
+            "requires = [\"protoc\"]\nenv = [\"SHARED\", \"API_URL\"]\n\
              [[steps]]\nname = \"compile\"\nrun = \"cargo build\"\nrequires = [\"cargo\", \"sccache\"]\n\
              [steps.env]\nPROFILE = \"release\"\n",
         );
@@ -1441,8 +1449,78 @@ mod tests {
         assert_eq!(step.requires, vec!["cargo", "protoc", "sccache"]);
         assert_eq!(step.env.get("RUST_LOG").unwrap(), "info");
         assert_eq!(step.env.get("PROFILE").unwrap(), "release");
-        // The more specific level wins the collision.
-        assert_eq!(step.env.get("SHARED").unwrap(), "from-workflow");
+        // A workflow's `env` names variables without setting them, so the
+        // value written at the workspace level is the one that stands.
+        assert_eq!(step.env.get("SHARED").unwrap(), "from-workspace");
+        assert_eq!(step.declared_env, vec!["SHARED", "API_URL"]);
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// `env` used to be a map of values. Taking the names and dropping the
+    /// values would quietly change what a build runs with, so the old shape is
+    /// refused with the new one spelled out.
+    #[test]
+    fn a_workflow_env_map_is_refused_with_the_list_it_should_be() {
+        let root = scratch("envmap");
+        let api = member(&root, "api", "[workspace]\nname = \"api\"\n");
+        workflow(
+            &api,
+            "build",
+            "[env]\nMODE = \"release\"\n[[steps]]\nname = \"compile\"\nrun = \"make\"\n",
+        );
+        let err = format!("{:#}", Workspace::load(&root).unwrap_err());
+        assert!(err.contains("env: [MODE]"), "{err}");
+        assert!(err.contains(".env"), "{err}");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// The same target compiled into two workflows' graphs keeps one cache
+    /// name. Its node id is shortened when its member contributes a single
+    /// workflow — `proto:gen` alone, `proto:generate:gen` beside another of
+    /// proto's workflows — and the cache keyed on that id, so each workflow
+    /// rebuilt what the other had just built.
+    #[test]
+    fn a_shared_target_keeps_its_cache_name_across_workflows() {
+        let root = scratch("sharedcache");
+        let proto = member(&root, "proto", "[workspace]\nname = \"proto\"\n");
+        workflow(
+            &proto,
+            "generate",
+            "[[steps]]\nname = \"gen\"\nrun = \"protoc\"\n",
+        );
+        workflow(
+            &proto,
+            "lint",
+            "needs = [\"proto:generate\"]\n[[steps]]\nname = \"check\"\nrun = \"buf lint\"\n",
+        );
+        let api = member(&root, "api", "[workspace]\nname = \"api\"\n");
+        workflow(
+            &api,
+            "build",
+            "needs = [\"proto:generate\"]\n[[steps]]\nname = \"compile\"\nrun = \"cargo build\"\n",
+        );
+        let ws = Workspace::load(&root).unwrap();
+
+        let cache_name = |graph: &WorkflowGraph| {
+            let step = graph
+                .steps
+                .iter()
+                .find(|s| s.cache_name().ends_with(":gen"))
+                .expect("the shared target is in the graph");
+            (step.name.clone(), step.cache_name().to_string())
+        };
+        let (build_node, build_cache) =
+            cache_name(&build(&ws, "build", &Selection::default()).unwrap());
+        let (lint_node, lint_cache) =
+            cache_name(&build(&ws, "lint", &Selection::default()).unwrap());
+
+        // The graphs name it differently...
+        assert_ne!(build_node, lint_node);
+        // ...but the cache doesn't.
+        assert_eq!(build_cache, "proto:generate:gen");
+        assert_eq!(lint_cache, build_cache);
 
         std::fs::remove_dir_all(&root).ok();
     }

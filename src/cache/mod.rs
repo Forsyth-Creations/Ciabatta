@@ -228,7 +228,19 @@ impl CacheConfig {
         let mut names: BTreeSet<String> = self.env.iter().cloned().collect();
         names.extend(step.env.keys().cloned());
         names.extend(step.required_env.iter().cloned());
+        names.extend(step.declared_env.iter().cloned());
         self.env = names.into_iter().collect();
+        // A workflow's `env` names its values rather than writing them, so they
+        // come from a `.env` — and one whose name says it's a credential is
+        // keyed by digest, the same as a `required_env` token.
+        for name in &step.declared_env {
+            if crate::run::envdeps::looks_secret(name)
+                && !step.env.contains_key(name)
+                && !self.secret_env.contains(name)
+            {
+                self.secret_env.push(name.clone());
+            }
+        }
         for name in &step.required_env {
             // A value the file itself writes down is no secret.
             if !step.env.contains_key(name) && !self.secret_env.contains(name) {

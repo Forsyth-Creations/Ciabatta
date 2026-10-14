@@ -255,7 +255,7 @@ pub fn reran_upstream(needs: &[String], unaccounted: &BTreeSet<String>) -> Vec<S
 }
 
 /// The environment a step runs with: `env` with the step's own `env:` table
-/// (workspace, workflow and step, folded together when the graph compiled)
+/// (a deprecated `workspace.env`, folded in when the graph compiled)
 /// layered on top, which is how the engine hands it to the command.
 pub fn with_step_values(
     step: &RunStep,

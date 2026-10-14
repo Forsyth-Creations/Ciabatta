@@ -90,12 +90,14 @@
         },
         "env": {
           "$ref": "./common.schema.json#/$defs/envMap",
-          "description": "Environment variables applied to every step defined here."
+          "description": "Deprecated since 0.6.4: a workspace shouldn't define its variables' values. Put them in the .env template (`env_default`) or an env profile (.ciabatta/.env.<name>), and list the names in each workflow's `env:`. Still applied for now.",
+          "deprecated": true,
+          "deprecationMessage": "Deprecated: move these values into the workspace's .env template (env_default) or an env profile, and list the names in the workflows' `env:`."
         },
         "umbrella": {
           "type": "boolean",
           "default": false,
-          "description": "Set on the monorepo root when the root is only an umbrella \u2014 shared `toolchain:` and `env:` \u2014 rather than a package of its own."
+          "description": "Set on the monorepo root when the root is only an umbrella \u2014 shared `toolchain:` hints and the root .env \u2014 rather than a package of its own."
         }
       }
     },

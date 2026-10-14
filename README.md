@@ -322,9 +322,11 @@ steps:
     publish_path: "api/{CIABATTA_BRANCH}/{CIABATTA_COMMIT}/api"
 ```
 
-Steps run **from their own package's directory**, with that package's
-`[workspace.env]` variables in scope, so scripts work exactly as they do when
-you run them by hand.
+Steps run **from their own package's directory**, with the run's `.env`
+variables in scope, so scripts work exactly as they do when you run them by
+hand. (A `workspace.env` table of values in `ciabatta.yaml` is deprecated as of
+0.6.4 and prints a note: values belong in the `.env` template or a profile, and
+names in each workflow's `env:` list.)
 
 ### One graph, drawn before it runs
 
@@ -973,8 +975,7 @@ A stage has exactly **three** dependencies, and any of them changing is a
 rebuild:
 
 1. its **input files**,
-2. its **environment variables** — every one it gets from an `env:` table
-   (workspace or step), every name in its workflow's `env` and
+2. its **environment variables** — every name in its workflow's `env` and
    `required_env` lists, plus anything extra listed in `cache.env`,
 3. the **outputs of the stages it needs**.
 
@@ -1539,7 +1540,7 @@ The report printed before every run (and by `--dry-run`) shows the search order,
 then groups the variables by the file they came from. Each group has a header
 naming the source and why it won, colour-coded by kind in a terminal: magenta
 for the terminal, blue for workflow files, cyan for profile files, green for
-`.env` files, dim for defaults, yellow for step `[env]` tables, red for
+`.env` files, dim for defaults, yellow for a deprecated `workspace.env` table, red for
 required variables nothing set. The run page shows the same reasons when you
 hover over or select a variable:
 

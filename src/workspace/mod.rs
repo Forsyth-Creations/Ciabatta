@@ -116,13 +116,22 @@ pub struct WorkspaceMeta {
     /// [`crate::environment::files`].
     #[serde(skip_serializing_if = "Option::is_none")]
     pub env_default: Option<String>,
-    /// Environment variables applied to every step defined here — the standard
-    /// set a sub-workspace wants its scripts to be able to count on.
+    /// Environment variables applied to every step defined here, by value.
+    ///
+    /// **Deprecated since 0.6.4.** A workspace's config says what the
+    /// workspace *is*; which values its variables take is the business of its
+    /// `.env` — generated from the checked-in [`env_default`] template, and
+    /// switched wholesale by an env profile — and which variables a workflow
+    /// uses is the business of that workflow's `env` list. A value written
+    /// here could be changed by neither, and overrode both. It still applies,
+    /// with a note saying where it belongs; see [`warn_deprecated_env`].
+    ///
+    /// [`env_default`]: Self::env_default
     #[serde(default)]
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub env: BTreeMap<String, String>,
     /// Set on the monorepo root's own config when the root is only an umbrella
-    /// (shared `[toolchain]` and `[env]`) rather than a package of its own.
+    /// (shared `[toolchain]` hints and the root `.env`) rather than a package of its own.
     #[serde(default)]
     #[serde(skip_serializing_if = "crate::format::is_false")]
     pub umbrella: bool,
@@ -626,6 +635,7 @@ fn load_member(root: &Path, dir: &Path) -> Result<Member> {
     })?;
     let config = load_config_file(&config_file)?;
     let meta = config.workspace.clone().unwrap_or_default();
+    warn_deprecated_env(&meta, &config_file);
 
     let rel = dir
         .strip_prefix(root)
@@ -655,6 +665,30 @@ fn load_member(root: &Path, dir: &Path) -> Result<Member> {
         config,
         workflows,
     })
+}
+
+/// Say, once per file, that a config still sets `workspace.env` — and what
+/// to write instead, with the file's own variables in it.
+fn warn_deprecated_env(meta: &WorkspaceMeta, config_file: &Path) {
+    if meta.env.is_empty() {
+        return;
+    }
+    let key = format!("workspace.env:{}", config_file.display());
+    crate::format::note_once(&key, || {
+        let template = meta.env_default.as_deref().unwrap_or(".env.default");
+        let lines: Vec<String> = meta.env.iter().map(|(k, v)| format!("{k}={v}")).collect();
+        let names: Vec<&str> = meta.env.keys().map(String::as_str).collect();
+        format!(
+            "{} sets `workspace.env`, which is deprecated — a workspace shouldn't define \
+             its variables' values. The values still apply for now. Move them into the \
+             workspace's {template} (the .env template, see `env_default`) or an env \
+             profile (.ciabatta/.env.<name>):\n    {}\nand have the workflows that use \
+             them list them by name: `env: [{}]`.",
+            config_file.to_string_lossy().replace('\\', "/"),
+            lines.join("\n    "),
+            names.join(", "),
+        )
+    });
 }
 
 /// The character that joins a sub-workspace to a step or workflow name:

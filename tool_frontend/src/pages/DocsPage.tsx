@@ -1421,8 +1421,9 @@ Environment for 'build' — 4 variable(s) this run depends on
 workspace:
   env_file: .env              # the default; set it to point somewhere else
   env_default: .env.example   # the checked-in template .env is generated from
-  env:
-    LOG_LEVEL: info           # a plain value every step here starts with`}</Pre>
+  # env: { LOG_LEVEL: info }  # DEPRECATED (0.6.4): put LOG_LEVEL=info in the
+  #                           # template instead, and list LOG_LEVEL in the
+  #                           # workflows' \`env:\``}</Pre>
         <P>
           A missing <C>.env</C> is generated from that template at the start of a run, for the
           project and for every sub-workspace the run touches. It never overwrites a file that
@@ -1460,8 +1461,9 @@ required_env: [API_URL, DATABASE_URL]`}</Pre>
     # Only in production, and never from a developer's laptop:
     when: env.RUN_ENV == prod
     skip_if: env.IS_LOCAL
-    env:
-      DEPLOY_TIMEOUT: 600     # this step only, layered over the run's`}</Pre>
+    # No env: here. A step can't set values (removed in 0.6.4): put
+    # DEPLOY_TIMEOUT=600 in the .env and list DEPLOY_TIMEOUT in the
+    # workflow's env: list.`}</Pre>
 
         <SubHeading>Env profiles</SubHeading>
         <P>
@@ -1677,7 +1679,6 @@ steps:
             ["description", "One line. ciabatta list -v prints it, so nobody has to open the file."],
             ["needs", "Steps in THIS file that must succeed first. Cross-package dependencies go on the workflow's needs."],
             ["cwd", "Where the action runs, relative to the project root. Defaults to the package's own directory."],
-            ["env", "Variables for this step alone, layered over the run's."],
             ["when / skip_if", "Conditions: VAR == value, VAR != value, VAR, !VAR. when must all hold; skip_if skips when any does."],
             ["timeout", "Wall-clock limit — \"90s\", \"10m\", \"1h30m\". Past it the step is killed and the rest of the graph carries on."],
             ["retries", "Extra attempts on failure, for transient errors. Default 0."],

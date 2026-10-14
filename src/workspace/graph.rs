@@ -749,7 +749,6 @@ fn compile(
             // written last so it wins.
             let mut env = workspace.env.clone();
             env.extend(member.meta.env.clone());
-            env.extend(step.env.clone());
             compiled.env = env;
             compiled.required_env = workflow.required_env.clone();
             // The workflow's `env` names variables rather than setting them:
@@ -901,7 +900,6 @@ fn compile(
             );
             let mut env = workspace.env.clone();
             env.extend(member.meta.env.clone());
-            env.extend(step.env.clone());
             compiled.env = env;
             compiled.required_env = workflow.required_env.clone();
             // The workflow's `env` names variables rather than setting them:
@@ -1439,7 +1437,7 @@ mod tests {
             "build",
             "requires = [\"protoc\"]\nenv = [\"SHARED\", \"API_URL\"]\n\
              [[steps]]\nname = \"compile\"\nrun = \"cargo build\"\nrequires = [\"cargo\", \"sccache\"]\n\
-             [steps.env]\nPROFILE = \"release\"\n",
+             ",
         );
         let ws = Workspace::load(&root).unwrap();
         let graph = build(&ws, "build", &Selection::default()).unwrap();
@@ -1448,7 +1446,6 @@ mod tests {
         // Cascaded in order, de-duplicated (cargo appears once).
         assert_eq!(step.requires, vec!["cargo", "protoc", "sccache"]);
         assert_eq!(step.env.get("RUST_LOG").unwrap(), "info");
-        assert_eq!(step.env.get("PROFILE").unwrap(), "release");
         // A workflow's `env` names variables without setting them, so the
         // value written at the workspace level is the one that stands.
         assert_eq!(step.env.get("SHARED").unwrap(), "from-workspace");
@@ -1472,6 +1469,25 @@ mod tests {
         let err = format!("{:#}", Workspace::load(&root).unwrap_err());
         assert!(err.contains("env: [MODE]"), "{err}");
         assert!(err.contains(".env"), "{err}");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A step can't set values either — removed in 0.6.4 along with the
+    /// workflow-level map. The error carries the `.env` lines and the `env:`
+    /// list to write instead.
+    #[test]
+    fn a_step_env_table_is_refused_with_where_its_values_go() {
+        let root = scratch("stepenv");
+        let api = member(&root, "api", "[workspace]\nname = \"api\"\n");
+        workflow(
+            &api,
+            "build",
+            "[[steps]]\nname = \"compile\"\nrun = \"make\"\n[steps.env]\nPROFILE = \"release\"\n",
+        );
+        let err = format!("{:#}", Workspace::load(&root).unwrap_err());
+        assert!(err.contains("PROFILE=release"), "{err}");
+        assert!(err.contains("env: [PROFILE]"), "{err}");
 
         std::fs::remove_dir_all(&root).ok();
     }

@@ -193,6 +193,22 @@ pub fn config_files_in(dir: &Path) -> Vec<PathBuf> {
 /// file from several call sites says so once rather than once per read.
 static WARNED: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
 
+/// Notes already printed by [`note_once`], by key.
+static NOTED: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// Print a `note:` to stderr once per `key` per process — for a deprecated
+/// setting that still works, where repeating the note on every load (the
+/// daemon reloads a workspace often) would bury it rather than surface it.
+pub fn note_once(key: &str, message: impl FnOnce() -> String) {
+    let mut noted = NOTED.lock().unwrap();
+    if noted.iter().any(|k| k == key) {
+        return;
+    }
+    noted.push(key.to_string());
+    drop(noted);
+    eprintln!("note: {}", message());
+}
+
 /// Tell the user, once per path per process, that a file is in the old format.
 ///
 /// Deliberately a note on stderr rather than an error: their build works, and

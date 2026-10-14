@@ -56,7 +56,7 @@ export function originText(variable: EnvVar): string {
     case "default":
       return `from the defaults file ${variable.file ?? ""}${beat}`;
     case "config":
-      return "from an [env] table in the config";
+      return "set by value in a workspace's ciabatta.yaml (workspace.env — deprecated, move it to the .env)";
     case "argument":
       return "a custom argument, given after `...` for this run only";
     default:
@@ -272,7 +272,11 @@ export function EnvPanel({ report, title = "Environment" }: { report: EnvReport;
         hint="optional — the workflow uses them, the .env (and its profile) sets them"
         vars={listed}
       />
-      <EnvGroup label="[env] tables" hint="set by value in a workspace or step" vars={declared} />
+      <EnvGroup
+        label="workspace.env"
+        hint="set by value in a workspace's ciabatta.yaml — deprecated: move these values to the .env"
+        vars={declared}
+      />
       <EnvGroup label="read by steps" hint="from the environment or a .env file" vars={read} />
       {keyed && (
         <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 0.5 }}>

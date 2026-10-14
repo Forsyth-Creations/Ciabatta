@@ -156,7 +156,9 @@ fn step() -> crate::run::RunStep {
         from: Some(one()),
         cwd: Some(one()),
         workspace: Some(one()),
-        env: map(),
+        // Not a config key since 0.6.4 — a step can't set values, and a
+        // step `env:` is refused — so the schemas don't name it.
+        env: BTreeMap::new(),
         env_files: list(),
         needs: list(),
         on_error: Some(one()),

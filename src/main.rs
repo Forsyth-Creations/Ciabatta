@@ -3433,9 +3433,8 @@ workspace:
   # env_file: .env         # sourced before any workflow here runs
   # env_default: .env.default   # the template .env is generated from
 
-  # Standard environment variables for every step defined in this package.
-  # env:
-  #   RUST_LOG: info
+  # Variables' values go in .env (generated from env_default), never here —
+  # and each workflow lists the names it uses in its own `env: [...]`.
 
 # ─── Caching ───────────────────────────────────────────────────────────────────
 # Off by default. Opt in, declare what a build reads and what it produces, and
@@ -3860,8 +3859,9 @@ workspace:                   # this package's identity (ciabatta init --lib)
   umbrella: true               # on the ROOT config only: "I'm not a package,
                                # just shared toolchain and settings"
 
-  env:                         # standard variables for every step defined here
-    RUST_LOG: info
+  # env: is DEPRECATED here (0.6.4): a workspace doesn't define values. Put
+  # them in the .env template (env_default) or a profile, and list the names
+  # in each workflow's `env:`.
 
 toolchain:                   # how to install what workflows `require`
   protoc:
@@ -3938,8 +3938,8 @@ workflow name. Small packages can write them inline under `workflows:` instead
       on_error: fix                         # route failures to a recovery node,
                                             # same as a run flowchart
 
-      env:
-        CARGO_TERM_COLOR: always
+      # No `env:` on a step: a workflow file never sets values. Put them
+      # in .env and list the names in the workflow's `env:` above.
 
       cache:                                # per-step cache override; most
         inputs: ["proto/**/*"]              # steps inherit the workspace's
@@ -3999,9 +3999,8 @@ cache:
 A stage has exactly THREE dependencies, and any of them changing is a rebuild:
 
   1. its input files,
-  2. its environment variables: every one from an `env:` table (workspace,
-     workflow, step), the workflow's `required_env`, and any extra names in
-     `cache.env`,
+  2. its environment variables: every name in its workflow's `env` and
+     `required_env` lists, and any extra names in `cache.env`,
   3. the outputs of the stages it `needs`.
 
 The third is what makes a graph cacheable rather than just a directory: change
@@ -4532,8 +4531,9 @@ workspace:                   # this package's identity (ciabatta init --lib)
   umbrella: true               # on the ROOT config only: "I'm not a package,
                                # just shared toolchain and settings"
 
-  env:                         # standard variables for every step defined here
-    RUST_LOG: info
+  # env: is DEPRECATED here (0.6.4): a workspace doesn't define values. Put
+  # them in the .env template (env_default) or a profile, and list the names
+  # in each workflow's `env:`.
 
 toolchain:                   # how to install what workflows `require`
   protoc:
@@ -4610,8 +4610,8 @@ workflow name. Small packages can write them inline under `workflows:` instead
       on_error: fix                         # route failures to a recovery node,
                                             # same as a run flowchart
 
-      env:
-        CARGO_TERM_COLOR: always
+      # No `env:` on a step: a workflow file never sets values. Put them
+      # in .env and list the names in the workflow's `env:` above.
 
       cache:                                # per-step cache override; most
         inputs: ["proto/**/*"]              # steps inherit the workspace's
@@ -4671,9 +4671,8 @@ cache:
 A stage has exactly THREE dependencies, and any of them changing is a rebuild:
 
   1. its input files,
-  2. its environment variables: every one from an `env:` table (workspace,
-     workflow, step), the workflow's `required_env`, and any extra names in
-     `cache.env`,
+  2. its environment variables: every name in its workflow's `env` and
+     `required_env` lists, and any extra names in `cache.env`,
   3. the outputs of the stages it `needs`.
 
 The third is what makes a graph cacheable rather than just a directory: change

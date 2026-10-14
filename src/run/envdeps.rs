@@ -639,7 +639,9 @@ fn reason(
     let why = match origin {
         Origin::Environment => "set in the terminal, which always wins".to_string(),
         Origin::Config => {
-            "set by value in an `env` table — its workspace's ciabatta.yaml or the step's own — on top of the run's environment".to_string()
+            "set by value in its workspace's ciabatta.yaml (`workspace.env`, deprecated: move it \
+             to the .env) — on top of the run's environment"
+                .to_string()
         }
         Origin::Argument => return None,
         Origin::Unset => {

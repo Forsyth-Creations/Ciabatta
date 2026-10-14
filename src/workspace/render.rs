@@ -138,6 +138,9 @@ fn badges(step: &RunStep) -> Option<String> {
     if step.continue_on_error {
         tags.push("non-blocking".to_string());
     }
+    if step.warn_on_error {
+        tags.push("warn on error".to_string());
+    }
     if !step.when.is_empty() || !step.skip_if.is_empty() {
         tags.push("conditional".to_string());
     }

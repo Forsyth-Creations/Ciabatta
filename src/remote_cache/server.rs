@@ -274,6 +274,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/stats", get(stats))
         .route("/api/projects", get(list_projects).post(register_project))
         .route("/api/projects/{id}", delete(forget_project))
+        .route("/api/cache/clear", post(clear_cache))
         .route(
             "/api/projects/{id}/workflows",
             get(get_workflows).post(report_workflows),
@@ -682,6 +683,7 @@ async fn stats(
             "last_miss_at": last(|p| p.last_miss_at.as_deref()),
             "last_saved_at": last(|p| p.last_upload_at.as_deref()),
             "last_eviction": recorded.last_eviction,
+            "last_clear": recorded.last_clear,
             "daily": recorded.daily,
             "recent": recorded.recent.iter().take(40).map(|event| {
                 let mut value = serde_json::to_value(event).unwrap_or_default();
@@ -700,6 +702,9 @@ async fn stats(
             "tracked": workflows.values().map(Vec::len).sum::<usize>(),
             "stale_after": state.config.staleness_raw(),
             "stale": stale,
+        },
+        "clear": {
+            "password_required": state.config.clear.password_required(),
         },
         "sessions": state.sessions.live_count(),
         "release": *state.release.read().unwrap(),
@@ -773,6 +778,68 @@ async fn forget_project(
         return Err(ApiError::not_found(format!("No project {id}")));
     }
     Ok(Json(json!({ "ok": true, "entries_removed": removed })))
+}
+
+#[derive(Deserialize)]
+struct ClearPayload {
+    /// Must be `true`. A bare POST is too easy to send by accident for an
+    /// action that deletes everything; the page sets it after its own
+    /// confirmation.
+    #[serde(default)]
+    confirm: bool,
+    /// The `clear` password, when the server's config sets one.
+    #[serde(default)]
+    password: Option<String>,
+}
+
+/// Delete every artifact the cache holds, and keep everything it has learned.
+///
+/// For a cache that has been filled with something it shouldn't have — a
+/// corrupted upload, a poisoned key, a build that cached what it never should
+/// have. Projects stay registered and every statistic stays as it was: the
+/// counters, the daily totals and the build history record traffic that really
+/// happened, and a reset that erased them would also erase the evidence of
+/// whatever made the reset necessary.
+async fn clear_cache(
+    State(state): State<AppState>,
+    headers: header::HeaderMap,
+    Json(payload): Json<ClearPayload>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let identity = state.identify_admin(&headers)?;
+    if !payload.confirm {
+        return Err(ApiError::bad_request(anyhow::anyhow!(
+            "Clearing deletes every artifact in this cache. Send `\"confirm\": true` to mean it."
+        )));
+    }
+    if !state.config.clear.accepts(payload.password.as_deref()) {
+        tracing::warn!(
+            "{} tried to clear the cache with the wrong password",
+            identity.name
+        );
+        return Err(ApiError::new(
+            StatusCode::FORBIDDEN,
+            if payload.password.as_deref().unwrap_or_default().is_empty() {
+                "This cache asks for a password before it can be cleared (`clear` in the \
+                 server's config)."
+            } else {
+                "That isn't the password this cache's `clear` setting asks for."
+            },
+        ));
+    }
+
+    let freed: u64 = state.store.list()?.iter().map(|e| e.size).sum();
+    let removed = state.store.clear()?;
+    state.activity.record_clear(&identity.name, removed, freed);
+    tracing::info!(
+        "{} cleared the cache: {removed} entries, {}",
+        identity.name,
+        crate::cache::store::human_size(freed)
+    );
+    Ok(Json(json!({
+        "ok": true,
+        "entries_removed": removed,
+        "bytes_freed": freed,
+    })))
 }
 
 // ─── Cache traffic ──────────────────────────────────────────────────────────
@@ -2228,6 +2295,107 @@ mod tests {
 
     /// On an authenticating cache, user management is an admin's job — and the
     /// credentials it mints work for logging in.
+    /// Clearing takes every artifact and leaves the record of what happened:
+    /// projects, counters, and a note of the clear itself. With a password
+    /// configured, nothing is deleted until it's the right one.
+    #[tokio::test]
+    async fn clearing_needs_confirmation_and_the_password_and_keeps_the_statistics() {
+        let dir = scratch("clear");
+        let state = state_with(ServerConfig {
+            server: Listen {
+                storage: dir.clone(),
+                ..Default::default()
+            },
+            clear: super::super::ClearConfig {
+                password_sha256: Some(crate::cache::hash_bytes(b"sesame")),
+                password_env: None,
+            },
+            ..Default::default()
+        });
+        let response = router(state.clone())
+            .oneshot(post("/api/projects", r#"{"name":"monorepo"}"#))
+            .await
+            .unwrap();
+        let id = json(response).await["id"].as_str().unwrap().to_string();
+
+        let work = dir.join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        std::fs::write(work.join("out.bin"), "built").unwrap();
+        let config = crate::cache::CacheConfig {
+            enabled: Some(true),
+            outputs: vec!["out.bin".into()],
+            ..Default::default()
+        };
+        state
+            .store
+            .put(
+                "k1",
+                &work,
+                crate::cache::store::Build {
+                    target: "compile".into(),
+                    workspace: id.clone(),
+                    inputs: Vec::new(),
+                    outputs: config.hash_outputs(&work).unwrap(),
+                    env: std::collections::BTreeMap::new(),
+                    upstream: std::collections::BTreeMap::new(),
+                    duration_ms: 10,
+                },
+            )
+            .unwrap();
+        state.activity.record_eviction(0, 0);
+
+        let stats = json(
+            router(state.clone())
+                .oneshot(get("/api/stats"))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(stats["clear"]["password_required"], true);
+        assert_eq!(stats["storage"]["entries"], 1);
+
+        // Unconfirmed, then the wrong password: both refused, nothing deleted.
+        let response = router(state.clone())
+            .oneshot(post("/api/cache/clear", r#"{"password":"sesame"}"#))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let response = router(state.clone())
+            .oneshot(post(
+                "/api/cache/clear",
+                r#"{"confirm":true,"password":"guess"}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_eq!(state.store.list().unwrap().len(), 1);
+
+        let response = router(state.clone())
+            .oneshot(post(
+                "/api/cache/clear",
+                r#"{"confirm":true,"password":"sesame"}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(json(response).await["entries_removed"], 1);
+
+        // The artifacts are gone; the project and the history are not.
+        let stats = json(
+            router(state.clone())
+                .oneshot(get("/api/stats"))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(stats["storage"]["entries"], 0);
+        assert_eq!(stats["projects"].as_array().unwrap().len(), 1);
+        assert!(stats["activity"]["last_eviction"].is_object());
+        assert_eq!(stats["activity"]["last_clear"]["removed"], 1);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     #[tokio::test]
     async fn a_token_cache_requires_an_admin_to_manage_users() {
         let dir = scratch("adminusers");

@@ -49,8 +49,9 @@
       "items": { "type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*$" }
     },
     "env": {
-      "$ref": "./common.schema.json#/$defs/envMap",
-      "description": "Environment variables applied to every step of this workflow. Every one keys the cache: a build run with different variables is a different build."
+      "type": "array",
+      "description": "The environment variables this workflow's steps use, by name. Their values come from the workspace's .env (and so from the elected env profile) or the terminal — never from this file. Unlike `required_env` they may be unset. Every one keys the cache: a build run with different variables is a different build.",
+      "items": { "type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*$" }
     },
     "tags": {
       "type": "array",

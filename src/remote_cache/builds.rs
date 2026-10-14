@@ -160,6 +160,11 @@ impl Ledger {
                 entry.status = if *ok { "success" } else { "failed" }.to_string();
                 entry.duration_ms = elapsed;
             }
+            ProgressUpdate::StepWarned { step, detail, .. } => {
+                let entry = self.step(step);
+                entry.status = "warning".to_string();
+                entry.note = Some(detail.clone());
+            }
             ProgressUpdate::StepSkipped { step, reason, .. } => {
                 let entry = self.step(step);
                 // The cache skipping a step is a reuse, not a condition.

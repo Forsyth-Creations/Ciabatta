@@ -197,6 +197,12 @@ impl App {
                     r.logs.push(line);
                 }
             }
+            ProgressUpdate::StepWarned { workflow, step, .. } => {
+                if let Some(r) = self.find_mut(&workflow) {
+                    r.logs
+                        .push(format!("⚠ {step} failed as a warning (warn_on_error)"));
+                }
+            }
             ProgressUpdate::StepSkipped {
                 workflow,
                 step,

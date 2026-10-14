@@ -594,7 +594,7 @@ fn authenticate_token(
 }
 
 /// Compare two hex hashes without leaking which byte differed via timing.
-fn constant_time_eq(a: &str, b: &str) -> bool {
+pub(crate) fn constant_time_eq(a: &str, b: &str) -> bool {
     if a.len() != b.len() {
         return false;
     }

@@ -52,6 +52,10 @@ pub struct EnvVar {
     pub secret: bool,
     /// Declared in `required_env`: the run refuses to start without it.
     pub required: bool,
+    /// Named in a workflow's `env` list: a variable the workflow says it uses,
+    /// whose value comes from the environment, and which may be unset.
+    #[serde(default, skip_serializing_if = "crate::format::is_false")]
+    pub declared: bool,
     pub origin: Origin,
     /// The file that supplied it, when `origin` is `EnvFile` or `Default`.
     pub file: Option<String>,
@@ -210,10 +214,13 @@ impl EnvReport {
                 if var.required {
                     notes.push("required_env".to_string());
                 }
+                if var.declared {
+                    notes.push("env".to_string());
+                }
                 if let Some(purpose) = &var.purpose {
                     notes.push(purpose.clone());
                 }
-                if var.optional {
+                if var.optional && !var.declared {
                     notes.push("optional".to_string());
                 }
                 if var.varies {
@@ -446,12 +453,16 @@ pub fn collect(
     // never optional, however many others treat it as a nice-to-have.
     let mut purposes: BTreeMap<String, String> = BTreeMap::new();
     let mut needed: HashSet<String> = HashSet::new();
+    // Every name a workflow's `env` list declares.
+    let mut listed: HashSet<String> = HashSet::new();
+    let mut env_listed: HashSet<String> = HashSet::new();
     // What keys the cache — see `CacheConfig::with_step_env`. The member-level
     // `cache.env` isn't on the step, but a workflow's (and the step's own) is.
     let mut keyed: HashSet<String> = resolved.required_env.iter().cloned().collect();
     for step in &resolved.steps {
         keyed.extend(step.env.keys().cloned());
         keyed.extend(step.required_env.iter().cloned());
+        keyed.extend(step.declared_env.iter().cloned());
         if let Some(cache) = &step.cache {
             keyed.extend(cache.env.iter().cloned());
         }
@@ -472,6 +483,17 @@ pub fn collect(
                 .entry(implied.key.clone())
                 .or_insert(implied.purpose);
             let list = users.entry(implied.key).or_default();
+            if !list.contains(&step.name) {
+                list.push(step.name.clone());
+            }
+        }
+        // What the step's workflow declares, by name — `required_env` and
+        // `env` — is a dependency of each of its steps whether or not a
+        // command spells it out: a build tool reads its variables itself.
+        env_listed.extend(step.declared_env.iter().cloned());
+        for key in step.required_env.iter().chain(&step.declared_env) {
+            listed.insert(key.clone());
+            let list = users.entry(key.clone()).or_default();
             if !list.contains(&step.name) {
                 list.push(step.name.clone());
             }
@@ -567,13 +589,18 @@ pub fn collect(
                 reason,
                 in_cache_key: keyed.contains(&key),
                 purpose: purposes.get(&key).cloned(),
-                optional: purposes.contains_key(&key)
-                    && !needed.contains(&key)
-                    && !required
-                    && !declared.contains_key(&key),
+                // A variable a workflow's `env` lists may be unset by design;
+                // only `required_env` says otherwise.
+                optional: (env_listed.contains(&key) && !required)
+                    || purposes.contains_key(&key)
+                        && !listed.contains(&key)
+                        && !needed.contains(&key)
+                        && !required
+                        && !declared.contains_key(&key),
                 value: value.map(|v| if secret { mask(&v) } else { v }),
                 secret,
                 required,
+                declared: env_listed.contains(&key) && !required,
                 origin,
                 file,
                 overrides,
@@ -612,7 +639,9 @@ fn reason(
     let why = match origin {
         Origin::Environment => "set in the terminal, which always wins".to_string(),
         Origin::Config => {
-            "set by a step's [env] table, on top of the run's environment".to_string()
+            "set by value in its workspace's ciabatta.yaml (`workspace.env`, deprecated: move it \
+             to the .env) — on top of the run's environment"
+                .to_string()
         }
         Origin::Argument => return None,
         Origin::Unset => {

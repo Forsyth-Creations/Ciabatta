@@ -261,6 +261,26 @@ impl GuiState {
                     s.finished_at = Some(now());
                 }
             }
+            // Already marked failed by its `StepFinished`; this says the
+            // failure was only a warning, so the graph shows it as one.
+            ProgressUpdate::StepWarned {
+                workflow,
+                step,
+                detail,
+            } => {
+                if let Some(r) = self.recipe_mut(&workflow)
+                    && let Some(s) = r.step_mut(&step)
+                {
+                    s.status = "warning".into();
+                    push_log(
+                        &mut s.logs,
+                        &mut s.dropped_logs,
+                        format!(
+                            "⚠ failed, but marked warn_on_error — the run carries on: {detail}"
+                        ),
+                    );
+                }
+            }
             ProgressUpdate::StepSkipped {
                 workflow,
                 step,

@@ -38,13 +38,20 @@ enum StepState {
     /// Its action is in flight. Not satisfied: its dependents wait for it.
     Running,
     Failed,
+    /// It failed, but declared `warn_on_error`: the failure is reported as a
+    /// warning and the step counts as done, so its dependents proceed.
+    Warned,
 }
 
 impl StepState {
     fn satisfied(self) -> bool {
         matches!(
             self,
-            StepState::Succeeded | StepState::Recovered | StepState::Skipped | StepState::Started
+            StepState::Succeeded
+                | StepState::Recovered
+                | StepState::Skipped
+                | StepState::Started
+                | StepState::Warned
         )
     }
 }
@@ -777,6 +784,32 @@ async fn run_dag(
                         &mut attempts,
                     )
                     .await?;
+                    continue;
+                }
+
+                // A failure the step said to treat as a warning: say so, and
+                // carry on as though it had succeeded. Nothing it produced is
+                // cached — it was marked unaccounted above — so whatever runs
+                // behind it reruns rather than trusting a half-made output.
+                if step.warn_on_error && !err.is::<TimedOut>() {
+                    state.insert(step.name.as_str(), StepState::Warned);
+                    let _ = tx
+                        .send(ProgressUpdate::Log(
+                            workflow.to_string(),
+                            format!(
+                                "⚠ step '{}' failed, but it is marked warn_on_error, so the \
+                                 run carries on: {err}",
+                                step.name
+                            ),
+                        ))
+                        .await;
+                    let _ = tx
+                        .send(ProgressUpdate::StepWarned {
+                            workflow: workflow.to_string(),
+                            step: step.name.clone(),
+                            detail: err.to_string(),
+                        })
+                        .await;
                     continue;
                 }
 
@@ -2074,6 +2107,32 @@ mod tests {
         assert!(err.contains("1 failed step(s)"), "{err}");
         assert!(err.contains("optional"), "{err}");
         assert!(outcomes(&updates).contains(&("required".to_string(), true)));
+    }
+
+    #[tokio::test]
+    async fn warn_on_error_reports_the_failure_and_runs_its_dependents() {
+        let steps = vec![
+            RunStep {
+                warn_on_error: true,
+                ..step("lint", "exit 1")
+            },
+            RunStep {
+                needs: vec!["lint".into()],
+                ..step("package", "echo ran")
+            },
+        ];
+        let (result, updates) = drive(steps, Path::new(".")).await;
+
+        // A warning, not a failure: the run succeeds...
+        assert!(result.is_ok(), "{:?}", result.err());
+        // ...the step behind it still ran...
+        assert!(outcomes(&updates).contains(&("package".to_string(), true)));
+        // ...and the failure was still said out loud, as a warning.
+        assert!(outcomes(&updates).contains(&("lint".to_string(), false)));
+        assert!(updates.iter().any(|u| matches!(
+            u,
+            ProgressUpdate::StepWarned { step, .. } if step == "lint"
+        )));
     }
 
     #[tokio::test]

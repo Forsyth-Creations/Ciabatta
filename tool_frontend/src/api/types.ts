@@ -43,6 +43,9 @@ export interface EnvVar {
   secret: boolean;
   /** Declared in `required_env` — the run refuses to start without it. */
   required: boolean;
+  /** Named in the workflow's `env` list: used, valued from `.env`, and allowed
+   *  to be unset. Absent on runs recorded before 0.6.4. */
+  declared?: boolean;
   origin: EnvOrigin;
   /** The file that supplied it, when `origin` is `env_file` or `default`. */
   file: string | null;

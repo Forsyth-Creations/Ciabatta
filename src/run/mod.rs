@@ -47,6 +47,51 @@ where
     })
 }
 
+/// Refuse `env:` on a step. Removed in 0.6.4: a workflow file names the
+/// variables it uses and never sets their values, so a step-level table of
+/// values has no place in one. An empty table reads, as nothing.
+fn no_step_env<'de, D>(
+    deserializer: D,
+) -> std::result::Result<std::collections::BTreeMap<String, String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    let names: Vec<String> = match &value {
+        serde_json::Value::Null => Vec::new(),
+        serde_json::Value::Object(map) => map.keys().cloned().collect(),
+        serde_json::Value::Array(items) => items
+            .iter()
+            .map(|v| {
+                v.as_str()
+                    .map(str::to_string)
+                    .unwrap_or_else(|| v.to_string())
+            })
+            .collect(),
+        other => vec![other.to_string()],
+    };
+    if names.is_empty() {
+        return Ok(std::collections::BTreeMap::new());
+    }
+    let lines: Vec<String> = match &value {
+        serde_json::Value::Object(map) => map
+            .iter()
+            .map(|(k, v)| match v {
+                serde_json::Value::String(s) => format!("{k}={s}"),
+                other => format!("{k}={other}"),
+            })
+            .collect(),
+        _ => names.iter().map(|n| format!("{n}=…")).collect(),
+    };
+    Err(serde::de::Error::custom(format!(
+        "a step can't set environment variables (`env:` on a step was removed in 0.6.4) — \
+         put the values in the workspace's .env (or the .ciabatta/.env.<profile> it is \
+         copied from):\n    {}\nand name them in the workflow's list: `env: [{}]`",
+        lines.join("\n    "),
+        names.join(", ")
+    )))
+}
+
 /// A node in the run flowchart: either a normal step (runs an action once its
 /// `needs` succeed) or a recovery node (`recover = true`, entered only via some
 /// step's `on_error`, offering a choice of fix `options`).
@@ -140,12 +185,41 @@ pub struct RunStep {
     /// the workflow, not the step.
     #[serde(skip)]
     pub required_env: Vec<String>,
+    /// Set by the compiler from the workflow's `env` list: the variables this
+    /// step's workflow says it uses. Their values come from the run's own
+    /// environment — the terminal, then the `.env` search, which a profile
+    /// decides — and every one of them keys the step's cache entry.
+    /// `#[serde(skip)]` for the same reason as `required_env`.
+    #[serde(skip)]
+    pub declared_env: Vec<String>,
+    /// What the cache knows this step as: `<member>:<workflow>:<step>`, set by
+    /// the workflow compiler.
+    ///
+    /// The graph's own node id can't be used for that. It is shortened to
+    /// `<member>:<step>` when a member contributes only one workflow to the
+    /// graph, so the same target compiled into two different workflows' graphs
+    /// would get two different names — and two different cache keys, and
+    /// rebuild in each. `None` outside a workflow graph, where the step's name
+    /// is already all there is.
+    #[serde(skip)]
+    pub cache_id: Option<String>,
     /// Don't fail the whole run when this step fails: its dependents are
     /// skipped, every other branch carries on, and the run reports the failure
     /// at the end. Always applied when a `timeout` expires.
     #[serde(default)]
     #[serde(skip_serializing_if = "crate::format::is_false")]
     pub continue_on_error: bool,
+    /// Treat this step failing as a warning: the failure is reported, but the
+    /// step counts as done — its dependents run, and the run itself still
+    /// succeeds. For a stage whose result is worth knowing about but not worth
+    /// stopping for: a linter being phased in, an optional upload, a report.
+    ///
+    /// The difference from [`Self::continue_on_error`] is what happens next:
+    /// that one stops this branch and fails the run at the end, this one does
+    /// neither.
+    #[serde(default)]
+    #[serde(skip_serializing_if = "crate::format::is_false")]
+    pub warn_on_error: bool,
 
     // ─── Phase & placement ──────────────────────────────────────────────────
     /// The special, identifiable phase this step belongs to: `setup`, `build`,
@@ -202,10 +276,15 @@ pub struct RunStep {
     /// workflow graph is compiled; it's what labels each node on the graph.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub workspace: Option<String>,
-    /// Environment variables for this step alone, layered over the run's own.
-    /// A compiled workflow graph folds each sub-workspace's standard variables
-    /// in here, so two members' settings can't collide in one shared map.
-    #[serde(default)]
+    /// Values layered over the run's environment for this step — filled in by
+    /// the workflow compiler from a sub-workspace's deprecated `workspace.env`
+    /// table, so two members' settings can't collide in one shared map.
+    ///
+    /// Not something a step can write. A workflow file names variables (its
+    /// `env:` list) and never sets them: their values come from the `.env`,
+    /// and so from the elected env profile. A step `env:` is refused by
+    /// [`no_step_env`] with the place its values belong.
+    #[serde(default, deserialize_with = "no_step_env")]
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub env: std::collections::BTreeMap<String, String>,
 
@@ -321,6 +400,11 @@ pub struct Transfer<'a> {
 }
 
 impl RunStep {
+    /// The name the cache keys this step under — see [`Self::cache_id`].
+    pub fn cache_name(&self) -> &str {
+        self.cache_id.as_deref().unwrap_or(&self.name)
+    }
+
     /// Whether this node runs an action of its own, as opposed to a pure
     /// recovery node that only presents options. A transfer step counts: its
     /// action is the built-in registry move.
@@ -1915,8 +1999,6 @@ retries          = 2
 continue_on_error = true
 kind             = "build"
 cwd              = "packages/api"
-[steps.env]
-PROFILE = "release"
 
 [[steps]]
 name       = "dev-server"
@@ -1941,7 +2023,6 @@ persistent = true
         assert!(compile.continue_on_error);
         assert_eq!(compile.kind.as_deref(), Some("build"));
         assert_eq!(compile.cwd.as_deref(), Some("packages/api"));
-        assert_eq!(compile.env.get("PROFILE").unwrap(), "release");
         assert!(!compile.persistent);
 
         assert!(steps[1].persistent);

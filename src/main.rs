@@ -1975,6 +1975,17 @@ async fn run_plain(
                 let time = took(&mut clocks, &format!("step:{workflow}:{step}"));
                 println!("{}   {mark} step: {step} {time}", tag(&workflow))
             }
+            ProgressUpdate::StepWarned {
+                workflow,
+                step,
+                detail,
+            } => {
+                println!(
+                    "{}   {} step: {step} failed as a warning (warn_on_error), the run carries on: {detail}",
+                    tag(&workflow),
+                    "⚠".style(color::warn())
+                )
+            }
             ProgressUpdate::StepSkipped {
                 workflow,
                 step,
@@ -3422,9 +3433,8 @@ workspace:
   # env_file: .env         # sourced before any workflow here runs
   # env_default: .env.default   # the template .env is generated from
 
-  # Standard environment variables for every step defined in this package.
-  # env:
-  #   RUST_LOG: info
+  # Variables' values go in .env (generated from env_default), never here —
+  # and each workflow lists the names it uses in its own `env: [...]`.
 
 # ─── Caching ───────────────────────────────────────────────────────────────────
 # Off by default. Opt in, declare what a build reads and what it produces, and
@@ -3849,8 +3859,9 @@ workspace:                   # this package's identity (ciabatta init --lib)
   umbrella: true               # on the ROOT config only: "I'm not a package,
                                # just shared toolchain and settings"
 
-  env:                         # standard variables for every step defined here
-    RUST_LOG: info
+  # env: is DEPRECATED here (0.6.4): a workspace doesn't define values. Put
+  # them in the .env template (env_default) or a profile, and list the names
+  # in each workflow's `env:`.
 
 toolchain:                   # how to install what workflows `require`
   protoc:
@@ -3879,8 +3890,10 @@ workflow name. Small packages can write them inline under `workflows:` instead
   required_env: [API_TOKEN]                 # refuse to start unless set
   tags: [rust]
 
-  env:                                      # vars for all its steps
-    PROFILE: release
+  env: [PROFILE, RUST_LOG]                  # vars its steps use, BY NAME:
+                                            # the values come from .env (and
+                                            # so from the env profile), never
+                                            # from here. May be unset.
 
   steps:
     - name: compile
@@ -3909,6 +3922,9 @@ workflow name. Small packages can write them inline under `workflows:` instead
                                             #   ciabatta watch --list
       continue_on_error: true               # its failure skips dependents but
                                             # doesn't stop the run
+      warn_on_error: true                   # or: its failure is only a
+                                            # warning — dependents still run
+                                            # and the run still succeeds
       kind: push                            # push | pull select the built-in
                                             # registry transfer; setup | build |
                                             # test | deploy | anything else is
@@ -3922,8 +3938,8 @@ workflow name. Small packages can write them inline under `workflows:` instead
       on_error: fix                         # route failures to a recovery node,
                                             # same as a run flowchart
 
-      env:
-        CARGO_TERM_COLOR: always
+      # No `env:` on a step: a workflow file never sets values. Put them
+      # in .env and list the names in the workflow's `env:` above.
 
       cache:                                # per-step cache override; most
         inputs: ["proto/**/*"]              # steps inherit the workspace's
@@ -3983,9 +3999,8 @@ cache:
 A stage has exactly THREE dependencies, and any of them changing is a rebuild:
 
   1. its input files,
-  2. its environment variables: every one from an `env:` table (workspace,
-     workflow, step), the workflow's `required_env`, and any extra names in
-     `cache.env`,
+  2. its environment variables: every name in its workflow's `env` and
+     `required_env` lists, and any extra names in `cache.env`,
   3. the outputs of the stages it `needs`.
 
 The third is what makes a graph cacheable rather than just a directory: change
@@ -4516,8 +4531,9 @@ workspace:                   # this package's identity (ciabatta init --lib)
   umbrella: true               # on the ROOT config only: "I'm not a package,
                                # just shared toolchain and settings"
 
-  env:                         # standard variables for every step defined here
-    RUST_LOG: info
+  # env: is DEPRECATED here (0.6.4): a workspace doesn't define values. Put
+  # them in the .env template (env_default) or a profile, and list the names
+  # in each workflow's `env:`.
 
 toolchain:                   # how to install what workflows `require`
   protoc:
@@ -4546,8 +4562,10 @@ workflow name. Small packages can write them inline under `workflows:` instead
   required_env: [API_TOKEN]                 # refuse to start unless set
   tags: [rust]
 
-  env:                                      # vars for all its steps
-    PROFILE: release
+  env: [PROFILE, RUST_LOG]                  # vars its steps use, BY NAME:
+                                            # the values come from .env (and
+                                            # so from the env profile), never
+                                            # from here. May be unset.
 
   steps:
     - name: compile
@@ -4576,6 +4594,9 @@ workflow name. Small packages can write them inline under `workflows:` instead
                                             #   ciabatta watch --list
       continue_on_error: true               # its failure skips dependents but
                                             # doesn't stop the run
+      warn_on_error: true                   # or: its failure is only a
+                                            # warning — dependents still run
+                                            # and the run still succeeds
       kind: push                            # push | pull select the built-in
                                             # registry transfer; setup | build |
                                             # test | deploy | anything else is
@@ -4589,8 +4610,8 @@ workflow name. Small packages can write them inline under `workflows:` instead
       on_error: fix                         # route failures to a recovery node,
                                             # same as a run flowchart
 
-      env:
-        CARGO_TERM_COLOR: always
+      # No `env:` on a step: a workflow file never sets values. Put them
+      # in .env and list the names in the workflow's `env:` above.
 
       cache:                                # per-step cache override; most
         inputs: ["proto/**/*"]              # steps inherit the workspace's
@@ -4650,9 +4671,8 @@ cache:
 A stage has exactly THREE dependencies, and any of them changing is a rebuild:
 
   1. its input files,
-  2. its environment variables: every one from an `env:` table (workspace,
-     workflow, step), the workflow's `required_env`, and any extra names in
-     `cache.env`,
+  2. its environment variables: every name in its workflow's `env` and
+     `required_env` lists, and any extra names in `cache.env`,
   3. the outputs of the stages it `needs`.
 
 The third is what makes a graph cacheable rather than just a directory: change

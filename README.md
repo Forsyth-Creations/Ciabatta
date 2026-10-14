@@ -322,9 +322,11 @@ steps:
     publish_path: "api/{CIABATTA_BRANCH}/{CIABATTA_COMMIT}/api"
 ```
 
-Steps run **from their own package's directory**, with that package's
-`[workspace.env]` variables in scope, so scripts work exactly as they do when
-you run them by hand.
+Steps run **from their own package's directory**, with the run's `.env`
+variables in scope, so scripts work exactly as they do when you run them by
+hand. (A `workspace.env` table of values in `ciabatta.yaml` is deprecated as of
+0.6.4 and prints a note: values belong in the `.env` template or a profile, and
+names in each workflow's `env:` list.)
 
 ### One graph, drawn before it runs
 
@@ -397,6 +399,7 @@ Missing 1 build tool(s):
 | `persistent = true` | A dev server or watcher that never exits: it's started, its dependents are released immediately, and the daemon takes ownership of it as a **watch session that outlives the run** — see below. |
 | `retries = 2` | Extra attempts for a flaky step. A timeout isn't retried — it's stuck, not flaky. |
 | `continue_on_error = true` | Its failure skips its dependents but doesn't stop the run. |
+| `warn_on_error = true` | Its failure is reported as a **warning**: its dependents still run, and the run still succeeds. For a stage worth hearing about but not worth stopping for — a linter being phased in, an optional upload. |
 
 A run that tolerated failures still **fails**, and reports every one of them at
 the end — tolerating a failure is not hiding it.
@@ -972,9 +975,8 @@ A stage has exactly **three** dependencies, and any of them changing is a
 rebuild:
 
 1. its **input files**,
-2. its **environment variables** — every one it gets from an `env:` table
-   (workspace, workflow or step) and every name in its workflow's
-   `required_env`, plus anything extra listed in `cache.env`,
+2. its **environment variables** — every name in its workflow's `env` and
+   `required_env` lists, plus anything extra listed in `cache.env`,
 3. the **outputs of the stages it needs**.
 
 **Variables key the cache without being repeated.** A workflow declares its
@@ -982,10 +984,15 @@ variables in two places, and both are part of every step's key:
 
 ```yaml
 # packages/api/.ciabatta/workflows/build.yaml
-env:                     # set for every step, by value
-  MODE: release
+env: [MODE]              # used by its steps, by name — the value is the .env's
 required_env: [API_URL, DEPLOY_TOKEN]   # must be set, or the run won't start
 ```
+
+A workflow's `env` is a list of names, never values: which value `MODE` has is
+decided by the `.env` the run sources — and so by the env profile elected for
+it — or by the terminal. Unlike `required_env`, a name in `env` may be unset.
+(Before 0.6.4 it was a map of values; that shape is now refused with the list
+it should be.)
 
 Change `MODE`, or run with a different `API_URL`, and the steps rebuild.
 `required_env` values go into the key (and the stored manifest, which is
@@ -1533,7 +1540,7 @@ The report printed before every run (and by `--dry-run`) shows the search order,
 then groups the variables by the file they came from. Each group has a header
 naming the source and why it won, colour-coded by kind in a terminal: magenta
 for the terminal, blue for workflow files, cyan for profile files, green for
-`.env` files, dim for defaults, yellow for step `[env]` tables, red for
+`.env` files, dim for defaults, yellow for a deprecated `workspace.env` table, red for
 required variables nothing set. The run page shows the same reasons when you
 hover over or select a variable:
 

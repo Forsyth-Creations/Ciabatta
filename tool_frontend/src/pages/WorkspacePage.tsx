@@ -412,6 +412,11 @@ function StepBadges({ step }: { step: WorkflowStep }) {
           <Chip size="small" variant="outlined" label="non-blocking" />
         </Tooltip>
       )}
+      {step.warn_on_error && (
+        <Tooltip title="Its failure is reported as a warning: dependents still run and the run still succeeds">
+          <Chip size="small" variant="outlined" color="warning" label="warn on error" />
+        </Tooltip>
+      )}
       {step.requires.map((tool) => (
         <Chip key={tool} size="small" variant="outlined" label={tool} sx={{ opacity: 0.7 }} />
       ))}

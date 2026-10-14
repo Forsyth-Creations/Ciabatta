@@ -28,6 +28,8 @@ export interface WorkflowStep {
   /** From the workflow's `background:` array: started first, gates nothing, stopped when the run ends. */
   background: boolean;
   continue_on_error: boolean;
+  /** A failure is only a warning: dependents run, the run still succeeds. */
+  warn_on_error?: boolean;
   recover: boolean;
   on_error: string | null;
   /** Variables this step sets for itself, on top of the run's environment. */

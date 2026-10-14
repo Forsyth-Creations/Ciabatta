@@ -56,7 +56,7 @@ export function originText(variable: EnvVar): string {
     case "default":
       return `from the defaults file ${variable.file ?? ""}${beat}`;
     case "config":
-      return "from an [env] table in the config";
+      return "set by value in a workspace's ciabatta.yaml (workspace.env — deprecated, move it to the .env)";
     case "argument":
       return "a custom argument, given after `...` for this run only";
     default:
@@ -208,11 +208,14 @@ export function EnvPanel({ report, title = "Environment" }: { report: EnvReport;
   // whatever else the steps read from around them.
   const vars = report.vars.filter((v) => v.origin !== "argument");
   const required = vars.filter((v) => v.required);
-  const declared = vars.filter((v) => !v.required && v.origin === "config");
+  const listed = vars.filter((v) => !v.required && v.declared);
+  const declared = vars.filter((v) => !v.required && !v.declared && v.origin === "config");
   const read = vars.filter(
-    (v) => !v.required && v.origin !== "config" && v.steps.length > 0,
+    (v) => !v.required && !v.declared && v.origin !== "config" && v.steps.length > 0,
   );
-  const unused = vars.filter((v) => v.steps.length === 0 && !v.required && v.origin !== "config");
+  const unused = vars.filter(
+    (v) => v.steps.length === 0 && !v.required && !v.declared && v.origin !== "config",
+  );
   const keyed = vars.some((v) => v.in_cache_key);
 
   return (
@@ -264,7 +267,16 @@ export function EnvPanel({ report, title = "Environment" }: { report: EnvReport;
         hint="must be set, or the run won't start"
         vars={required}
       />
-      <EnvGroup label="env" hint="declared in the config, by value" vars={declared} />
+      <EnvGroup
+        label="env"
+        hint="optional — the workflow uses them, the .env (and its profile) sets them"
+        vars={listed}
+      />
+      <EnvGroup
+        label="workspace.env"
+        hint="set by value in a workspace's ciabatta.yaml — deprecated: move these values to the .env"
+        vars={declared}
+      />
       <EnvGroup label="read by steps" hint="from the environment or a .env file" vars={read} />
       {keyed && (
         <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 0.5 }}>

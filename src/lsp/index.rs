@@ -206,7 +206,7 @@ fn scan(root: &Path) -> Index {
         for (name, workflow) in &member.workflows {
             index.tags.extend(workflow.tags.iter().cloned());
             index.owners.extend(workflow.owner.iter().cloned());
-            index.env.extend(workflow.env.keys().cloned());
+            index.env.extend(workflow.env.iter().cloned());
             index.env.extend(workflow.required_env.iter().cloned());
             for step in &workflow.steps {
                 index.tags.extend(step.tags.iter().cloned());

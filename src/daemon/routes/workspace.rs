@@ -332,6 +332,7 @@ fn step_json(step: &crate::run::RunStep) -> Value {
         "persistent": step.persistent,
         "background": step.background,
         "continue_on_error": step.continue_on_error,
+        "warn_on_error": step.warn_on_error,
         "recover": step.recover,
         "on_error": step.on_error,
         "env": env,

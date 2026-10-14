@@ -57,6 +57,11 @@ pub struct Recorded {
     /// What the most recent retention sweep that evicted anything did.
     #[serde(default)]
     pub last_eviction: Option<Eviction>,
+    /// The last time somebody cleared the whole cache from the admin page.
+    /// Kept beside the numbers it deliberately didn't reset, so a dip in the
+    /// hit rate the morning after has an explanation sitting next to it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_clear: Option<Clear>,
     /// Every project's traffic summed per UTC day, keyed `YYYY-MM-DD` — which
     /// sorts as a date, so the oldest day is always the first key.
     #[serde(default)]
@@ -160,6 +165,15 @@ pub struct Event {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct Eviction {
     pub at: String,
+    pub removed: usize,
+    pub freed: u64,
+}
+
+/// What clearing the cache removed, and who asked for it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Clear {
+    pub at: String,
+    pub by: String,
     pub removed: usize,
     pub freed: u64,
 }
@@ -340,6 +354,20 @@ impl Activity {
     pub fn record_eviction(&self, removed: usize, freed: u64) {
         self.lock().last_eviction = Some(Eviction {
             at: crate::cache::store::now(),
+            removed,
+            freed,
+        });
+        self.dirty.store(true, Ordering::Relaxed);
+    }
+
+    /// Note that the whole cache was cleared. Nothing else is touched: the
+    /// counters, the daily totals and the recent events describe traffic that
+    /// really happened, and wiping them would make a reset look like a
+    /// server that was never used.
+    pub fn record_clear(&self, by: &str, removed: usize, freed: u64) {
+        self.lock().last_clear = Some(Clear {
+            at: crate::cache::store::now(),
+            by: by.to_string(),
             removed,
             freed,
         });

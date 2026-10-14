@@ -146,6 +146,7 @@ fn step() -> crate::run::RunStep {
         retries: 1,
         persistent: true,
         continue_on_error: true,
+        warn_on_error: true,
         kind: Some(one()),
         registry: Some(one()),
         artifact: Some(one()),
@@ -155,7 +156,9 @@ fn step() -> crate::run::RunStep {
         from: Some(one()),
         cwd: Some(one()),
         workspace: Some(one()),
-        env: map(),
+        // Not a config key since 0.6.4 — a step can't set values, and a
+        // step `env:` is refused — so the schemas don't name it.
+        env: BTreeMap::new(),
         env_files: list(),
         needs: list(),
         on_error: Some(one()),
@@ -177,6 +180,8 @@ fn step() -> crate::run::RunStep {
         // of a workflow's `background:` array — so the schemas don't name it.
         background: false,
         required_env: Vec::new(),
+        declared_env: Vec::new(),
+        cache_id: None,
     }
 }
 
@@ -197,7 +202,7 @@ fn workflow() -> crate::workspace::Workflow {
         requires: list(),
         env_file: list(),
         required_env: list(),
-        env: map(),
+        env: list(),
         tags: list(),
         cache: Some(cache()),
         steps: vec![step()],

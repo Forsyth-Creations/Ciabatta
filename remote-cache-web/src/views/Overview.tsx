@@ -35,6 +35,7 @@ import {
   ProjectSaved,
   RateGauge,
 } from "../components/charts";
+import { ClearCache } from "../components/ClearCache";
 import { ChartCard, EmptyRow, Mono, Prose, Section, StatTile, Tag, When } from "../components/ui";
 import { ago, human, rate, saved } from "../format";
 import { useLoad } from "../useLoad";
@@ -42,7 +43,7 @@ import { useLoad } from "../useLoad";
 const SPANS = [7, 30, 90] as const;
 
 export function Overview({ refreshKey }: { refreshKey: number }) {
-  const { data: s, error, loading } = useLoad(() => api<Stats>("/api/stats"), refreshKey);
+  const { data: s, error, loading, reload } = useLoad(() => api<Stats>("/api/stats"), refreshKey);
   const [span, setSpan] = useState<number>(30);
 
   if (error)
@@ -56,6 +57,7 @@ export function Overview({ refreshKey }: { refreshKey: number }) {
   const a = s.activity;
   const lookups = s.counters.hits + s.counters.misses;
   const ev = a.last_eviction;
+  const cleared = a.last_clear;
 
   return (
     <Box>
@@ -346,8 +348,12 @@ export function Overview({ refreshKey }: { refreshKey: number }) {
           `Retention: ${s.retention.description}.` +
           (ev
             ? ` Last eviction ${ago(ev.at)}: ${ev.removed} entr${ev.removed === 1 ? "y" : "ies"}, ${human(ev.freed)}.`
-            : " Nothing evicted yet.")
+            : " Nothing evicted yet.") +
+          (cleared
+            ? ` Cleared ${ago(cleared.at)} by ${cleared.by}: ${cleared.removed} entr${cleared.removed === 1 ? "y" : "ies"}, ${human(cleared.freed)}.`
+            : "")
         }
+        action={<ClearCache stats={s} onCleared={reload} />}
       >
         <Box
           sx={{

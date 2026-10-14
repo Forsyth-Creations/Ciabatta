@@ -89,6 +89,15 @@ pub enum ProgressUpdate {
         step: String,
         ok: bool,
     },
+    /// A run step failed, but declared `warn_on_error`: sent after its
+    /// `StepFinished { ok: false }`. It counts as done — its dependents run and
+    /// the run can still succeed — so viewers show it as a warning rather than
+    /// a failure. `detail` is the failure as reported.
+    StepWarned {
+        workflow: String,
+        step: String,
+        detail: String,
+    },
     /// A run step was skipped because its `when`/`skip_if` condition said so.
     /// It counts as satisfied, so its dependents still run. `reason` is a short
     /// explanation (e.g. ``skip_if `env.IN_CI == true` ``).

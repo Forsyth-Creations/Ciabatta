@@ -1337,9 +1337,15 @@ ciabatta cache status           # what the local cache is holding, and what it s
         />
 
         <Pre>{`# packages/api/.ciabatta/workflows/build.yaml
-env:                                  # set for every step, by value
-  MODE: release
+env: [MODE]                           # used by every step, by name — the .env sets it
 required_env: [API_URL, DEPLOY_TOKEN] # must be set, or the run won't start`}</Pre>
+        <P>
+          A workflow&apos;s <C>env</C> names variables, never values: which value <C>MODE</C> has
+          is decided by the <C>.env</C> the run sources — and so by the elected env profile — or
+          by the terminal. Unlike <C>required_env</C>, a name in <C>env</C> may be unset. On the
+          run graph, required variables are drawn solid with a ✱ and optional ones dashed with a
+          ?, each wired to the steps of the workflow that declares it.
+        </P>
         <P>
           Both lists key the cache. <C>required_env</C> values go in as a SHA-256 digest — that is
           where tokens get declared, and cache manifests are shared through the remote cache — so
@@ -1415,8 +1421,9 @@ Environment for 'build' — 4 variable(s) this run depends on
 workspace:
   env_file: .env              # the default; set it to point somewhere else
   env_default: .env.example   # the checked-in template .env is generated from
-  env:
-    LOG_LEVEL: info           # a plain value every step here starts with`}</Pre>
+  # env: { LOG_LEVEL: info }  # DEPRECATED (0.6.4): put LOG_LEVEL=info in the
+  #                           # template instead, and list LOG_LEVEL in the
+  #                           # workflows' \`env:\``}</Pre>
         <P>
           A missing <C>.env</C> is generated from that template at the start of a run, for the
           project and for every sub-workspace the run touches. It never overwrites a file that
@@ -1454,8 +1461,9 @@ required_env: [API_URL, DATABASE_URL]`}</Pre>
     # Only in production, and never from a developer's laptop:
     when: env.RUN_ENV == prod
     skip_if: env.IS_LOCAL
-    env:
-      DEPLOY_TIMEOUT: 600     # this step only, layered over the run's`}</Pre>
+    # No env: here. A step can't set values (removed in 0.6.4): put
+    # DEPLOY_TIMEOUT=600 in the .env and list DEPLOY_TIMEOUT in the
+    # workflow's env: list.`}</Pre>
 
         <SubHeading>Env profiles</SubHeading>
         <P>
@@ -1630,6 +1638,7 @@ steps:
     script: scripts/smoke.sh     # a bash script, path relative to the step's cwd
     needs: [package]
     continue_on_error: true      # report it, don't take the run down
+    # warn_on_error: true        # ...or: only a warning — dependents still run
     when: env.RUN_SMOKE          # only when that's truthy
 
   # A recovery node: not part of the success graph, entered only when compile
@@ -1670,11 +1679,11 @@ steps:
             ["description", "One line. ciabatta list -v prints it, so nobody has to open the file."],
             ["needs", "Steps in THIS file that must succeed first. Cross-package dependencies go on the workflow's needs."],
             ["cwd", "Where the action runs, relative to the project root. Defaults to the package's own directory."],
-            ["env", "Variables for this step alone, layered over the run's."],
             ["when / skip_if", "Conditions: VAR == value, VAR != value, VAR, !VAR. when must all hold; skip_if skips when any does."],
             ["timeout", "Wall-clock limit — \"90s\", \"10m\", \"1h30m\". Past it the step is killed and the rest of the graph carries on."],
             ["retries", "Extra attempts on failure, for transient errors. Default 0."],
             ["continue_on_error", "Don't fail the run: skip this step's dependents, carry on elsewhere, report at the end."],
+            ["warn_on_error", "Treat a failure as a warning: the step counts as done, its dependents run, and the run still succeeds."],
             ["on_error", "Jump to this recovery node instead of aborting."],
             ["persistent", "A process that never exits — a dev server. Its dependents are released immediately and it OUTLIVES the run, as a watch session."],
             ["tags / owner", "Labels and ownership for this step alone."],

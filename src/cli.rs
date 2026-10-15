@@ -58,6 +58,52 @@ pub enum Commands {
         env: Vec<String>,
     },
 
+    /// Ask the operator for a value from inside a workflow step, and print the
+    /// answer to stdout:
+    ///
+    ///     region=$(ciabatta input "Which region?" --default us-east-1 --env REGION)
+    ///
+    /// Inside a run, the question goes to whoever is watching it — this
+    /// terminal, with a countdown, or a modal in the web app for a `--gui` or
+    /// daemon run — and the step waits for the answer. With `--env VAR` and
+    /// VAR set, its value is the answer and nobody is asked. A run nobody can
+    /// answer (CI, piped output, --tui) takes the `--default`, or fails the
+    /// step. How long a question waits is `workspace.input_timeout` in the
+    /// root ciabatta.yaml (unlimited unless set), or `--timeout`.
+    ///
+    /// Outside a run it asks on this terminal, or reads one line from stdin.
+    #[command(visible_alias = "read")]
+    Input {
+        /// The question, one line.
+        #[arg(value_name = "PROMPT", default_value = "Enter a value")]
+        prompt: String,
+        /// Longer text shown with the question — what the value is for,
+        /// where to find it. Shown in the web app's dialog and under the
+        /// prompt in a terminal.
+        #[arg(short = 'd', long, value_name = "TEXT")]
+        details: Option<String>,
+        /// Use this variable's value when it is set (and not empty), without
+        /// asking.
+        #[arg(short = 'e', long = "env", value_name = "VAR")]
+        env: Option<String>,
+        /// The answer when the operator just presses Enter, when the question
+        /// times out, or when nobody can be asked.
+        #[arg(long, value_name = "VALUE")]
+        default: Option<String>,
+        /// Mask the answer as it is typed, and in the run's logs.
+        #[arg(short = 's', long)]
+        secret: bool,
+        /// How long to wait for this question, overriding the workspace's
+        /// `input_timeout` (`"30s"`, `"5m"`; `0` waits forever).
+        #[arg(short = 't', long, value_name = "DURATION")]
+        timeout: Option<String>,
+        /// Wait for a go-ahead rather than a value: Enter in a terminal, a
+        /// Continue button in the web app. Prints nothing. A pause that times
+        /// out, or that nobody can see (CI), carries on.
+        #[arg(long, conflicts_with = "secret")]
+        enter: bool,
+    },
+
     /// Run a workflow across the monorepo, by name.
     ///
     /// Equivalent to typing the workflow name directly: `ciabatta workflow

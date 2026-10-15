@@ -238,6 +238,8 @@ const ENDPOINTS: EndpointGroup[] = [
       { method: "GET", path: "/api/run/runs/{id}", note: "Current state of every step, including each step's cache report." },
       { method: "GET", path: "/api/run/runs/{id}/stream", note: "SSE. Step transitions and log lines as they happen." },
       { method: "POST", path: "/api/run/runs/{id}/choose", note: "Answer a step that is waiting on a decision." },
+      { method: "POST", path: "/api/run/runs/{id}/input", note: "Answer a step's `ciabatta input` question: { id, value }." },
+      { method: "GET", path: "/api/run/inputs", note: "Every `ciabatta input` question waiting on an answer, across all runs." },
     ],
   },
   {
@@ -380,6 +382,18 @@ const COMMANDS: CommandGroup[] = [
       {
         usage: "ciabatta env list",
         note: "The env profiles this workspace has — every .env.<name>, with how many variables each sets and where its files are — and the default .env files they overlay.",
+      },
+      {
+        usage: 'value=$(ciabatta input "PROMPT" [--env VAR] [--default VALUE])',
+        note: "From inside a step: ask whoever is watching the run for a value, and print the answer to stdout. A terminal run prompts with a countdown; a --gui or daemon run shows a dialog in this app that can't be dismissed until it's answered. Alias: `ciabatta read`. See \"Ask for a value mid-run\".",
+        flags: [
+          ["-d, --details TEXT", "Longer text shown with the question — what the value is for, where to find it."],
+          ["-e, --env VAR", "Answer with this variable's value, without asking, when it's set and not empty."],
+          ["--default VALUE", "The answer for an empty reply, a timeout, or a run nobody can answer."],
+          ["-s, --secret", "Mask the answer as it's typed and in the logs."],
+          ["--enter", "Wait for a go-ahead, not a value: Enter in a terminal, a Continue button here. Prints nothing; carries on when it times out or nobody can be asked."],
+          ["-t, --timeout DURATION", "How long to wait, overriding workspace.input_timeout. 0 waits forever."],
+        ],
       },
       {
         usage: "ciabatta workflow build",
@@ -1882,6 +1896,126 @@ cd packages/api && ciabatta build           # same as --only api; --all for ever
     ),
   },
   {
+    id: "asking",
+    group: "Start here",
+    title: "Ask for a value mid-run",
+    body: (
+      <>
+        <P>
+          Some steps need a person: which environment to deploy to, a one-time code, a yes before
+          something irreversible. A step&apos;s script asks with <C>ciabatta input</C>, and the
+          answer comes back on stdout:
+        </P>
+        <Pre>{`#!/usr/bin/env bash
+set -euo pipefail
+
+region=$(ciabatta input "Which region should this deploy to?" \\
+  --details "The stack is created in this region. Pick the one closest to the customers." \\
+  --default us-east-1 \\
+  --env DEPLOY_REGION)
+
+confirm=$(ciabatta input "Type the stack name to confirm" --timeout 2m)
+token=$(ciabatta input "One-time code" --secret)
+
+# No value, just a go-ahead: Enter in the terminal, a Continue button here.
+ciabatta input "Flip the maintenance switch, then continue" --enter
+
+echo "deploying to $region"`}</Pre>
+        <P>Where the question goes depends on who is watching the run:</P>
+        <Bullets
+          items={[
+            <>
+              <strong>A terminal</strong> (<C>ciabatta deploy</C>): the prompt appears under the
+              run with a live countdown. Output from other steps is held back until you answer,
+              so it can&apos;t scribble over what you&apos;re typing; the steps themselves keep
+              running. Enter on an empty line takes the default. Ctrl-C stops the run.
+            </>,
+            <>
+              <strong>This app</strong> (<C>ciabatta deploy --gui</C>, or a run started from the
+              Run page): a dialog opens on whatever page you&apos;re on, showing the question, its
+              details, which step and run are asking, and the countdown. It can&apos;t be
+              dismissed — the step is blocked on it — and because the question lives in the
+              daemon, reloading the page brings it straight back. Several questions queue, oldest
+              first.
+            </>,
+            <>
+              <strong>Nobody</strong> (CI, piped output, <C>--tui</C>): the question settles
+              immediately on its <C>--default</C>. Without one, the step fails with a message
+              naming the variable to set.
+            </>,
+          ]}
+        />
+
+        <SubHeading>Waiting for a go-ahead</SubHeading>
+        <P>
+          <C>--enter</C> asks for nothing but a nod: the terminal waits for Enter, and this app
+          shows the question with a single <strong>Continue</strong> button instead of a text
+          field. It prints nothing, so call it on its own rather than inside <C>$(…)</C>. A
+          go-ahead that times out, or that nobody can see (CI), carries on rather than failing
+          the step — add <C>--default</C> only if you want to say otherwise in the log.
+        </P>
+
+        <SubHeading>Answering from a variable</SubHeading>
+        <P>
+          <C>--env DEPLOY_REGION</C> makes the question optional: when <C>DEPLOY_REGION</C> is set
+          and not empty — in the shell, the workspace&apos;s <C>.env</C>, an env profile, or{" "}
+          <C>-e DEPLOY_REGION=eu-west-1</C> — its value is the answer and nobody is asked. That is
+          how the same workflow runs interactively on a laptop and unattended in CI.
+        </P>
+
+        <SubHeading>How long a question waits</SubHeading>
+        <P>
+          By default, forever. Set a limit for the whole workspace in the root{" "}
+          <C>.ciabatta/ciabatta.yaml</C>, or per question with <C>--timeout</C>:
+        </P>
+        <Pre>{`workspace:
+  input_timeout: 5m      # 30s, 5m, 1h30m; 0 or "none" waits forever`}</Pre>
+        <P>
+          When the time runs out the question takes its <C>--default</C>; a question with no
+          default fails its step. Every answer — or the timeout — is written to the step&apos;s
+          log as <C>input: …</C>, with secrets masked.
+        </P>
+        <Alert severity="info" sx={{ my: 2, maxWidth: "78ch" }}>
+          Outside a run, <C>ciabatta input</C> asks on the terminal it&apos;s run from, or reads
+          one line from stdin when that&apos;s piped — so a script that uses it still works when
+          you run it by hand.
+        </Alert>
+      </>
+    ),
+  },
+  {
+    id: "concurrency",
+    group: "Start here",
+    title: "Limit how many runs go at once",
+    body: (
+      <>
+        <P>
+          Two terminals and the daemon can all start runs of the same workspace, and on a laptop
+          three parallel builds can be two too many. So by default a workspace runs{" "}
+          <strong>one workflow at a time</strong> on each machine. Change it in the root{" "}
+          <C>.ciabatta/ciabatta.yaml</C>:
+        </P>
+        <Pre>{`workspace:
+  max_concurrent_runs: 2   # unset: 1 · 0: no limit`}</Pre>
+        <P>
+          The limit is per workspace, per machine, and counts every kind of run — plain terminal,{" "}
+          <C>--tui</C>, <C>--gui</C> and runs started here. A run past the limit waits for a slot
+          before its first step, saying so in its log (
+          <C>waiting for a run slot: this workspace allows 2 runs at a time…</C>), and starts as
+          soon as one finishes. Stopping a waiting run ends the wait. Dry runs don&apos;t take a
+          slot, and a run started by another run&apos;s step — a script that calls{" "}
+          <C>ciabatta test</C> — shares its parent&apos;s slot rather than waiting on it.
+        </P>
+        <P>
+          Slots are file locks under <C>~/.ciabatta/run-slots/</C>, which the operating system
+          releases when their holder exits — so a run that was killed, or a daemon that crashed,
+          can&apos;t leave a slot taken. This is separate from <C>--jobs</C>, which limits how
+          many steps one run executes side by side.
+        </P>
+      </>
+    ),
+  },
+  {
     id: "tips",
     group: "Start here",
     title: "Common tips",
@@ -2319,6 +2453,14 @@ ciabatta remote-cache status         # hit rate, storage, retention`}</Pre>
         <P>
           Nothing updates automatically. A build tool that swaps its own binary out from under a
           running CI job is a bad build tool; this notices, tells you, and waits to be asked.
+        </P>
+        <P>
+          It also tells you loudly. Every workflow run asks the configured remote cache which
+          version it runs, and when that differs from this ciabatta the run opens with a warning
+          you can&apos;t miss — a boxed banner in the terminal, a filled warning at the top of
+          the run page here — naming both versions and what to do about it. A cache that
+          isn&apos;t configured, can&apos;t be reached, or takes more than a moment to answer
+          skips the check; it never slows down or fails a run.
         </P>
       </>
     ),

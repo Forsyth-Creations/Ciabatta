@@ -81,6 +81,15 @@ pub struct WorkflowView {
     /// Lines dropped off the front of `logs` once it hit [`LOG_LIMIT`].
     dropped_logs: usize,
     pending: Option<PendingChoice>,
+    /// `ciabatta input` questions waiting on an answer, oldest first. Kept in
+    /// the run's state rather than only sent as events, so a page opened — or
+    /// reloaded — while one is waiting still puts it in front of the operator.
+    #[serde(default)]
+    inputs: Vec<crate::run::input::Pending>,
+    /// Things the run opened by warning about — a version mismatch with the
+    /// remote cache — shown above everything else on the run page.
+    #[serde(default)]
+    warnings: Vec<String>,
     /// Every environment variable this run depends on, with the value its steps
     /// will see and where that value came from. Resolved once, when the run is
     /// created — it is what the run started with, not a live view of the
@@ -338,10 +347,29 @@ impl GuiState {
                     });
                 }
             }
+            ProgressUpdate::InputRequested {
+                workflow, input, ..
+            } => {
+                if let Some(r) = self.recipe_mut(&workflow) {
+                    r.inputs.push(*input);
+                }
+            }
+            ProgressUpdate::Warning { workflow, message } => {
+                if let Some(r) = self.recipe_mut(&workflow) {
+                    push_log(&mut r.logs, &mut r.dropped_logs, format!("⚠ {message}"));
+                    r.warnings.push(message);
+                }
+            }
+            ProgressUpdate::InputResolved { workflow, id, .. } => {
+                if let Some(r) = self.recipe_mut(&workflow) {
+                    r.inputs.retain(|input| input.id != id);
+                }
+            }
             ProgressUpdate::Completed(name) => {
                 if let Some(r) = self.recipe_mut(&name) {
                     r.status = "success".into();
                     r.pending = None;
+                    r.inputs.clear();
                     r.finished_at = Some(now());
                 }
             }
@@ -356,6 +384,7 @@ impl GuiState {
                     r.status = outcome.into();
                     r.error = Some(err.clone());
                     r.pending = None;
+                    r.inputs.clear();
                     let at = now();
                     r.finished_at = Some(at.clone());
                     let line = if stopped {
@@ -420,6 +449,21 @@ impl GuiState {
 }
 
 impl GuiState {
+    /// Every question waiting on an answer, with the workflow asking it.
+    pub fn pending_inputs(&self) -> Vec<(String, crate::run::input::Pending)> {
+        self.workflows
+            .iter()
+            .flat_map(|w| w.inputs.iter().map(|i| (w.name.clone(), i.clone())))
+            .collect()
+    }
+
+    /// Whether question `id` is still waiting.
+    pub fn input_pending(&self, id: u64) -> bool {
+        self.workflows
+            .iter()
+            .any(|w| w.inputs.iter().any(|i| i.id == id))
+    }
+
     /// Whether every workflow has reached a terminal state.
     pub fn done(&self) -> bool {
         self.done
@@ -440,6 +484,7 @@ impl GuiState {
             workflow.status = "stopped".into();
             workflow.error = Some(reason.to_string());
             workflow.pending = None;
+            workflow.inputs.clear();
             for step in &mut workflow.steps {
                 if step.status == "running" {
                     step.status = "stopped".into();
@@ -627,6 +672,8 @@ pub fn initial_state(
             logs: VecDeque::new(),
             dropped_logs: 0,
             pending: None,
+            inputs: Vec::new(),
+            warnings: Vec::new(),
             env: envdeps::collect(&resolved, root, env, Some(config)),
             started_at: None,
             finished_at: None,

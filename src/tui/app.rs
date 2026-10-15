@@ -238,6 +238,15 @@ impl App {
                     r.logs.push("    (choose a fix in --gui mode)".to_string());
                 }
             }
+            // The TUI runs unattended (its `RunCtl` has no answer bus), so a
+            // question has already settled on its default by the time this is
+            // drawn; the answer reaches the log as a step line.
+            ProgressUpdate::InputRequested { .. } | ProgressUpdate::InputResolved { .. } => {}
+            ProgressUpdate::Warning { workflow, message } => {
+                if let Some(r) = self.find_mut(&workflow) {
+                    r.logs.push(format!("⚠ {message}"));
+                }
+            }
             ProgressUpdate::Completed(name) => {
                 if let Some(r) = self.find_mut(&name) {
                     r.status = WorkflowStatus::Success;

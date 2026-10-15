@@ -43,6 +43,8 @@ pub fn router() -> Router<AppState> {
         .route("/api/run/settings", get(settings).post(set_settings))
         .route("/api/run/runs/{id}/stream", get(stream))
         .route("/api/run/runs/{id}/choose", post(choose))
+        .route("/api/run/runs/{id}/input", post(answer))
+        .route("/api/run/inputs", get(inputs))
         .route("/api/run/runs/{id}/stop", post(stop))
         .route("/api/run/runs/{id}/rerun", post(rerun))
 }
@@ -87,6 +89,8 @@ pub struct Run {
     pub state: Arc<Mutex<GuiState>>,
     /// Carries a browser's answer back to a waiting recovery step.
     pub choices: broadcast::Sender<StepChoice>,
+    /// Carries a browser's answer back to a step waiting in `ciabatta input`.
+    pub inputs: broadcast::Sender<crate::run::input::Answer>,
     /// The run's stop switch, held so the Stop button can reach the engine.
     pub cancel: Arc<runner::Cancel>,
     /// Bumped on every applied update, so the SSE loop can tell whether
@@ -165,6 +169,7 @@ impl Runs {
                 state.interrupted("the daemon restarted while this run was in flight");
             }
             let (choices, _) = broadcast::channel(64);
+            let (inputs, _) = broadcast::channel(64);
             inner.insert(
                 stored.id,
                 Arc::new(Run {
@@ -176,6 +181,7 @@ impl Runs {
                     request: stored.request,
                     state: Arc::new(Mutex::new(state)),
                     choices,
+                    inputs,
                     cancel: Arc::new(runner::Cancel::default()),
                     seq: Arc::new(AtomicU64::new(0)),
                     changed: Arc::new(tokio::sync::Notify::new()),
@@ -322,6 +328,13 @@ pub struct CreatePayload {
     /// The env profile to run under (`--env-profile`).
     #[serde(default)]
     env_profile: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct AnswerPayload {
+    /// The question's id, from the run's `inputs`.
+    id: u64,
+    value: String,
 }
 
 #[derive(Deserialize)]
@@ -492,6 +505,7 @@ async fn start(state: AppState, payload: CreatePayload) -> RouteResult<Json<Valu
     }
 
     let (choice_tx, _) = broadcast::channel::<StepChoice>(64);
+    let (input_tx, _) = broadcast::channel::<crate::run::input::Answer>(64);
     let (progress_tx, mut progress_rx) = mpsc::channel(256);
     // Shared three ways: the run record (so `stop` can reach it), the engine
     // (which checks it), and nothing else.
@@ -506,6 +520,7 @@ async fn start(state: AppState, payload: CreatePayload) -> RouteResult<Json<Valu
         request: payload.clone(),
         state: gui_state.clone(),
         choices: choice_tx.clone(),
+        inputs: input_tx.clone(),
         cancel: cancel.clone(),
         seq: Arc::new(AtomicU64::new(0)),
         changed: Arc::new(tokio::sync::Notify::new()),
@@ -601,6 +616,8 @@ async fn start(state: AppState, payload: CreatePayload) -> RouteResult<Json<Valu
     let ctl = RunCtl {
         interactive: true,
         choices: Some(choice_tx),
+        // And steps can ask questions, answered from the run page's dialog.
+        inputs: Some(input_tx),
         cancel: Some(cancel),
         force: payload.force,
         ..Default::default()
@@ -717,6 +734,20 @@ fn trace(run: u64, update: &runner::ProgressUpdate) {
             message,
             ..
         } => tracing::info!(run, %workflow, %step, %message, "step is waiting for a choice"),
+        P::InputRequested {
+            workflow,
+            step,
+            input,
+        } => {
+            tracing::info!(run, %workflow, %step, prompt = %input.prompt, "step is waiting for input")
+        }
+        P::InputResolved {
+            workflow,
+            step,
+            outcome,
+            ..
+        } => tracing::info!(run, %workflow, %step, outcome = outcome.label(), "input settled"),
+        P::Warning { workflow, message } => tracing::warn!(run, %workflow, "{message}"),
         P::Completed(workflow) => tracing::info!(run, %workflow, "workflow completed"),
         P::Failed(workflow, err) => tracing::error!(run, %workflow, "workflow failed: {err}"),
     }
@@ -953,6 +984,51 @@ async fn choose(
         })?;
 
     Ok(Json(json!({ "ok": true })))
+}
+
+/// Answer a step's `ciabatta input` question.
+async fn answer(
+    State(state): State<AppState>,
+    Path(id): Path<u64>,
+    Json(payload): Json<AnswerPayload>,
+) -> RouteResult<Json<Value>> {
+    let run = get_run(&state, id)?;
+    // Checked against the state rather than trusting a send: the bus outlives
+    // any one question, so a send "succeeding" says nothing about whether
+    // anyone was still waiting for this answer.
+    if !lock(&run.state).input_pending(payload.id) {
+        return Err(RouteError::bad_request(
+            "That question isn't waiting any more — it was answered, timed out, or its step ended.",
+        ));
+    }
+    run.inputs
+        .send(crate::run::input::Answer {
+            id: payload.id,
+            value: payload.value,
+        })
+        .map_err(|_| RouteError::bad_request("The run stopped listening for answers."))?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+/// Every question waiting on an answer, across every run — so the web app can
+/// put one in front of the operator whichever page they are on.
+async fn inputs(State(state): State<AppState>) -> Json<Value> {
+    let waiting: Vec<Value> = state
+        .runs
+        .list()
+        .iter()
+        .flat_map(|run| {
+            let pending = lock(&run.state).pending_inputs();
+            pending.into_iter().map(move |(workflow, input)| {
+                let mut value = serde_json::to_value(&input).unwrap_or_default();
+                value["run"] = json!(run.id);
+                value["project"] = json!(run.project);
+                value["workflow"] = json!(workflow);
+                value
+            })
+        })
+        .collect();
+    Json(json!({ "inputs": waiting }))
 }
 
 /// The run's view state plus its identity, as one payload.

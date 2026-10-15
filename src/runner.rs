@@ -129,6 +129,29 @@ pub enum ProgressUpdate {
         message: String,
         options: Vec<String>,
     },
+    /// A step ran `ciabatta input` and is waiting for an answer. Viewers that
+    /// can answer reply with a [`crate::run::input::Answer`] on
+    /// [`RunCtl::inputs`]; every viewer shows it until [`Self::InputResolved`].
+    InputRequested {
+        workflow: String,
+        step: String,
+        input: Box<crate::run::input::Pending>,
+    },
+    /// Question `id` was settled — answered, timed out, or abandoned by the
+    /// step that asked it — and should come down.
+    InputResolved {
+        workflow: String,
+        step: String,
+        id: u64,
+        outcome: crate::run::input::Outcome,
+    },
+    /// Something about the run its viewers should see before anything else —
+    /// today, this ciabatta and the remote cache running different versions.
+    /// The terminal draws it as a banner; the web app as an alert.
+    Warning {
+        workflow: String,
+        message: String,
+    },
     Completed(String),
     Failed(String, String),
 }
@@ -205,6 +228,10 @@ pub struct RunCtl {
     /// Broadcast bus the UI publishes [`StepChoice`]s on. Each workflow engine
     /// subscribes and filters for its own workflow + step.
     pub choices: Option<tokio::sync::broadcast::Sender<StepChoice>>,
+    /// Bus the viewer publishes answers to `ciabatta input` questions on.
+    /// `None` means nobody can answer: each question takes its `--default`
+    /// or fails, which is what CI wants.
+    pub inputs: Option<tokio::sync::broadcast::Sender<crate::run::input::Answer>>,
     /// Hand `persistent` steps to the daemon as watch sessions, so they outlive
     /// the run — starting the daemon if it isn't up. On by default, because a
     /// dev server that dies with the build that started it isn't persistent at
@@ -255,6 +282,7 @@ impl Default for RunCtl {
         Self {
             interactive: false,
             choices: None,
+            inputs: None,
             persist_via_daemon: true,
             authoritative: false,
             sandbox_also: Vec::new(),
@@ -288,6 +316,14 @@ pub async fn run_workflow_ctl(
     tx: mpsc::Sender<ProgressUpdate>,
 ) -> Result<()> {
     let _ = tx.send(ProgressUpdate::Started(name.to_string())).await;
+    if let Some(message) = crate::remote_cache::version::mismatch(config).await {
+        let _ = tx
+            .send(ProgressUpdate::Warning {
+                workflow: name.to_string(),
+                message,
+            })
+            .await;
+    }
     tracing::debug!(workflow = %name, dry_run, "starting workflow");
 
     let started = std::time::Instant::now();
@@ -305,10 +341,57 @@ pub async fn run_workflow_ctl(
         }
         ledger
     });
-    let result = crate::run::execute(
-        name, resolved, config, root, env_vars, dry_run, &ctl, &inner_tx,
-    )
-    .await;
+    // The run's slot and its question broker, both settled by the workspace
+    // root's config — they are about the machine and the people at it, not
+    // about any one package.
+    let setup = async {
+        let workspace = crate::config::load_config(root).unwrap_or_else(|_| config.clone());
+        // `(slot, dir)`: the slot this run holds — none when it shares its
+        // parent's — and the directory its steps are told about.
+        let slot = match crate::run::slots::limit(&workspace) {
+            // A dry run does no work, so it takes no slot.
+            Some(limit) if !dry_run => {
+                let dir = crate::run::slots::dir_for(root)?;
+                if crate::run::slots::inherited(&dir, env_vars) {
+                    Some((None, dir))
+                } else {
+                    let note_tx = inner_tx.clone();
+                    let held =
+                        crate::run::slots::take(&dir, limit, ctl.cancel.as_deref(), |line| {
+                            let _ = note_tx.try_send(ProgressUpdate::Log(name.to_string(), line));
+                        })
+                        .await?;
+                    Some((Some(held), dir))
+                }
+            }
+            _ => None,
+        };
+        let timeout = crate::run::input::workspace_timeout(&workspace)?;
+        let broker =
+            crate::run::input::Broker::start(name, timeout, ctl.inputs.clone(), inner_tx.clone())
+                .await?;
+        anyhow::Ok((slot, broker))
+    };
+    let result = match setup.await {
+        Ok((slot, broker)) => {
+            let mut env_vars = broker.extend(env_vars);
+            if let Some((_, dir)) = &slot {
+                env_vars.insert(
+                    crate::run::slots::SLOT_VAR.to_string(),
+                    dir.to_string_lossy().into_owned(),
+                );
+            }
+            let result = crate::run::execute(
+                name, resolved, config, root, &env_vars, dry_run, &ctl, &inner_tx,
+            )
+            .await;
+            // The broker holds a sender; it has to go before the tap can end.
+            drop(broker);
+            drop(slot);
+            result
+        }
+        Err(e) => Err(e),
+    };
     drop(inner_tx);
     let ledger = tap.await.unwrap_or_default();
 

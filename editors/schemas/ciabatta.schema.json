@@ -77,6 +77,21 @@
           "default": "30d",
           "description": "How long a workflow may go unrun before ciabatta reports it stale (\"30d\", \"6h\"). Read from the monorepo root and applied to every member, since how long is too long is a property of how the team works rather than of any one package. Every run records what it ran; with a remote cache configured those records are shared, so \"nobody has run this since March\" is answerable rather than just \"I haven't\"."
         },
+        "input_timeout": {
+          "anyOf": [
+            { "$ref": "./common.schema.json#/$defs/duration" },
+            { "enum": ["none", "never", "unlimited"] }
+          ],
+          "description": "How long a `ciabatta input` question waits for an answer before it takes its --default (or fails its step without one): \"30s\", \"5m\", \"1h30m\". Read from the monorepo root. Unset, 0 or \"none\" waits forever. `ciabatta input --timeout` overrides it per question.",
+          "examples": ["5m", "none"]
+        },
+        "max_concurrent_runs": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "How many of this workspace's workflow runs may go at once on this machine, across terminals and the daemon. Runs past the limit wait for a slot before their first step; a run started by another run's step shares its slot. Read from the monorepo root. Unset is 1 (one at a time); 0 is no limit. Dry runs don't count.",
+          "default": 1,
+          "examples": [2, 0]
+        },
         "env_file": {
           "$ref": "./common.schema.json#/$defs/stringOrList",
           "description": ".env file path(s) relative to this sub-workspace, sourced before any of its workflows run. Unset means `.env`; setting it REPLACES that default rather than adding to it."

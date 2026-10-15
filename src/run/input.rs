@@ -280,14 +280,26 @@ impl Broker {
             .ok()
             .and_then(|exe| exe.parent().map(|d| d.to_path_buf()))
         {
-            let path = env.get("PATH").cloned().unwrap_or_default();
-            let mut dirs = vec![dir];
-            dirs.extend(std::env::split_paths(&path));
-            if let Ok(joined) = std::env::join_paths(dirs) {
-                env.insert("PATH".to_string(), joined.to_string_lossy().into_owned());
-            }
+            prepend_path(&mut env, dir);
         }
         env
+    }
+}
+
+/// Put `dir` first on the `PATH` in `env`.
+///
+/// The variable is found case-insensitively and updated under the name it
+/// already has: Windows spells it `Path`, and adding a second, `PATH`, holding
+/// only `dir` is a step that can no longer find `yarn`. An env with no path at
+/// all is left alone rather than given one that names a single directory.
+fn prepend_path(env: &mut HashMap<String, String>, dir: std::path::PathBuf) {
+    let Some(key) = env.keys().find(|k| k.eq_ignore_ascii_case("PATH")).cloned() else {
+        return;
+    };
+    let mut dirs = vec![dir];
+    dirs.extend(std::env::split_paths(&env[&key]));
+    if let Ok(joined) = std::env::join_paths(dirs) {
+        env.insert(key, joined.to_string_lossy().into_owned());
     }
 }
 
@@ -749,6 +761,22 @@ mod tests {
         );
         assert_eq!(read("workspace:\n  input_timeout: 0\n"), None);
         assert_eq!(read("workspace: {}\n"), None, "unlimited by default");
+    }
+
+    #[test]
+    fn the_path_is_extended_under_the_name_it_already_has() {
+        let dir = std::path::PathBuf::from("ciabatta-bin");
+        let sep = if cfg!(windows) { ";" } else { ":" };
+        let rest = format!("one{sep}two");
+
+        let mut windows = HashMap::from([("Path".to_string(), rest.clone())]);
+        prepend_path(&mut windows, dir.clone());
+        assert_eq!(windows.len(), 1, "no second PATH beside Path: {windows:?}");
+        assert_eq!(windows["Path"], format!("ciabatta-bin{sep}{rest}"));
+
+        let mut none = HashMap::new();
+        prepend_path(&mut none, dir);
+        assert!(none.is_empty(), "no PATH made up from nothing");
     }
 
     #[test]

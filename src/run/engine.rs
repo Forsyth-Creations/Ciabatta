@@ -1352,14 +1352,14 @@ fn step_cwd(step: &RunStep, root: &Path) -> std::path::PathBuf {
 /// layered on top. A compiled workflow graph puts each sub-workspace's standard
 /// variables there, so two members can set the same name to different values
 /// without one of them silently winning.
+///
+/// It also names the step, so `ciabatta input` can say which step is asking.
 fn step_env(step: &RunStep, env_vars: &HashMap<String, String>) -> HashMap<String, String> {
-    if step.env.is_empty() {
-        return env_vars.clone();
-    }
     let mut merged = env_vars.clone();
     for (key, value) in &step.env {
         merged.insert(key.clone(), value.clone());
     }
+    merged.insert(super::input::STEP_VAR.to_string(), step.name.clone());
     merged
 }
 
@@ -1701,7 +1701,17 @@ async fn run_action(
 
     match script {
         Some(path) => sink.push(format!("Running script: {}", cwd.join(path).display())),
-        None => sink.push(format!("$ {command}")),
+        // One log line per line of the command: a multi-line `run:` echoed as
+        // a single entry is one "line" with newlines in it, which the run
+        // page's fixed-height log rows draw on top of each other.
+        None => {
+            for (i, line) in command.trim_end().lines().enumerate() {
+                sink.push(match i {
+                    0 => format!("$ {line}"),
+                    _ => format!("  {line}"),
+                });
+            }
+        }
     }
     if dry_run {
         sink.push(format!("[dry-run] would run: {command}"));
@@ -1739,7 +1749,7 @@ async fn run_action(
 
 /// Render a duration the way it was most likely written (`10m`, `1h30m`, `45s`),
 /// for messages about a step that ran out of time.
-fn format_duration(d: std::time::Duration) -> String {
+pub(crate) fn format_duration(d: std::time::Duration) -> String {
     let secs = d.as_secs();
     let (h, m, s) = (secs / 3600, (secs % 3600) / 60, secs % 60);
     let mut out = String::new();
@@ -1836,6 +1846,7 @@ mod tests {
         let ctl = RunCtl {
             interactive: false,
             choices: None,
+            inputs: None,
             // Tests must not reach for — let alone start — a real daemon, so
             // persistent steps take the in-process path here.
             persist_via_daemon: false,

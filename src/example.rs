@@ -197,6 +197,7 @@ fn plan(options: &Options) -> Vec<File> {
         file("packages/web/.ciabatta/workflows/build.yaml", WEB_BUILD),
         file("packages/web/.ciabatta/workflows/test.yaml", WEB_TEST),
         file("packages/web/.ciabatta/workflows/dev.yaml", WEB_DEV),
+        file("packages/web/.ciabatta/workflows/greet.yaml", WEB_GREET),
     ];
 
     if options.nexus {
@@ -313,6 +314,7 @@ workflows:
       - name: ping
         run: "echo 'ciabatta example: everything is where it should be'"
         tags: [fast]
+
 "#,
     );
 
@@ -754,6 +756,44 @@ steps:
     tags: [fast, frontend]
 "#;
 
+const WEB_GREET: &str = r#"# A step that stops and asks whoever is watching for a value.
+#
+# In a terminal the question appears under the run, with a countdown when the
+# root sets `workspace.input_timeout`; with --gui it is a dialog in the web app
+# that stays up until it is answered. Set GREET_NAME (in .env, or with
+# -e GREET_NAME=…) and nobody is asked; in CI it falls back to the --default.
+#
+#   ciabatta greet
+#   ciabatta greet --gui
+#   ciabatta greet -e GREET_NAME=Ada
+
+description: Ask the operator a question mid-run, then use the answer
+owner: Web Team
+tags: [example]
+env: [GREET_NAME]
+
+steps:
+  - name: ask
+    description: Waits for an answer — set GREET_NAME to skip the question
+    run: |
+      name=$(ciabatta input "Who's running this?" \
+        --details "Any name will do. Set GREET_NAME in .env to stop being asked." \
+        --default friend \
+        --env GREET_NAME)
+      echo "hello, $name"
+
+  - name: confirm
+    description: Waits for a go-ahead — Enter in a terminal, Continue in the web app
+    run: |
+      ciabatta input "Ready to wave goodbye?" --enter
+      echo "goodbye!"
+    needs: [ask]
+
+  - name: tick
+    description: Runs alongside the questions, to show the rest of the run keeps going
+    run: "for i in 1 2 3; do echo \"tick $i\"; sleep 1; done"
+"#;
+
 const WEB_DEV: &str = r#"# A workflow with a step that never exits.
 #
 # `persistent: true` starts the dev server, releases everything downstream
@@ -850,6 +890,7 @@ Nobody wrote that graph down. Each package declared what *it* needs, and
 | Required variables | `packages/api/.ciabatta/workflows/build.yaml` → `required_env` |
 | `.env` files | `packages/api/.env`, and `.env.example` at the root |
 | A workflow written inline rather than in its own file | `.ciabatta/ciabatta.yaml` → `workflows.smoke` |
+| Asking the operator mid-run (`ciabatta input`) | `packages/web/.ciabatta/workflows/greet.yaml` |
 "#,
     );
 
@@ -878,6 +919,7 @@ whole thing compiles to a single graph.
 ciabatta build                  # every package's `build`, in dependency order
 ciabatta build test             # both, compiled into ONE graph
 ciabatta smoke                  # a workflow written inline at the root
+ciabatta greet                  # a step that stops and asks you a question
 ciabatta build --only api       # start from api (its dependencies still run)
 ciabatta build --only api --isolated   # just api, nothing upstream
 ciabatta build --dry-run        # walk every step, execute nothing

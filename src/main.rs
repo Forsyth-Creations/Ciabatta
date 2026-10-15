@@ -89,6 +89,33 @@ async fn main() -> Result<()> {
             cmd_workflow(args, false, &custom_args).await?;
         }
 
+        Commands::Input {
+            prompt,
+            details,
+            env,
+            default,
+            secret,
+            timeout,
+            enter,
+        } => {
+            let ask = run::input::Ask {
+                prompt,
+                details,
+                default,
+                secret,
+                env,
+                timeout,
+                enter,
+            };
+            let vars: HashMap<String, String> = env::vars().collect();
+            let answer = run::input::ask(ask, &vars).await?;
+            // The answer is the only thing on stdout, so `$(…)` captures it.
+            // A go-ahead has no answer to print.
+            if !enter {
+                println!("{answer}");
+            }
+        }
+
         Commands::Env { subcommand } => match subcommand {
             EnvCommand::List => cmd_env_list()?,
             EnvCommand::Use { name, dry_run } => cmd_env_use(&name, dry_run)?,
@@ -1862,12 +1889,23 @@ async fn run_plain(
     root: &Path,
     vars: &HashMap<String, String>,
     dry_run: bool,
-    ctl: runner::RunCtl,
+    mut ctl: runner::RunCtl,
 ) -> Result<()> {
     use runner::ProgressUpdate;
+    use std::io::IsTerminal;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use tokio::sync::mpsc;
 
     let (tx, mut rx) = mpsc::channel::<ProgressUpdate>(256);
+
+    // `ciabatta input` questions are answered here when there is someone at
+    // the keyboard to answer them; piped or in CI, they settle on their
+    // defaults. Ctrl-C at a prompt stops the run, so it needs a stop switch.
+    let inputs = (std::io::stdin().is_terminal() && std::io::stderr().is_terminal())
+        .then(|| tokio::sync::broadcast::channel::<run::input::Answer>(16).0);
+    ctl.inputs = inputs.clone();
+    let cancel = ctl.cancel.get_or_insert_with(Default::default).clone();
 
     let name_clone = name.to_string();
     let resolved_clone = resolved.clone();
@@ -1912,9 +1950,115 @@ async fn run_plain(
         text.style(color::faint()).to_string()
     };
 
+    // A question being asked on this terminal. While it is up, everything
+    // else the run says waits in `backlog`, so step output can't scribble over
+    // the prompt — the steps themselves keep running.
+    struct Asking {
+        id: u64,
+        abort: Arc<AtomicBool>,
+        answer: tokio::task::JoinHandle<Result<std::result::Result<String, run::input::NoAnswer>>>,
+    }
+    let mut asking: Option<Asking> = None;
+    let mut backlog: std::collections::VecDeque<ProgressUpdate> = Default::default();
+    let mut open = true;
+
     let mut any_failed = false;
-    while let Some(update) = rx.recv().await {
+    loop {
+        let update = if let Some(current) = asking.as_mut() {
+            tokio::select! {
+                got = rx.recv(), if open => {
+                    match got {
+                        Some(update) => {
+                            // Settled some other way — timed out, or its step
+                            // was killed: take the prompt down.
+                            if matches!(&update, ProgressUpdate::InputResolved { id, .. } if *id == current.id) {
+                                current.abort.store(true, Ordering::SeqCst);
+                            }
+                            backlog.push_back(update);
+                        }
+                        None => {
+                            open = false;
+                            current.abort.store(true, Ordering::SeqCst);
+                        }
+                    }
+                }
+                done = &mut current.answer => {
+                    let id = current.id;
+                    asking = None;
+                    match done {
+                        Ok(Ok(Ok(value))) => {
+                            if let Some(bus) = &inputs {
+                                let _ = bus.send(run::input::Answer { id, value });
+                            }
+                        }
+                        Ok(Ok(Err(run::input::NoAnswer::Interrupted))) => {
+                            eprintln!("Interrupted — stopping the run.");
+                            cancel.stop();
+                        }
+                        Ok(Ok(Err(run::input::NoAnswer::Expired))) => {}
+                        Ok(Err(e)) => eprintln!("Couldn't read an answer from this terminal: {e:#}"),
+                        Err(e) => eprintln!("The input prompt failed: {e}"),
+                    }
+                }
+            }
+            continue;
+        } else if let Some(update) = backlog.pop_front() {
+            update
+        } else if open {
+            match rx.recv().await {
+                Some(update) => update,
+                None => break,
+            }
+        } else {
+            break;
+        };
+
         match update {
+            ProgressUpdate::InputRequested {
+                workflow,
+                step,
+                input,
+            } => {
+                // Already settled while it sat in the backlog: nothing to ask.
+                let settled = backlog.iter().any(
+                    |u| matches!(u, ProgressUpdate::InputResolved { id, .. } if *id == input.id),
+                );
+                if settled || inputs.is_none() {
+                    continue;
+                }
+                let deadline = input
+                    .deadline
+                    .as_deref()
+                    .and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok())
+                    .map(|at| {
+                        let left = (at.with_timezone(&chrono::Utc) - chrono::Utc::now())
+                            .to_std()
+                            .unwrap_or_default();
+                        std::time::Instant::now() + left
+                    });
+                println!(
+                    "{}   {} step: {step} is asking for input",
+                    tag(&workflow),
+                    "?".style(color::active())
+                );
+                let abort = Arc::new(AtomicBool::new(false));
+                let flag = abort.clone();
+                let id = input.id;
+                let answer = tokio::task::spawn_blocking(move || {
+                    run::input::ask_terminal(&input, deadline, &flag)
+                });
+                asking = Some(Asking { id, abort, answer });
+            }
+            // The answer is logged by the step as `input: … → …`.
+            ProgressUpdate::InputResolved { .. } => {}
+            // Big and first, on stderr, so it survives `| tail` and nobody
+            // reads past it.
+            ProgressUpdate::Warning { message, .. } => {
+                eprintln!(
+                    "\n{}\n",
+                    remote_cache::version::banner(&message).style(color::warn())
+                );
+            }
             ProgressUpdate::Started(name) => {
                 start(&mut clocks, format!("workflow:{name}"));
                 println!("{} started", tag(&name))

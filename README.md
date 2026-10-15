@@ -895,6 +895,39 @@ presents a list of fix `options`:
 - After a fix succeeds, **`retry`** re-runs the named step. Retry loops are
   bounded so a persistently failing step can't spin forever.
 
+### Asking for a value mid-run
+
+A step can stop and ask whoever is watching the run:
+
+```bash
+region=$(ciabatta input "Which region?" --details "Where the stack is created." \
+  --default us-east-1 --env DEPLOY_REGION)
+ciabatta input "Flip the maintenance switch, then continue" --enter
+```
+
+- In a **terminal**, the prompt appears under the run with a live countdown;
+  other steps' output waits until you answer. Ctrl-C stops the run.
+- With **`--gui`** (or a run started in the web app), a dialog opens on every
+  page of the app. It can't be dismissed, and it comes back after a reload,
+  until the question is answered, times out, or the run stops. `--enter` shows
+  a single Continue button.
+- With **nobody** to ask (CI, piped, `--tui`), the question takes its
+  `--default`, or fails the step and names the variable to set.
+
+`--env VAR` answers from `VAR` without asking whenever it's set. `--secret`
+masks the answer. How long a question waits is unlimited unless the root
+config says otherwise, or `--timeout` overrides it:
+
+```yaml
+workspace:
+  input_timeout: 5m        # 0 / "none" waits forever (the default)
+  max_concurrent_runs: 2   # runs of this workspace at once on this machine
+```
+
+`max_concurrent_runs` counts every run of the workspace on the machine — the
+terminal, the daemon, a second terminal. A run past the limit waits for a slot
+before its first step, says so, and starts as soon as one frees up.
+
 ### Watching and building runs in the browser
 
 ```bash
@@ -1375,6 +1408,11 @@ advertised is the content, which is also what the client verifies.
 Nothing updates automatically. A build tool that swaps its own binary out from
 under a running CI job is a bad build tool; this notices, tells you, and waits
 to be asked.
+
+And it tells you loudly: every workflow run asks the remote cache its version,
+and when it differs from yours the run opens with a boxed warning in the
+terminal (a filled banner on the web app's run page) naming both versions. A
+cache that isn't configured or can't be reached skips the check.
 
 ## Releases
 

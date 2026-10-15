@@ -98,6 +98,18 @@ pub struct WorkspaceMeta {
     /// of any one package. See [`crate::run::history`].
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stale_after: Option<String>,
+    /// How long a `ciabatta input` question waits for an answer before it
+    /// takes its `--default`, or fails the step without one (`"5m"`, `"1h"`).
+    /// Read from the monorepo root. Unset — the default — waits forever.
+    /// See [`crate::run::input`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input_timeout: Option<String>,
+    /// How many of this workspace's workflow runs may go at once on this
+    /// machine, across terminals and the daemon. Runs past the limit queue
+    /// until one finishes. Read from the monorepo root; unset or `0` is no
+    /// limit. See [`crate::run::slots`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_concurrent_runs: Option<usize>,
     /// `.env` file path(s), relative to this sub-workspace, sourced before any
     /// of its workflows run.
     ///

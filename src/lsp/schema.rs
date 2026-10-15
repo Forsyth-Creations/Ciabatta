@@ -219,6 +219,8 @@ fn workspace_meta() -> crate::workspace::WorkspaceMeta {
         tags: list(),
         requires: list(),
         stale_after: Some(one()),
+        input_timeout: Some(one()),
+        max_concurrent_runs: Some(1),
         env_file: list(),
         env_default: Some(one()),
         env: map(),

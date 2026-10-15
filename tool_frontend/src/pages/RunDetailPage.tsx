@@ -9,6 +9,7 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   Alert,
+  AlertTitle,
   Box,
   Button,
   Chip,
@@ -418,6 +419,18 @@ function WorkflowPanel({
         })}
       </Stack>
 
+      {(workflow.warnings ?? []).map((warning) => (
+        <Alert
+          key={warning}
+          severity="warning"
+          variant="filled"
+          sx={{ mb: 2, fontSize: 15, "& .MuiAlert-icon": { fontSize: 28 } }}
+        >
+          <AlertTitle sx={{ fontWeight: 700 }}>Version mismatch with the remote cache</AlertTitle>
+          {warning}
+        </Alert>
+      ))}
+
       {workflow.error && (
         <Alert severity="error" sx={{ mb: 2 }}>
           {workflow.error}
@@ -450,6 +463,14 @@ function WorkflowPanel({
       )}
 
       {choose.error && <ErrorNote error={choose.error} />}
+
+      {/* Answered in the app-wide dialog; noted here so the run says why
+          it's sitting still. */}
+      {(workflow.inputs ?? []).map((input) => (
+        <Alert key={input.id} severity="info" sx={{ mb: 2 }}>
+          <strong>{input.step}</strong> is waiting for input: {input.prompt}
+        </Alert>
+      ))}
 
       {inspect && (
         <InspectSummary

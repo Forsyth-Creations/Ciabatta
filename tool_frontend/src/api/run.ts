@@ -207,6 +207,38 @@ export interface PendingChoice {
   options: string[];
 }
 
+/**
+ * A question a step asked with `ciabatta input`, waiting on an answer. It
+ * lives in the run's state, so it survives a page reload until it is
+ * answered, times out, or its step ends.
+ */
+export interface PendingInput {
+  /** Unique within its run; the answer names it. */
+  id: number;
+  step: string;
+  prompt: string;
+  /** Longer text from `--details`. */
+  details: string | null;
+  /** What an empty answer — or a timeout — becomes. */
+  default: string | null;
+  /** Mask the answer (`--secret`). */
+  secret: boolean;
+  /** The variable that would have answered it without asking (`--env`). */
+  env: string | null;
+  /** Only a go-ahead is wanted (`--enter`): show Continue, not a field. */
+  enter?: boolean;
+  asked_at: string;
+  /** When it stops waiting; null waits forever. */
+  deadline: string | null;
+}
+
+/** A waiting question as the cross-run listing reports it. */
+export interface WaitingInput extends PendingInput {
+  run: number;
+  project: string;
+  workflow: string;
+}
+
 export interface WorkflowView extends Timed {
   name: string;
   status: string;
@@ -218,6 +250,11 @@ export interface WorkflowView extends Timed {
   /** As `StepView.dropped_logs`, for the workflow's combined output. */
   dropped_logs: number;
   pending: PendingChoice | null;
+  /** `ciabatta input` questions waiting on an answer, oldest first. */
+  inputs?: PendingInput[];
+  /** What the run opened by warning about — a version mismatch with the
+   *  remote cache. */
+  warnings?: string[];
   /**
    * The environment this run started with, resolved once when it was created:
    * every variable its steps depend on, with the value they see.
@@ -415,6 +452,30 @@ export function missingEnvFrom(error: unknown): string[] | null {
   if (!(error instanceof ApiError) || error.status !== 422) return null;
   const missing = error.body?.missing_env;
   return Array.isArray(missing) && missing.length > 0 ? (missing as string[]) : null;
+}
+
+/**
+ * Every question waiting on an answer, across every run.
+ *
+ * Polled from the app shell rather than read off one run's stream, so a step
+ * asking a question reaches the operator whichever page they're on.
+ */
+export function useWaitingInputs() {
+  return useQuery({
+    queryKey: ["run", "inputs"] as const,
+    queryFn: () => api.get<{ inputs: WaitingInput[] }>("/api/run/inputs"),
+    refetchInterval: 1_500,
+  });
+}
+
+/** Answer question `id` of run `run`. */
+export function useAnswerInput() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (body: { run: number; id: number; value: string }) =>
+      api.post(`/api/run/runs/${body.run}/input`, { id: body.id, value: body.value }),
+    onSettled: () => queryClient.invalidateQueries({ queryKey: ["run", "inputs"] }),
+  });
 }
 
 export function useChoose(runId: number) {

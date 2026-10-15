@@ -37,6 +37,7 @@ pub mod releases;
 pub mod server;
 pub mod tls;
 pub mod users;
+pub mod version;
 pub mod web;
 pub mod workflows;
 

@@ -52,6 +52,7 @@ import type { ReactNode } from "react";
 import { useColorMode } from "../state/colorMode";
 import { ProjectSwitcher } from "./ProjectSwitcher";
 import { HealthIndicator } from "./HealthIndicator";
+import { InputPrompt } from "./InputPrompt";
 
 const DRAWER_WIDTH = 232;
 const NAV_STORAGE_KEY = "ciabatta-nav-open";
@@ -143,6 +144,8 @@ export function AppShell({ children }: { children: ReactNode }) {
 
   return (
     <Box sx={{ display: "flex", minHeight: "100vh" }}>
+      {/* A step asking a question reaches the operator on every page. */}
+      <InputPrompt />
       <AppBar position="fixed" sx={{ zIndex: (t) => t.zIndex.drawer + 1 }}>
         <Toolbar sx={{ gap: { xs: 1, sm: 2 } }}>
           <Tooltip title={open ? "Hide navigation" : "Show navigation"}>

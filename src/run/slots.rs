@@ -1,8 +1,14 @@
 //! How many of a workspace's workflows may run at once on this machine.
 //!
-//! `workspace.max_concurrent_runs` in the root config caps it. Each run takes
-//! a slot before its first step and holds it until it ends; a run that finds
-//! every slot taken waits for one, saying so.
+//! `workspace.max_concurrent_runs` in the root config caps it — one at a time
+//! unless it says otherwise, and `0` for no limit. Each run takes a slot before
+//! its first step and holds it until it ends; a run that finds every slot taken
+//! waits for one, saying so.
+//!
+//! A run started *by a step* of a run that holds a slot — a script that calls
+//! `ciabatta test` — shares its parent's slot instead of queueing for one: with
+//! the default of one, it would otherwise wait forever on the run waiting for
+//! it. [`SLOT_VAR`] in a step's environment is how the child knows.
 //!
 //! A slot is an exclusive lock on one of `max_concurrent_runs` files under
 //! `~/.ciabatta/run-slots/<workspace>/`. Locks rather than a counter in a file
@@ -19,6 +25,13 @@ use anyhow::{Context, Result};
 
 use crate::runner::Cancel;
 
+/// Set in every step's environment to the slot directory its run holds a slot
+/// in, so a nested run of the same workspace knows not to queue behind it.
+pub const SLOT_VAR: &str = "CIABATTA_RUN_SLOT";
+
+/// The limit when `max_concurrent_runs` is unset: one run at a time.
+pub const DEFAULT_LIMIT: usize = 1;
+
 /// How often a waiting run tries again.
 const POLL: Duration = Duration::from_millis(500);
 
@@ -28,14 +41,28 @@ pub struct Slot {
     _lock: File,
 }
 
-/// The workspace's limit, from `workspace.max_concurrent_runs`. `None` —
-/// unset, or `0` — means no limit.
+/// The workspace's limit, from `workspace.max_concurrent_runs`: unset is
+/// [`DEFAULT_LIMIT`], and `0` — `None` here — is no limit at all.
 pub fn limit(config: &crate::config::CiabattaConfig) -> Option<usize> {
-    config
+    match config
         .workspace
         .as_ref()
         .and_then(|w| w.max_concurrent_runs)
-        .filter(|n| *n > 0)
+    {
+        None => Some(DEFAULT_LIMIT),
+        Some(0) => None,
+        Some(n) => Some(n),
+    }
+}
+
+/// Whether this run was started by a step of a run already holding a slot in
+/// `dir` — and so runs inside that slot rather than queueing for its own.
+pub fn inherited(dir: &Path, env: &std::collections::HashMap<String, String>) -> bool {
+    let held = env
+        .get(SLOT_VAR)
+        .cloned()
+        .or_else(|| std::env::var(SLOT_VAR).ok());
+    held.is_some_and(|held| Path::new(&held) == dir)
 }
 
 /// Where `root`'s slot files live: one directory per workspace, named for a
@@ -122,6 +149,33 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn unset_is_one_at_a_time_and_zero_is_no_limit() {
+        let read = |yaml: &str| {
+            let config: crate::config::CiabattaConfig =
+                crate::format::from_str(yaml, crate::format::Format::Yaml).unwrap();
+            limit(&config)
+        };
+        assert_eq!(read("workspace: {}\n"), Some(1));
+        assert_eq!(read("{}\n"), Some(1), "no workspace table at all");
+        assert_eq!(read("workspace:\n  max_concurrent_runs: 0\n"), None);
+        assert_eq!(read("workspace:\n  max_concurrent_runs: 3\n"), Some(3));
+    }
+
+    #[test]
+    fn a_run_started_by_a_step_shares_its_parents_slot() {
+        let dir = scratch("inherited");
+        let env = std::collections::HashMap::from([(
+            SLOT_VAR.to_string(),
+            dir.to_string_lossy().into_owned(),
+        )]);
+        assert!(inherited(&dir, &env));
+        assert!(
+            !inherited(&scratch("elsewhere"), &env),
+            "another workspace queues"
+        );
     }
 
     #[test]

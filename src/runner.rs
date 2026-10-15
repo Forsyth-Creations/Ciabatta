@@ -346,17 +346,23 @@ pub async fn run_workflow_ctl(
     // about any one package.
     let setup = async {
         let workspace = crate::config::load_config(root).unwrap_or_else(|_| config.clone());
+        // `(slot, dir)`: the slot this run holds — none when it shares its
+        // parent's — and the directory its steps are told about.
         let slot = match crate::run::slots::limit(&workspace) {
             // A dry run does no work, so it takes no slot.
             Some(limit) if !dry_run => {
                 let dir = crate::run::slots::dir_for(root)?;
-                let note_tx = inner_tx.clone();
-                Some(
-                    crate::run::slots::take(&dir, limit, ctl.cancel.as_deref(), |line| {
-                        let _ = note_tx.try_send(ProgressUpdate::Log(name.to_string(), line));
-                    })
-                    .await?,
-                )
+                if crate::run::slots::inherited(&dir, env_vars) {
+                    Some((None, dir))
+                } else {
+                    let note_tx = inner_tx.clone();
+                    let held =
+                        crate::run::slots::take(&dir, limit, ctl.cancel.as_deref(), |line| {
+                            let _ = note_tx.try_send(ProgressUpdate::Log(name.to_string(), line));
+                        })
+                        .await?;
+                    Some((Some(held), dir))
+                }
             }
             _ => None,
         };
@@ -368,7 +374,13 @@ pub async fn run_workflow_ctl(
     };
     let result = match setup.await {
         Ok((slot, broker)) => {
-            let env_vars = broker.extend(env_vars);
+            let mut env_vars = broker.extend(env_vars);
+            if let Some((_, dir)) = &slot {
+                env_vars.insert(
+                    crate::run::slots::SLOT_VAR.to_string(),
+                    dir.to_string_lossy().into_owned(),
+                );
+            }
             let result = crate::run::execute(
                 name, resolved, config, root, &env_vars, dry_run, &ctl, &inner_tx,
             )

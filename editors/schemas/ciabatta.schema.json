@@ -88,8 +88,9 @@
         "max_concurrent_runs": {
           "type": "integer",
           "minimum": 0,
-          "description": "How many of this workspace's workflow runs may go at once on this machine, across terminals and the daemon. Runs past the limit wait for a slot before their first step. Read from the monorepo root. Unset or 0 is no limit. Dry runs don't count.",
-          "examples": [2]
+          "description": "How many of this workspace's workflow runs may go at once on this machine, across terminals and the daemon. Runs past the limit wait for a slot before their first step; a run started by another run's step shares its slot. Read from the monorepo root. Unset is 1 (one at a time); 0 is no limit. Dry runs don't count.",
+          "default": 1,
+          "examples": [2, 0]
         },
         "env_file": {
           "$ref": "./common.schema.json#/$defs/stringOrList",

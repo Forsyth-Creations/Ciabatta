@@ -106,8 +106,8 @@ pub struct WorkspaceMeta {
     pub input_timeout: Option<String>,
     /// How many of this workspace's workflow runs may go at once on this
     /// machine, across terminals and the daemon. Runs past the limit queue
-    /// until one finishes. Read from the monorepo root; unset or `0` is no
-    /// limit. See [`crate::run::slots`].
+    /// until one finishes. Read from the monorepo root. Unset is one at a
+    /// time; `0` is no limit. See [`crate::run::slots`].
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_concurrent_runs: Option<usize>,
     /// `.env` file path(s), relative to this sub-workspace, sourced before any

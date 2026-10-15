@@ -1991,18 +1991,20 @@ echo "deploying to $region"`}</Pre>
       <>
         <P>
           Two terminals and the daemon can all start runs of the same workspace, and on a laptop
-          three parallel builds can be two too many. Cap it in the root{" "}
+          three parallel builds can be two too many. So by default a workspace runs{" "}
+          <strong>one workflow at a time</strong> on each machine. Change it in the root{" "}
           <C>.ciabatta/ciabatta.yaml</C>:
         </P>
         <Pre>{`workspace:
-  max_concurrent_runs: 2   # unset or 0: no limit`}</Pre>
+  max_concurrent_runs: 2   # unset: 1 · 0: no limit`}</Pre>
         <P>
           The limit is per workspace, per machine, and counts every kind of run — plain terminal,{" "}
           <C>--tui</C>, <C>--gui</C> and runs started here. A run past the limit waits for a slot
           before its first step, saying so in its log (
           <C>waiting for a run slot: this workspace allows 2 runs at a time…</C>), and starts as
           soon as one finishes. Stopping a waiting run ends the wait. Dry runs don&apos;t take a
-          slot.
+          slot, and a run started by another run&apos;s step — a script that calls{" "}
+          <C>ciabatta test</C> — shares its parent&apos;s slot rather than waiting on it.
         </P>
         <P>
           Slots are file locks under <C>~/.ciabatta/run-slots/</C>, which the operating system

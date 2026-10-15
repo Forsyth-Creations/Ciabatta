@@ -921,12 +921,13 @@ config says otherwise, or `--timeout` overrides it:
 ```yaml
 workspace:
   input_timeout: 5m        # 0 / "none" waits forever (the default)
-  max_concurrent_runs: 2   # runs of this workspace at once on this machine
+  max_concurrent_runs: 2   # runs of this workspace at once here (default 1; 0 = no limit)
 ```
 
 `max_concurrent_runs` counts every run of the workspace on the machine — the
-terminal, the daemon, a second terminal. A run past the limit waits for a slot
-before its first step, says so, and starts as soon as one frees up.
+terminal, the daemon, a second terminal — and is **1 unless set**. A run past
+the limit waits for a slot before its first step, says so, and starts as soon
+as one frees up. A run started by a step of another run shares its slot.
 
 ### Watching and building runs in the browser
 

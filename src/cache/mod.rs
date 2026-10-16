@@ -36,12 +36,13 @@
 //!
 //! [`ciabatta dry-run`]: crate::cache::plan
 
+pub mod cargo;
 pub mod cli;
 pub mod diff;
 pub mod graph;
 pub mod store;
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -131,6 +132,38 @@ pub struct CacheConfig {
     #[serde(default)]
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub exclude: Vec<String>,
+
+    /// Leave out of `inputs` whatever git would ignore: every `.gitignore` in
+    /// the tree, nested ones included, and `.git/info/exclude`. The user's
+    /// global excludes file is deliberately not read — it differs from machine
+    /// to machine, and a key that depends on whose laptop computed it can never
+    /// be shared through the remote.
+    ///
+    /// This is what lets `inputs: ["crates/**/*"]` mean "the sources" rather
+    /// than "the sources and every build artifact sitting next to them". Only
+    /// inputs: outputs live in ignored directories almost by definition.
+    ///
+    /// Tri-state like `enabled`, so a level that doesn't mention it inherits
+    /// it. Off when unset, because turning it on moves every existing key.
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gitignore: Option<bool>,
+
+    /// A Rust build's inputs and outputs, worked out by Cargo: see
+    /// [`cargo`]. Added to whatever `inputs` and `outputs` say, never instead
+    /// of them, so a build that also reads `assets/` lists just that.
+    ///
+    /// Replaced wholesale by a level that declares its own, like `inputs`.
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cargo: Option<cargo::CargoSpec>,
+
+    /// The step's own sub-workspace, relative to the workspace root, which is
+    /// where `cargo` looks for a manifest when it names none. Never written in
+    /// config — filled in by [`Self::with_home`] when a step's effective
+    /// settings are worked out.
+    #[serde(skip)]
+    pub home: Option<String>,
 
     /// The shared cache this workspace reads from and writes to, when it has
     /// one. Local-only caching needs none of this.
@@ -265,7 +298,7 @@ impl CacheConfig {
     pub fn why_disabled(&self) -> Option<&'static str> {
         if !self.is_on() {
             Some("caching is off (set `cache.enabled: true` to turn it on)")
-        } else if self.inputs.is_empty() {
+        } else if self.inputs.is_empty() && self.cargo.is_none() {
             Some("no `cache.inputs` are declared, so there's nothing to key on")
         } else {
             None
@@ -292,13 +325,122 @@ impl CacheConfig {
     /// relative to `dir` — the one member whose files it is precisely the
     /// point of this build to read. `None` for a step belonging to the root.
     pub fn hash_inputs(&self, dir: &Path, own: Option<&str>) -> Result<Vec<FileHash>> {
-        hash_matching(dir, &self.inputs, &self.input_exclude(dir, own))
+        self.inputs_matching(dir, own, true)
     }
 
     /// The files this build reads, listed but not hashed — see
     /// [`list_matching`].
     pub fn list_inputs(&self, dir: &Path, own: Option<&str>) -> Result<Vec<FileHash>> {
-        list_matching(dir, &self.inputs, &self.input_exclude(dir, own))
+        self.inputs_matching(dir, own, false)
+    }
+
+    /// Record which sub-workspace this config's step belongs to — `None` or
+    /// `"."` for the root — so `cargo` can find that step's manifest.
+    pub fn with_home(mut self, home: Option<String>) -> Self {
+        self.home = home.filter(|h| !h.is_empty() && h != ".");
+        self
+    }
+
+    /// What [`Self::cargo`] resolves to, when it is set.
+    pub fn cargo_resolved(&self, dir: &Path) -> Result<Option<cargo::Resolved>> {
+        self.cargo
+            .as_ref()
+            .map(|spec| cargo::resolve(dir, self.home.as_deref(), spec))
+            .transpose()
+    }
+
+    fn inputs_matching(&self, dir: &Path, own: Option<&str>, hash: bool) -> Result<Vec<FileHash>> {
+        let kept = self.kept_by_gitignore(dir)?;
+        let mut files = matching(
+            dir,
+            &self.inputs,
+            &self.input_exclude(dir, own),
+            kept.as_ref(),
+            hash,
+        )?;
+
+        let Some(resolved) = self.cargo_resolved(dir)? else {
+            return Ok(files);
+        };
+        // Cargo's half has its own exclusions. A sibling sub-workspace is
+        // still somebody else's entry — unless a crate in it is a path
+        // dependency, in which case its sources are compiled into this build's
+        // artifact and leaving them out of the key is the stale-hit bug this
+        // whole section exists to prevent. And `.gitignore` always applies:
+        // a package directory walked whole would otherwise sweep up its own
+        // `target/`.
+        let mut exclude = self.exclude.clone();
+        exclude.extend(resolved.exclude.iter().cloned());
+        exclude.extend(nested_workspaces_through(dir, |rel| {
+            Some(rel) == own || resolved.reaches_into(rel)
+        }));
+        let kept = match kept {
+            Some(kept) => kept,
+            None => not_ignored(dir)?,
+        };
+        let from_cargo = matching(dir, &resolved.inputs, &exclude, Some(&kept), hash)?;
+
+        let mut merged: BTreeMap<String, FileHash> =
+            files.drain(..).map(|f| (f.path.clone(), f)).collect();
+        for file in from_cargo {
+            merged.entry(file.path.clone()).or_insert(file);
+        }
+        Ok(merged.into_values().collect())
+    }
+
+    /// Every output pattern: what `outputs` says, and the artifacts `cargo`
+    /// resolves to.
+    fn output_patterns(&self, dir: &Path) -> Result<Vec<String>> {
+        let mut patterns = self.outputs.clone();
+        if let Some(resolved) = self.cargo_resolved(dir)? {
+            patterns.extend(resolved.outputs);
+        }
+        Ok(patterns)
+    }
+
+    /// Files rustc reports reading for this build's `cargo` artifacts that its
+    /// inputs don't cover — each one a change that would not invalidate its
+    /// cache entry. Empty without `cargo`, and before a first build.
+    ///
+    /// `upstream` is what the steps this one needs produced: a build reading
+    /// those is keyed on them already, through their output fingerprints.
+    pub fn undeclared_reads(
+        &self,
+        dir: &Path,
+        own: Option<&str>,
+        upstream: &HashSet<String>,
+    ) -> Result<Vec<String>> {
+        let Some(resolved) = self.cargo_resolved(dir)? else {
+            return Ok(Vec::new());
+        };
+        let reads = cargo::dep_info_reads(dir, &resolved);
+        if reads.is_empty() {
+            return Ok(Vec::new());
+        }
+        let covered: HashSet<String> = self
+            .list_inputs(dir, own)?
+            .into_iter()
+            .map(|f| f.path)
+            .collect();
+        Ok(reads
+            .into_iter()
+            .filter(|r| !covered.contains(r) && !upstream.contains(r))
+            .collect())
+    }
+
+    /// Whether `cargo` will supply outputs, without running Cargo to find out.
+    fn cargo_declares_outputs(&self) -> bool {
+        self.cargo.as_ref().is_some_and(|c| !c.artifacts.is_empty())
+    }
+
+    /// With `gitignore: true`, every path under `dir` git would keep; `None`
+    /// when the setting is off and nothing is filtered.
+    fn kept_by_gitignore(&self, dir: &Path) -> Result<Option<HashSet<String>>> {
+        if self.gitignore.unwrap_or(false) {
+            not_ignored(dir).map(Some)
+        } else {
+            Ok(None)
+        }
     }
 
     /// What is kept out of this build's inputs: what it declared, plus every
@@ -335,7 +477,7 @@ impl CacheConfig {
 
     /// The files this build writes, listed but not hashed.
     pub fn list_outputs(&self, dir: &Path) -> Result<Vec<FileHash>> {
-        list_matching(dir, &self.outputs, &[])
+        list_matching(dir, &self.output_patterns(dir)?, &[])
     }
 
     /// Whether a run of this build can be shown to have produced what it did.
@@ -348,13 +490,15 @@ impl CacheConfig {
     /// why a step behind one of those has to run too. See
     /// [`Reason::UpstreamReran`].
     pub fn accounts_for_its_outputs(&self) -> bool {
-        !self.outputs.is_empty() || self.writes_nothing()
+        !self.outputs.is_empty() || self.cargo_declares_outputs() || self.writes_nothing()
     }
 
     /// Whether this build declared that it writes nothing anyone reads
     /// (`no_outputs: true`, with no `outputs` to contradict it).
     pub fn writes_nothing(&self) -> bool {
-        self.outputs.is_empty() && self.no_outputs.unwrap_or(false)
+        self.outputs.is_empty()
+            && !self.cargo_declares_outputs()
+            && self.no_outputs.unwrap_or(false)
     }
 
     /// Hash the files this build writes. Never filtered by `exclude`.
@@ -365,7 +509,45 @@ impl CacheConfig {
     /// unlike an undeclared input an over-broad output can only ever cost a
     /// rebuild.
     pub fn hash_outputs(&self, dir: &Path) -> Result<Vec<FileHash>> {
-        hash_matching(dir, &self.outputs, &[])
+        hash_matching(dir, &self.output_patterns(dir)?, &[])
+    }
+}
+
+/// What each step of a graph produced, and what it needs — so a file a build
+/// read can be told apart as one an upstream step made (keyed already,
+/// through `needs`) or one it should have declared.
+#[derive(Debug, Default, Clone)]
+pub struct Produced {
+    steps: std::collections::HashMap<String, (Vec<String>, Vec<String>)>,
+}
+
+impl Produced {
+    pub fn record(&mut self, name: &str, needs: &[String], outputs: &[FileHash]) {
+        self.steps.insert(
+            name.to_string(),
+            (
+                needs.to_vec(),
+                outputs.iter().map(|f| f.path.clone()).collect(),
+            ),
+        );
+    }
+
+    /// Every output of the steps in `needs`, and of the steps they need, all
+    /// the way up.
+    pub fn upstream_of(&self, needs: &[String]) -> HashSet<String> {
+        let mut out = HashSet::new();
+        let mut seen: HashSet<&str> = HashSet::new();
+        let mut queue: Vec<&str> = needs.iter().map(String::as_str).collect();
+        while let Some(name) = queue.pop() {
+            if !seen.insert(name) {
+                continue;
+            }
+            if let Some((needs, outputs)) = self.steps.get(name) {
+                out.extend(outputs.iter().cloned());
+                queue.extend(needs.iter().map(String::as_str));
+            }
+        }
+        out
     }
 }
 
@@ -397,8 +579,15 @@ impl CacheConfig {
 /// scan descends *through* it to exclude what is nested below it. Everybody
 /// else's subtree is still somebody else's entry.
 pub fn nested_workspaces_except(dir: &Path, own: Option<&str>) -> Vec<String> {
+    nested_workspaces_through(dir, |rel| Some(rel) == own)
+}
+
+/// [`nested_workspaces_except`], descending through every sub-workspace
+/// `through` says yes to rather than only the step's own — the ones a
+/// `cache.cargo` closure has to reach into.
+pub fn nested_workspaces_through(dir: &Path, through: impl Fn(&str) -> bool) -> Vec<String> {
     let mut found = Vec::new();
-    collect_nested(dir, dir, own, 0, &mut found);
+    collect_nested(dir, dir, &through, 0, &mut found);
     found
 }
 
@@ -409,7 +598,7 @@ const MAX_NEST_DEPTH: usize = 6;
 fn collect_nested(
     root: &Path,
     dir: &Path,
-    own: Option<&str>,
+    through: &dyn Fn(&str) -> bool,
     depth: usize,
     found: &mut Vec<String>,
 ) {
@@ -438,8 +627,8 @@ fn collect_nested(
         if path.join(crate::config::CIABATTA_DIR).is_dir() {
             // The step's own member: its files are what this build reads, so
             // keep them, and carry on down to exclude anything nested inside it.
-            if rel.as_deref() == own {
-                collect_nested(root, &path, own, depth + 1, found);
+            if rel.as_deref().is_some_and(through) {
+                collect_nested(root, &path, through, depth + 1, found);
                 continue;
             }
             if let Some(rel) = rel {
@@ -448,7 +637,7 @@ fn collect_nested(
             // Stop here: whatever is below belongs to this member, not to us.
             continue;
         }
-        collect_nested(root, &path, own, depth + 1, found);
+        collect_nested(root, &path, through, depth + 1, found);
     }
 }
 
@@ -530,7 +719,7 @@ fn hex(bytes: &[u8]) -> String {
 /// an error: `outputs` legitimately match nothing before the first build, and
 /// an `inputs` pattern for an optional file is a normal thing to write.
 pub fn hash_matching(dir: &Path, patterns: &[String], exclude: &[String]) -> Result<Vec<FileHash>> {
-    matching(dir, patterns, exclude, true)
+    matching(dir, patterns, exclude, None, true)
 }
 
 /// The same expansion as [`hash_matching`], without reading a single byte.
@@ -541,7 +730,44 @@ pub fn hash_matching(dir: &Path, patterns: &[String], exclude: &[String]) -> Res
 /// print a count would make simply looking at the graph as expensive as
 /// building it. The `sha256` of each returned file is empty.
 pub fn list_matching(dir: &Path, patterns: &[String], exclude: &[String]) -> Result<Vec<FileHash>> {
-    matching(dir, patterns, exclude, false)
+    matching(dir, patterns, exclude, None, false)
+}
+
+/// Every file and directory under `dir` that git would not ignore, as
+/// `/`-separated paths relative to it.
+///
+/// Walked once up front rather than asked per path, because ignore rules are
+/// inherited down the tree — whether `a/b/c` is ignored depends on every
+/// `.gitignore` between it and `dir` — and the walk already prunes an ignored
+/// `target/` or `node_modules/` without descending into it. Dot-files are kept
+/// (`.cargo/config.toml` is an input like any other); `.git` itself never is.
+///
+/// Works outside a git checkout too: a `.gitignore` says what's derived
+/// whether or not anyone has run `git init`, and a CI job building from a
+/// source tarball should get the same key as one building from a clone.
+pub fn not_ignored(dir: &Path) -> Result<HashSet<String>> {
+    let mut kept = HashSet::new();
+    let walk = ignore::WalkBuilder::new(dir)
+        .hidden(false)
+        .parents(false)
+        .ignore(false)
+        .git_global(false)
+        .git_ignore(true)
+        .git_exclude(true)
+        .require_git(false)
+        .filter_entry(|entry| entry.file_name() != ".git")
+        .build();
+    for entry in walk {
+        let entry = entry.with_context(|| format!("Failed to walk {}", dir.display()))?;
+        let Ok(rel) = entry.path().strip_prefix(dir) else {
+            continue;
+        };
+        let rel = rel.to_string_lossy().replace('\\', "/");
+        if !rel.is_empty() {
+            kept.insert(rel);
+        }
+    }
+    Ok(kept)
 }
 
 /// Rewrite a `**` glued to other text into the spelling the matcher accepts.
@@ -592,10 +818,13 @@ pub fn normalize_glob(pattern: &str) -> String {
     parts.join("/")
 }
 
+/// `kept`, when given, is [`not_ignored`]'s answer: anything outside it is
+/// skipped exactly as if it were excluded.
 fn matching(
     dir: &Path,
     patterns: &[String],
     exclude: &[String],
+    kept: Option<&HashSet<String>>,
     hash: bool,
 ) -> Result<Vec<FileHash>> {
     let mut seen: BTreeMap<String, FileHash> = BTreeMap::new();
@@ -623,7 +852,7 @@ fn matching(
             .with_context(|| format!("Invalid cache pattern '{pattern}'"))?;
 
         for entry in entries.flatten() {
-            collect_into(dir, &entry, exclude, hash, &mut seen)?;
+            collect_into(dir, &entry, exclude, kept, hash, &mut seen)?;
         }
     }
 
@@ -635,6 +864,7 @@ fn collect_into(
     dir: &Path,
     path: &Path,
     exclude: &[String],
+    kept: Option<&HashSet<String>>,
     hash: bool,
     seen: &mut BTreeMap<String, FileHash>,
 ) -> Result<()> {
@@ -661,6 +891,9 @@ fn collect_into(
     if !rel.is_empty() && is_excluded(&rel, dir, exclude) {
         return Ok(());
     }
+    if !rel.is_empty() && kept.is_some_and(|kept| !kept.contains(&rel)) {
+        return Ok(());
+    }
 
     if path.is_dir() {
         // Sorted so the walk order — and so any error a caller sees — doesn't
@@ -672,7 +905,7 @@ fn collect_into(
             .collect();
         children.sort();
         for child in children {
-            collect_into(dir, &child, exclude, hash, seen)?;
+            collect_into(dir, &child, exclude, kept, hash, seen)?;
         }
         return Ok(());
     }
@@ -1101,7 +1334,7 @@ pub fn plan(
     };
     let key = key_inputs.key()?;
 
-    if target.config.outputs.is_empty() && !target.config.writes_nothing() {
+    if !target.config.accounts_for_its_outputs() {
         return Ok(Decision::Rebuild {
             key,
             reason: Reason::NoOutputs,
@@ -1494,6 +1727,81 @@ mod tests {
         assert!(hashed.iter().all(|f| !f.sha256.is_empty()));
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `gitignore: true` drops what git would ignore — nested `.gitignore`s
+    /// and negations included — and keeps dot-files that aren't ignored.
+    #[test]
+    fn gitignore_keeps_build_output_out_of_inputs() {
+        let dir = scratch("gitignore");
+        write(&dir, ".gitignore", "target/\n*.log\n!keep.log\n");
+        write(&dir, "crates/api/src/main.rs", "fn main() {}");
+        write(&dir, "crates/api/target/debug/api", "binary");
+        write(&dir, "crates/api/.gitignore", "generated/\n");
+        write(&dir, "crates/api/generated/out.rs", "// derived");
+        write(&dir, "crates/api/build.log", "noise");
+        write(&dir, "crates/api/keep.log", "wanted");
+        write(&dir, ".cargo/config.toml", "[build]");
+
+        let mut config = CacheConfig {
+            enabled: Some(true),
+            inputs: vec!["crates/**/*".to_string(), ".cargo/**/*".to_string()],
+            ..Default::default()
+        };
+        let everything: Vec<String> = config
+            .hash_inputs(&dir, None)
+            .unwrap()
+            .into_iter()
+            .map(|f| f.path)
+            .collect();
+        assert!(everything.contains(&"crates/api/target/debug/api".to_string()));
+
+        config.gitignore = Some(true);
+        let hashed: Vec<String> = config
+            .hash_inputs(&dir, None)
+            .unwrap()
+            .into_iter()
+            .map(|f| f.path)
+            .collect();
+        assert_eq!(
+            hashed,
+            vec![
+                ".cargo/config.toml",
+                "crates/api/.gitignore",
+                "crates/api/keep.log",
+                "crates/api/src/main.rs",
+            ]
+        );
+        let listed: Vec<String> = config
+            .list_inputs(&dir, None)
+            .unwrap()
+            .into_iter()
+            .map(|f| f.path)
+            .collect();
+        assert_eq!(hashed, listed);
+
+        // Outputs are never filtered: they live in ignored directories.
+        config.outputs = vec!["crates/api/target/debug/api".to_string()];
+        assert_eq!(config.hash_outputs(&dir).unwrap().len(), 1);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A level that doesn't mention `gitignore` inherits it.
+    #[test]
+    fn gitignore_is_inherited_by_a_step_that_does_not_mention_it() {
+        let workflow = CacheConfig {
+            gitignore: Some(true),
+            ..Default::default()
+        };
+        let step = CacheConfig {
+            env: vec!["PROFILE".to_string()],
+            ..Default::default()
+        };
+        assert_eq!(
+            graph::effective(Some(&workflow), Some(&step)).gitignore,
+            Some(true)
+        );
     }
 
     #[test]

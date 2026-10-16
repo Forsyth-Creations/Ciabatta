@@ -1305,6 +1305,13 @@ function TargetDependencies({ deps }: { deps: TargetDeps }) {
         }
         title={deps.exclude.length > 0 ? `excluding ${deps.exclude.join(", ")}` : undefined}
       />
+      {deps.cargo && deps.cargo.length > 0 && (
+        <DepRow
+          label="cargo"
+          value={deps.cargo.join("; ")}
+          title="Packages cache.cargo resolved this target's files from"
+        />
+      )}
       <DepRow
         label="writes"
         value={
@@ -1321,6 +1328,13 @@ function TargetDependencies({ deps }: { deps: TargetDeps }) {
       {deps.commands.length > 0 && <DepRow label="runs" value={deps.commands.join(" ; ")} mono />}
       {!deps.cached && deps.why_uncached && (
         <DepRow label="not cached" value={deps.why_uncached} />
+      )}
+      {deps.cached && deps.undeclared_reads && deps.undeclared_reads.length > 0 && (
+        <Typography variant="caption" color="warning.main">
+          ⚠ rustc reports the last build reading {deps.undeclared_reads.join(", ")}, outside
+          its cache inputs, so changing {deps.undeclared_reads.length === 1 ? "it" : "them"}{" "}
+          would not invalidate this target.
+        </Typography>
       )}
       {deps.outputs_in_inputs && deps.outputs_in_inputs.length > 0 && (
         <Typography variant="caption" color="warning.main">

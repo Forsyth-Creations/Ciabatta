@@ -398,6 +398,9 @@ fn render(answer: &Answer, all: bool) -> String {
         &list_or(&deps.needs, "nothing — it can start immediately"),
     ));
     out.push_str(&row("files", &files_line(deps)));
+    if !deps.cargo.is_empty() {
+        out.push_str(&row("cargo", &deps.cargo.join("\n               ")));
+    }
     if all {
         out.push_str(&file_list(&deps.input_list));
     }
@@ -428,6 +431,24 @@ fn render(answer: &Answer, all: bool) -> String {
             }
         }
         (None, None) => out.push_str("  the cache couldn't be read for this target\n"),
+    }
+
+    if deps.cached && !deps.undeclared_reads.is_empty() {
+        out.push_str(&format!(
+            "\n  ⚠ rustc reports its last build reading {} outside its inputs, so \n    \
+             changing {} would not invalidate its cache entry. Add {} to `cache.inputs`.\n",
+            deps.undeclared_reads.join(", "),
+            if deps.undeclared_reads.len() == 1 {
+                "it"
+            } else {
+                "them"
+            },
+            if deps.undeclared_reads.len() == 1 {
+                "it"
+            } else {
+                "them"
+            },
+        ));
     }
 
     if deps.cached && !deps.outputs_in_inputs.is_empty() {

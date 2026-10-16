@@ -68,7 +68,49 @@
           "items": { "type": "string" },
           "examples": [[".git", "node_modules", "target"]]
         },
+        "gitignore": {
+          "type": "boolean",
+          "description": "Leave out of `inputs` whatever git would ignore — every .gitignore in the tree and .git/info/exclude, but not your global excludes file, which differs between machines. Lets `inputs: [\"crates/**/*\"]` mean the sources without the build output next to them. Inputs only. Absent means inherit; off when never set."
+        },
+        "cargo": { "$ref": "#/$defs/cargoCache" },
         "remote": { "$ref": "#/$defs/remoteCache" }
+      }
+    },
+
+    "cargoCache": {
+      "type": "object",
+      "description": "A Rust build's inputs and outputs, read from `cargo metadata` instead of written by hand. Inputs: every package directory in the path-dependency closure of what's selected (git-ignored files left out), plus the workspace Cargo.toml, Cargo.lock, rust-toolchain and .cargo/config files. Outputs: the selected packages' artifacts of the kinds in `artifacts`. Added to `inputs`/`outputs`, never instead of them.",
+      "additionalProperties": false,
+      "properties": {
+        "package": {
+          "type": "string",
+          "description": "The package to build. Omitted, the selection is what `cargo build` would build from the manifest's directory: that package, or a virtual workspace's default members."
+        },
+        "packages": {
+          "type": "array",
+          "description": "Several packages, for a step that builds more than one (`-p a -p b`).",
+          "items": { "type": "string" }
+        },
+        "manifest": {
+          "type": "string",
+          "description": "The Cargo.toml to read, relative to the workspace root. Defaults to the step's own sub-workspace's Cargo.toml, then the root's.",
+          "examples": ["Cargo.toml", "editors/zed/Cargo.toml"]
+        },
+        "profile": {
+          "type": "string",
+          "description": "The Cargo profile the step builds with. `dev` (the default) and `test` write to target/debug, `release` and `bench` to target/release, a custom profile to a directory of its own name.",
+          "examples": ["release", "dev"]
+        },
+        "target": {
+          "type": "string",
+          "description": "A target triple, for a step that passes `--target`. Artifacts are then looked for under target/<triple>/<profile>/, named the way that platform names them.",
+          "examples": ["x86_64-unknown-linux-gnu", "aarch64-apple-darwin"]
+        },
+        "artifacts": {
+          "type": "array",
+          "description": "Which artifacts of the selected packages are this build's outputs. Empty means Cargo supplies inputs only.",
+          "items": { "enum": ["bin", "lib", "cdylib", "dylib", "staticlib"] }
+        }
       }
     },
 

@@ -3301,7 +3301,34 @@ fn cmd_cache(subcommand: CacheCommand) -> Result<()> {
             let proposal = cache::cli::propose_under(&root, rel.as_deref());
 
             println!("Looking at {} …\n", root.display());
-            if proposal.inputs.is_empty() {
+            if let Some(cargo) = &proposal.cargo {
+                println!("A Cargo build — its files will be read from `cargo metadata` each run:");
+                for package in &proposal.cargo_packages {
+                    let at = if package.dir.is_empty() {
+                        "."
+                    } else {
+                        &package.dir
+                    };
+                    let why = if package.selected {
+                        ""
+                    } else {
+                        "  (path dependency)"
+                    };
+                    println!("  {:<20} {at}{why}", package.name);
+                }
+                if cargo.artifacts.is_empty() {
+                    println!("  no binary targets, so its outputs are left for you to name");
+                } else {
+                    println!(
+                        "  outputs: its {} binaries",
+                        cargo.profile.as_deref().unwrap_or("dev")
+                    );
+                }
+                println!();
+            }
+            if proposal.inputs.is_empty() && proposal.cargo.is_some() {
+                // Cargo has it covered; nothing else to list.
+            } else if proposal.inputs.is_empty() {
                 println!(
                     "Nothing recognizable as source was found here. The `cache:` section \
                      will be written with the parts you need to fill in marked TODO —\n\
@@ -3319,7 +3346,13 @@ fn cmd_cache(subcommand: CacheCommand) -> Result<()> {
                     println!("  {pattern:<20} {why}");
                 }
             }
-            if proposal.outputs.is_empty() {
+            let cargo_outputs = proposal
+                .cargo
+                .as_ref()
+                .is_some_and(|c| !c.artifacts.is_empty());
+            if proposal.outputs.is_empty() && cargo_outputs {
+                // Cargo's artifacts are the outputs.
+            } else if proposal.outputs.is_empty() {
                 println!(
                     "\nNo build output directory was found yet, so `outputs` is left for you \
                      to fill in.\nWith none declared there's nothing to restore, and every \

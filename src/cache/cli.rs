@@ -51,7 +51,9 @@ impl StepContext for WorkspaceContext<'_> {
         // Two levels, not three: a workflow's own `cache:` was folded into
         // each of its steps when the graph compiled, so `step.cache` already
         // carries it.
-        super::graph::effective(workspace_level.as_ref(), step.cache.as_ref()).with_step_env(step)
+        super::graph::effective(workspace_level.as_ref(), step.cache.as_ref())
+            .with_step_env(step)
+            .with_home(member.map(|m| m.rel.clone()))
     }
 
     fn dir(&self, _step: &RunStep) -> PathBuf {
@@ -149,6 +151,16 @@ fn print_step(step: &Planned, show_diff: bool) {
         );
     }
 
+    if !step.undeclared_reads.is_empty() {
+        println!(
+            "    {} rustc read {} file(s) its inputs don't cover, so changing them won't \
+             rebuild it: {}",
+            "⚠".yellow(),
+            step.undeclared_reads.len(),
+            step.undeclared_reads.join(", "),
+        );
+    }
+
     if !step.outputs_in_inputs.is_empty() {
         println!(
             "    {} {}",
@@ -226,6 +238,7 @@ pub fn plan_json(plan: &Plan) -> serde_json::Value {
             "inputs": step.inputs,
             "outputs": step.outputs,
             "diff": step.diff,
+            "undeclared_reads": step.undeclared_reads,
             "outputs_in_inputs": step.outputs_in_inputs,
         })).collect::<Vec<_>>(),
     })
@@ -264,6 +277,12 @@ pub struct Proposal {
     pub exclude: Vec<String>,
     /// Why each input pattern was proposed, so the user can judge it.
     pub reasons: Vec<(String, &'static str)>,
+    /// A `cache.cargo` section, when the directory is a Cargo package or
+    /// workspace that Cargo could read — in place of the hand-written globs
+    /// that would otherwise name its manifest, sources and target directory.
+    pub cargo: Option<super::cargo::CargoSpec>,
+    /// What `cargo` resolved to when it was proposed, for the summary.
+    pub cargo_packages: Vec<super::cargo::Package>,
 }
 
 /// Directories that are build output rather than source, wherever they appear.
@@ -350,12 +369,83 @@ pub fn propose_under(dir: &Path, rel: Option<&str>) -> Proposal {
         )
         .collect();
 
-    Proposal {
+    let proposal = Proposal {
         inputs,
         outputs,
         exclude: dedup(exclude),
         reasons,
+        cargo: None,
+        cargo_packages: Vec::new(),
+    };
+    with_cargo(proposal, dir, rel)
+}
+
+/// Swap the Rust half of a proposal for a `cache.cargo` section, when Cargo
+/// can read the directory.
+///
+/// The section is written rather than the globs it expands to, because the
+/// globs are exactly what goes stale: the day a path dependency is added, a
+/// written-out list stops naming everything the binary is built from, and
+/// nothing says so. When Cargo can't read the manifest — not installed, or a
+/// manifest it rejects — the proposal is left as the plain globs, which are
+/// still better than nothing.
+fn with_cargo(mut proposal: Proposal, dir: &Path, rel: Option<&str>) -> Proposal {
+    use super::cargo::{ArtifactKind, CargoSpec};
+
+    if !dir.join("Cargo.toml").is_file() {
+        return proposal;
     }
+    let rel = rel.filter(|r| !r.is_empty() && *r != ".");
+    let depth = rel.map(|r| r.split('/').count()).unwrap_or(0);
+    let Some(root) = dir.ancestors().nth(depth) else {
+        return proposal;
+    };
+
+    let bins = CargoSpec {
+        profile: Some("release".to_string()),
+        artifacts: vec![ArtifactKind::Bin],
+        ..Default::default()
+    };
+    let inputs_only = CargoSpec {
+        artifacts: Vec::new(),
+        ..bins.clone()
+    };
+    let (spec, resolved) = match super::cargo::resolve(root, rel, &bins) {
+        Ok(resolved) => (bins, resolved),
+        Err(_) => match super::cargo::resolve(root, rel, &inputs_only) {
+            Ok(resolved) => (inputs_only, resolved),
+            Err(_) => return proposal,
+        },
+    };
+
+    // Everything below the package directory is Cargo's to name now, and the
+    // target directory is Cargo's to report.
+    const CARGO_OWNED: &[&str] = &["Cargo.toml", "Cargo.lock"];
+    let in_target = |p: &str| {
+        let local = rel
+            .and_then(|r| p.strip_prefix(&format!("{r}/")))
+            .unwrap_or(p);
+        local == "target" || local.starts_with("target/")
+    };
+    let covered = |p: &str| {
+        let local = rel
+            .and_then(|r| p.strip_prefix(&format!("{r}/")))
+            .unwrap_or(p);
+        CARGO_OWNED.contains(&local)
+            || resolved
+                .packages
+                .iter()
+                .any(|pkg| pkg.dir == rel.unwrap_or(""))
+    };
+    proposal.inputs.retain(|p| !covered(p));
+    proposal.reasons.retain(|(p, _)| !covered(p));
+    if !spec.artifacts.is_empty() {
+        proposal.outputs.retain(|p| !in_target(p));
+    }
+    proposal.exclude.retain(|p| !in_target(p));
+    proposal.cargo_packages = resolved.packages;
+    proposal.cargo = Some(spec);
+    proposal
 }
 
 fn dedup(mut values: Vec<String>) -> Vec<String> {
@@ -378,7 +468,9 @@ fn matches_anything(dir: &Path, pattern: &str) -> bool {
 impl Proposal {
     /// Whether there's enough here to cache anything.
     pub fn is_usable(&self) -> bool {
-        !self.inputs.is_empty() && !self.outputs.is_empty()
+        let cargo_outputs = self.cargo.as_ref().is_some_and(|c| !c.artifacts.is_empty());
+        (!self.inputs.is_empty() || self.cargo.is_some())
+            && (!self.outputs.is_empty() || cargo_outputs)
     }
 
     /// Render the proposal as the YAML block to splice into a config.
@@ -393,8 +485,51 @@ impl Proposal {
         out.push_str("  # what they mean. `ciabatta why <step>` lists what they matched.\n");
         out.push_str(&format!("  enabled: {enabled}\n"));
 
+        out.push_str("  # Leave whatever git ignores out of the inputs, so build output\n");
+        out.push_str("  # sitting next to the sources never counts as a source.\n");
+        out.push_str("  gitignore: true\n");
+
+        if let Some(cargo) = &self.cargo {
+            out.push_str("  # Read from `cargo metadata` on every run: every package directory\n");
+            out.push_str("  # in the path-dependency closure, the workspace Cargo.toml and\n");
+            out.push_str(
+                "  # Cargo.lock, and any rust-toolchain or .cargo/config — so a new path\n",
+            );
+            out.push_str("  # dependency is picked up without editing this file.\n");
+            out.push_str("  cargo:\n");
+            if let Some(package) = &cargo.package {
+                out.push_str(&format!("    package: {package}\n"));
+            }
+            if let Some(profile) = &cargo.profile {
+                out.push_str(&format!(
+                    "    profile: {profile}   # the profile the step builds with\n"
+                ));
+            }
+            if cargo.artifacts.is_empty() {
+                out.push_str(
+                    "    # No binary targets were found: list `artifacts` (lib, cdylib,\n",
+                );
+                out.push_str("    # staticlib, dylib) or the outputs by hand.\n");
+            } else {
+                let kinds: Vec<String> = cargo
+                    .artifacts
+                    .iter()
+                    .map(|k| {
+                        serde_json::to_value(k)
+                            .ok()
+                            .and_then(|v| v.as_str().map(str::to_string))
+                            .unwrap_or_default()
+                    })
+                    .collect();
+                out.push_str(&format!("    artifacts: [{}]\n", kinds.join(", ")));
+            }
+        }
+
         out.push_str("  inputs:\n");
-        if self.inputs.is_empty() {
+        if self.inputs.is_empty() && self.cargo.is_some() {
+            out.push_str("    # Anything the build reads outside its Cargo packages.\n");
+            out.push_str("    []\n");
+        } else if self.inputs.is_empty() {
             out.push_str("    # TODO: nothing recognizable was found — list your sources here,\n");
             out.push_str("    # e.g. \"src/**/*\"\n");
             out.push_str("    []\n");
@@ -411,7 +546,10 @@ impl Proposal {
         }
 
         out.push_str("  outputs:\n");
-        if self.outputs.is_empty() {
+        if self.outputs.is_empty() && self.cargo.as_ref().is_some_and(|c| !c.artifacts.is_empty()) {
+            out.push_str("    # Anything else the build writes; Cargo's artifacts are covered.\n");
+            out.push_str("    []\n");
+        } else if self.outputs.is_empty() {
             out.push_str("    # TODO: no build output directory was found yet. List what your\n");
             out.push_str("    # build produces, e.g. \"dist/**/*\" — with none, nothing can be\n");
             out.push_str("    # restored and every build runs.\n");
@@ -942,6 +1080,62 @@ mod tests {
         assert!(cache.exclude.contains(&"dist".to_string()));
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A directory Cargo can read gets a `cache.cargo` section instead of the
+    /// globs it would expand to — rooted correctly for a member, and with the
+    /// path dependency it reaches named in the summary.
+    #[test]
+    fn a_cargo_package_is_proposed_as_a_cargo_section() {
+        let root = scratch("cargo_init");
+        write(
+            &root,
+            "Cargo.toml",
+            "[workspace]\nmembers = [\"packages/*\"]\nresolver = \"2\"\n",
+        );
+        write(
+            &root,
+            "packages/api/Cargo.toml",
+            "[package]\nname = \"api\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\
+             [dependencies]\ncore = { path = \"../core\" }\n",
+        );
+        write(&root, "packages/api/src/main.rs", "fn main() {}");
+        write(&root, "packages/api/Dockerfile", "FROM scratch");
+        write(&root, "packages/api/target/release/api", "built");
+        write(
+            &root,
+            "packages/core/Cargo.toml",
+            "[package]\nname = \"core\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        );
+        write(&root, "packages/core/src/lib.rs", "");
+
+        let proposal = propose_under(&root.join("packages/api"), Some("packages/api"));
+        let cargo = proposal.cargo.clone().expect("a cargo section");
+        assert_eq!(cargo.profile.as_deref(), Some("release"));
+        assert_eq!(
+            cargo.artifacts,
+            vec![super::super::cargo::ArtifactKind::Bin]
+        );
+        // Everything in the package directory is Cargo's to name now.
+        assert!(proposal.inputs.is_empty(), "{:?}", proposal.inputs);
+        assert!(proposal.outputs.is_empty(), "{:?}", proposal.outputs);
+        assert!(proposal.is_usable());
+        let packages: Vec<&str> = proposal
+            .cargo_packages
+            .iter()
+            .map(|p| p.name.as_str())
+            .collect();
+        assert_eq!(packages, vec!["api", "core"]);
+
+        let block = format!("cache:\n{}", proposal.to_yaml(true));
+        let workflow: crate::workspace::Workflow =
+            crate::format::from_str(&block, crate::format::Format::Yaml)
+                .unwrap_or_else(|e| panic!("generated cache section didn't parse: {e}\n\n{block}"));
+        let cache = workflow.cache.expect("cache section written");
+        assert_eq!(cache.cargo, Some(cargo));
+        assert_eq!(cache.gitignore, Some(true));
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

@@ -115,10 +115,25 @@ fn cache() -> crate::cache::CacheConfig {
         no_outputs: Some(true),
         env: list(),
         exclude: list(),
+        gitignore: Some(true),
+        cargo: Some(cargo_spec()),
+        // `#[serde(skip)]`: the step's sub-workspace, filled in at plan time.
+        home: None,
         remote: Some(remote()),
         // `#[serde(skip)]`: filled in from a workflow's `required_env`, never
         // written in config, so the schemas don't name it.
         secret_env: Vec::new(),
+    }
+}
+
+fn cargo_spec() -> crate::cache::cargo::CargoSpec {
+    crate::cache::cargo::CargoSpec {
+        package: Some("x".to_string()),
+        packages: list(),
+        manifest: Some("x".to_string()),
+        profile: Some("x".to_string()),
+        target: Some("x".to_string()),
+        artifacts: vec![crate::cache::cargo::ArtifactKind::Bin],
     }
 }
 
@@ -327,6 +342,12 @@ fn the_schemas_describe_exactly_the_fields_ciabatta_reads() {
     );
     agree("CacheConfig", &cache(), &common, "/$defs/cache/properties");
     agree(
+        "CargoSpec",
+        &cargo_spec(),
+        &common,
+        "/$defs/cargoCache/properties",
+    );
+    agree(
         "RemoteRef",
         &remote(),
         &common,
@@ -351,6 +372,7 @@ fn every_section_but_ai_rejects_unknown_fields() {
         ("workflow", &flow, ""),
         ("step", &common, "/$defs/step"),
         ("cache", &common, "/$defs/cache"),
+        ("cache.cargo", &common, "/$defs/cargoCache"),
     ] {
         let node = schema.pointer(pointer).expect("node should exist");
         assert_eq!(

@@ -52,6 +52,9 @@ pub struct Planned {
     /// What changed since the last run of this step, when there was one and
     /// something did.
     pub diff: Option<Diff>,
+    /// Files rustc says the last build read that its inputs don't cover —
+    /// see [`CacheConfig::undeclared_reads`].
+    pub undeclared_reads: Vec<String>,
     /// Files its inputs match that an output pattern also covers — see
     /// [`super::CacheConfig::outputs_in_inputs`].
     pub outputs_in_inputs: Vec<String>,
@@ -134,6 +137,7 @@ pub fn plan_graph(
     // downstream of them can be reused on the strength of an unchanged key.
     let mut unaccounted: BTreeSet<String> = BTreeSet::new();
     let mut planned: Vec<Planned> = Vec::new();
+    let mut produced = super::Produced::default();
     // What each step is called in the cache, so an upstream edge keys on the
     // same stable name the step it points at is stored under.
     let cache_names: BTreeMap<&str, &str> = steps
@@ -203,6 +207,7 @@ pub fn plan_graph(
 
         let inputs = config.hash_inputs(&dir, member.as_deref())?;
         let outputs = config.hash_outputs(&dir)?;
+        produced.record(&step.name, &step.needs, &outputs);
 
         // Downstream steps depend on what this one produced. On a hit that's
         // the stored output set; otherwise it's whatever is on disk now, which
@@ -239,6 +244,11 @@ pub fn plan_graph(
             inputs,
             outputs,
             diff,
+            // Best-effort: a dep-info file that can't be read is a missing
+            // warning, not a failed plan.
+            undeclared_reads: config
+                .undeclared_reads(&dir, member.as_deref(), &produced.upstream_of(&step.needs))
+                .unwrap_or_default(),
             outputs_in_inputs: config
                 .outputs_in_inputs(&dir, member.as_deref())
                 .unwrap_or_default(),
@@ -370,6 +380,12 @@ pub fn layer_over(base: &mut CacheConfig, over: &CacheConfig) {
     }
     if !over.exclude.is_empty() {
         base.exclude = over.exclude.clone();
+    }
+    if let Some(gitignore) = over.gitignore {
+        base.gitignore = Some(gitignore);
+    }
+    if over.cargo.is_some() {
+        base.cargo = over.cargo.clone();
     }
     // The remote is a property of the project, not of a target within it (see
     // `Session::warn_about_ignored_remotes`), so a level only ever adds one

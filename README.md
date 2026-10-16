@@ -1100,6 +1100,33 @@ cache:
   no_outputs: true     # skipped on unchanged inputs; holds nothing back
 ```
 
+**Rust builds: let Cargo name the files.** Hand-listing every crate, manifest
+and `target/` artifact in a multi-crate workspace goes stale the day someone
+adds a path dependency. `cache.cargo` asks `cargo metadata --no-deps --offline`
+instead:
+
+```yaml
+cache:
+  enabled: true
+  gitignore: true          # leave whatever git ignores out of the inputs
+  cargo:
+    package: api           # omit for what `cargo build` would build here
+    profile: release
+    artifacts: [bin]       # bin | lib | cdylib | dylib | staticlib
+```
+
+Inputs become every package directory in the path-dependency closure (git-ignored
+files left out), plus the workspace `Cargo.toml`, `Cargo.lock`, and any
+`rust-toolchain` or `.cargo/config`; outputs become the selected packages'
+artifacts under the target directory Cargo reports. Each step reads its own
+sub-workspace's `Cargo.toml` by default, so several Cargo workspaces in one repo
+each get their own lockfile, and a path dependency living in another ciabatta
+sub-workspace is keyed on rather than excluded. After a build, the dep-info files
+rustc writes are checked against the inputs, and anything it read that they
+don't cover is reported by the run, `dry-run` and `why`. `cache init` writes this
+section for a directory Cargo can read. The in-app docs (**Docs → Rust builds**)
+go through every case.
+
 **Why didn't it hit?** A reused step shows a cache icon on the run page's
 graph; click it for the entry it used. *Inspect cache*, in a run's header,
 shows what the cache decided for every step — reused, missed and why, or blocked

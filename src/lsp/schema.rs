@@ -119,6 +119,8 @@ fn cache() -> crate::cache::CacheConfig {
         cargo: Some(cargo_spec()),
         // `#[serde(skip)]`: the step's sub-workspace, filled in at plan time.
         home: None,
+        // `#[serde(skip)]`: the step's environment, filled in at plan time.
+        values: BTreeMap::new(),
         remote: Some(remote()),
         // `#[serde(skip)]`: filled in from a workflow's `required_env`, never
         // written in config, so the schemas don't name it.

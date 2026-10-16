@@ -98,8 +98,12 @@
         },
         "profile": {
           "type": "string",
-          "description": "The Cargo profile the step builds with. `dev` (the default) and `test` write to target/debug, `release` and `bench` to target/release, a custom profile to a directory of its own name.",
-          "examples": ["release", "dev"]
+          "description": "The profile the step builds with, named by the target/ directory its artifacts land in: `debug` (the default) or `release`. Or an environment variable holding one of the two — `$CARGO_PROFILE`, `${CARGO_PROFILE}`, or `${CARGO_PROFILE:-release}` for a default when it's unset or empty (otherwise `debug`). The value comes from the step's .env, the elected env profile, or the shell, and the variable keys the cache.",
+          "anyOf": [
+            { "enum": ["debug", "release"] },
+            { "pattern": "^\\$([A-Za-z_][A-Za-z0-9_]*|\\{[A-Za-z_][A-Za-z0-9_]*(:-(debug|release))?\\})$" }
+          ],
+          "examples": ["release", "debug", "${CARGO_PROFILE:-release}"]
         },
         "target": {
           "type": "string",

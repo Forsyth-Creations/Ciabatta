@@ -3321,7 +3321,7 @@ fn cmd_cache(subcommand: CacheCommand) -> Result<()> {
                 } else {
                     println!(
                         "  outputs: its {} binaries",
-                        cargo.profile.as_deref().unwrap_or("dev")
+                        cargo.profile.as_deref().unwrap_or("debug")
                     );
                 }
                 println!();

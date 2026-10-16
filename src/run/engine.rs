@@ -639,7 +639,7 @@ async fn run_dag(
                 // inputs, not to become a new way for a run to die.
                 let mut sandbox = None;
                 if let Some(iso) = isolation.as_deref_mut() {
-                    match iso.prepare(step) {
+                    match iso.prepare(step, step_env) {
                         Ok(prepared) => sandbox = prepared,
                         Err(e) => {
                             let _ = tx

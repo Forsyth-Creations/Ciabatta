@@ -16,9 +16,14 @@
 //!   enabled: true
 //!   cargo:
 //!     package: api
-//!     profile: release
+//!     profile: release        # or debug, or ${CARGO_PROFILE:-release}
 //!     artifacts: [bin]
 //! ```
+//!
+//! The profile is named by the directory its artifacts land in — `debug` or
+//! `release` — and can be read from an environment variable instead, so one
+//! workflow can build either way. A variable named there keys the cache, so a
+//! release build is never handed a debug build's binary.
 //!
 //! **Inputs** are every package directory in the path-dependency closure of
 //! what was selected — the whole directory, not just `src/`, because a build
@@ -72,9 +77,10 @@ pub struct CargoSpec {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub manifest: Option<String>,
 
-    /// The Cargo profile the step builds with. `dev` (the default, as for
-    /// `cargo build`) and `test` write to `debug/`, `release` and `bench` to
-    /// `release/`, and a custom profile to a directory of its own name.
+    /// The profile the step builds with: `debug` (the default, as for
+    /// `cargo build`) or `release` — named by the directory under `target/`
+    /// its artifacts land in. Or an environment variable holding one of the
+    /// two, as `$VAR`, `${VAR}` or `${VAR:-release}`: see [`ProfileRef`].
     #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub profile: Option<String>,
@@ -91,6 +97,130 @@ pub struct CargoSpec {
     #[serde(default)]
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub artifacts: Vec<ArtifactKind>,
+}
+
+/// The profiles `cache.cargo.profile` can name, each by the directory under
+/// `target/` its artifacts land in. Cargo's own name for the first is `dev`,
+/// but the directory is what this section is about, and `debug` is what a
+/// person looking at `target/` sees.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Profile {
+    Debug,
+    Release,
+}
+
+impl Profile {
+    fn parse(text: &str) -> Option<Profile> {
+        match text.trim() {
+            "debug" => Some(Profile::Debug),
+            "release" => Some(Profile::Release),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Profile::Debug => "debug",
+            Profile::Release => "release",
+        }
+    }
+}
+
+/// What `cache.cargo.profile` says, before any variable in it is read.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ProfileRef {
+    /// `debug` or `release`, written out.
+    Fixed(Profile),
+    /// `$VAR`, `${VAR}` or `${VAR:-default}`: the profile is the variable's
+    /// value, from the step's environment (its `.env`, the elected env
+    /// profile, or the shell). Unset or empty, it is `default`, and without
+    /// one `debug` — what `cargo build` builds with no flags.
+    Env {
+        name: String,
+        default: Option<Profile>,
+    },
+}
+
+impl ProfileRef {
+    /// Read what was written. Anything other than the two profile names or a
+    /// variable reference is an error that says which forms are accepted.
+    pub fn parse(text: &str) -> Result<ProfileRef> {
+        let text = text.trim();
+        if let Some(profile) = Profile::parse(text) {
+            return Ok(ProfileRef::Fixed(profile));
+        }
+        let re = regex::Regex::new(
+            r"^\$(?:([A-Za-z_][A-Za-z0-9_]*)|\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\})$",
+        )
+        .expect("a valid pattern");
+        let Some(caps) = re.captures(text) else {
+            let hint = match text {
+                "dev" | "test" => " (`dev` and `test` build into target/debug: write `debug`)",
+                "bench" => " (`bench` builds into target/release: write `release`)",
+                _ => "",
+            };
+            bail!(
+                "`cache.cargo.profile`: `{text}` isn't a profile — write `debug` or \
+                 `release`, or name a variable holding one: `${{CARGO_PROFILE}}`, or \
+                 `${{CARGO_PROFILE:-release}}` for a default{hint}"
+            );
+        };
+        let name = caps
+            .get(1)
+            .or_else(|| caps.get(2))
+            .map(|m| m.as_str().to_string())
+            .unwrap_or_default();
+        let default = match caps.get(3) {
+            None => None,
+            Some(m) => Some(Profile::parse(m.as_str()).with_context(|| {
+                format!(
+                    "`cache.cargo.profile`: the default in `{text}` is `{}` — it has to be \
+                     `debug` or `release`",
+                    m.as_str()
+                )
+            })?),
+        };
+        Ok(ProfileRef::Env { name, default })
+    }
+}
+
+impl CargoSpec {
+    /// The variable [`Self::profile`] is read from, when it names one. It
+    /// keys the cache like any declared variable: the same sources built
+    /// both ways are two different builds.
+    pub fn profile_var(&self) -> Option<String> {
+        match ProfileRef::parse(self.profile.as_deref()?) {
+            Ok(ProfileRef::Env { name, .. }) => Some(name),
+            _ => None,
+        }
+    }
+
+    /// The profile this spec builds with. A variable is looked up in
+    /// `values` — the step's environment — and then the process's own.
+    pub fn resolve_profile(&self, values: &BTreeMap<String, String>) -> Result<Profile> {
+        let Some(written) = self.profile.as_deref() else {
+            return Ok(Profile::Debug);
+        };
+        match ProfileRef::parse(written)? {
+            ProfileRef::Fixed(profile) => Ok(profile),
+            ProfileRef::Env { name, default } => {
+                let value = values
+                    .get(&name)
+                    .cloned()
+                    .or_else(|| std::env::var(&name).ok())
+                    .filter(|v| !v.trim().is_empty());
+                match value {
+                    None => Ok(default.unwrap_or(Profile::Debug)),
+                    Some(value) => Profile::parse(&value).with_context(|| {
+                        format!(
+                            "`cache.cargo.profile` reads ${name}, which is `{value}` — it has \
+                             to be `debug` or `release`"
+                        )
+                    }),
+                }
+            }
+        }
+    }
 }
 
 /// A kind of artifact a Cargo target produces.
@@ -162,6 +292,20 @@ impl Resolved {
 /// to nothing would key the build on nothing, and a build keyed on nothing is
 /// a hit forever.
 pub fn resolve(root: &Path, home: Option<&str>, spec: &CargoSpec) -> Result<Resolved> {
+    resolve_with(root, home, spec, &BTreeMap::new())
+}
+
+/// [`resolve`], reading a variable in `profile` from `values` (the step's
+/// environment) before the process's own.
+pub fn resolve_with(
+    root: &Path,
+    home: Option<&str>,
+    spec: &CargoSpec,
+    values: &BTreeMap<String, String>,
+) -> Result<Resolved> {
+    // Read first, so a mistyped profile is reported even for a spec that
+    // asks for no artifacts.
+    let profile = spec.resolve_profile(values)?;
     let root = root
         .canonicalize()
         .with_context(|| format!("Failed to resolve {}", root.display()))?;
@@ -299,10 +443,7 @@ pub fn resolve(root: &Path, home: Option<&str>, spec: &CargoSpec) -> Result<Reso
         if let Some(triple) = &spec.target {
             out_dir = join(&out_dir, triple);
         }
-        out_dir = join(
-            &out_dir,
-            profile_dir(spec.profile.as_deref().unwrap_or("dev")),
-        );
+        out_dir = join(&out_dir, profile.as_str());
 
         let mut outputs = BTreeSet::new();
         let mut dep_info = BTreeSet::new();
@@ -550,15 +691,6 @@ fn nested_packages(dir: &Path, closure: &BTreeSet<PathBuf>) -> Vec<PathBuf> {
     let mut found = Vec::new();
     walk(dir, closure, 0, &mut found);
     found
-}
-
-/// The directory a profile's artifacts land in.
-fn profile_dir(profile: &str) -> &str {
-    match profile {
-        "dev" | "test" => "debug",
-        "release" | "bench" => "release",
-        custom => custom,
-    }
 }
 
 /// The platform whose naming an artifact follows.
@@ -893,6 +1025,52 @@ mod tests {
     }
 
     #[test]
+    fn a_profile_variable_picks_the_outputs_and_keys_the_build() {
+        let root = workspace("profile_var");
+        let var = "CIABATTA_TEST_CARGO_PROFILE_VAR";
+        let step = crate::run::RunStep {
+            name: "compile".into(),
+            ..Default::default()
+        };
+        let config = CacheConfig {
+            enabled: Some(true),
+            cargo: Some(CargoSpec {
+                package: Some("api".into()),
+                profile: Some(format!("${{{var}:-release}}")),
+                artifacts: vec![ArtifactKind::Bin],
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+        .with_step_env(&step);
+        assert_eq!(config.env, vec![var.to_string()]);
+
+        let exe = if cfg!(windows) { "api.exe" } else { "api" };
+        let outputs = |value: Option<&str>| {
+            let values = value
+                .map(|v| BTreeMap::from([(var.to_string(), v.to_string())]))
+                .unwrap_or_default();
+            config
+                .clone()
+                .with_values(&values)
+                .cargo_resolved(&root)
+                .unwrap()
+                .unwrap()
+                .outputs
+        };
+        assert_eq!(outputs(None), vec![format!("target/release/{exe}")]);
+        assert_eq!(outputs(Some("debug")), vec![format!("target/debug/{exe}")]);
+        let wrong = config
+            .clone()
+            .with_values(&BTreeMap::from([(var.to_string(), "fast".to_string())]))
+            .cargo_resolved(&root)
+            .unwrap_err();
+        assert!(wrong.to_string().contains("`fast`"), "{wrong}");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn no_package_means_what_cargo_build_would_build_there() {
         let root = workspace("default");
         // From the package's own directory: that package.
@@ -1205,8 +1383,82 @@ mod tests {
             Platform::of(Some("x86_64-unknown-linux-gnu")),
             Platform::Unix
         );
-        assert_eq!(profile_dir("dev"), "debug");
-        assert_eq!(profile_dir("bench"), "release");
-        assert_eq!(profile_dir("ci"), "ci");
+    }
+
+    #[test]
+    fn a_profile_is_debug_or_release_or_a_variable_holding_one() {
+        use super::{Profile, ProfileRef};
+        assert_eq!(
+            ProfileRef::parse("release").unwrap(),
+            ProfileRef::Fixed(Profile::Release)
+        );
+        assert_eq!(
+            ProfileRef::parse("debug").unwrap(),
+            ProfileRef::Fixed(Profile::Debug)
+        );
+        for written in ["$CARGO_PROFILE", "${CARGO_PROFILE}"] {
+            assert_eq!(
+                ProfileRef::parse(written).unwrap(),
+                ProfileRef::Env {
+                    name: "CARGO_PROFILE".into(),
+                    default: None
+                }
+            );
+        }
+        assert_eq!(
+            ProfileRef::parse("${CARGO_PROFILE:-release}").unwrap(),
+            ProfileRef::Env {
+                name: "CARGO_PROFILE".into(),
+                default: Some(Profile::Release)
+            }
+        );
+
+        // Cargo's own names are refused with the one to write instead.
+        let dev = ProfileRef::parse("dev").unwrap_err().to_string();
+        assert!(dev.contains("write `debug`"), "{dev}");
+        let bench = ProfileRef::parse("bench").unwrap_err().to_string();
+        assert!(bench.contains("write `release`"), "{bench}");
+        assert!(ProfileRef::parse("ci").is_err());
+        assert!(ProfileRef::parse("${CARGO_PROFILE:-dev}").is_err());
+    }
+
+    #[test]
+    fn a_profile_variable_is_read_from_the_steps_environment() {
+        let var = "CIABATTA_TEST_CARGO_PROFILE_UNSET";
+        let spec = |written: &str| CargoSpec {
+            profile: Some(written.to_string()),
+            ..Default::default()
+        };
+        let values = |v: &str| BTreeMap::from([(var.to_string(), v.to_string())]);
+        let none = BTreeMap::new();
+
+        assert_eq!(
+            CargoSpec::default().resolve_profile(&none).unwrap(),
+            Profile::Debug
+        );
+        let plain = spec(&format!("${{{var}}}"));
+        assert_eq!(plain.profile_var().as_deref(), Some(var));
+        assert_eq!(plain.resolve_profile(&none).unwrap(), Profile::Debug);
+        assert_eq!(
+            plain.resolve_profile(&values("release")).unwrap(),
+            Profile::Release
+        );
+        // Empty is unset, as for `:-` in a shell.
+        let defaulted = spec(&format!("${{{var}:-release}}"));
+        assert_eq!(
+            defaulted.resolve_profile(&values("")).unwrap(),
+            Profile::Release
+        );
+        assert_eq!(
+            defaulted.resolve_profile(&values("debug")).unwrap(),
+            Profile::Debug
+        );
+
+        let wrong = plain
+            .resolve_profile(&values("fast"))
+            .unwrap_err()
+            .to_string();
+        assert!(wrong.contains(var) && wrong.contains("`fast`"), "{wrong}");
+        assert!(spec("release").profile_var().is_none());
     }
 }

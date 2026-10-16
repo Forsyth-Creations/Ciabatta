@@ -152,13 +152,13 @@ pub fn plan_graph(
             continue;
         }
 
-        let config = context.cache_config(step);
         let dir = context.dir(step);
         let workspace = context.workspace(step);
         // What the step will actually see, `env:` tables included — the same
         // map the run keys on, so the plan and the run agree.
         let step_env = with_step_values(step, env);
         let env = &step_env;
+        let config = context.cache_config(step).with_values(env);
 
         // Only the steps this one actually needs, so an unrelated change
         // upstream in a different branch of the graph doesn't invalidate it.

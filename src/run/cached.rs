@@ -564,6 +564,9 @@ impl Session {
             step,
             &env.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
         );
+        // A `cache.cargo.profile` variable is read from what the step runs
+        // with, so the outputs looked for are the ones it builds.
+        let config = config.with_values(&env_map);
         let target = crate::cache::Target {
             name: step.cache_name().to_string(),
             workspace: workspace.clone(),

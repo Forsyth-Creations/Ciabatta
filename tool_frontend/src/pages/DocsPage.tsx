@@ -1353,7 +1353,7 @@ cache:
   gitignore: true
   cargo:
     package: api          # omit for what \`cargo build\` would build here
-    profile: release      # dev → target/debug, release → target/release
+    profile: release      # debug (default) → target/debug, release → target/release
     artifacts: [bin]      # bin | lib | cdylib | dylib | staticlib
   inputs: ["assets/**/*"] # still allowed: anything outside the crates
 
@@ -1363,6 +1363,31 @@ steps:
         <P>
           <C>ciabatta cache init</C> writes this for you when the directory has a{" "}
           <C>Cargo.toml</C> Cargo can read.
+        </P>
+
+        <SubHeading>Choosing the profile per run</SubHeading>
+        <P>
+          <C>profile</C> is <C>debug</C> (the default, what <C>cargo build</C> builds) or{" "}
+          <C>release</C> — named by the <C>target/</C> directory the artifacts land in, so
+          Cargo&apos;s <C>dev</C> is written <C>debug</C>. To pick it at run time, name an
+          environment variable instead:
+        </P>
+        <Pre>{`cache:
+  enabled: true
+  cargo:
+    package: api
+    profile: \${CARGO_PROFILE:-release}   # or $CARGO_PROFILE, \${CARGO_PROFILE}
+    artifacts: [bin]
+
+steps:
+  - name: compile
+    run: cargo build -p api $([ "\${CARGO_PROFILE:-release}" = release ] && echo --release)`}</Pre>
+        <P>
+          The value is read from what the step runs with — its <C>.env</C>, the elected env
+          profile, or the shell (<C>CARGO_PROFILE=debug ciabatta build</C>). Unset or empty, it is
+          the default after <C>:-</C>, and without one <C>debug</C>. Any other value is an error
+          that names the variable. The variable keys the cache like a declared <C>env</C> name,
+          so a release build is never handed a debug build&apos;s binary.
         </P>
 
         <SubHeading>What it resolves to</SubHeading>

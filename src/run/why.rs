@@ -430,6 +430,13 @@ fn render(answer: &Answer, all: bool) -> String {
         (None, None) => out.push_str("  the cache couldn't be read for this target\n"),
     }
 
+    if deps.cached && !deps.outputs_in_inputs.is_empty() {
+        out.push_str(&format!(
+            "\n  ⚠ {}\n",
+            crate::cache::describe_outputs_in_inputs(&deps.outputs_in_inputs)
+        ));
+    }
+
     // The one thing here that is a *problem* rather than a fact.
     let undeclared = deps.undeclared_env();
     if deps.cached && !undeclared.is_empty() {

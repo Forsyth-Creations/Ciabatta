@@ -1298,6 +1298,15 @@ function TargetDependencies({ deps }: { deps: TargetDeps }) {
       {!deps.cached && deps.why_uncached && (
         <DepRow label="not cached" value={deps.why_uncached} />
       )}
+      {deps.outputs_in_inputs && deps.outputs_in_inputs.length > 0 && (
+        <Typography variant="caption" color="warning.main">
+          ⚠ {deps.outputs_in_inputs.length} file(s) match both its inputs and its outputs, so
+          they are treated as outputs only and left out of the key:{" "}
+          {deps.outputs_in_inputs.slice(0, 5).join(", ")}
+          {deps.outputs_in_inputs.length > 5 && `, and ${deps.outputs_in_inputs.length - 5} more`}.
+          Narrow cache.inputs, or add them to exclude.
+        </Typography>
+      )}
       {deps.cached && undeclared.length > 0 && (
         <Typography variant="caption" color="warning.main">
           ⚠ reads {undeclared.join(", ")} without declaring{" "}

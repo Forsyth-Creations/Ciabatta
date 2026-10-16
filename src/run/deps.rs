@@ -83,6 +83,11 @@ pub struct TargetDeps {
     /// The other targets it depends on.
     pub needs: Vec<String>,
 
+    /// Files its inputs match that an output pattern also covers: treated as
+    /// outputs only, and worth a warning.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub outputs_in_inputs: Vec<String>,
+
     /// Whether the cache is in play for it.
     pub cached: bool,
     /// Why it isn't, when it isn't.
@@ -181,6 +186,9 @@ fn one(context: &WorkspaceContext<'_>, root: &Path, step: &RunStep, detail: Deta
         env: cache.env.clone(),
         env_refs: super::envdeps::step_refs(step),
         needs: step.needs.clone(),
+        outputs_in_inputs: cache
+            .outputs_in_inputs(&dir, member.as_deref())
+            .unwrap_or_default(),
         cached: cache.why_disabled().is_none(),
         why_uncached: cache.why_disabled().map(str::to_string),
     }

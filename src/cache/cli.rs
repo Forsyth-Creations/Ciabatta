@@ -149,6 +149,14 @@ fn print_step(step: &Planned, show_diff: bool) {
         );
     }
 
+    if !step.outputs_in_inputs.is_empty() {
+        println!(
+            "    {} {}",
+            "⚠".yellow(),
+            super::describe_outputs_in_inputs(&step.outputs_in_inputs)
+        );
+    }
+
     let Some(diff) = &step.diff else { return };
 
     println!("    {} {}", "changed:".dimmed(), diff.summary());
@@ -218,6 +226,7 @@ pub fn plan_json(plan: &Plan) -> serde_json::Value {
             "inputs": step.inputs,
             "outputs": step.outputs,
             "diff": step.diff,
+            "outputs_in_inputs": step.outputs_in_inputs,
         })).collect::<Vec<_>>(),
     })
 }

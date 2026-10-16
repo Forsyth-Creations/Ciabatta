@@ -50,6 +50,8 @@ pub struct Session {
     unaccounted: BTreeSet<String>,
     /// Remote cache to consult, when this project has one configured.
     remote: Option<Remote>,
+    /// Where restore progress goes, when anyone is listening.
+    reporter: Option<Reporter>,
     /// Keys this run reused without asking the remote for them.
     ///
     /// The first time an entry is restored it is mirrored into the local store,
@@ -262,6 +264,36 @@ impl DiffSummary {
 }
 
 /// A configured remote cache, once its project identity has been resolved.
+/// A step whose outputs are coming down from the remote cache, as the run view
+/// shows it while it happens.
+///
+/// Before this, the lookup and the whole download ran inside the cache
+/// decision with nothing sent until both were done, so a step restoring a
+/// large artifact sat at "not started yet" for as long as the transfer took —
+/// indistinguishable from a run that had hung.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct Restoring {
+    /// `checking` while the server is asked whether it has the entry,
+    /// `downloading` once it has said yes.
+    pub phase: String,
+    /// The server, as configured.
+    pub server: String,
+    pub files_done: usize,
+    pub files_total: usize,
+    pub bytes_done: u64,
+    pub bytes_total: u64,
+    /// The file on its way down.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current: Option<String>,
+}
+
+/// Where a session sends [`Restoring`] updates: the run's progress channel,
+/// and the workflow name its updates are filed under.
+struct Reporter {
+    tx: tokio::sync::mpsc::Sender<crate::runner::ProgressUpdate>,
+    workflow: String,
+}
+
 struct Remote {
     client: Client,
     project: String,
@@ -360,6 +392,7 @@ impl Session {
             cache_names: HashMap::new(),
             unaccounted: BTreeSet::new(),
             remote: None,
+            reporter: None,
             reused_locally: Vec::new(),
             force: false,
             stats: Stats::default(),
@@ -446,6 +479,19 @@ impl Session {
                 self.remote_failed(format!("{e:#}"));
             }
         }
+    }
+
+    /// Send restore progress for the steps of `workflow` to `tx` — the run's
+    /// own progress channel, so viewers see a download as it happens.
+    pub fn report_to(
+        &mut self,
+        tx: tokio::sync::mpsc::Sender<crate::runner::ProgressUpdate>,
+        workflow: &str,
+    ) {
+        self.reporter = Some(Reporter {
+            tx,
+            workflow: workflow.to_string(),
+        });
     }
 
     /// Decide what to do about `step`, restoring its outputs when it can.
@@ -560,12 +606,55 @@ impl Session {
             && !matches!(reason, Reason::NoOutputs)
         {
             let key = key.clone();
+            let server = remote.client.base().to_string();
+            let send = |progress: Restoring| {
+                if let Some(reporter) = &self.reporter {
+                    // Never wait on a viewer: a full channel drops a progress
+                    // frame, and the next one says the same thing, further on.
+                    let _ = reporter
+                        .tx
+                        .try_send(crate::runner::ProgressUpdate::StepRestoring {
+                            workflow: reporter.workflow.clone(),
+                            step: step.name.clone(),
+                            progress,
+                        });
+                }
+            };
+            send(Restoring {
+                phase: "checking".to_string(),
+                server: server.clone(),
+                ..Default::default()
+            });
+            // A frame per chunk would be thousands for one large file, and
+            // every frame is the whole run state to every viewer. A file
+            // starting or finishing always goes through; bytes in between at
+            // most a few times a second.
+            let mut last = std::time::Instant::now();
+            let mut last_file: Option<usize> = None;
+            let mut on_progress = |p: crate::remote_cache::client::DownloadProgress<'_>| {
+                let boundary = last_file != Some(p.files_done) || p.current.is_none();
+                if !boundary && last.elapsed() < std::time::Duration::from_millis(250) {
+                    return;
+                }
+                last = std::time::Instant::now();
+                last_file = Some(p.files_done);
+                send(Restoring {
+                    phase: "downloading".to_string(),
+                    server: server.clone(),
+                    files_done: p.files_done,
+                    files_total: p.files_total,
+                    bytes_done: p.bytes_done,
+                    bytes_total: p.bytes_total,
+                    current: p.current.map(str::to_string),
+                });
+            };
             if let Some(entry) = crate::remote_cache::client::try_restore(
                 &remote.client,
                 &remote.project,
                 &key,
                 Some(&step.name),
                 &dir,
+                &mut on_progress,
             )
             .await
             {

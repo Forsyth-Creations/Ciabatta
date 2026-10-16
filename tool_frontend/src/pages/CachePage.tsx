@@ -18,6 +18,7 @@ import {
   Alert,
   Box,
   Button,
+  Collapse,
   Card,
   CardContent,
   Chip,
@@ -43,6 +44,7 @@ import CloudQueueIcon from "@mui/icons-material/CloudQueue";
 import OpenInNewIcon from "@mui/icons-material/OpenInNew";
 import ReplayIcon from "@mui/icons-material/Replay";
 import BuildIcon from "@mui/icons-material/Build";
+import AccountTreeIcon from "@mui/icons-material/AccountTree";
 import RemoveCircleOutlineIcon from "@mui/icons-material/RemoveCircleOutline";
 
 import { humanizeBytes, humanizeMs, useCachePlan, useCacheStatus, useRemoteCache } from "../api/cache";
@@ -58,6 +60,7 @@ import type {
 } from "../api/types";
 import { Prose, ago } from "../components/CacheReport";
 import { CacheDiffView } from "../components/CacheDiff";
+import { FileTree } from "../components/FileTree";
 import { ErrorNote, Loading, PageHeader, RequireProject } from "../components/Page";
 
 export function CachePage() {
@@ -225,6 +228,10 @@ function StageCard({ step }: { step: PlannedStep }) {
           />
         </Stack>
 
+        {(step.inputs.length > 0 || step.outputs.length > 0) && (
+          <StageTree step={step} />
+        )}
+
         {step.diff && (
           <>
             <Divider sx={{ my: 2 }} />
@@ -233,6 +240,31 @@ function StageCard({ step }: { step: PlannedStep }) {
         )}
       </CardContent>
     </Card>
+  );
+}
+
+/**
+ * The stage's files as a tree, behind a toggle: the capped lists above are
+ * what you scan, and this is what you open when one of them looks wrong.
+ */
+function StageTree({ step }: { step: PlannedStep }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <Box sx={{ mb: 1 }}>
+      <Button
+        size="small"
+        startIcon={<AccountTreeIcon fontSize="small" />}
+        onClick={() => setOpen((o) => !o)}
+        sx={{ textTransform: "none", px: 0.5 }}
+      >
+        {open ? "Hide the file tree" : "Show the file tree"}
+      </Button>
+      <Collapse in={open} unmountOnExit>
+        <Box sx={{ mt: 0.5 }}>
+          <FileTree inputs={step.inputs} outputs={step.outputs} maxHeight={360} />
+        </Box>
+      </Collapse>
+    </Box>
   );
 }
 

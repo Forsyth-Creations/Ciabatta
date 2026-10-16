@@ -37,6 +37,10 @@ pub struct Session {
     root: PathBuf,
     /// Step name → fingerprint of what it produced. The third dependency.
     fingerprints: BTreeMap<String, String>,
+    /// What each finished step produced, so a file rustc reports reading can
+    /// be recognised as an upstream step's output rather than an undeclared
+    /// input.
+    produced: crate::cache::Produced,
     /// Step name → the name the cache knows it by ([`RunStep::cache_name`]),
     /// for every step seen so far.
     cache_names: HashMap<String, String>,
@@ -357,6 +361,7 @@ impl Session {
             config: config.clone(),
             root: root.to_path_buf(),
             fingerprints: BTreeMap::new(),
+            produced: Default::default(),
             cache_names: HashMap::new(),
             unaccounted: BTreeSet::new(),
             remote: None,
@@ -686,7 +691,7 @@ impl Session {
                 self.stats.fresh += 1;
                 self.keep_alive(&key);
                 self.record_saved(&key);
-                self.remember(&step.name, &key, &dir, &config)?;
+                self.remember(step, &key, &dir, &config)?;
                 Ok(Action::Skip {
                     note: if outputs == 0 && config.writes_nothing() {
                         "up to date (it passed with these exact inputs, and writes nothing)"
@@ -706,7 +711,7 @@ impl Session {
                 }
                 self.stats.restored += 1;
                 self.record_saved(&key);
-                self.remember(&step.name, &key, &dir, &config)?;
+                self.remember(step, &key, &dir, &config)?;
                 Ok(Action::Skip {
                     note: format!("restored from {}", source.label()),
                 })
@@ -789,6 +794,28 @@ impl Session {
                 return;
             }
         };
+
+        self.produced.record(&step.name, &step.needs, &outputs);
+
+        // The compiler's own account of what it read, checked against what the
+        // step declared — the moment it's freshest, and worth a line in the log
+        // because it is the stale hit of six weeks from now, caught today.
+        if config.cargo.is_some()
+            && let Ok(undeclared) = config.undeclared_reads(
+                &dir,
+                config.home.as_deref(),
+                &self.produced.upstream_of(&step.needs),
+            )
+            && !undeclared.is_empty()
+        {
+            eprintln!(
+                "warning: rustc reports {} reading {} file(s) outside its cache inputs — \
+                 changing them won't rebuild it: {}",
+                step.name,
+                undeclared.len(),
+                undeclared.join(", "),
+            );
+        }
 
         // Whatever it produced is what its dependents key against, cached or not.
         self.fingerprints
@@ -965,7 +992,14 @@ impl Session {
     /// the fingerprint, and so changed every dependent's key: a reused step
     /// that quietly stopped everything behind it from being reused, while the
     /// dry run promised they would be.
-    fn remember(&mut self, name: &str, key: &str, dir: &Path, config: &CacheConfig) -> Result<()> {
+    fn remember(
+        &mut self,
+        step: &RunStep,
+        key: &str,
+        dir: &Path,
+        config: &CacheConfig,
+    ) -> Result<()> {
+        let name = step.name.as_str();
         let outputs = match self.store.get(key)? {
             Some(entry) => entry.outputs,
             // Only when the manifest has gone between the decision and here.
@@ -973,6 +1007,7 @@ impl Session {
         };
         self.fingerprints
             .insert(name.to_string(), crate::cache::fingerprint(&outputs));
+        self.produced.record(name, &step.needs, &outputs);
         Ok(())
     }
 

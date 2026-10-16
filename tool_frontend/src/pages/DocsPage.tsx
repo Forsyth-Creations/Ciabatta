@@ -1322,6 +1322,132 @@ ciabatta cache status           # what the local cache is holding, and what it s
     ),
   },
   {
+    id: "cargo",
+    group: "Start here",
+    title: "Rust builds: let Cargo name the files",
+    body: (
+      <>
+        <P>
+          A multi-crate workspace is where a hand-written <C>inputs</C> list goes wrong. Every
+          crate a binary is built from has to be named, with its manifest, its{" "}
+          <C>build.rs</C>, the lockfile and any <C>.cargo/config.toml</C> — and the list is stale
+          the day somebody adds a path dependency. Stale in the quiet way: the new crate&apos;s
+          sources aren&apos;t in the key, so changing them changes nothing, and yesterday&apos;s
+          binary is served. Cargo already knows all of it, so ask Cargo:
+        </P>
+        <Pre>{`# crates/api/.ciabatta/workflows/build.yaml
+cache:
+  enabled: true
+  gitignore: true
+  cargo:
+    package: api          # omit for what \`cargo build\` would build here
+    profile: release      # dev → target/debug, release → target/release
+    artifacts: [bin]      # bin | lib | cdylib | dylib | staticlib
+  inputs: ["assets/**/*"] # still allowed: anything outside the crates
+
+steps:
+  - name: compile
+    run: cargo build --release -p api`}</Pre>
+        <P>
+          <C>ciabatta cache init</C> writes this for you when the directory has a{" "}
+          <C>Cargo.toml</C> Cargo can read.
+        </P>
+
+        <SubHeading>What it resolves to</SubHeading>
+        <P>
+          On every plan, ciabatta runs <C>cargo metadata --no-deps --offline</C> — nothing is
+          downloaded, so it works on a machine that is offline or mid-build — and works out:
+        </P>
+        <FieldTable
+          rows={[
+            [
+              "inputs",
+              "Every package directory in the path-dependency closure of what was selected — the whole directory, because a build script or include_str! can read anything in it — plus the workspace Cargo.toml, Cargo.lock, and any rust-toolchain or .cargo/config between the manifest and the project root. Registry and git crates are pinned by Cargo.lock.",
+            ],
+            [
+              "exclude",
+              "The target directory Cargo reports (so CARGO_TARGET_DIR and build.target-dir are honoured), and any package nested inside the closure that isn't part of it — a fuzz/ crate, say. Git-ignored files are always left out of Cargo's half.",
+            ],
+            [
+              "outputs",
+              "The selected packages' artifacts of the kinds in artifacts, named per platform: app / app.exe, libcore.rlib, libext.so / .dylib / ext.dll, libc.a / c.lib — under target/<triple>/<profile>/ when target: is set.",
+            ],
+          ]}
+        />
+        <P>
+          The answer is remembered between runs and re-read the moment a manifest changes, so a new
+          path dependency is picked up without anyone editing the workflow. Anything Cargo
+          can&apos;t answer — no <C>cargo</C> on the machine, an unknown package, a crate outside
+          the project — is an error that names the problem, never an empty key that hits forever.{" "}
+          <C>ciabatta why api:compile</C> prints the packages it resolved to under{" "}
+          <strong>cargo</strong>, and the paths themselves under <strong>files</strong>.
+        </P>
+
+        <SubHeading>Workspaces inside workspaces</SubHeading>
+        <P>
+          Ciabatta sub-workspaces (directories with their own <C>.ciabatta/</C>) and Cargo
+          workspaces don&apos;t have to line up, and each combination does the right thing:
+        </P>
+        <Bullets
+          items={[
+            <>
+              <strong>One Cargo workspace, one ciabatta sub-workspace per crate.</strong> Each
+              writes its own <C>package:</C>. Cargo is asked once per Cargo workspace, and every
+              crate&apos;s steps share the answer.
+            </>,
+            <>
+              <strong>Several independent Cargo workspaces in one repository.</strong> Without{" "}
+              <C>manifest:</C>, a step reads its own sub-workspace&apos;s <C>Cargo.toml</C>, then the
+              root&apos;s — so each gets its own <C>Cargo.lock</C>, toolchain file and target
+              directory, not the root&apos;s.
+            </>,
+            <>
+              <strong>A crate that path-depends on a crate in another sub-workspace.</strong>{" "}
+              Another sub-workspace&apos;s files are normally kept out of your inputs — it owns its
+              own cache entry. A path dependency is the exception: its sources are compiled into
+              your binary, so Cargo&apos;s half reaches in and keys on them, and <C>why</C> marks
+              the package &quot;owned by sub-workspace …&quot;. Hand-written <C>inputs</C> still
+              stop at the boundary.
+            </>,
+            <>
+              <strong>A root step for the whole workspace.</strong> <C>cargo: {"{}"}</C> on a
+              virtual manifest selects its default members — what <C>cargo build</C> there would
+              build.
+            </>,
+          ]}
+        />
+        <Alert severity="warning" sx={{ my: 2, maxWidth: "78ch" }}>
+          Every cached path is relative to the project root, so a path dependency or a target
+          directory outside the project is refused rather than stored as a <C>../</C> path, which
+          would escape its cache entry.
+        </Alert>
+
+        <SubHeading>Asking rustc what it actually read</SubHeading>
+        <P>
+          After a build, rustc leaves a dep-info file next to each artifact (
+          <C>target/release/api.d</C>) listing every source file it read — including an{" "}
+          <C>include_str!(&quot;../../schemas/api.json&quot;)</C> that no glob would have
+          guessed. Ciabatta compares that list with the step&apos;s inputs and warns about anything
+          missing: in the run log as the step finishes, in <C>ciabatta dry-run</C>, in{" "}
+          <C>ciabatta why</C>, and on the step on the <Link to="/run">Run page</Link>. Not reported:
+          generated files under the target directory, crates from the registry, and anything a
+          step in <C>needs</C> produced — a web bundle a <C>build.rs</C> embeds is that
+          step&apos;s output, already keyed through its fingerprint. A warning means: add that
+          path to <C>cache.inputs</C>, or a <C>needs</C> on the step that makes it.
+        </P>
+
+        <SubHeading>gitignore works without Cargo too</SubHeading>
+        <P>
+          <C>gitignore: true</C> on its own leaves out of <C>inputs</C> whatever git would ignore —
+          every <C>.gitignore</C> in the tree and <C>.git/info/exclude</C>, but not your global
+          excludes file, which differs between machines and would make keys unshareable. It
+          applies to inputs only: outputs live in ignored directories almost by definition. Off
+          unless set, because turning it on changes every existing key.
+        </P>
+      </>
+    ),
+  },
+  {
     id: "env",
     group: "Start here",
     title: "Make a run depend on environment variables",

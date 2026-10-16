@@ -83,6 +83,18 @@ pub struct TargetDeps {
     /// The other targets it depends on.
     pub needs: Vec<String>,
 
+    /// What `cache.cargo` resolved to: one line per package in the closure,
+    /// saying where it lives and why it's there. Its paths are already folded
+    /// into `inputs`, `outputs` and `exclude`; this is the explanation.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cargo: Vec<String>,
+    /// Why `cache.cargo` couldn't be resolved, when it couldn't.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cargo_error: Option<String>,
+    /// Files rustc reports the last build reading that no input covers.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub undeclared_reads: Vec<String>,
+
     /// Whether the cache is in play for it.
     pub cached: bool,
     /// Why it isn't, when it isn't.
@@ -135,11 +147,27 @@ pub fn collect_with(
         config,
     };
 
-    steps
+    let mut all: Vec<TargetDeps> = steps
         .iter()
         .filter(|step| !step.recover)
         .map(|step| one(&context, root, step, detail))
-        .collect()
+        .collect();
+
+    // A file rustc read that an upstream step produced is keyed through
+    // `needs` already — only what nobody accounts for is worth a warning.
+    if all.iter().any(|d| !d.undeclared_reads.is_empty()) {
+        let mut produced = crate::cache::Produced::default();
+        for step in steps.iter().filter(|s| !s.recover) {
+            let cache = context.cache_config(step);
+            let outputs = cache.list_outputs(&context.dir(step)).unwrap_or_default();
+            produced.record(&step.name, &step.needs, &outputs);
+        }
+        for deps in &mut all {
+            let upstream = produced.upstream_of(&deps.needs);
+            deps.undeclared_reads.retain(|r| !upstream.contains(r));
+        }
+    }
+    all
 }
 
 fn one(context: &WorkspaceContext<'_>, root: &Path, step: &RunStep, detail: Detail) -> TargetDeps {
@@ -155,16 +183,41 @@ fn one(context: &WorkspaceContext<'_>, root: &Path, step: &RunStep, detail: Deta
     let outputs = cache.list_outputs(&dir).unwrap_or_default();
 
     let mut exclude = cache.input_exclude(&dir, member.as_deref());
+    let mut inputs_declared = cache.inputs.clone();
+    let mut outputs_declared = cache.outputs.clone();
+    let mut cargo = Vec::new();
+    let mut cargo_error = None;
+    match cache.cargo_resolved(&dir) {
+        Ok(Some(resolved)) => {
+            inputs_declared.extend(resolved.inputs.iter().cloned());
+            outputs_declared.extend(resolved.outputs.iter().cloned());
+            exclude.extend(resolved.exclude.iter().cloned());
+            // A sibling the closure reaches into is not excluded after all.
+            exclude.retain(|e| !resolved.reaches_into(e) || cache.exclude.contains(e));
+            cargo = resolved
+                .packages
+                .iter()
+                .map(|p| describe_package(&dir, member.as_deref(), p))
+                .collect();
+        }
+        Ok(None) => {}
+        Err(error) => cargo_error = Some(format!("{error:#}")),
+    }
     exclude.sort();
     exclude.dedup();
+    // A path both written by hand and resolved by Cargo is one input, once.
+    let mut seen = std::collections::HashSet::new();
+    inputs_declared.retain(|p| seen.insert(p.clone()));
+    let mut seen = std::collections::HashSet::new();
+    outputs_declared.retain(|p| seen.insert(p.clone()));
 
     TargetDeps {
         name: step.name.clone(),
         workspace: step.workspace.clone(),
         dir: relative(root, &dir),
         commands: crate::cache::graph::commands_of(step),
-        inputs: cache.inputs.clone(),
-        outputs: cache.outputs.clone(),
+        inputs: inputs_declared,
+        outputs: outputs_declared,
         exclude,
         input_files: inputs.len(),
         input_bytes: inputs.iter().map(|f| f.size).sum::<u64>(),
@@ -181,9 +234,58 @@ fn one(context: &WorkspaceContext<'_>, root: &Path, step: &RunStep, detail: Deta
         env: cache.env.clone(),
         env_refs: super::envdeps::step_refs(step),
         needs: step.needs.clone(),
-        cached: cache.why_disabled().is_none(),
-        why_uncached: cache.why_disabled().map(str::to_string),
+        cargo,
+        undeclared_reads: if cache.cargo.is_some() && cargo_error.is_none() {
+            cache
+                .undeclared_reads(&dir, member.as_deref(), &Default::default())
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        },
+        why_uncached: match &cargo_error {
+            Some(error) => Some(error.clone()),
+            None => cache.why_disabled().map(str::to_string),
+        },
+        cached: cache.why_disabled().is_none() && cargo_error.is_none(),
+        cargo_error,
     }
+}
+
+/// One package of a `cache.cargo` closure, as `why` explains it.
+fn describe_package(
+    root: &Path,
+    own: Option<&str>,
+    package: &crate::cache::cargo::Package,
+) -> String {
+    let at = if package.dir.is_empty() {
+        "."
+    } else {
+        &package.dir
+    };
+    let why = if package.selected {
+        "selected".to_string()
+    } else {
+        "path dependency".to_string()
+    };
+    match owning_member(root, &package.dir).filter(|m| Some(m.as_str()) != own) {
+        Some(owner) => format!(
+            "{} ({at}) — {why}, owned by sub-workspace {owner}",
+            package.name
+        ),
+        None => format!("{} ({at}) — {why}", package.name),
+    }
+}
+
+/// The innermost ciabatta sub-workspace holding `rel`, if it isn't the root.
+fn owning_member(root: &Path, rel: &str) -> Option<String> {
+    let mut at = rel;
+    while !at.is_empty() {
+        if root.join(at).join(crate::config::CIABATTA_DIR).is_dir() {
+            return Some(at.to_string());
+        }
+        at = at.rsplit_once('/').map(|(parent, _)| parent).unwrap_or("");
+    }
+    None
 }
 
 /// `dir` as the user would type it: relative to the project root, `.` for the

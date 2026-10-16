@@ -179,6 +179,16 @@ export interface TargetDeps {
 
   needs: string[];
 
+  /**
+   * What `cache.cargo` resolved to, one line per package in the closure. Its
+   * paths are already in `inputs`/`outputs`/`exclude`; this says why.
+   */
+  cargo?: string[];
+  /** Why `cache.cargo` couldn't be resolved, when it couldn't. */
+  cargo_error?: string;
+  /** Files rustc reports the last build reading that no input covers. */
+  undeclared_reads?: string[];
+
   cached: boolean;
   why_uncached: string | null;
 }

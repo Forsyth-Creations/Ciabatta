@@ -27,6 +27,7 @@ import {
   Typography,
 } from "@mui/material";
 import ArrowBackIcon from "@mui/icons-material/ArrowBack";
+import FolderOpenIcon from "@mui/icons-material/FolderOpen";
 import ManageSearchIcon from "@mui/icons-material/ManageSearch";
 import StopIcon from "@mui/icons-material/Stop";
 import ReplayIcon from "@mui/icons-material/Replay";
@@ -60,6 +61,7 @@ import {
 } from "../api/run";
 import { humanizeBytes } from "../api/cache";
 import type { EnvVar } from "../api/types";
+import { useWorkspace } from "../api/workspace";
 import { LogView } from "../components/LogView";
 import { RecreateDrawer } from "../components/RecreateDrawer";
 import { EnvPrompt } from "../components/EnvPrompt";
@@ -733,6 +735,11 @@ function StepInspector({
   const upstream = [...dependencyClosure(workflow, step.name)].filter(
     (id) => id !== step.name && !isDependencyNode(id),
   );
+  // Already fetched elsewhere in the app, so this just reuses the cached
+  // catalogue. Fails outright on a project that isn't a monorepo, in which
+  // case `step.workspace` is null anyway and nothing below tries to show it.
+  const { data: catalogue } = useWorkspace(project);
+  const memberPath = catalogue?.members.find((m) => m.name === step.workspace)?.path;
   return (
     <Stack spacing={0.75}>
       <Stack direction="row" spacing={1} alignItems="center" sx={{ minWidth: 0 }}>
@@ -754,6 +761,23 @@ function StepInspector({
           Clear
         </Button>
       </Stack>
+      {/* The step only names its sub-workspace; this says where that lives,
+          relative to the monorepo root, right under its name — the first
+          thing you'd want to know before going to fix it. */}
+      {step.workspace && (
+        <Stack direction="row" spacing={0.5} alignItems="center" sx={{ minWidth: 0 }}>
+          <FolderOpenIcon sx={{ fontSize: 15, color: "text.secondary", flexShrink: 0 }} />
+          <Typography
+            variant="body2"
+            color="text.secondary"
+            noWrap
+            sx={{ fontFamily: monoFontStack, fontWeight: 600, minWidth: 0 }}
+            title={memberPath ? `${memberPath} (${step.workspace})` : step.workspace}
+          >
+            {memberPath ? (memberPath === "." ? "./ (the repo root)" : `./${memberPath}`) : step.workspace}
+          </Typography>
+        </Stack>
+      )}
       {/* The commands are listed under "runs" when the step is a target; only
           a step without one (a recovery branch) needs its action said here. */}
       {step.action && (step.deps?.commands.length ?? 0) === 0 && (

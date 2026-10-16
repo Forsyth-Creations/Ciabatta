@@ -728,19 +728,6 @@ fn trace(run: u64, update: &runner::ProgressUpdate) {
         } => {
             tracing::debug!(run, %workflow, %step, outcome = %report.outcome, "{}", report.summary)
         }
-        P::StepRestoring {
-            workflow,
-            step,
-            progress,
-        } => tracing::debug!(
-            run,
-            %workflow,
-            %step,
-            phase = %progress.phase,
-            files = progress.files_done,
-            bytes = progress.bytes_done,
-            "restoring from the remote cache"
-        ),
         P::StepNeedsChoice {
             workflow,
             step,

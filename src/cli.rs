@@ -372,6 +372,13 @@ pub enum Commands {
         /// List the sessions the daemon is running and exit.
         #[arg(long, conflicts_with_all = ["COMMAND", "stop", "attach"])]
         list: bool,
+
+        /// Elect this env profile first, exactly as a run's `--env-profile`
+        /// does: each workspace's `.ciabatta/.env.NAME` is copied into its
+        /// `.env`, and the command sees those values. Without it, the watch
+        /// uses whichever profile is active already.
+        #[arg(long = "env-profile", alias = "env_profile", value_name = "NAME")]
+        env_profile: Option<String>,
     },
 
     /// AI assistant: chat with an LLM that learns your codebase architecture.

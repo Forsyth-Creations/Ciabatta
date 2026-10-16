@@ -154,6 +154,10 @@ pub struct CacheReport {
     /// anybody.
     #[serde(default)]
     pub hints: Vec<String>,
+    /// Files its inputs match that an output pattern also covers: dropped
+    /// from the key, and worth fixing in the config.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub outputs_in_inputs: Vec<String>,
 }
 
 /// A cache entry, as much of it as the run view needs.
@@ -678,6 +682,16 @@ impl Session {
                 report.diff = diff.as_ref().map(DiffSummary::of);
             }
             Decision::Uncached { .. } => {}
+        }
+        // Best-effort: a listing that fails costs a warning, not the decision.
+        report.outputs_in_inputs = config
+            .outputs_in_inputs(&dir, member.as_deref())
+            .unwrap_or_default();
+        if !report.outputs_in_inputs.is_empty() {
+            report.hints.insert(
+                0,
+                crate::cache::describe_outputs_in_inputs(&report.outputs_in_inputs),
+            );
         }
         self.file_report(&step.name, report);
 
@@ -1411,6 +1425,44 @@ mod tests {
             "{:?}",
             report.hints
         );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A step whose outputs sit inside its inputs: its report names them and
+    /// leads its hints with what to change, and it is reused on the next run
+    /// rather than invalidated by what it just wrote.
+    #[tokio::test]
+    async fn the_report_names_outputs_inside_the_inputs_and_the_step_still_hits() {
+        let root = scratch("outputsininputs");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/lib.rs"), "fn lib() {}").unwrap();
+        let mut build = cached_step("build", &[], "src/gen");
+        build.cache.as_mut().unwrap().exclude.clear();
+
+        assert_eq!(
+            one_run(&root, std::slice::from_ref(&build)).await,
+            ["build:rebuild"]
+        );
+        assert!(
+            root.join("src/gen").exists(),
+            "the run should have written into src/gen"
+        );
+
+        let mut session = Session::open(&root, &CiabattaConfig::default()).unwrap();
+        session.before(&build, &HashMap::new()).await.unwrap();
+        let report = session.take_report().unwrap();
+        assert_eq!(report.outcome, "fresh", "{report:?}");
+        assert!(!report.outputs_in_inputs.is_empty());
+        assert!(
+            report
+                .outputs_in_inputs
+                .iter()
+                .all(|p| p.starts_with("src/gen/")),
+            "{:?}",
+            report.outputs_in_inputs
+        );
+        assert!(report.hints[0].contains("match both"), "{:?}", report.hints);
 
         let _ = std::fs::remove_dir_all(&root);
     }

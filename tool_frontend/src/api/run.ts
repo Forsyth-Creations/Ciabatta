@@ -179,6 +179,10 @@ export interface TargetDeps {
 
   needs: string[];
 
+  /** Files its inputs match that an output pattern also covers: treated as
+   *  outputs only, never part of the key. */
+  outputs_in_inputs?: string[];
+
   cached: boolean;
   why_uncached: string | null;
 }

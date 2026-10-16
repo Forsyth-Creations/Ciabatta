@@ -1255,7 +1255,7 @@ cache:
   # packages/api/ on each one.
   inputs:  ["packages/api/src/**/*", "packages/api/Cargo.toml", "Cargo.lock"]
   outputs: ["packages/api/target/release/api"]
-  exclude: ["packages/api/target"]   # its own output is not one of its inputs
+  exclude: ["packages/api/target"]   # the rest of target/ isn't a source either
   env:     [PROFILE]                 # optional: env + required_env already key it
 
 steps:
@@ -1272,6 +1272,17 @@ steps:
           <C>ciabatta why api:compile</C> is the fastest way to catch it — it prints what the
           globs actually matched.
         </Alert>
+
+        <SubHeading>An output is never an input</SubHeading>
+        <P>
+          A file an <C>outputs</C> pattern covers is left out of the key even when{" "}
+          <C>inputs</C> matches it — a build that hashed what it writes would change its own
+          key every time it ran, and never be reused. The patterns decide rather than the files on
+          disk, so the key is the same before the first build as after it. The overlap is still
+          worth fixing, so the run log, <C>dry-run</C>, <C>why</C> and the step&apos;s panel on
+          the <Link to="/run">Run page</Link> name the files. A step whose every input is also an
+          output isn&apos;t cached at all: an empty key would hit forever.
+        </P>
 
         <SubHeading>Steps that write nothing</SubHeading>
         <P>

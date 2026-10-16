@@ -52,6 +52,9 @@ pub struct Planned {
     /// What changed since the last run of this step, when there was one and
     /// something did.
     pub diff: Option<Diff>,
+    /// Files its inputs match that an output pattern also covers — see
+    /// [`super::CacheConfig::outputs_in_inputs`].
+    pub outputs_in_inputs: Vec<String>,
 }
 
 impl Planned {
@@ -236,6 +239,9 @@ pub fn plan_graph(
             inputs,
             outputs,
             diff,
+            outputs_in_inputs: config
+                .outputs_in_inputs(&dir, member.as_deref())
+                .unwrap_or_default(),
         });
     }
 

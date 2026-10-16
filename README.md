@@ -1597,9 +1597,12 @@ Environment for 'build' — 4 variable(s) this run depends on
     TIER    dev
 ```
 
-`ciabatta watch` sources the same files a run would and prints exactly what it
-resolved before the command starts, so a watched dev server and a `dev` workflow
-step can't quietly see different environments.
+`ciabatta watch` sources the same files a run would — searched from the
+workspace you're in up to the root, with the active env profile's file standing
+in for each `.env` — and prints the profile, the files and what it resolved
+before the command starts, so a watched dev server and a `dev` workflow step
+can't quietly see different environments. `ciabatta watch --env-profile staging
+"npm run dev"` elects a profile first, exactly as a run's `--env-profile` does.
 
 ### Env profiles
 
@@ -1820,6 +1823,7 @@ scan in a browser than in a scrollback buffer.
 ```bash
 ciabatta watch "npm run dev"                 # stream a dev server's logs
 ciabatta watch -t error -t "panic" "cargo test"   # notify on matching lines
+ciabatta watch --env-profile staging "npm run dev" # elect a profile first
 ciabatta watch --list            # every session the daemon is running
 ciabatta watch --attach 3        # tail session 3 (Ctrl-C only detaches)
 ciabatta watch --stop 3          # stop session 3

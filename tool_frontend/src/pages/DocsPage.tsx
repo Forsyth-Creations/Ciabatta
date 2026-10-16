@@ -537,6 +537,7 @@ const COMMANDS: CommandGroup[] = [
           ["--list", "List the sessions the daemon is running."],
           ["--attach ID", "Follow an existing session — how you tail a persistent step."],
           ["--stop ID", "Actually stop one."],
+          ["--env-profile NAME", "Elect this env profile first, as a run's --env-profile does. Without it the watch uses the active profile, and the env files from the workspace you're in up to the root."],
         ],
       },
       {

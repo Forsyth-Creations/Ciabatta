@@ -229,9 +229,18 @@ async fn main() -> Result<()> {
             stop,
             attach,
             list,
+            env_profile,
         } => {
             cmd_watch(
-                command, triggers, max_lines, port, no_open, stop, attach, list,
+                command,
+                triggers,
+                max_lines,
+                port,
+                no_open,
+                stop,
+                attach,
+                list,
+                env_profile,
             )
             .await?;
         }
@@ -1176,6 +1185,7 @@ async fn cmd_watch(
     stop: Option<u64>,
     attach: Option<u64>,
     list: bool,
+    env_profile: Option<String>,
 ) -> Result<()> {
     let session = daemon::connect(port).await?;
     let client = session.daemon.client()?;
@@ -1227,7 +1237,8 @@ async fn cmd_watch(
     // CIABATTA_* variables. Watching `npm run dev` and having it behave
     // differently from `ciabatta run dev` because one sourced `.env` and the
     // other didn't is the kind of difference that costs an afternoon.
-    let watch_env = resolve_watch_env()?;
+    let cwd = env::current_dir().context("Failed to get current directory")?;
+    let watch_env = resolve_watch_env(&cwd, env_profile.as_deref())?;
     print_watch_env(&watch_env);
 
     let created: serde_json::Value = client
@@ -1237,7 +1248,7 @@ async fn cmd_watch(
             "command": command,
             "triggers": triggers,
             "max_lines": max_lines,
-            "env": watch_env,
+            "env": watch_env.vars,
         }))
         .send()
         .await?
@@ -1323,17 +1334,25 @@ fn current_project_id() -> Option<String> {
 
 /// The environment a watched command runs with.
 ///
-/// The same resolution a run does — CIABATTA_* variables from git or CI, then
-/// the workspace's env files layered underneath — so `ciabatta watch "npm run
-/// dev"` and a `dev` workflow step see the same thing.
+/// The same resolution a run does, by the same code: CIABATTA_* variables
+/// from git or CI, the profile elected for the run (`--env-profile`, or one
+/// already active) copied into place, and then the env files of every
+/// workspace from the one the watch was started in up to the root — nearest
+/// first, with an active profile's `.ciabatta/.env.<name>` standing in for the
+/// `.env` it replaces. So `ciabatta watch "npm run dev"` in `packages/api`
+/// and a `dev` workflow step there see the same thing.
 ///
-/// Never fatal: a watch is somebody looking at output, and refusing to start
-/// one because a project's config didn't load would be the wrong trade. A
-/// problem is reported and the command runs with the ambient environment.
-fn resolve_watch_env() -> Result<BTreeMap<String, String>> {
-    let cwd = env::current_dir().context("Failed to get current directory")?;
-    let Some(root) = find_root(&cwd) else {
-        return Ok(BTreeMap::new());
+/// This used to read only the root workspace's env files and knew nothing of
+/// profiles: a watch started inside a package never saw that package's `.env`,
+/// and one started with `CIABATTA_ENV_PROFILE=staging` got the root's
+/// everyday values while a run beside it got staging's.
+///
+/// Never fatal for a config that won't load: a watch is somebody looking at
+/// output, and refusing to start one would be the wrong trade. A profile that
+/// was asked for by name and doesn't exist *is* an error, as it is for a run.
+fn resolve_watch_env(cwd: &Path, env_profile: Option<&str>) -> Result<WatchEnv> {
+    let Some(root) = workspace::find_workspace_root(cwd).or_else(|| find_root(cwd)) else {
+        return Ok(WatchEnv::default());
     };
 
     let config = match load_config(&root) {
@@ -1342,40 +1361,80 @@ fn resolve_watch_env() -> Result<BTreeMap<String, String>> {
             eprintln!(
                 "note: couldn't read this project's config ({e:#}); watching with the ambient environment"
             );
-            return Ok(BTreeMap::new());
+            return Ok(WatchEnv::default());
         }
     };
 
     // Build variables first, so an explicit CIABATTA_* value wins over a file.
     let mut vars = build_env_vars(&config, &[], false, &root, false).unwrap_or_default();
+    source_ciabatta_vars(&mut vars, &root, false);
+    vars.remove(environment::profiles::PROFILE_FROM_VAR);
+    if let Some(profile) = env_profile {
+        environment::profiles::require(&root, profile)?;
+        vars.insert(
+            environment::profiles::PROFILE_VAR.to_string(),
+            profile.to_string(),
+        );
+        vars.insert(
+            environment::profiles::PROFILE_FROM_VAR.to_string(),
+            "flag".to_string(),
+        );
+    }
 
-    let meta = config.workspace.clone().unwrap_or_default();
-    let resolved = environment::files::resolve(&meta, &root);
-
-    // Which keys the env files define. Kept separately because `vars` is seeded
-    // from the whole ambient environment, and handing back all of it would make
-    // both the printed list and the daemon payload mostly noise.
-    let mut from_files: Vec<String> = Vec::new();
-    if !resolved.files.is_empty() {
-        for file in &resolved.files {
-            if let Ok(content) = std::fs::read_to_string(root.join(file)) {
-                from_files.extend(run::parse_env_content(&content).into_iter().map(|(k, _)| k));
+    // Elect it the way a run does before its first phase, so the `.env` the
+    // watched command (or anything it starts) reads is the profile's too.
+    let mut elected = Vec::new();
+    if let Some(profile) = environment::profiles::active(&vars) {
+        for done in environment::profiles::apply(&root, &profile, false)? {
+            if let Some(line) = environment::profiles::describe(&done, false) {
+                elected.push(line);
             }
-        }
-        match run::load_env_files(&resolved.files, &root, &vars) {
-            Ok(merged) => vars = merged,
-            Err(e) => eprintln!("note: couldn't source this workspace's env files ({e:#})"),
         }
     }
 
+    let meta = config.workspace.clone().unwrap_or_default();
+    let levels = run::with_env_levels(run::ResolvedRun::default(), &root, cwd, &meta);
+    let prepared = match run::prepare_env(&levels, &root, &vars) {
+        Ok(prepared) => prepared,
+        Err(e) => {
+            eprintln!("note: couldn't source this workspace's env files ({e:#})");
+            return Ok(WatchEnv {
+                elected,
+                ..Default::default()
+            });
+        }
+    };
+    let (_, profile) = environment::profiles::choice(&prepared.env, &root);
+
     // Only what ciabatta contributes: the CIABATTA_* variables it resolved, and
-    // whatever this workspace's env files define. Everything else the command
-    // sees is inherited from the shell, and re-listing the shell's environment
-    // back at the user would bury the two lines that matter.
-    Ok(vars
-        .into_iter()
-        .filter(|(key, _)| key.starts_with("CIABATTA_") || from_files.contains(key))
-        .collect())
+    // whatever the env files define. Everything else the command sees is
+    // inherited from the shell, and re-listing the shell's environment back at
+    // the user would bury the lines that matter.
+    let vars = prepared
+        .env
+        .iter()
+        .filter(|(key, _)| key.starts_with("CIABATTA_") || prepared.sources.contains_key(*key))
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    Ok(WatchEnv {
+        vars,
+        files: prepared.sourced,
+        profile: Some(profile),
+        elected,
+    })
+}
+
+/// What [`resolve_watch_env`] found, and how — printed before the watch starts.
+#[derive(Debug, Default)]
+struct WatchEnv {
+    /// The variables ciabatta adds to the command's environment.
+    vars: BTreeMap<String, String>,
+    /// The env files searched that exist, in search order.
+    files: Vec<String>,
+    /// Which env profile is in use and why (or why none is).
+    profile: Option<String>,
+    /// What electing the profile just did to each `.env`.
+    elected: Vec<String>,
 }
 
 /// Show what the watched command will see.
@@ -1385,7 +1444,17 @@ fn resolve_watch_env() -> Result<BTreeMap<String, String>> {
 /// — which is being able to see at a glance that `API_URL` is pointing at the
 /// wrong thing. What is *not* printed is the ambient environment the process
 /// already had; only what ciabatta resolved and is adding.
-fn print_watch_env(vars: &BTreeMap<String, String>) {
+fn print_watch_env(watch: &WatchEnv) {
+    for line in &watch.elected {
+        println!("{line}");
+    }
+    if let Some(profile) = &watch.profile {
+        println!("Env profile: {profile}");
+    }
+    if !watch.files.is_empty() {
+        println!("Env files: {}", watch.files.join(", "));
+    }
+    let vars = &watch.vars;
     if vars.is_empty() {
         println!("Environment: nothing resolved — running with your shell's environment.");
         println!();
@@ -2144,6 +2213,28 @@ async fn run_plain(
             // Already said by the step's skip line; the report itself is for
             // the web app's inspector.
             ProgressUpdate::StepCache { .. } => {}
+            // One line as the download starts — a terminal can't redraw a
+            // progress bar between other steps' output, and a line per chunk
+            // would bury them. The skip line that follows says it landed.
+            ProgressUpdate::StepRestoring {
+                workflow,
+                step,
+                progress,
+            } => {
+                if progress.phase == "downloading"
+                    && progress.files_done == 0
+                    && progress.bytes_done == 0
+                    && progress.current.is_none()
+                {
+                    println!(
+                        "{}   {} step: {step} — downloading {} file(s), {} from the remote cache",
+                        tag(&workflow),
+                        "↓".style(color::active()),
+                        progress.files_total,
+                        cache::store::human_size(progress.bytes_total),
+                    )
+                }
+            }
             // The command's own output, escapes and all — it was asked for
             // colour precisely because these lines end up here unaltered.
             ProgressUpdate::StepLog {
@@ -5533,6 +5624,68 @@ mod tests {
         yaml_scalar,
     };
     use std::path::{Path, PathBuf};
+
+    /// A watch sees what a run started in the same place would: the nearest
+    /// workspace's `.env` first, then upward — and, with a profile, that
+    /// profile's values, copied into place the way a run elects one.
+    #[test]
+    fn a_watch_resolves_the_environment_a_run_from_the_same_place_would() {
+        let root = std::env::temp_dir().join(format!("ciab_watch_env_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let write = |rel: &str, body: &str| {
+            let path = root.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, body).unwrap();
+        };
+        write(".ciabatta/ciabatta.yaml", "workspace:\n  name: root\n");
+        write(
+            "packages/api/.ciabatta/ciabatta.yaml",
+            "workspace:\n  name: api\n",
+        );
+        write(".env", "SHARED=root\nROOT_ONLY=yes\n");
+        write("packages/api/.env", "SHARED=api\n");
+        write("packages/api/.ciabatta/.env.staging", "SHARED=staging\n");
+        let api = root.join("packages/api");
+
+        // From inside the package: its own `.env` wins, the root's fills in.
+        let watch = super::resolve_watch_env(&api, None).unwrap();
+        assert_eq!(
+            watch.vars.get("SHARED").map(String::as_str),
+            Some("api"),
+            "{watch:?}"
+        );
+        assert_eq!(watch.vars.get("ROOT_ONLY").map(String::as_str), Some("yes"));
+        assert!(
+            watch.files.iter().any(|f| f == "packages/api/.env"),
+            "{watch:?}"
+        );
+
+        // With a profile: its values, and the `.env` is now its copy, so a
+        // later watch with no flag keeps using it.
+        let staging = super::resolve_watch_env(&api, Some("staging")).unwrap();
+        assert_eq!(
+            staging.vars.get("SHARED").map(String::as_str),
+            Some("staging")
+        );
+        assert!(
+            staging.profile.as_deref().unwrap().starts_with("staging"),
+            "{staging:?}"
+        );
+        let after = super::resolve_watch_env(&api, None).unwrap();
+        assert_eq!(
+            after.vars.get("SHARED").map(String::as_str),
+            Some("staging")
+        );
+        assert!(
+            after.profile.as_deref().unwrap().contains("staging"),
+            "{after:?}"
+        );
+
+        // A profile asked for by name that doesn't exist is an error, as for a run.
+        assert!(super::resolve_watch_env(&api, Some("nope")).is_err());
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     /// A scaffold that doesn't parse is worse than no scaffold: the first thing
     /// the user does is run a command against it.

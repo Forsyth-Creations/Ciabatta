@@ -445,10 +445,34 @@ impl CacheConfig {
 
     /// What is kept out of this build's inputs: what it declared, plus every
     /// sub-workspace that owns its own cache entry.
+    ///
+    /// And every output pattern: **an output is never an input.** A file the
+    /// build writes that is also hashed into its key can never hit — the first
+    /// run keys on a tree without it, the build writes it, and the next run's
+    /// key includes it. Matched on the patterns rather than on the files that
+    /// exist, so the input set is the same before the first build as after it.
+    /// What this drops is reported by [`Self::outputs_in_inputs`], so the
+    /// config can be fixed rather than quietly corrected forever.
     pub fn input_exclude(&self, dir: &Path, own: Option<&str>) -> Vec<String> {
         let mut exclude = self.exclude.clone();
         exclude.extend(nested_workspaces_except(dir, own));
+        exclude.extend(self.outputs.iter().cloned());
         exclude
+    }
+
+    /// The files `inputs` would match that an output pattern also covers, and
+    /// so are treated as outputs only — sorted, for a warning to name.
+    pub fn outputs_in_inputs(&self, dir: &Path, own: Option<&str>) -> Result<Vec<String>> {
+        if self.inputs.is_empty() || self.outputs.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut exclude = self.exclude.clone();
+        exclude.extend(nested_workspaces_except(dir, own));
+        Ok(list_matching(dir, &self.inputs, &exclude)?
+            .into_iter()
+            .map(|f| f.path)
+            .filter(|path| is_excluded(path, dir, &self.outputs))
+            .collect())
     }
 
     /// The files this build writes, listed but not hashed.
@@ -927,6 +951,27 @@ fn is_excluded(rel: &str, dir: &Path, exclude: &[String]) -> bool {
     })
 }
 
+/// One sentence about files matched by both `inputs` and `outputs`, naming the
+/// first few — the same wording wherever the overlap is reported.
+pub fn describe_outputs_in_inputs(files: &[String]) -> String {
+    const SHOWN: usize = 5;
+    let mut named = files
+        .iter()
+        .take(SHOWN)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(", ");
+    if files.len() > SHOWN {
+        named.push_str(&format!(", and {} more", files.len() - SHOWN));
+    }
+    format!(
+        "{} file(s) match both `cache.inputs` and `cache.outputs`, so they are treated as \
+         outputs only — an output is never part of the key. Narrow `inputs` (or add them to \
+         `exclude`) to say so: {named}",
+        files.len()
+    )
+}
+
 /// Everything that goes into a cache key, in a stable, inspectable form.
 ///
 /// Serialized to JSON and hashed. Keeping it a real struct rather than an ad-hoc
@@ -1249,6 +1294,22 @@ pub fn plan(
     let inputs = target
         .config
         .hash_inputs(&target.dir, target.member.as_deref())?;
+    // Inputs were declared and matched files, but every one of them is an
+    // output. Keying on the empty set that leaves would key identically
+    // forever — the one way dropping outputs from inputs could turn a slow
+    // cache into a wrong one.
+    if inputs.is_empty()
+        && !target
+            .config
+            .outputs_in_inputs(&target.dir, target.member.as_deref())?
+            .is_empty()
+    {
+        return Ok(Decision::Uncached {
+            reason: "every file its `cache.inputs` match is also one of its `cache.outputs`, \
+                     so there is nothing left to key on"
+                .to_string(),
+        });
+    }
     let key_inputs = KeyInputs {
         version: KEY_VERSION,
         target: target.name.clone(),
@@ -1862,6 +1923,113 @@ mod tests {
         let mut edited = base.clone();
         edited.inputs[0].sha256 = "def".into();
         assert_ne!(edited.key().unwrap(), key);
+    }
+
+    /// An output is never an input. With `inputs: ["."]` and no `exclude`,
+    /// the build's own output used to land in its key: the first run keyed on
+    /// a tree without it, and every later run on a tree with it, so the step
+    /// never hit. Now the output is left out — the key is the same before and
+    /// after the build — and the overlap is reported.
+    #[test]
+    fn an_output_is_never_part_of_the_key_and_the_overlap_is_reported() {
+        let root = scratch("outputs_not_inputs");
+        let work = root.join("api");
+        std::fs::create_dir_all(&work).unwrap();
+        write(&work, "src/main.rs", "fn main() {}");
+        let store = store::Store::at(root.join("cache")).unwrap();
+        let target = Target {
+            name: "build".into(),
+            workspace: "api".into(),
+            dir: work.clone(),
+            member: None,
+            commands: vec!["make".into()],
+            config: CacheConfig {
+                enabled: Some(true),
+                inputs: vec![".".into()],
+                outputs: vec!["dist/**/*".into(), "bin/app".into()],
+                ..Default::default()
+            },
+            upstream: BTreeMap::new(),
+        };
+        let env = BTreeMap::new();
+
+        let before = plan(&target, &env, &store).unwrap();
+        let key = before.key().unwrap().to_string();
+        assert!(
+            target
+                .config
+                .outputs_in_inputs(&work, None)
+                .unwrap()
+                .is_empty()
+        );
+
+        // The build writes its outputs inside what `inputs` covers.
+        write(&work, "dist/app.js", "built");
+        write(&work, "dist/app.css", "built");
+        write(&work, "bin/app", "built");
+        let hashed: Vec<String> = target
+            .config
+            .hash_inputs(&work, None)
+            .unwrap()
+            .into_iter()
+            .map(|f| f.path)
+            .collect();
+        assert_eq!(hashed, vec!["src/main.rs"]);
+        assert_eq!(
+            target.config.outputs_in_inputs(&work, None).unwrap(),
+            vec!["bin/app", "dist/app.css", "dist/app.js"]
+        );
+
+        // Same key after the build as before it — the bug this fixes.
+        let after = plan(&target, &env, &store).unwrap();
+        assert_eq!(after.key(), Some(key.as_str()));
+
+        let said =
+            describe_outputs_in_inputs(&target.config.outputs_in_inputs(&work, None).unwrap());
+        assert!(said.starts_with("3 file(s) match both"), "{said}");
+        assert!(said.contains("dist/app.js"), "{said}");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// When every input is also an output there is nothing left to key on,
+    /// and an empty key would hit forever — so the step isn't cached at all.
+    #[test]
+    fn a_step_whose_inputs_are_all_outputs_is_not_cached() {
+        let root = scratch("all_outputs");
+        let work = root.join("api");
+        write(&work, "dist/app.js", "built");
+        let store = store::Store::at(root.join("cache")).unwrap();
+        let target = Target {
+            name: "build".into(),
+            workspace: "api".into(),
+            dir: work.clone(),
+            member: None,
+            commands: vec!["make".into()],
+            config: CacheConfig {
+                enabled: Some(true),
+                inputs: vec!["dist/**/*".into()],
+                outputs: vec!["dist".into()],
+                ..Default::default()
+            },
+            upstream: BTreeMap::new(),
+        };
+        match plan(&target, &BTreeMap::new(), &store).unwrap() {
+            Decision::Uncached { reason } => {
+                assert!(reason.contains("nothing left to key on"), "{reason}")
+            }
+            other => panic!("expected uncached, got {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The listing, many: the warning names the first few and counts the rest.
+    #[test]
+    fn the_overlap_warning_names_a_few_and_counts_the_rest() {
+        let files: Vec<String> = (0..8).map(|i| format!("dist/{i}.js")).collect();
+        let said = describe_outputs_in_inputs(&files);
+        assert!(said.contains("dist/4.js, and 3 more"), "{said}");
+        assert!(!said.contains("dist/5.js"), "{said}");
     }
 
     /// A full pass over the decision table: never built → rebuild, built and

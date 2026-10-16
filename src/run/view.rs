@@ -197,6 +197,11 @@ pub struct StepView {
     /// a dry run, a condition that skipped it).
     #[serde(default)]
     cache: Option<crate::run::cached::CacheReport>,
+    /// Its outputs coming down from the remote cache, while they are: what the
+    /// node draws instead of sitting at "not started yet" for the length of
+    /// the transfer. Cleared as soon as the step is skipped or starts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    restoring: Option<crate::run::cached::Restoring>,
     /// When it started and finished, RFC 3339 in local time — so the viewer can
     /// say how long it took and when it ended. Defaulted so a run recorded
     /// before these existed still loads from disk.
@@ -251,6 +256,7 @@ impl GuiState {
                     r.pending = None;
                     if let Some(s) = r.step_mut(&step) {
                         s.status = "running".into();
+                        s.restoring = None;
                         // A step can run more than once — a retry routes back
                         // to it — and the time that matters is the latest go.
                         s.started_at = Some(now());
@@ -298,6 +304,7 @@ impl GuiState {
                 if let Some(r) = self.recipe_mut(&workflow) {
                     if let Some(s) = r.step_mut(&step) {
                         s.status = "skipped".into();
+                        s.restoring = None;
                         s.finished_at = Some(now());
                         push_log(
                             &mut s.logs,
@@ -307,6 +314,37 @@ impl GuiState {
                     }
                     let line = format!("[{step}] skipped: {reason}");
                     push_log(&mut r.logs, &mut r.dropped_logs, line);
+                }
+            }
+            ProgressUpdate::StepRestoring {
+                workflow,
+                step,
+                progress,
+            } => {
+                if let Some(r) = self.recipe_mut(&workflow)
+                    && let Some(s) = r.step_mut(&step)
+                {
+                    let first_download = progress.phase == "downloading"
+                        && s.restoring
+                            .as_ref()
+                            .is_none_or(|p| p.phase != "downloading");
+                    if first_download {
+                        push_log(
+                            &mut s.logs,
+                            &mut s.dropped_logs,
+                            format!(
+                                "↓ downloading {} file(s), {} from the remote cache at {}",
+                                progress.files_total,
+                                crate::cache::store::human_size(progress.bytes_total),
+                                progress.server,
+                            ),
+                        );
+                    }
+                    if s.started_at.is_none() {
+                        s.started_at = Some(now());
+                    }
+                    s.status = "restoring".into();
+                    s.restoring = Some(progress);
                 }
             }
             ProgressUpdate::StepCache {
@@ -647,6 +685,7 @@ pub fn initial_state(
                 // the viewer would have to special-case.
                 deps: deps.remove(&step.name).unwrap_or_default(),
                 cache: None,
+                restoring: None,
                 started_at: None,
                 finished_at: None,
             });
@@ -739,6 +778,55 @@ mod tests {
             }],
             ..Default::default()
         }
+    }
+
+    /// A restore shows on the step while it happens — not "not started yet"
+    /// for the length of the download — and is cleared once the step is
+    /// skipped as restored.
+    #[test]
+    fn a_remote_restore_is_shown_while_it_downloads_and_cleared_after() {
+        let mut state = one_step_run();
+        let restoring = |phase: &str, done: u64| ProgressUpdate::StepRestoring {
+            workflow: "build".into(),
+            step: "compile".into(),
+            progress: crate::run::cached::Restoring {
+                phase: phase.into(),
+                server: "http://cache.example".into(),
+                files_done: 0,
+                files_total: 2,
+                bytes_done: done,
+                bytes_total: 2048,
+                current: Some("target/release/app".into()),
+            },
+        };
+        let step = |state: &GuiState| state.workflows[0].steps[0].clone();
+
+        state.apply(restoring("checking", 0));
+        assert_eq!(step(&state).status, "restoring");
+        assert!(step(&state).started_at.is_some());
+
+        state.apply(restoring("downloading", 0));
+        state.apply(restoring("downloading", 1024));
+        let during = step(&state);
+        assert_eq!(during.restoring.as_ref().unwrap().bytes_done, 1024);
+        // One line for the download, not one per progress frame.
+        let lines = during
+            .logs
+            .iter()
+            .filter(|l| l.contains("downloading"))
+            .count();
+        assert_eq!(lines, 1);
+
+        state.apply(ProgressUpdate::StepSkipped {
+            workflow: "build".into(),
+            step: "compile".into(),
+            reason: "restored from the remote cache".into(),
+        });
+        let after = step(&state);
+        assert_eq!(after.status, "skipped");
+        assert!(after.restoring.is_none());
+        let json = serde_json::to_value(&after).unwrap();
+        assert!(json.get("restoring").is_none(), "{json}");
     }
 
     #[test]

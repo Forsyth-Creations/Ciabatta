@@ -558,11 +558,29 @@ async fn run_dag(
                 // everything downstream proceeds exactly as if it had run.
                 let mut pending = None;
                 if let Some(session) = cache.as_deref_mut() {
+                    session.report_to(tx.clone(), workflow);
                     let decided = session.before(step, step_env).await;
                     // Whatever was decided, the run view gets the details —
                     // that's what puts the cache icon on the node, and what
                     // the inspector reads when somebody asks why it missed.
                     if let Some(report) = session.take_report() {
+                        // Said once, as the decision is made — the report is
+                        // sent again after the step runs, and this isn't news
+                        // the second time.
+                        if !report.outputs_in_inputs.is_empty() {
+                            let _ = tx
+                                .send(ProgressUpdate::Log(
+                                    workflow.to_string(),
+                                    format!(
+                                        "warning: {}: {}",
+                                        step.name,
+                                        crate::cache::describe_outputs_in_inputs(
+                                            &report.outputs_in_inputs
+                                        )
+                                    ),
+                                ))
+                                .await;
+                        }
                         let _ = tx
                             .send(ProgressUpdate::StepCache {
                                 workflow: workflow.to_string(),

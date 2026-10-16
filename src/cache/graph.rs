@@ -55,6 +55,9 @@ pub struct Planned {
     /// Files rustc says the last build read that its inputs don't cover —
     /// see [`CacheConfig::undeclared_reads`].
     pub undeclared_reads: Vec<String>,
+    /// Files its inputs match that an output pattern also covers — see
+    /// [`super::CacheConfig::outputs_in_inputs`].
+    pub outputs_in_inputs: Vec<String>,
 }
 
 impl Planned {
@@ -245,6 +248,9 @@ pub fn plan_graph(
             // warning, not a failed plan.
             undeclared_reads: config
                 .undeclared_reads(&dir, member.as_deref(), &produced.upstream_of(&step.needs))
+                .unwrap_or_default(),
+            outputs_in_inputs: config
+                .outputs_in_inputs(&dir, member.as_deref())
                 .unwrap_or_default(),
         });
     }

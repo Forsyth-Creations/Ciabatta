@@ -389,6 +389,11 @@ impl Client {
         parse(response).await.map(Some)
     }
 
+    /// The server this client talks to, as normalized.
+    pub fn base(&self) -> &str {
+        &self.base
+    }
+
     /// Download an entry's outputs into `dir`, verifying each against the
     /// manifest before it lands.
     pub async fn download(
@@ -398,8 +403,36 @@ impl Client {
         entry: &Entry,
         dir: &Path,
     ) -> Result<()> {
+        self.download_with(project, key, entry, dir, &mut |_| {})
+            .await
+    }
+
+    /// [`Self::download`], reporting progress as the bytes arrive.
+    ///
+    /// Read a chunk at a time rather than with one `bytes()` call, because a
+    /// restore is the one moment a run can sit for minutes on a single
+    /// multi-hundred-megabyte artifact — and with nothing reported, a viewer
+    /// can't tell a slow download from a hung run.
+    pub async fn download_with(
+        &self,
+        project: &str,
+        key: &str,
+        entry: &Entry,
+        dir: &Path,
+        on_progress: &mut (dyn FnMut(DownloadProgress<'_>) + Send),
+    ) -> Result<()> {
+        let mut progress = DownloadProgress {
+            files_done: 0,
+            files_total: entry.outputs.len(),
+            bytes_done: 0,
+            bytes_total: entry.outputs.iter().map(|o| o.size).sum(),
+            current: None,
+        };
+        on_progress(progress.clone());
         for output in &entry.outputs {
-            let response = self
+            progress.current = Some(&output.path);
+            on_progress(progress.clone());
+            let mut response = self
                 .authed(
                     self.http
                         .get(self.url(&format!("/api/projects/{project}/cache/{key}/artifact"))),
@@ -411,7 +444,16 @@ impl Client {
                 .error_for_status()
                 .with_context(|| format!("Failed to download {}", output.path))?;
 
-            let bytes = response.bytes().await?;
+            let mut bytes = Vec::with_capacity(output.size as usize);
+            while let Some(chunk) = response
+                .chunk()
+                .await
+                .with_context(|| format!("Failed to download {}", output.path))?
+            {
+                bytes.extend_from_slice(&chunk);
+                progress.bytes_done += chunk.len() as u64;
+                on_progress(progress.clone());
+            }
             let actual = crate::cache::hash_bytes(&bytes);
             anyhow::ensure!(
                 actual == output.sha256,
@@ -427,6 +469,9 @@ impl Client {
             }
             std::fs::write(&path, &bytes)
                 .with_context(|| format!("Failed to write {}", path.display()))?;
+            progress.files_done += 1;
+            progress.current = None;
+            on_progress(progress.clone());
         }
         Ok(())
     }
@@ -728,9 +773,13 @@ pub async fn try_restore(
     key: &str,
     target: Option<&str>,
     dir: &Path,
+    on_progress: &mut (dyn FnMut(DownloadProgress<'_>) + Send),
 ) -> Option<Entry> {
     match client.lookup_for(project, key, target).await {
-        Ok(Some(entry)) => match client.download(project, key, &entry, dir).await {
+        Ok(Some(entry)) => match client
+            .download_with(project, key, &entry, dir, on_progress)
+            .await
+        {
             Ok(()) => Some(entry),
             Err(e) => {
                 eprintln!("note: the remote cache had this build but couldn't serve it ({e:#})");
@@ -743,6 +792,17 @@ pub async fn try_restore(
             None
         }
     }
+}
+
+/// How far a [`Client::download_with`] has got.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DownloadProgress<'a> {
+    pub files_done: usize,
+    pub files_total: usize,
+    pub bytes_done: u64,
+    pub bytes_total: u64,
+    /// The file on its way down, between files `None`.
+    pub current: Option<&'a str>,
 }
 
 /// Tell the remote cache which entries a run reused, so retention ages them

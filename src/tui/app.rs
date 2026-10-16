@@ -215,6 +215,22 @@ impl App {
             // The skip line already says a step was served from the cache;
             // the full report is for the web app's inspector.
             ProgressUpdate::StepCache { .. } => {}
+            ProgressUpdate::StepRestoring {
+                workflow,
+                step,
+                progress,
+            } => {
+                if progress.phase == "downloading"
+                    && progress.bytes_done == 0
+                    && progress.current.is_none()
+                    && let Some(r) = self.find_mut(&workflow)
+                {
+                    r.logs.push(format!(
+                        "↓ {step}: downloading {} file(s) from the remote cache",
+                        progress.files_total
+                    ));
+                }
+            }
             ProgressUpdate::StepLog {
                 workflow,
                 step,

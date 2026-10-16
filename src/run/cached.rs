@@ -54,6 +54,8 @@ pub struct Session {
     unaccounted: BTreeSet<String>,
     /// Remote cache to consult, when this project has one configured.
     remote: Option<Remote>,
+    /// Where restore progress goes, when anyone is listening.
+    reporter: Option<Reporter>,
     /// Keys this run reused without asking the remote for them.
     ///
     /// The first time an entry is restored it is mirrored into the local store,
@@ -158,6 +160,10 @@ pub struct CacheReport {
     /// anybody.
     #[serde(default)]
     pub hints: Vec<String>,
+    /// Files its inputs match that an output pattern also covers: dropped
+    /// from the key, and worth fixing in the config.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub outputs_in_inputs: Vec<String>,
 }
 
 /// A cache entry, as much of it as the run view needs.
@@ -266,6 +272,36 @@ impl DiffSummary {
 }
 
 /// A configured remote cache, once its project identity has been resolved.
+/// A step whose outputs are coming down from the remote cache, as the run view
+/// shows it while it happens.
+///
+/// Before this, the lookup and the whole download ran inside the cache
+/// decision with nothing sent until both were done, so a step restoring a
+/// large artifact sat at "not started yet" for as long as the transfer took —
+/// indistinguishable from a run that had hung.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct Restoring {
+    /// `checking` while the server is asked whether it has the entry,
+    /// `downloading` once it has said yes.
+    pub phase: String,
+    /// The server, as configured.
+    pub server: String,
+    pub files_done: usize,
+    pub files_total: usize,
+    pub bytes_done: u64,
+    pub bytes_total: u64,
+    /// The file on its way down.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current: Option<String>,
+}
+
+/// Where a session sends [`Restoring`] updates: the run's progress channel,
+/// and the workflow name its updates are filed under.
+struct Reporter {
+    tx: tokio::sync::mpsc::Sender<crate::runner::ProgressUpdate>,
+    workflow: String,
+}
+
 struct Remote {
     client: Client,
     project: String,
@@ -365,6 +401,7 @@ impl Session {
             cache_names: HashMap::new(),
             unaccounted: BTreeSet::new(),
             remote: None,
+            reporter: None,
             reused_locally: Vec::new(),
             force: false,
             stats: Stats::default(),
@@ -451,6 +488,19 @@ impl Session {
                 self.remote_failed(format!("{e:#}"));
             }
         }
+    }
+
+    /// Send restore progress for the steps of `workflow` to `tx` — the run's
+    /// own progress channel, so viewers see a download as it happens.
+    pub fn report_to(
+        &mut self,
+        tx: tokio::sync::mpsc::Sender<crate::runner::ProgressUpdate>,
+        workflow: &str,
+    ) {
+        self.reporter = Some(Reporter {
+            tx,
+            workflow: workflow.to_string(),
+        });
     }
 
     /// Decide what to do about `step`, restoring its outputs when it can.
@@ -565,12 +615,55 @@ impl Session {
             && !matches!(reason, Reason::NoOutputs)
         {
             let key = key.clone();
+            let server = remote.client.base().to_string();
+            let send = |progress: Restoring| {
+                if let Some(reporter) = &self.reporter {
+                    // Never wait on a viewer: a full channel drops a progress
+                    // frame, and the next one says the same thing, further on.
+                    let _ = reporter
+                        .tx
+                        .try_send(crate::runner::ProgressUpdate::StepRestoring {
+                            workflow: reporter.workflow.clone(),
+                            step: step.name.clone(),
+                            progress,
+                        });
+                }
+            };
+            send(Restoring {
+                phase: "checking".to_string(),
+                server: server.clone(),
+                ..Default::default()
+            });
+            // A frame per chunk would be thousands for one large file, and
+            // every frame is the whole run state to every viewer. A file
+            // starting or finishing always goes through; bytes in between at
+            // most a few times a second.
+            let mut last = std::time::Instant::now();
+            let mut last_file: Option<usize> = None;
+            let mut on_progress = |p: crate::remote_cache::client::DownloadProgress<'_>| {
+                let boundary = last_file != Some(p.files_done) || p.current.is_none();
+                if !boundary && last.elapsed() < std::time::Duration::from_millis(250) {
+                    return;
+                }
+                last = std::time::Instant::now();
+                last_file = Some(p.files_done);
+                send(Restoring {
+                    phase: "downloading".to_string(),
+                    server: server.clone(),
+                    files_done: p.files_done,
+                    files_total: p.files_total,
+                    bytes_done: p.bytes_done,
+                    bytes_total: p.bytes_total,
+                    current: p.current.map(str::to_string),
+                });
+            };
             if let Some(entry) = crate::remote_cache::client::try_restore(
                 &remote.client,
                 &remote.project,
                 &key,
                 Some(&step.name),
                 &dir,
+                &mut on_progress,
             )
             .await
             {
@@ -683,6 +776,16 @@ impl Session {
                 report.diff = diff.as_ref().map(DiffSummary::of);
             }
             Decision::Uncached { .. } => {}
+        }
+        // Best-effort: a listing that fails costs a warning, not the decision.
+        report.outputs_in_inputs = config
+            .outputs_in_inputs(&dir, member.as_deref())
+            .unwrap_or_default();
+        if !report.outputs_in_inputs.is_empty() {
+            report.hints.insert(
+                0,
+                crate::cache::describe_outputs_in_inputs(&report.outputs_in_inputs),
+            );
         }
         self.file_report(&step.name, report);
 
@@ -1446,6 +1549,44 @@ mod tests {
             "{:?}",
             report.hints
         );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A step whose outputs sit inside its inputs: its report names them and
+    /// leads its hints with what to change, and it is reused on the next run
+    /// rather than invalidated by what it just wrote.
+    #[tokio::test]
+    async fn the_report_names_outputs_inside_the_inputs_and_the_step_still_hits() {
+        let root = scratch("outputsininputs");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/lib.rs"), "fn lib() {}").unwrap();
+        let mut build = cached_step("build", &[], "src/gen");
+        build.cache.as_mut().unwrap().exclude.clear();
+
+        assert_eq!(
+            one_run(&root, std::slice::from_ref(&build)).await,
+            ["build:rebuild"]
+        );
+        assert!(
+            root.join("src/gen").exists(),
+            "the run should have written into src/gen"
+        );
+
+        let mut session = Session::open(&root, &CiabattaConfig::default()).unwrap();
+        session.before(&build, &HashMap::new()).await.unwrap();
+        let report = session.take_report().unwrap();
+        assert_eq!(report.outcome, "fresh", "{report:?}");
+        assert!(!report.outputs_in_inputs.is_empty());
+        assert!(
+            report
+                .outputs_in_inputs
+                .iter()
+                .all(|p| p.starts_with("src/gen/")),
+            "{:?}",
+            report.outputs_in_inputs
+        );
+        assert!(report.hints[0].contains("match both"), "{:?}", report.hints);
 
         let _ = std::fs::remove_dir_all(&root);
     }

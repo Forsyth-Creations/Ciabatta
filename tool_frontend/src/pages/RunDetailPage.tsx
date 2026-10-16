@@ -11,6 +11,7 @@ import {
   Alert,
   AlertTitle,
   Box,
+  LinearProgress,
   Button,
   Chip,
   Dialog,
@@ -26,6 +27,7 @@ import {
   Typography,
 } from "@mui/material";
 import ArrowBackIcon from "@mui/icons-material/ArrowBack";
+import FolderOpenIcon from "@mui/icons-material/FolderOpen";
 import ManageSearchIcon from "@mui/icons-material/ManageSearch";
 import StopIcon from "@mui/icons-material/Stop";
 import ReplayIcon from "@mui/icons-material/Replay";
@@ -43,6 +45,8 @@ import {
   clockTime,
   elapsedOf,
   missingEnvFrom,
+  restoringLine,
+  restoringPercent,
   useChoose,
   useNow,
   useRerunRun,
@@ -57,6 +61,7 @@ import {
 } from "../api/run";
 import { humanizeBytes } from "../api/cache";
 import type { EnvVar } from "../api/types";
+import { useWorkspace } from "../api/workspace";
 import { LogView } from "../components/LogView";
 import { RecreateDrawer } from "../components/RecreateDrawer";
 import { EnvPrompt } from "../components/EnvPrompt";
@@ -730,6 +735,11 @@ function StepInspector({
   const upstream = [...dependencyClosure(workflow, step.name)].filter(
     (id) => id !== step.name && !isDependencyNode(id),
   );
+  // Already fetched elsewhere in the app, so this just reuses the cached
+  // catalogue. Fails outright on a project that isn't a monorepo, in which
+  // case `step.workspace` is null anyway and nothing below tries to show it.
+  const { data: catalogue } = useWorkspace(project);
+  const memberPath = catalogue?.members.find((m) => m.name === step.workspace)?.path;
   return (
     <Stack spacing={0.75}>
       <Stack direction="row" spacing={1} alignItems="center" sx={{ minWidth: 0 }}>
@@ -751,6 +761,23 @@ function StepInspector({
           Clear
         </Button>
       </Stack>
+      {/* The step only names its sub-workspace; this says where that lives,
+          relative to the monorepo root, right under its name — the first
+          thing you'd want to know before going to fix it. */}
+      {step.workspace && (
+        <Stack direction="row" spacing={0.5} alignItems="center" sx={{ minWidth: 0 }}>
+          <FolderOpenIcon sx={{ fontSize: 15, color: "text.secondary", flexShrink: 0 }} />
+          <Typography
+            variant="body2"
+            color="text.secondary"
+            noWrap
+            sx={{ fontFamily: monoFontStack, fontWeight: 600, minWidth: 0 }}
+            title={memberPath ? `${memberPath} (${step.workspace})` : step.workspace}
+          >
+            {memberPath ? (memberPath === "." ? "./ (the repo root)" : `./${memberPath}`) : step.workspace}
+          </Typography>
+        </Stack>
+      )}
       {/* The commands are listed under "runs" when the step is a target; only
           a step without one (a recovery branch) needs its action said here. */}
       {step.action && (step.deps?.commands.length ?? 0) === 0 && (
@@ -767,8 +794,42 @@ function StepInspector({
         now={now}
         env={workflow.env.vars.filter((variable) => variable.steps.includes(step.name))}
       />
+      {step.restoring && <RestoringPanel step={step} />}
       <StepCacheSection project={project} step={step} inspect={inspect} />
     </Stack>
+  );
+}
+
+/**
+ * A step whose outputs are coming down from the remote cache, said where the
+ * step's details are — so a long transfer reads as a download in progress,
+ * not as a run that stopped answering.
+ */
+function RestoringPanel({ step }: { step: StepView }) {
+  const restoring = step.restoring!;
+  const percent = restoringPercent(restoring);
+  return (
+    <Alert severity="info" sx={{ py: 0.5, "& .MuiAlert-message": { width: "100%" } }}>
+      <Typography variant="caption" sx={{ display: "block" }}>
+        {restoring.phase === "checking"
+          ? `Asking the remote cache at ${restoring.server} whether it has this build…`
+          : `Restoring from the remote cache at ${restoring.server}: ${restoringLine(restoring, humanizeBytes)}`}
+      </Typography>
+      <LinearProgress
+        variant={percent === null ? "indeterminate" : "determinate"}
+        value={percent ?? undefined}
+        sx={{ mt: 0.75, borderRadius: 1 }}
+      />
+      {restoring.current && (
+        <Typography
+          variant="caption"
+          color="text.secondary"
+          sx={{ display: "block", mt: 0.5, fontFamily: monoFontStack, wordBreak: "break-all" }}
+        >
+          {restoring.current}
+        </Typography>
+      )}
+    </Alert>
   );
 }
 
@@ -1000,7 +1061,9 @@ function NodeLabel({
       detail={
         // A step served from the cache is "skipped" to the engine, but that
         // word belongs to steps a condition left out.
-        wasReused(step.cache)
+        step.restoring
+          ? restoringLine(step.restoring, humanizeBytes)
+          : wasReused(step.cache)
           ? `from cache${step.finished_at ? ` · ${clockTime(step.finished_at)}` : ""}`
           : step.started_at && step.finished_at
             ? `${elapsedOf(step, 0)} · ${clockTime(step.finished_at)}`
@@ -1271,6 +1334,15 @@ function TargetDependencies({ deps }: { deps: TargetDeps }) {
           ⚠ rustc reports the last build reading {deps.undeclared_reads.join(", ")}, outside
           its cache inputs, so changing {deps.undeclared_reads.length === 1 ? "it" : "them"}{" "}
           would not invalidate this target.
+        </Typography>
+      )}
+      {deps.outputs_in_inputs && deps.outputs_in_inputs.length > 0 && (
+        <Typography variant="caption" color="warning.main">
+          ⚠ {deps.outputs_in_inputs.length} file(s) match both its inputs and its outputs, so
+          they are treated as outputs only and left out of the key:{" "}
+          {deps.outputs_in_inputs.slice(0, 5).join(", ")}
+          {deps.outputs_in_inputs.length > 5 && `, and ${deps.outputs_in_inputs.length - 5} more`}.
+          Narrow cache.inputs, or add them to exclude.
         </Typography>
       )}
       {deps.cached && undeclared.length > 0 && (

@@ -967,9 +967,9 @@ cache:
   inputs:  ["packages/api/src/**/*",     # what the build READS
             "packages/api/Cargo.toml"]
   outputs: ["packages/api/target/release/app"]   # what the build WRITES
-  exclude: [packages/api/target]        # never counted as an input, so a build
-                                        # can't invalidate itself with its own
-                                        # output
+  exclude: [packages/api/target]        # never counted as an input (outputs
+                                        # never are; this keeps the rest of
+                                        # target/ out of the key too)
   env: [PROFILE]                        # OPTIONAL: extra variables to key on.
                                         # Every `env:` and `required_env`
                                         # variable already keys the cache.
@@ -1060,6 +1060,15 @@ behind is unrecorded, so nothing downstream is served from the cache. Declaring
 output set stops the invalidation there, and only what genuinely moved rebuilds.
 
 Two things worth being explicit about:
+
+**An output is never an input.** Any file an `outputs` pattern covers is left
+out of the key even when `inputs` matches it — otherwise a build would change
+its own key by writing its output, and never be reused. The patterns decide, not
+the files on disk, so the key is the same before the first build as after it.
+The overlap is still a config worth fixing, so the run log, `dry-run`, `why` and
+the run page name the files (`3 file(s) match both cache.inputs and
+cache.outputs …`). A step whose every input is also an output isn't cached at
+all: an empty key would hit forever.
 
 **An undeclared input is a wrong answer, not a slow one.** If a build reads a
 file that isn't in `inputs`, changing that file won't change the key and the
@@ -1624,9 +1633,12 @@ Environment for 'build' — 4 variable(s) this run depends on
     TIER    dev
 ```
 
-`ciabatta watch` sources the same files a run would and prints exactly what it
-resolved before the command starts, so a watched dev server and a `dev` workflow
-step can't quietly see different environments.
+`ciabatta watch` sources the same files a run would — searched from the
+workspace you're in up to the root, with the active env profile's file standing
+in for each `.env` — and prints the profile, the files and what it resolved
+before the command starts, so a watched dev server and a `dev` workflow step
+can't quietly see different environments. `ciabatta watch --env-profile staging
+"npm run dev"` elects a profile first, exactly as a run's `--env-profile` does.
 
 ### Env profiles
 
@@ -1847,6 +1859,7 @@ scan in a browser than in a scrollback buffer.
 ```bash
 ciabatta watch "npm run dev"                 # stream a dev server's logs
 ciabatta watch -t error -t "panic" "cargo test"   # notify on matching lines
+ciabatta watch --env-profile staging "npm run dev" # elect a profile first
 ciabatta watch --list            # every session the daemon is running
 ciabatta watch --attach 3        # tail session 3 (Ctrl-C only detaches)
 ciabatta watch --stop 3          # stop session 3

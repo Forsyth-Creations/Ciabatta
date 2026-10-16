@@ -94,6 +94,10 @@ pub struct TargetDeps {
     /// Files rustc reports the last build reading that no input covers.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub undeclared_reads: Vec<String>,
+    /// Files its inputs match that an output pattern also covers: treated as
+    /// outputs only, and worth a warning.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub outputs_in_inputs: Vec<String>,
 
     /// Whether the cache is in play for it.
     pub cached: bool,
@@ -248,6 +252,9 @@ fn one(context: &WorkspaceContext<'_>, root: &Path, step: &RunStep, detail: Deta
         },
         cached: cache.why_disabled().is_none() && cargo_error.is_none(),
         cargo_error,
+        outputs_in_inputs: cache
+            .outputs_in_inputs(&dir, member.as_deref())
+            .unwrap_or_default(),
     }
 }
 

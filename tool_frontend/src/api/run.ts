@@ -23,8 +23,23 @@ export type StepStatus =
   | "success"
   | "failed"
   | "skipped"
+  /** Its outputs are coming down from the remote cache — see `restoring`. */
+  | "restoring"
   /** Cut short: the run was stopped, or the daemon restarted under it. */
   | "stopped";
+
+/** A step's outputs on their way down from the remote cache. */
+export interface Restoring {
+  /** `checking` while the server is asked; `downloading` once it said yes. */
+  phase: "checking" | "downloading";
+  server: string;
+  files_done: number;
+  files_total: number;
+  bytes_done: number;
+  bytes_total: number;
+  /** The file on its way down. */
+  current?: string;
+}
 
 export interface StepView extends Timed {
   name: string;
@@ -82,6 +97,24 @@ export interface StepView extends Timed {
    *  the cache never looked at it — caching off, a dry run, `--authoritative`,
    *  or a condition that skipped the step. */
   cache?: CacheReport | null;
+
+  /** Present while its outputs are being restored from the remote cache. */
+  restoring?: Restoring | null;
+}
+
+/** "3 of 12 files · 4.1 MB of 20 MB", or what the lookup is doing. */
+export function restoringLine(restoring: Restoring, humanize: (n: number) => string): string {
+  if (restoring.phase === "checking") return "asking the remote cache…";
+  return (
+    `downloading ${restoring.files_done} of ${restoring.files_total} file(s) · ` +
+    `${humanize(restoring.bytes_done)} of ${humanize(restoring.bytes_total)}`
+  );
+}
+
+/** How far through a download is, 0–100, for a progress bar. */
+export function restoringPercent(restoring: Restoring): number | null {
+  if (restoring.phase !== "downloading" || restoring.bytes_total <= 0) return null;
+  return Math.min(100, (restoring.bytes_done / restoring.bytes_total) * 100);
 }
 
 /** Whether the shared cache was in play for the run. */

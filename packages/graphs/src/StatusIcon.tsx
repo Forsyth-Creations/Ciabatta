@@ -14,6 +14,7 @@ import CheckCircleIcon from "@mui/icons-material/CheckCircle";
 import ErrorIcon from "@mui/icons-material/Error";
 import WarningIcon from "@mui/icons-material/Warning";
 import AutorenewIcon from "@mui/icons-material/Autorenew";
+import CloudDownloadIcon from "@mui/icons-material/CloudDownload";
 import RemoveCircleOutlineIcon from "@mui/icons-material/RemoveCircleOutline";
 import RadioButtonUncheckedIcon from "@mui/icons-material/RadioButtonUnchecked";
 import PauseCircleOutlineIcon from "@mui/icons-material/PauseCircleOutline";
@@ -22,7 +23,14 @@ import type { SvgIconComponent } from "@mui/icons-material";
 import type { Theme } from "@mui/material/styles";
 
 /** A step's state, as the engine reports it. */
-export type StepStatus = "pending" | "running" | "success" | "failed" | "skipped" | "warning";
+export type StepStatus =
+  | "pending"
+  | "running"
+  | "restoring"
+  | "success"
+  | "failed"
+  | "skipped"
+  | "warning";
 
 /** A run's verdict, which is a step status plus "somebody stopped it". */
 export type RunStatus = StepStatus | "stopped";
@@ -33,6 +41,8 @@ interface Look {
   label: string;
   /** Whether it turns — reserved for the one state that is still changing. */
   spins?: boolean;
+  /** Whether it fades in and out: changing, but not by doing work. */
+  pulses?: boolean;
 }
 
 const LOOKS: Record<RunStatus, Look> = {
@@ -41,6 +51,15 @@ const LOOKS: Record<RunStatus, Look> = {
     colour: (theme) => theme.palette.warning.main,
     label: "running",
     spins: true,
+  },
+  // Its outputs are coming down from the remote cache: in motion, like
+  // running, but nothing is being built — drawn in the info colour so a long
+  // download doesn't read as a long build.
+  restoring: {
+    Icon: CloudDownloadIcon,
+    colour: (theme) => theme.palette.info.main,
+    label: "downloading from the remote cache",
+    pulses: true,
   },
   success: {
     Icon: CheckCircleIcon,
@@ -111,6 +130,15 @@ export function StatusIcon({
               "@keyframes ciabatta-spin": {
                 from: { transform: "rotate(0deg)" },
                 to: { transform: "rotate(360deg)" },
+              },
+            }
+          : {}),
+        ...(look.pulses
+          ? {
+              animation: "ciabatta-pulse 1.4s ease-in-out infinite",
+              "@keyframes ciabatta-pulse": {
+                "0%, 100%": { opacity: 1 },
+                "50%": { opacity: 0.35 },
               },
             }
           : {}),

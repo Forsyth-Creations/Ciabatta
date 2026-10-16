@@ -558,6 +558,7 @@ async fn run_dag(
                 // everything downstream proceeds exactly as if it had run.
                 let mut pending = None;
                 if let Some(session) = cache.as_deref_mut() {
+                    session.report_to(tx.clone(), workflow);
                     let decided = session.before(step, step_env).await;
                     // Whatever was decided, the run view gets the details —
                     // that's what puts the cache icon on the node, and what

@@ -2144,6 +2144,28 @@ async fn run_plain(
             // Already said by the step's skip line; the report itself is for
             // the web app's inspector.
             ProgressUpdate::StepCache { .. } => {}
+            // One line as the download starts — a terminal can't redraw a
+            // progress bar between other steps' output, and a line per chunk
+            // would bury them. The skip line that follows says it landed.
+            ProgressUpdate::StepRestoring {
+                workflow,
+                step,
+                progress,
+            } => {
+                if progress.phase == "downloading"
+                    && progress.files_done == 0
+                    && progress.bytes_done == 0
+                    && progress.current.is_none()
+                {
+                    println!(
+                        "{}   {} step: {step} — downloading {} file(s), {} from the remote cache",
+                        tag(&workflow),
+                        "↓".style(color::active()),
+                        progress.files_total,
+                        cache::store::human_size(progress.bytes_total),
+                    )
+                }
+            }
             // The command's own output, escapes and all — it was asked for
             // colour precisely because these lines end up here unaltered.
             ProgressUpdate::StepLog {

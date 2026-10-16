@@ -11,6 +11,7 @@ import {
   Alert,
   AlertTitle,
   Box,
+  LinearProgress,
   Button,
   Chip,
   Dialog,
@@ -43,6 +44,8 @@ import {
   clockTime,
   elapsedOf,
   missingEnvFrom,
+  restoringLine,
+  restoringPercent,
   useChoose,
   useNow,
   useRerunRun,
@@ -767,8 +770,42 @@ function StepInspector({
         now={now}
         env={workflow.env.vars.filter((variable) => variable.steps.includes(step.name))}
       />
+      {step.restoring && <RestoringPanel step={step} />}
       <StepCacheSection project={project} step={step} inspect={inspect} />
     </Stack>
+  );
+}
+
+/**
+ * A step whose outputs are coming down from the remote cache, said where the
+ * step's details are — so a long transfer reads as a download in progress,
+ * not as a run that stopped answering.
+ */
+function RestoringPanel({ step }: { step: StepView }) {
+  const restoring = step.restoring!;
+  const percent = restoringPercent(restoring);
+  return (
+    <Alert severity="info" sx={{ py: 0.5, "& .MuiAlert-message": { width: "100%" } }}>
+      <Typography variant="caption" sx={{ display: "block" }}>
+        {restoring.phase === "checking"
+          ? `Asking the remote cache at ${restoring.server} whether it has this build…`
+          : `Restoring from the remote cache at ${restoring.server}: ${restoringLine(restoring, humanizeBytes)}`}
+      </Typography>
+      <LinearProgress
+        variant={percent === null ? "indeterminate" : "determinate"}
+        value={percent ?? undefined}
+        sx={{ mt: 0.75, borderRadius: 1 }}
+      />
+      {restoring.current && (
+        <Typography
+          variant="caption"
+          color="text.secondary"
+          sx={{ display: "block", mt: 0.5, fontFamily: monoFontStack, wordBreak: "break-all" }}
+        >
+          {restoring.current}
+        </Typography>
+      )}
+    </Alert>
   );
 }
 
@@ -1000,7 +1037,9 @@ function NodeLabel({
       detail={
         // A step served from the cache is "skipped" to the engine, but that
         // word belongs to steps a condition left out.
-        wasReused(step.cache)
+        step.restoring
+          ? restoringLine(step.restoring, humanizeBytes)
+          : wasReused(step.cache)
           ? `from cache${step.finished_at ? ` · ${clockTime(step.finished_at)}` : ""}`
           : step.started_at && step.finished_at
             ? `${elapsedOf(step, 0)} · ${clockTime(step.finished_at)}`

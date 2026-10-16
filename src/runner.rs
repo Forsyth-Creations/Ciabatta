@@ -114,6 +114,15 @@ pub enum ProgressUpdate {
         step: String,
         report: Box<crate::run::cached::CacheReport>,
     },
+    /// A step's outputs are being fetched from the remote cache: sent when
+    /// the lookup starts, and then as the download progresses. Ends with the
+    /// step's `StepSkipped` (restored) or `StepStarted` (not there after all,
+    /// or it couldn't be served, so it builds).
+    StepRestoring {
+        workflow: String,
+        step: String,
+        progress: crate::run::cached::Restoring,
+    },
     /// A log line produced by a specific run step's action.
     StepLog {
         workflow: String,

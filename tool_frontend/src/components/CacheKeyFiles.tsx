@@ -19,14 +19,29 @@ import {
   Tab,
   Tabs,
   TextField,
+  ToggleButton,
+  ToggleButtonGroup,
   Tooltip,
   Typography,
 } from "@mui/material";
+import AccountTreeIcon from "@mui/icons-material/AccountTree";
 import ContentCopyIcon from "@mui/icons-material/ContentCopy";
+import ViewListIcon from "@mui/icons-material/ViewList";
 
 import { humanizeBytes, useCacheKeyFiles } from "../api/cache";
 import type { FileHash } from "../api/types";
 import { monoFontStack } from "../theme";
+import { FileTree } from "./FileTree";
+
+/** The tree or the flat list, remembered per browser — a convenience only. */
+const VIEW_KEY = "ciabatta.cacheFiles.view";
+function initialView(): "tree" | "list" {
+  try {
+    return localStorage.getItem(VIEW_KEY) === "list" ? "list" : "tree";
+  } catch {
+    return "tree";
+  }
+}
 
 /** How many rows render before the list asks for a filter instead. */
 const MAX_ROWS = 400;
@@ -140,6 +155,15 @@ export function CacheKeyFilesView({
   const { data, error, isLoading } = useCacheKeyFiles(project, cacheKey, live);
   const [tab, setTab] = useState<"inputs" | "outputs">("inputs");
   const [filter, setFilter] = useState("");
+  const [view, setView] = useState<"tree" | "list">(initialView);
+  const chooseView = (next: "tree" | "list") => {
+    setView(next);
+    try {
+      localStorage.setItem(VIEW_KEY, next);
+    } catch {
+      // Private window or blocked storage: the choice lasts this page.
+    }
+  };
 
   if (isLoading) {
     return (
@@ -195,18 +219,42 @@ export function CacheKeyFilesView({
           the outputs are what's on disk right now{live ? " (refreshing while it builds)" : ""}.
         </Typography>
       )}
-      <Stack direction="row" spacing={1} alignItems="center">
-        <Tabs
-          value={tab}
-          onChange={(_, value) => setTab(value)}
-          sx={{ minHeight: 32, "& .MuiTab-root": { minHeight: 32, py: 0.5 } }}
+      <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
+        <ToggleButtonGroup
+          size="small"
+          exclusive
+          value={view}
+          onChange={(_, next: "tree" | "list" | null) => next && chooseView(next)}
+          sx={{ "& .MuiToggleButton-root": { py: 0.25, px: 0.75 } }}
         >
-          <Tab value="inputs" label={`Inputs (${data.inputs.length})`} />
-          <Tab value="outputs" label={`Outputs (${data.outputs.length})`} />
-        </Tabs>
+          <ToggleButton value="tree" aria-label="file tree">
+            <Tooltip title="Inputs and outputs as one directory tree">
+              <AccountTreeIcon sx={{ fontSize: 16 }} />
+            </Tooltip>
+          </ToggleButton>
+          <ToggleButton value="list" aria-label="flat list">
+            <Tooltip title="One list per set, in the order the key hashes them">
+              <ViewListIcon sx={{ fontSize: 16 }} />
+            </Tooltip>
+          </ToggleButton>
+        </ToggleButtonGroup>
+        {view === "list" && (
+          <Tabs
+            value={tab}
+            onChange={(_, value) => setTab(value)}
+            sx={{ minHeight: 32, "& .MuiTab-root": { minHeight: 32, py: 0.5 } }}
+          >
+            <Tab value="inputs" label={`Inputs (${data.inputs.length})`} />
+            <Tab value="outputs" label={`Outputs (${data.outputs.length})`} />
+          </Tabs>
+        )}
         <Box sx={{ flexGrow: 1 }} />
         <Typography variant="caption" color="text.secondary">
-          {humanizeBytes(bytes)}
+          {view === "tree"
+            ? `${humanizeBytes(data.inputs.reduce((t, f) => t + f.size, 0))} in · ${humanizeBytes(
+                data.outputs.reduce((t, f) => t + f.size, 0),
+              )} out`
+            : humanizeBytes(bytes)}
         </Typography>
         <TextField
           size="small"
@@ -216,7 +264,18 @@ export function CacheKeyFilesView({
           sx={{ width: 200, "& input": { py: 0.5, fontSize: 12 } }}
         />
       </Stack>
-      <FileRows files={files} filter={filter} />
+      <Box sx={{ mt: 0.5 }}>
+        {view === "tree" ? (
+          <FileTree
+            inputs={data.inputs}
+            outputs={data.outputs}
+            filter={filter}
+            renderHash={(hash) => <HashText value={hash} />}
+          />
+        ) : (
+          <FileRows files={files} filter={filter} />
+        )}
+      </Box>
     </Box>
   );
 }

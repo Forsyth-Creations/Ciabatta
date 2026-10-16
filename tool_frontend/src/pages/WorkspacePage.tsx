@@ -433,6 +433,9 @@ function GraphPanel({ project, workflow }: { project: string; workflow: string }
   // What each stage would reuse. A cache that isn't configured simply yields
   // nothing here, so the graph looks exactly as it did before caching existed.
   const { data: plan } = useCachePlan(project, workflow);
+  // Already fetched for the list above. A node only names its sub-workspace;
+  // the catalogue knows where that lives, which is where a fix would go.
+  const { data: catalogue } = useWorkspace(project);
   const start = useStartRun();
   const [dryRun, setDryRun] = useState(false);
   // The graph by default: it shows what waits for what, which a list of waves
@@ -467,6 +470,7 @@ function GraphPanel({ project, workflow }: { project: string; workflow: string }
   const isBackground = new Set(background.map((node) => node.id));
   const planned = new Map((plan?.steps ?? []).map((step) => [step.name, step]));
   const caching = plan?.caching ?? false;
+  const memberPaths = new Map((catalogue?.members ?? []).map((m) => [m.name, m.path]));
 
   return (
     <Card variant="outlined">
@@ -546,6 +550,7 @@ function GraphPanel({ project, workflow }: { project: string; workflow: string }
                   node={byId.get(selected)!}
                   env={envFor(data, selected)}
                   planned={planned.get(selected)}
+                  memberPath={memberPaths.get(byId.get(selected)!.workspace ?? "")}
                 />
               ) : (
                 <Typography variant="caption" color="text.secondary">
@@ -644,10 +649,13 @@ function GraphNodeCard({
   node,
   env,
   planned,
+  memberPath,
 }: {
   node: GraphNode;
   env: EnvVar[];
   planned?: PlannedStep;
+  /** Where the node's sub-workspace lives, relative to the monorepo root. */
+  memberPath?: string;
 }) {
   // What the node declares for itself is already a badge; this is what it
   // reads from the environment around it, resolved.
@@ -687,6 +695,14 @@ function GraphNodeCard({
       {node.description && (
         <Typography variant="caption" color="text.secondary" display="block">
           {node.description}
+        </Typography>
+      )}
+      {memberPath && (
+        <Typography variant="caption" color="text.secondary" display="block">
+          defined in{" "}
+          <Box component="span" sx={{ fontFamily: monoFontStack }}>
+            {memberPath === "." ? "./ (the repo root)" : `./${memberPath}`}
+          </Box>
         </Typography>
       )}
       {node.needs.length > 0 && (

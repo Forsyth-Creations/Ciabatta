@@ -502,7 +502,7 @@ impl Proposal {
             }
             if let Some(profile) = &cargo.profile {
                 out.push_str(&format!(
-                    "    profile: {profile}   # the profile the step builds with\n"
+                    "    profile: {profile}   # debug | release | ${{CARGO_PROFILE:-release}}\n"
                 ));
             }
             if cargo.artifacts.is_empty() {

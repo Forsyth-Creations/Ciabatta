@@ -165,6 +165,12 @@ pub struct CacheConfig {
     #[serde(skip)]
     pub home: Option<String>,
 
+    /// The step's environment, where a variable in `cargo.profile` is read
+    /// before the process's own. Never written in config — filled in by
+    /// [`Self::with_values`] where a step's environment is known.
+    #[serde(skip)]
+    pub values: BTreeMap<String, String>,
+
     /// The shared cache this workspace reads from and writes to, when it has
     /// one. Local-only caching needs none of this.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -262,6 +268,9 @@ impl CacheConfig {
         names.extend(step.env.keys().cloned());
         names.extend(step.required_env.iter().cloned());
         names.extend(step.declared_env.iter().cloned());
+        // A profile read from a variable keys on it: the same sources built
+        // as debug and as release are different builds.
+        names.extend(self.cargo.as_ref().and_then(|c| c.profile_var()));
         self.env = names.into_iter().collect();
         // A workflow's `env` names its values rather than writing them, so they
         // come from a `.env` — and one whose name says it's a credential is
@@ -341,11 +350,18 @@ impl CacheConfig {
         self
     }
 
+    /// Record the step's environment, so a variable `cargo.profile` names is
+    /// read from the same values the step runs with and keys on.
+    pub fn with_values(mut self, values: &BTreeMap<String, String>) -> Self {
+        self.values = values.clone();
+        self
+    }
+
     /// What [`Self::cargo`] resolves to, when it is set.
     pub fn cargo_resolved(&self, dir: &Path) -> Result<Option<cargo::Resolved>> {
         self.cargo
             .as_ref()
-            .map(|spec| cargo::resolve(dir, self.home.as_deref(), spec))
+            .map(|spec| cargo::resolve_with(dir, self.home.as_deref(), spec, &self.values))
             .transpose()
     }
 

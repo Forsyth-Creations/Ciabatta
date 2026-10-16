@@ -1111,8 +1111,21 @@ cache:
   gitignore: true          # leave whatever git ignores out of the inputs
   cargo:
     package: api           # omit for what `cargo build` would build here
-    profile: release
+    profile: release       # debug (the default) | release | ${CARGO_PROFILE:-release}
     artifacts: [bin]       # bin | lib | cdylib | dylib | staticlib
+```
+
+`profile` is `debug` or `release` — the `target/` directory the artifacts land
+in. To choose it per run, name an environment variable instead: `$CARGO_PROFILE`,
+`${CARGO_PROFILE}`, or `${CARGO_PROFILE:-release}` for a default when it's unset
+(otherwise `debug`). Its value comes from the step's `.env`, the elected env
+profile, or the shell (`CARGO_PROFILE=release ciabatta build`), anything other
+than `debug` or `release` is an error, and the variable keys the cache — a
+release build is never handed a debug build's binary. Have the step build the
+same way, with the same default:
+
+```yaml
+run: cargo build -p api $([ "${CARGO_PROFILE:-release}" = release ] && echo --release)
 ```
 
 Inputs become every package directory in the path-dependency closure (git-ignored

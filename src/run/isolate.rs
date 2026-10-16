@@ -124,8 +124,13 @@ impl Isolation {
     }
 
     /// Build a sandbox for one step, or `None` when it declares no inputs and
-    /// so has nothing to be held to.
-    pub fn prepare(&mut self, step: &RunStep) -> Result<Option<Sandbox>> {
+    /// so has nothing to be held to. `values` is the step's environment, where
+    /// a `cache.cargo.profile` variable is read.
+    pub fn prepare(
+        &mut self,
+        step: &RunStep,
+        values: &HashMap<String, String>,
+    ) -> Result<Option<Sandbox>> {
         let Some(declared) = self.steps.get(&step.name) else {
             return Ok(None);
         };
@@ -138,7 +143,10 @@ impl Isolation {
         // `inputs` reach broadly (`.`, `**/*`) would otherwise copy the last
         // sandbox into the next one, and each run would cost more than the one
         // before it.
-        let mut config = declared.config.clone();
+        let mut config = declared
+            .config
+            .clone()
+            .with_values(&values.iter().map(|(k, v)| (k.clone(), v.clone())).collect());
         config.exclude.push(SANDBOX_DIR.to_string());
 
         let root = self.sandboxes.join(sanitize(&step.name));
@@ -428,7 +436,10 @@ mod tests {
         };
         let steps = vec![step("build")];
         let mut isolation = Isolation::plan(&root, &steps, &context, &[]);
-        let sandbox = isolation.prepare(&steps[0]).unwrap().expect("sandboxed");
+        let sandbox = isolation
+            .prepare(&steps[0], &HashMap::new())
+            .unwrap()
+            .expect("sandboxed");
 
         assert_eq!(sandbox.staged, 1);
         assert!(sandbox.dir.join("declared.txt").is_file());
@@ -467,7 +478,10 @@ mod tests {
         };
         let steps = vec![step("package")];
         let mut isolation = Isolation::plan(&root, &steps, &context, &[]);
-        let sandbox = isolation.prepare(&steps[0]).unwrap().expect("sandboxed");
+        let sandbox = isolation
+            .prepare(&steps[0], &HashMap::new())
+            .unwrap()
+            .expect("sandboxed");
 
         assert_eq!(sandbox.staged, 2);
         assert!(sandbox.dir.join("editors/vscode/main.ts").is_file());
@@ -496,7 +510,12 @@ mod tests {
         let mut isolation = Isolation::plan(&root, &steps, &context, &[]);
 
         // No sandbox — an empty one would fail it for the wrong reason.
-        assert!(isolation.prepare(&steps[0]).unwrap().is_none());
+        assert!(
+            isolation
+                .prepare(&steps[0], &HashMap::new())
+                .unwrap()
+                .is_none()
+        );
         assert_eq!(isolation.unverified, vec!["mystery".to_string()]);
         assert!(isolation.summary().unwrap().contains("ran unverified"));
     }
@@ -514,7 +533,10 @@ mod tests {
         };
         let steps = vec![step("failing")];
         let mut isolation = Isolation::plan(&root, &steps, &context, &[]);
-        let sandbox = isolation.prepare(&steps[0]).unwrap().unwrap();
+        let sandbox = isolation
+            .prepare(&steps[0], &HashMap::new())
+            .unwrap()
+            .unwrap();
 
         let kept = isolation.keep(sandbox);
         assert!(

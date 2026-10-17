@@ -790,6 +790,23 @@ pub enum SelfCommand {
         #[arg(long)]
         force: bool,
     },
+
+    /// Check every workflow in the workspace for what would stop it running.
+    ///
+    /// Compiles each sub-workspace's every workflow the way a run would, and
+    /// lists each one that's broken: a config file that doesn't parse, a
+    /// `needs` or `depends_on` naming a sub-workspace, workflow or step that
+    /// doesn't exist, an `on_error` route to nowhere, a dependency cycle, a
+    /// push to a registry nobody defines. Exits non-zero when it finds any, so
+    /// it can gate CI.
+    ///
+    ///   ciabatta self lint
+    ///   ciabatta self lint --json
+    Lint {
+        /// Print the report as JSON.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 /// Parses a bare `ciabatta <workflow> [flags]` invocation.

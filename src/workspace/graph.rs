@@ -441,7 +441,7 @@ fn resolve<'a>(workspace: &'a Workspace, unit: &UnitId) -> Result<(&'a Member, &
 /// The units a given unit depends on: its `[workspace] depends_on` (which
 /// applies to every workflow the member defines) plus the workflow's own
 /// `needs`.
-fn unit_dependencies(workspace: &Workspace, unit: &UnitId) -> Result<Vec<UnitId>> {
+pub(crate) fn unit_dependencies(workspace: &Workspace, unit: &UnitId) -> Result<Vec<UnitId>> {
     let (member, workflow) = resolve(workspace, unit)?;
     let mut out: Vec<UnitId> = Vec::new();
 
@@ -480,7 +480,7 @@ fn unit_dependencies(workspace: &Workspace, unit: &UnitId) -> Result<Vec<UnitId>
 ///
 /// `strict` controls whether an absent same-name workflow is an error, which is
 /// what separates workflow `needs` from blanket `depends_on`.
-fn parse_dependency(
+pub(crate) fn parse_dependency(
     workspace: &Workspace,
     from: &UnitId,
     spec: &str,

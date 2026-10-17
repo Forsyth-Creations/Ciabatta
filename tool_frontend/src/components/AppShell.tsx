@@ -38,6 +38,7 @@ import {
 } from "@mui/material";
 import { useTheme } from "@mui/material/styles";
 import AccountTreeIcon from "@mui/icons-material/AccountTree";
+import ArticleIcon from "@mui/icons-material/Article";
 import ChecklistIcon from "@mui/icons-material/Checklist";
 import DarkModeIcon from "@mui/icons-material/DarkMode";
 import HubIcon from "@mui/icons-material/Hub";
@@ -64,9 +65,11 @@ const DRAWER_WIDTH = 232;
 const MINI_WIDTH = 60;
 const NAV_STORAGE_KEY = "ciabatta-nav-open";
 
-/** One entry per tool the daemon absorbed, plus the dashboard. */
+/** One entry per tool the daemon absorbed, plus the dashboard and the
+ *  project's own README. */
 const NAV_ITEMS = [
   { to: "/", label: "Dashboard", icon: <SpaceDashboardIcon />, exact: true },
+  { to: "/readme", label: "README", icon: <ArticleIcon /> },
   { to: "/todo", label: "Todo", icon: <ChecklistIcon /> },
   { to: "/watch", label: "Watch", icon: <MonitorHeartIcon /> },
   { to: "/workspace", label: "Workspace", icon: <AccountTreeIcon /> },

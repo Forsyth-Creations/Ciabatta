@@ -16,6 +16,7 @@ import { CachePage } from "./pages/CachePage";
 import { AiPage } from "./pages/AiPage";
 import { DashboardPage } from "./pages/DashboardPage";
 import { DocsPage } from "./pages/DocsPage";
+import { ReadmePage } from "./pages/ReadmePage";
 import { RunBuilderPage } from "./pages/RunBuilderPage";
 import { RunPage } from "./pages/RunPage";
 import { RunDetailPage } from "./pages/RunDetailPage";
@@ -41,6 +42,12 @@ const indexRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/",
   component: DashboardPage,
+});
+
+const readmeRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/readme",
+  component: ReadmePage,
 });
 
 const todoRoute = createRoute({
@@ -113,6 +120,7 @@ const docsRoute = createRoute({
 
 const routeTree = rootRoute.addChildren([
   indexRoute,
+  readmeRoute,
   todoRoute,
   watchRoute,
   watchSessionRoute,

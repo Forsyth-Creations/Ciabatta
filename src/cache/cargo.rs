@@ -35,10 +35,18 @@
 //! manifest and the workspace root. Registry and git dependencies are covered
 //! by `Cargo.lock`, which pins them by checksum.
 //!
+//! So are the crates a `[patch]` or `[replace]` entry points at by path —
+//! `cargo metadata` still describes those dependencies as registry crates —
+//! and any target source living outside its package.
+//!
 //! **Outputs** are the artifacts of the selected packages' targets of the
 //! requested kinds, under the target directory Cargo reports — so
 //! `CARGO_TARGET_DIR` and `build.target-dir` are respected rather than assumed
-//! away — with each platform's file naming.
+//! away — in each target triple's directory (`target:`, `CARGO_BUILD_TARGET`,
+//! or `build.target`), with each platform's file naming.
+//!
+//! **The key** also gets `rustc -vV` and the variables in [`CARGO_ENV`]: what
+//! changes the code generated without changing a file.
 //!
 //! `cargo metadata` runs with `--no-deps --offline`: nothing is downloaded and
 //! no registry needs to be reachable, which matters for a cache that is often
@@ -98,6 +106,17 @@ pub struct CargoSpec {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub artifacts: Vec<ArtifactKind>,
 }
+
+/// What Cargo reads from the environment to decide how to compile. Every
+/// `cache.cargo` build keys on these, declared or not: `RUSTFLAGS=-Ctarget-cpu=native`
+/// produces a different binary from the same sources, and `CARGO_BUILD_TARGET`
+/// one for a different platform.
+pub const CARGO_ENV: &[&str] = &[
+    "RUSTFLAGS",
+    "CARGO_ENCODED_RUSTFLAGS",
+    "CARGO_BUILD_RUSTFLAGS",
+    "CARGO_BUILD_TARGET",
+];
 
 /// The profiles `cache.cargo.profile` can name, each by the directory under
 /// `target/` its artifacts land in. Cargo's own name for the first is `dev`,
@@ -248,6 +267,24 @@ pub struct Package {
     /// Named by the spec (or selected by default), rather than reached through
     /// a path dependency.
     pub selected: bool,
+    /// Brought in by a `[patch]` or `[replace]` entry rather than a
+    /// dependency: a vendored or locally forked crate standing in for a
+    /// registry one. Keyed as a whole directory, since Cargo can't be asked
+    /// about a crate outside the workspace's members.
+    pub patch: bool,
+}
+
+impl Package {
+    /// Why it's in the closure, for `why` and `cache init`.
+    pub fn role(&self) -> &'static str {
+        if self.selected {
+            "selected"
+        } else if self.patch {
+            "[patch] override"
+        } else {
+            "path dependency"
+        }
+    }
 }
 
 /// What a [`CargoSpec`] means on disk, every path relative to the workspace
@@ -271,6 +308,14 @@ pub struct Resolved {
     /// The dep-info file rustc writes next to each output, listing every
     /// source file it read.
     pub dep_info: Vec<String>,
+    /// The `build/` directories under each output directory, where every
+    /// build script's `output` records the variables it asked to be rerun on.
+    pub build_dirs: Vec<String>,
+    /// `rustc -vV` for the toolchain this build uses: release, commit and
+    /// host. Part of the key, because an artifact from another compiler or
+    /// another platform isn't this build's — and an `.rlib` from another
+    /// rustc won't even link.
+    pub toolchain: String,
 }
 
 impl Resolved {
@@ -368,6 +413,9 @@ pub fn resolve_with(
 
     let mut packages = Vec::new();
     let mut dirs: BTreeSet<PathBuf> = BTreeSet::new();
+    // A target whose source lives outside its package directory: the package
+    // directory doesn't cover it, so it's an input of its own.
+    let mut stray_sources: BTreeSet<PathBuf> = BTreeSet::new();
     for (manifest_path, is_selected) in &closure {
         let package = &known[manifest_path];
         let dir = manifest_path
@@ -383,10 +431,46 @@ pub fn resolve_with(
                 root.display(),
             )
         })?;
+        for target in &package.targets {
+            if let Some(src) = &target.src_path {
+                let src = canonical(src);
+                if !src.starts_with(&dir) {
+                    stray_sources.insert(src);
+                }
+            }
+        }
         packages.push(Package {
             name: package.name.clone(),
             dir: rel,
             selected: *is_selected,
+            patch: false,
+        });
+        dirs.insert(dir);
+    }
+
+    // `[patch]` and `[replace]` entries with a `path`: crates standing in for
+    // registry ones. Nothing in `cargo metadata --no-deps` mentions them —
+    // the dependency still says "itoa from crates.io" — so without reading
+    // the manifests they'd be compiled into the binary and keyed on nothing.
+    // Every one is included, used or not: whether a patch applies is the
+    // resolver's business, and an unused one costs a rebuild, not a wrong hit.
+    for (name, dir) in patch_dirs(&root, &workspace_root, &manifest) {
+        if dirs.contains(&dir) {
+            continue;
+        }
+        let rel = relative(&root, &dir).with_context(|| {
+            format!(
+                "`cache.cargo`: `[patch]` points `{name}` at {}, outside this project — its \
+                 sources can't be part of a cache key whose paths are relative to {}",
+                dir.display(),
+                root.display(),
+            )
+        })?;
+        packages.push(Package {
+            name,
+            dir: rel,
+            selected: false,
+            patch: true,
         });
         dirs.insert(dir);
     }
@@ -407,6 +491,17 @@ pub fn resolve_with(
     for file in cargo_files(&root, &workspace_root, &manifest) {
         inputs.insert(relative(&root, &file)?);
     }
+    for src in &stray_sources {
+        if dirs.iter().any(|d| src.starts_with(d)) {
+            continue;
+        }
+        inputs.insert(relative(&root, src).with_context(|| {
+            format!(
+                "`cache.cargo`: a target's source, {}, is outside this project",
+                src.display()
+            )
+        })?);
+    }
 
     let target_dir = canonical(&meta.target_directory);
     let mut exclude: BTreeSet<String> = BTreeSet::new();
@@ -419,16 +514,35 @@ pub fn resolve_with(
         }
     }
 
+    // Where the artifacts land: one directory per target triple the build
+    // compiles for — usually just the host's, which has none.
+    let triples = target_triples(spec, values, &root, &manifest);
+    let out_dirs: Vec<String> = match relative(&root, &target_dir) {
+        Ok(base) => triples
+            .iter()
+            .map(|triple| {
+                let dir = match triple {
+                    Some(triple) => join(&base, triple),
+                    None => base.clone(),
+                };
+                join(&dir, profile.as_str())
+            })
+            .collect(),
+        Err(_) => Vec::new(),
+    };
+
     let mut resolved = Resolved {
         inputs: inputs.into_iter().collect(),
         exclude: exclude.into_iter().collect(),
         packages,
         outputs: Vec::new(),
         dep_info: Vec::new(),
+        build_dirs: out_dirs.iter().map(|d| join(d, "build")).collect(),
+        toolchain: toolchain(manifest.parent().unwrap_or(&root))?,
     };
 
     if !spec.artifacts.is_empty() {
-        let base = relative(&root, &target_dir).with_context(|| {
+        relative(&root, &target_dir).with_context(|| {
             format!(
                 "`cache.cargo`: Cargo's target directory is {}, outside this project — \
                  artifacts there can't be stored under paths relative to {}. Unset \
@@ -438,21 +552,17 @@ pub fn resolve_with(
                 root.display(),
             )
         })?;
-        let platform = Platform::of(spec.target.as_deref());
-        let mut out_dir = base;
-        if let Some(triple) = &spec.target {
-            out_dir = join(&out_dir, triple);
-        }
-        out_dir = join(&out_dir, profile.as_str());
-
         let mut outputs = BTreeSet::new();
         let mut dep_info = BTreeSet::new();
-        for package in &selected {
-            for target in &package.targets {
-                for kind in &spec.artifacts {
-                    if let Some((file, stem)) = artifact_name(*kind, target, platform) {
-                        outputs.insert(join(&out_dir, &file));
-                        dep_info.insert(join(&out_dir, &format!("{stem}.d")));
+        for (triple, out_dir) in triples.iter().zip(&out_dirs) {
+            let platform = Platform::of(triple.as_deref());
+            for package in &selected {
+                for target in &package.targets {
+                    for kind in &spec.artifacts {
+                        if let Some((file, stem)) = artifact_name(*kind, target, platform) {
+                            outputs.insert(join(out_dir, &file));
+                            dep_info.insert(join(out_dir, &format!("{stem}.d")));
+                        }
                     }
                 }
             }
@@ -482,6 +592,206 @@ pub fn resolve_with(
 /// generated) are derived rather than read, and files outside the project
 /// (the registry, the toolchain's standard library) are pinned by
 /// `Cargo.lock` and the toolchain file — neither is reported. A dep-info file
+/// The target triples the build compiles for, as Cargo would choose them:
+/// `cache.cargo.target`, else `CARGO_BUILD_TARGET`, else `build.target` in the
+/// nearest `.cargo/config.toml` — one triple or several. `None` is the host,
+/// whose artifacts go straight under the profile directory.
+///
+/// Reading the config matters: a `build.target` there moves every artifact
+/// to `target/<triple>/<profile>/`, and looking in `target/<profile>/` instead
+/// would store whatever stale host binary was lying there as this build's
+/// output.
+fn target_triples(
+    spec: &CargoSpec,
+    values: &BTreeMap<String, String>,
+    root: &Path,
+    manifest: &Path,
+) -> Vec<Option<String>> {
+    if let Some(triple) = &spec.target {
+        return vec![Some(triple.clone())];
+    }
+    let from_env = values
+        .get("CARGO_BUILD_TARGET")
+        .cloned()
+        .or_else(|| std::env::var("CARGO_BUILD_TARGET").ok())
+        .filter(|v| !v.trim().is_empty());
+    if let Some(triple) = from_env {
+        return vec![Some(triple_name(&triple))];
+    }
+    let mut dir = manifest.parent();
+    while let Some(at) = dir {
+        if !at.starts_with(root) {
+            break;
+        }
+        for name in [".cargo/config.toml", ".cargo/config"] {
+            let Ok(text) = std::fs::read_to_string(at.join(name)) else {
+                continue;
+            };
+            let Ok(config) = text.parse::<toml::Table>() else {
+                continue;
+            };
+            match config.get("build").and_then(|b| b.get("target")) {
+                Some(toml::Value::String(triple)) => return vec![Some(triple_name(triple))],
+                Some(toml::Value::Array(list)) => {
+                    return list
+                        .iter()
+                        .filter_map(|v| v.as_str())
+                        .map(|t| Some(triple_name(t)))
+                        .collect();
+                }
+                _ => {}
+            }
+        }
+        dir = at.parent();
+    }
+    vec![None]
+}
+
+/// A target as Cargo names its directory: a triple as written, a custom
+/// target's `.json` spec by its file stem.
+fn triple_name(target: &str) -> String {
+    let target = target.trim();
+    match target.strip_suffix(".json") {
+        Some(path) => Path::new(path)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| target.to_string()),
+        None => target.to_string(),
+    }
+}
+
+/// Every `[patch.<source>.<name>]` and `[replace]` entry with a `path`, from
+/// the workspace manifest and the `.cargo/config.toml` files Cargo reads for
+/// this build — each as (name, canonical directory).
+fn patch_dirs(root: &Path, workspace_root: &Path, manifest: &Path) -> Vec<(String, PathBuf)> {
+    let mut found: Vec<(String, PathBuf)> = Vec::new();
+    // A manifest's paths are relative to its directory; a config file's to
+    // the directory holding its `.cargo/`.
+    let mut sources: Vec<(PathBuf, PathBuf)> = vec![(
+        workspace_root.join("Cargo.toml"),
+        workspace_root.to_path_buf(),
+    )];
+    let mut dir = manifest.parent();
+    while let Some(at) = dir {
+        if !at.starts_with(root) {
+            break;
+        }
+        for name in [".cargo/config.toml", ".cargo/config"] {
+            sources.push((at.join(name), at.to_path_buf()));
+        }
+        dir = at.parent();
+    }
+    for (file, base) in sources {
+        let Ok(text) = std::fs::read_to_string(&file) else {
+            continue;
+        };
+        let Ok(table) = text.parse::<toml::Table>() else {
+            continue;
+        };
+        let mut entries: Vec<(&String, &toml::Value)> = Vec::new();
+        if let Some(toml::Value::Table(patch)) = table.get("patch") {
+            for source in patch.values() {
+                if let toml::Value::Table(crates) = source {
+                    entries.extend(crates.iter());
+                }
+            }
+        }
+        if let Some(toml::Value::Table(replace)) = table.get("replace") {
+            entries.extend(replace.iter());
+        }
+        for (name, entry) in entries {
+            let Some(path) = entry.get("path").and_then(|p| p.as_str()) else {
+                continue;
+            };
+            let dir = canonical(&base.join(path));
+            // `[replace]` keys are package ids (`itoa:1.0.0`); the name is
+            // what reads well in `why`.
+            let name = name.split(':').next().unwrap_or(name).to_string();
+            if !found.iter().any(|(_, d)| *d == dir) {
+                found.push((name, dir));
+            }
+        }
+    }
+    found
+}
+
+/// `rustc -vV`, run where Cargo would run it — so a `rust-toolchain.toml`
+/// override is the toolchain asked about. Remembered for a minute: the daemon
+/// plans on every graph view, and a toolchain doesn't change that often, but
+/// it does change under a long-running daemon.
+fn toolchain(dir: &Path) -> Result<String> {
+    static MEMO: OnceLock<Mutex<HashMap<PathBuf, (std::time::Instant, String)>>> = OnceLock::new();
+    let memo = MEMO.get_or_init(Default::default);
+    if let Ok(memo) = memo.lock()
+        && let Some((at, version)) = memo.get(dir)
+        && at.elapsed() < std::time::Duration::from_secs(60)
+    {
+        return Ok(version.clone());
+    }
+    let rustc = std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
+    let output = Command::new(&rustc)
+        .arg("-vV")
+        .current_dir(dir)
+        .output()
+        .with_context(|| {
+            format!(
+                "`cache.cargo` keys a build on its compiler, and `{}` couldn't be run",
+                rustc.to_string_lossy()
+            )
+        })?;
+    if !output.status.success() {
+        bail!(
+            "`cache.cargo`: `rustc -vV` failed in {}:\n{}",
+            dir.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if let Ok(mut memo) = memo.lock() {
+        memo.insert(
+            dir.to_path_buf(),
+            (std::time::Instant::now(), version.clone()),
+        );
+    }
+    Ok(version)
+}
+
+/// The variables this build's build scripts asked to be rerun on
+/// (`cargo:rerun-if-env-changed=NAME`), from the `output` file each one left
+/// under `build/` on its last run. Each is something the build reads that the
+/// cache only keys on if it's declared. Empty before a first build.
+pub fn build_script_env(root: &Path, resolved: &Resolved) -> BTreeSet<String> {
+    let names: BTreeSet<&str> = resolved.packages.iter().map(|p| p.name.as_str()).collect();
+    let mut found = BTreeSet::new();
+    for build in &resolved.build_dirs {
+        let Ok(entries) = std::fs::read_dir(root.join(build)) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let dir_name = entry.file_name().to_string_lossy().into_owned();
+            // `<package>-<16 hex digits>`, one per build-script compilation.
+            let Some((package, hash)) = dir_name.rsplit_once('-') else {
+                continue;
+            };
+            if hash.len() != 16 || !names.contains(package) {
+                continue;
+            }
+            let Ok(text) = std::fs::read_to_string(entry.path().join("output")) else {
+                continue;
+            };
+            for line in text.lines() {
+                let rest = line
+                    .strip_prefix("cargo::rerun-if-env-changed=")
+                    .or_else(|| line.strip_prefix("cargo:rerun-if-env-changed="));
+                if let Some(name) = rest.map(str::trim).filter(|n| !n.is_empty()) {
+                    found.insert(name.to_string());
+                }
+            }
+        }
+    }
+    found
+}
+
 /// that isn't there yet, before a first build, simply has nothing to say.
 pub fn dep_info_reads(root: &Path, resolved: &Resolved) -> BTreeSet<String> {
     let Ok(root) = root.canonicalize() else {
@@ -840,6 +1150,10 @@ struct MetaTarget {
     kind: Vec<String>,
     #[serde(default)]
     crate_types: Vec<String>,
+    /// The target's root source file — usually under the package, but a
+    /// `[[bin]] path = "../shared/main.rs"` puts it anywhere.
+    #[serde(default)]
+    src_path: Option<PathBuf>,
 }
 
 /// A metadata read, and what would have to change for it to be stale.
@@ -1043,7 +1357,13 @@ mod tests {
             ..Default::default()
         }
         .with_step_env(&step);
-        assert_eq!(config.env, vec![var.to_string()]);
+        assert!(config.env.contains(&var.to_string()), "{:?}", config.env);
+        for name in super::CARGO_ENV {
+            assert!(
+                config.env.contains(&name.to_string()),
+                "{name} keys a cargo build"
+            );
+        }
 
         let exe = if cfg!(windows) { "api.exe" } else { "api" };
         let outputs = |value: Option<&str>| {
@@ -1067,6 +1387,115 @@ mod tests {
             .unwrap_err();
         assert!(wrong.to_string().contains("`fast`"), "{wrong}");
 
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn patched_crates_and_stray_target_sources_are_inputs() {
+        let root = workspace("patch");
+        // A `[patch]` pointing a registry crate at a vendored copy, and a bin
+        // whose source lives outside its package.
+        let manifest = std::fs::read_to_string(root.join("Cargo.toml")).unwrap();
+        write(
+            &root,
+            "Cargo.toml",
+            &format!("{manifest}\n[patch.crates-io]\nitoa = {{ path = \"vendor/itoa\" }}\n"),
+        );
+        write(&root, "vendor/itoa/Cargo.toml", &package("itoa", ""));
+        write(&root, "vendor/itoa/src/lib.rs", "");
+        write(
+            &root,
+            "crates/api/Cargo.toml",
+            &package(
+                "api",
+                "[dependencies]\ncore = { path = \"../core\" }\n\
+                 [[bin]]\nname = \"api\"\npath = \"src/main.rs\"\n\
+                 [[bin]]\nname = \"admin\"\npath = \"../../shared/admin.rs\"\n",
+            ),
+        );
+        write(&root, "shared/admin.rs", "fn main() {}");
+
+        let resolved = resolve(&root, None, &release_bins(Some("api"))).unwrap();
+        assert!(
+            resolved.inputs.contains(&"vendor/itoa".to_string()),
+            "{:?}",
+            resolved.inputs
+        );
+        assert!(
+            resolved.inputs.contains(&"shared/admin.rs".to_string()),
+            "{:?}",
+            resolved.inputs
+        );
+        let itoa = resolved.packages.iter().find(|p| p.name == "itoa").unwrap();
+        assert!(itoa.patch && !itoa.selected);
+        assert_eq!(itoa.role(), "[patch] override");
+        // The toolchain is resolved for the key.
+        assert!(
+            resolved.toolchain.contains("rustc"),
+            "{}",
+            resolved.toolchain
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn build_target_in_cargo_config_moves_the_outputs() {
+        let root = workspace("build_target");
+        write(
+            &root,
+            ".cargo/config.toml",
+            "[build]\ntarget = \"x86_64-unknown-linux-musl\"\n",
+        );
+        let resolved = resolve(&root, None, &release_bins(Some("api"))).unwrap();
+        assert_eq!(
+            resolved.outputs,
+            vec!["target/x86_64-unknown-linux-musl/release/api".to_string()]
+        );
+        // Several targets: one set of artifacts each, each named its own way.
+        write(
+            &root,
+            ".cargo/config.toml",
+            "[build]\ntarget = [\"x86_64-pc-windows-msvc\", \"specs/my-board.json\"]\n",
+        );
+        let resolved = resolve(&root, None, &release_bins(Some("api"))).unwrap();
+        assert_eq!(
+            resolved.outputs,
+            vec![
+                "target/my-board/release/api".to_string(),
+                "target/x86_64-pc-windows-msvc/release/api.exe".to_string(),
+            ]
+        );
+        // `CARGO_BUILD_TARGET` beats the config, as it does for Cargo.
+        let values = BTreeMap::from([(
+            "CARGO_BUILD_TARGET".to_string(),
+            "aarch64-apple-darwin".to_string(),
+        )]);
+        let resolved = resolve_with(&root, None, &release_bins(Some("api")), &values).unwrap();
+        assert_eq!(
+            resolved.outputs,
+            vec!["target/aarch64-apple-darwin/release/api".to_string()]
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn build_script_env_is_read_from_its_output() {
+        let root = workspace("build_env");
+        write(
+            &root,
+            "target/release/build/api-0123456789abcdef/output",
+            "cargo:rerun-if-env-changed=PAGE_SIZE\ncargo::rerun-if-env-changed=MODE\n\
+             cargo:rustc-env=X=1\n",
+        );
+        // Another crate's build script isn't this build's business.
+        write(
+            &root,
+            "target/release/build/cli-0123456789abcdef/output",
+            "cargo:rerun-if-env-changed=OTHER\n",
+        );
+        let resolved = resolve(&root, None, &release_bins(Some("api"))).unwrap();
+        let found: Vec<String> = build_script_env(&root, &resolved).into_iter().collect();
+        assert_eq!(found, vec!["MODE".to_string(), "PAGE_SIZE".to_string()]);
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -1334,6 +1763,7 @@ mod tests {
             name: name.to_string(),
             kind: kind.iter().map(|k| k.to_string()).collect(),
             crate_types: kind.iter().map(|k| k.to_string()).collect(),
+            src_path: None,
         };
         let bin = target("my-app", &["bin"]);
         let cdylib = target("my-ext", &["cdylib", "rlib"]);

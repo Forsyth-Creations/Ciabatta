@@ -451,6 +451,14 @@ fn render(answer: &Answer, all: bool) -> String {
         ));
     }
 
+    if deps.cached && !deps.undeclared_build_env.is_empty() {
+        let names = deps.undeclared_build_env.join(", ");
+        out.push_str(&format!(
+            "\n  ⚠ a build script asks to be rerun when {names} changes, but the cache \n    \
+             doesn't key on it. List it in the workflow's `env:` so a change rebuilds.\n",
+        ));
+    }
+
     if deps.cached && !deps.outputs_in_inputs.is_empty() {
         out.push_str(&format!(
             "\n  ⚠ {}\n",

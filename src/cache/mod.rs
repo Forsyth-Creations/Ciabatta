@@ -271,6 +271,12 @@ impl CacheConfig {
         // A profile read from a variable keys on it: the same sources built
         // as debug and as release are different builds.
         names.extend(self.cargo.as_ref().and_then(|c| c.profile_var()));
+        // And so does what Cargo reads from the environment to decide how to
+        // compile: flags change the code generated, and a target changes
+        // which platform it's for.
+        if self.cargo.is_some() {
+            names.extend(cargo::CARGO_ENV.iter().map(|n| n.to_string()));
+        }
         self.env = names.into_iter().collect();
         // A workflow's `env` names its values rather than writing them, so they
         // come from a `.env` — and one whose name says it's a credential is
@@ -441,6 +447,19 @@ impl CacheConfig {
         Ok(reads
             .into_iter()
             .filter(|r| !covered.contains(r) && !upstream.contains(r))
+            .collect())
+    }
+
+    /// Variables this build's build scripts asked to be rerun on
+    /// (`rerun-if-env-changed`) that don't key it. Empty without `cargo`, and
+    /// before a first build.
+    pub fn undeclared_build_env(&self, dir: &Path) -> Result<Vec<String>> {
+        let Some(resolved) = self.cargo_resolved(dir)? else {
+            return Ok(Vec::new());
+        };
+        Ok(cargo::build_script_env(dir, &resolved)
+            .into_iter()
+            .filter(|name| !self.env.contains(name))
             .collect())
     }
 
@@ -855,6 +874,14 @@ fn matching(
             .trim_end_matches(['/', '\\'])
             .trim_start_matches("./")
             .trim_start_matches(".\\");
+        // A trailing `/**` means "everything under here" to anyone who writes
+        // it, but `glob` yields nothing for it — so `schemas/**` silently
+        // keyed on no files, and an edit under `schemas/` was served from the
+        // cache. Walking the directory is what it means.
+        let trimmed = match trimmed {
+            "**" => "",
+            other => other.strip_suffix("/**").unwrap_or(other),
+        };
         // `.` — the whole workspace — is a pattern people write and glob does
         // not resolve to anything useful.
         let joined = match trimmed {
@@ -1036,6 +1063,11 @@ pub struct KeyInputs {
     /// Upstream step name → the hash of that step's output set.
     #[serde(default)]
     pub upstream: BTreeMap<String, String>,
+    /// For a `cache.cargo` build, `rustc -vV`: the compiler and the host it
+    /// runs on. Absent for every other build, so their keys are unchanged.
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub toolchain: Option<String>,
 }
 
 /// Reduce a set of output hashes to one value, so a downstream step can depend
@@ -1347,6 +1379,10 @@ pub fn plan(
         )
         .key_material(),
         upstream: target.upstream.clone(),
+        toolchain: target
+            .config
+            .cargo_resolved(&target.dir)?
+            .map(|resolved| resolved.toolchain),
     };
     let key = key_inputs.key()?;
 
@@ -1904,6 +1940,29 @@ mod tests {
     }
 
     #[test]
+    fn a_trailing_double_star_matches_everything_under_the_directory() {
+        let dir = scratch("double_star");
+        write(&dir, "schemas/storage.json", "{}");
+        write(&dir, "schemas/nested/more.json", "{}");
+        write(&dir, "other.txt", "x");
+        let config = CacheConfig {
+            inputs: vec!["schemas/**".into()],
+            ..Default::default()
+        };
+        let paths: Vec<String> = config
+            .list_inputs(&dir, None)
+            .unwrap()
+            .into_iter()
+            .map(|f| f.path)
+            .collect();
+        assert_eq!(
+            paths,
+            vec!["schemas/nested/more.json", "schemas/storage.json"]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn the_key_covers_inputs_commands_and_declared_env() {
         let base = KeyInputs {
             version: KEY_VERSION,
@@ -1918,6 +1977,7 @@ mod tests {
             env: BTreeMap::new(),
             features: BTreeSet::new(),
             upstream: BTreeMap::new(),
+            toolchain: None,
         };
         let key = base.key().unwrap();
         assert_eq!(key.len(), 64, "a hex SHA-256");

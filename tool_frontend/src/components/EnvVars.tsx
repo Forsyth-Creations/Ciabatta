@@ -12,15 +12,19 @@
  * nothing here can un-mask them.
  */
 
+import { useMemo, useState } from "react";
 import {
   Alert,
   AlertTitle,
   Box,
   Chip,
+  InputAdornment,
   Stack,
+  TextField,
   Tooltip,
   Typography,
 } from "@mui/material";
+import SearchIcon from "@mui/icons-material/Search";
 import KeyIcon from "@mui/icons-material/VpnKey";
 import FingerprintIcon from "@mui/icons-material/Fingerprint";
 
@@ -200,23 +204,32 @@ function EnvGroup({ label, hint, vars }: { label: string; hint: string; vars: En
  * sourced `.env` defines but nobody reads is listed last, because "this file
  * sets things nothing uses" is worth knowing but isn't the question.
  */
+/**
+ * A report's variables in the groups a workflow file declares them in:
+ * `required_env`, then `env`, then the deprecated `workspace.env`, then what
+ * steps read without declaring, and last what's set but read by nothing.
+ * Custom arguments are left out: they have a block of their own.
+ */
+function groupEnv(report: EnvReport) {
+  const vars = report.vars.filter((v) => v.origin !== "argument");
+  return {
+    required: vars.filter((v) => v.required),
+    listed: vars.filter((v) => !v.required && v.declared),
+    declared: vars.filter((v) => !v.required && !v.declared && v.origin === "config"),
+    read: vars.filter(
+      (v) => !v.required && !v.declared && v.origin !== "config" && v.steps.length > 0,
+    ),
+    unused: vars.filter(
+      (v) => v.steps.length === 0 && !v.required && !v.declared && v.origin !== "config",
+    ),
+    keyed: vars.some((v) => v.in_cache_key),
+  };
+}
+
 export function EnvPanel({ report, title = "Environment" }: { report: EnvReport; title?: string }) {
   if (report.vars.length === 0 && report.files.length === 0) return null;
 
-  // Custom arguments have a block of their own, above. The rest is grouped
-  // the way a workflow file declares it: `required_env`, then `env`, then
-  // the variables a step's conditions test.
-  const vars = report.vars.filter((v) => v.origin !== "argument");
-  const required = vars.filter((v) => v.required);
-  const listed = vars.filter((v) => !v.required && v.declared);
-  const declared = vars.filter((v) => !v.required && !v.declared && v.origin === "config");
-  const read = vars.filter(
-    (v) => !v.required && !v.declared && v.origin !== "config" && v.steps.length > 0,
-  );
-  const unused = vars.filter(
-    (v) => v.steps.length === 0 && !v.required && !v.declared && v.origin !== "config",
-  );
-  const keyed = vars.some((v) => v.in_cache_key);
+  const { required, listed, declared, read, unused, keyed } = groupEnv(report);
 
   return (
     <Box>
@@ -297,5 +310,188 @@ export function EnvPanel({ report, title = "Environment" }: { report: EnvReport;
         </Typography>
       )}
     </Box>
+  );
+}
+
+/**
+ * The environment as a list: one row per variable, grouped as the workflow
+ * file declares them, with a search across names, values and the steps that
+ * read them. For a box with room to scroll, where the chips of `EnvPanel`
+ * become a wall to read across.
+ */
+export function EnvList({ report }: { report: EnvReport }) {
+  const [query, setQuery] = useState("");
+  const needle = query.trim().toLowerCase();
+  const groups = useMemo(() => {
+    const { required, listed, declared, read, unused } = groupEnv(report);
+    return [
+      { label: "required_env", hint: "must be set, or the run won't start", vars: required },
+      { label: "env", hint: "optional — the workflow uses them, the .env sets them", vars: listed },
+      {
+        label: "workspace.env",
+        hint: "set by value in a workspace's ciabatta.yaml — deprecated: move these to the .env",
+        vars: declared,
+      },
+      { label: "read by steps", hint: "from the environment or a .env file", vars: read },
+      { label: "unread", hint: "set, but no step reads it", vars: unused },
+    ];
+  }, [report]);
+
+  const matches = (variable: EnvVar) =>
+    !needle ||
+    variable.key.toLowerCase().includes(needle) ||
+    (variable.value ?? "").toLowerCase().includes(needle) ||
+    variable.steps.some((step) => step.toLowerCase().includes(needle));
+  const shown = groups
+    .map((group) => ({ ...group, vars: group.vars.filter(matches) }))
+    .filter((group) => group.vars.length > 0);
+
+  if (report.vars.length === 0 && report.files.length === 0) {
+    return (
+      <Typography variant="caption" color="text.secondary">
+        This workflow reads no environment variables.
+      </Typography>
+    );
+  }
+
+  return (
+    <Box>
+      <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap sx={{ mb: 1 }}>
+        <TextField
+          size="small"
+          value={query}
+          onChange={(event) => setQuery(event.target.value)}
+          placeholder={`Search ${report.vars.length} variables`}
+          sx={{ flex: "0 1 260px", minWidth: 160, "& .MuiInputBase-root": { height: 30, fontSize: 13 } }}
+          slotProps={{
+            htmlInput: { "aria-label": "Search the environment" },
+            input: {
+              startAdornment: (
+                <InputAdornment position="start">
+                  <SearchIcon sx={{ fontSize: 16 }} />
+                </InputAdornment>
+              ),
+            },
+          }}
+        />
+        {(report.profile || report.profile_reason) && (
+          <Tooltip title={report.profile_reason ?? ""}>
+            <Chip
+              size="small"
+              color={report.profile ? "secondary" : "default"}
+              variant="outlined"
+              label={`profile: ${report.profile ?? "none"}`}
+            />
+          </Tooltip>
+        )}
+        {report.files.length > 0 && (
+          <Typography variant="caption" color="text.secondary" sx={{ fontFamily: monoFontStack }}>
+            sourcing {report.files.join(", ")}
+          </Typography>
+        )}
+      </Stack>
+
+      <CustomArguments report={report} />
+
+      {report.missing.length > 0 && (
+        <Alert severity="warning" sx={{ mb: 1, py: 0 }}>
+          No value for required {report.missing.join(", ")}
+        </Alert>
+      )}
+
+      {shown.length === 0 && (
+        <Typography variant="caption" color="text.secondary">
+          No variable matches “{query.trim()}”.
+        </Typography>
+      )}
+
+      {shown.map((group) => (
+        <Box key={group.label} sx={{ mb: 1 }}>
+          <Tooltip title={group.hint} placement="top-start">
+            <Typography
+              variant="overline"
+              color="text.secondary"
+              // As written in the workflow file, not shouted: these are keys.
+              sx={{ display: "block", lineHeight: 2, fontFamily: monoFontStack, textTransform: "none" }}
+            >
+              {group.label} · {group.vars.length}
+            </Typography>
+          </Tooltip>
+          {group.vars.map((variable) => (
+            <EnvRow key={variable.key} variable={variable} />
+          ))}
+        </Box>
+      ))}
+    </Box>
+  );
+}
+
+/** One variable in `EnvList`: name, value, and what it's for on hover. */
+function EnvRow({ variable }: { variable: EnvVar }) {
+  const unset = unsetProblem(variable);
+  return (
+    // Below the row and after a moment, so running the pointer down the list
+    // doesn't flash a tooltip over the search box at every row.
+    <Tooltip
+      placement="bottom-start"
+      enterDelay={400}
+      enterNextDelay={400}
+      title={
+        <>
+          {variable.purpose && `${variable.purpose} · `}
+          {variable.reason ?? originText(variable)}
+          {variable.in_cache_key && " · part of the cache key: changing it rebuilds"}
+          {variable.secret && " · value hidden because the name looks like a secret"}
+          {variable.steps.length > 0 && ` · used by ${variable.steps.join(", ")}`}
+        </>
+      }
+    >
+      <Box
+        sx={{
+          display: "grid",
+          gridTemplateColumns: "minmax(120px, 240px) minmax(0, 1fr) auto",
+          columnGap: 2,
+          alignItems: "center",
+          px: 1,
+          py: 0.25,
+          borderRadius: 0.5,
+          fontFamily: monoFontStack,
+          fontSize: 12.5,
+          "&:hover": { bgcolor: "action.hover" },
+        }}
+      >
+        <Box
+          component="span"
+          sx={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+        >
+          {variable.secret && (
+            <KeyIcon sx={{ fontSize: 13, mr: 0.5, verticalAlign: "-2px", color: "warning.main" }} />
+          )}
+          {variable.key}
+        </Box>
+        <Box
+          component="span"
+          sx={{
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+            color: unset ? "error.main" : variable.value === null ? "text.disabled" : "text.secondary",
+            fontStyle: variable.value === null ? "italic" : "normal",
+          }}
+        >
+          {envValueText(variable)}
+        </Box>
+        <Stack direction="row" spacing={1} alignItems="center" sx={{ color: "text.disabled" }}>
+          {variable.steps.length > 0 && (
+            <Typography variant="caption" sx={{ fontFamily: "inherit" }}>
+              {variable.steps.length} step{variable.steps.length === 1 ? "" : "s"}
+            </Typography>
+          )}
+          {variable.in_cache_key && (
+            <FingerprintIcon aria-label="keys the cache" sx={{ fontSize: 14 }} />
+          )}
+        </Stack>
+      </Box>
+    </Tooltip>
   );
 }

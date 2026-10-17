@@ -19,8 +19,8 @@ import {
   DialogActions,
   DialogContent,
   DialogTitle,
-  FormControlLabel,
   InputAdornment,
+  ListItemText,
   ListSubheader,
   Menu,
   MenuItem,
@@ -41,6 +41,8 @@ import ManageSearchIcon from "@mui/icons-material/ManageSearch";
 import StopIcon from "@mui/icons-material/Stop";
 import ReplayIcon from "@mui/icons-material/Replay";
 import TerminalIcon from "@mui/icons-material/Terminal";
+import TuneIcon from "@mui/icons-material/Tune";
+import ViewQuiltIcon from "@mui/icons-material/ViewQuilt";
 import RequiredIcon from "@mui/icons-material/Emergency";
 import OptionalIcon from "@mui/icons-material/HelpOutline";
 import { IconButton } from "@mui/material";
@@ -72,10 +74,17 @@ import { humanizeBytes } from "../api/cache";
 import type { EnvVar } from "../api/types";
 import { useWorkspace } from "../api/workspace";
 import { LogView } from "../components/LogView";
+import {
+  BoxLayout,
+  rowsFor,
+  useBoxLayout,
+  type BoxItem,
+  type DefaultLayouts,
+} from "../components/BoxLayout";
 import { RecreateDrawer } from "../components/RecreateDrawer";
 import { EnvPrompt } from "../components/EnvPrompt";
 import {
-  EnvPanel,
+  EnvList,
   EnvVarChip,
   StepEnvChips,
   envValueText,
@@ -232,9 +241,35 @@ function nodeHeight(
   );
 }
 
-/** Height of the graph and log panes, which are the same so they line up when
- *  they sit side by side. */
-const PANE_HEIGHT = 460;
+/**
+ * Where the run page's boxes go until somebody moves them: graph and logs side
+ * by side, the same height so they line up, with the details and the
+ * environment full width underneath. Watching a step run means watching two
+ * things — which node is lit, and what it is printing — so they start next to
+ * each other. Below `md` there's one column, and everything stacks.
+ */
+const RUN_LAYOUT: DefaultLayouts = {
+  lg: [
+    { i: "graph", x: 0, y: 0, w: 6, h: rowsFor(500), minW: 3, minH: 6 },
+    { i: "logs", x: 6, y: 0, w: 6, h: rowsFor(500), minW: 3, minH: 6 },
+    { i: "details", x: 0, y: rowsFor(500), w: 12, h: rowsFor(160), minW: 3, minH: 3 },
+    { i: "env", x: 0, y: rowsFor(660), w: 12, h: rowsFor(320), minW: 3, minH: 3 },
+  ],
+  md: [
+    { i: "graph", x: 0, y: 0, w: 12, h: rowsFor(460), minH: 6 },
+    { i: "logs", x: 0, y: rowsFor(460), w: 12, h: rowsFor(400), minH: 6 },
+    { i: "details", x: 0, y: rowsFor(860), w: 12, h: rowsFor(160), minH: 3 },
+    { i: "env", x: 0, y: rowsFor(1020), w: 12, h: rowsFor(320), minH: 3 },
+  ],
+  sm: [
+    { i: "graph", x: 0, y: 0, w: 1, h: rowsFor(400), minH: 6 },
+    { i: "logs", x: 0, y: rowsFor(400), w: 1, h: rowsFor(360), minH: 6 },
+    { i: "details", x: 0, y: rowsFor(760), w: 1, h: rowsFor(200), minH: 3 },
+    { i: "env", x: 0, y: rowsFor(960), w: 1, h: rowsFor(320), minH: 3 },
+  ],
+};
+/** Bumped when the boxes change enough that an old saved layout won't fit. */
+const RUN_LAYOUT_KEY = "ciabatta-run-layout-v1";
 
 /**
  * What one click on a dependency node lights up.
@@ -289,6 +324,9 @@ export function RunDetailPage() {
   const [recreating, setRecreating] = useState(false);
   const rerun = useRerunRun();
   const [needsEnv, setNeedsEnv] = useState<string[] | null>(null);
+  // Held here rather than in the workflow panel, so the header can offer to
+  // reset it — and so switching workflow tabs keeps the arrangement.
+  const layout = useBoxLayout(RUN_LAYOUT_KEY, RUN_LAYOUT);
 
   if (error) return <ErrorNote error={new Error(error)} />;
   if (!state) return <Loading label="Connecting to the run…" />;
@@ -313,20 +351,40 @@ export function RunDetailPage() {
 
   return (
     <>
+      {/* One header row: what the run is and how it went on the left, what
+          you can do with it on the right. The phases sit with the status
+          rather than on a row of their own — they're part of "how it went". */}
       <Stack
         direction="row"
         alignItems="center"
-        spacing={1.5}
-        sx={{ mb: 2 }}
+        columnGap={1}
+        rowGap={1}
+        sx={{ mb: 1.5 }}
         flexWrap="wrap"
         useFlexGap
       >
-        <IconButton component={Link} to="/run" size="small" aria-label="Back to runs">
-          <ArrowBackIcon />
+        <IconButton
+          component={Link}
+          to="/run"
+          size="small"
+          aria-label="Back to runs"
+          sx={{ ml: -0.5 }}
+        >
+          <ArrowBackIcon fontSize="small" />
         </IconButton>
-        <Box sx={{ flexGrow: 1, minWidth: 0 }}>
-          <Typography variant="h1">Run #{id}</Typography>
-          <Typography variant="caption" color="text.secondary">
+        <Box sx={{ minWidth: 0 }}>
+          <Stack direction="row" alignItems="center" spacing={1}>
+            <Typography variant="h2" component="h1" noWrap>
+              Run #{id}
+            </Typography>
+            <Chip
+              size="small"
+              variant="outlined"
+              icon={<StatusIcon status={status} title={null} />}
+              label={statusLabel(status)}
+            />
+          </Stack>
+          <Typography variant="caption" color="text.secondary" component="div" noWrap>
             {state.run.workflows.join(", ")}
             {state.dry_run && " · dry run"}
             {timing && <RunClock timing={timing} live={!state.done} />}
@@ -335,6 +393,8 @@ export function RunDetailPage() {
             {state.run.env_profile && ` · profile: ${state.run.env_profile}`}
           </Typography>
         </Box>
+        {workflow && <PhaseStrip workflow={workflow} />}
+        <Box sx={{ flexGrow: 1 }} />
         {(state.run.args ?? []).length > 0 && (
           <Tooltip
             title={`Custom arguments, given after \`...\` for this run only: ${state.run.args!.join(" ")}. They're listed with the run's environment below.`}
@@ -348,12 +408,6 @@ export function RunDetailPage() {
             />
           </Tooltip>
         )}
-        <Chip
-          size="small"
-          variant="outlined"
-          icon={<StatusIcon status={status} title={null} />}
-          label={statusLabel(status)}
-        />
         <InspectToggle />
         <Tooltip title="Show the exact commands this run executed, in order, with the directory each one runs from — and where it has got to.">
           <Button size="small" startIcon={<TerminalIcon />} onClick={() => setRecreating(true)}>
@@ -381,6 +435,13 @@ export function RunDetailPage() {
           </Box>
         </Tooltip>
         {!state.done && <StopRunButton id={id} />}
+        {layout.customised && (
+          <Tooltip title="Put the graph, logs, details and environment back where they started.">
+            <Button size="small" startIcon={<ViewQuiltIcon />} onClick={layout.reset}>
+              Reset layout
+            </Button>
+          </Tooltip>
+        )}
       </Stack>
 
       {rerun.error && !needsEnv && <ErrorNote error={rerun.error} />}
@@ -405,7 +466,7 @@ export function RunDetailPage() {
             setWorkflowIndex(next);
             setSelectedStep(null);
           }}
-          sx={{ mb: 2 }}
+          sx={{ mb: 1.5, minHeight: 36, "& .MuiTab-root": { minHeight: 36, py: 0.5 } }}
         >
           {state.workflows.map((r) => (
             <Tab key={r.name} label={r.name} />
@@ -420,6 +481,7 @@ export function RunDetailPage() {
           workflow={workflow}
           selectedStep={selectedStep}
           onSelectStep={setSelectedStep}
+          layout={layout}
         />
       )}
     </>
@@ -432,12 +494,14 @@ function WorkflowPanel({
   workflow,
   selectedStep,
   onSelectStep,
+  layout,
 }: {
   runId: number;
   project: string;
   workflow: WorkflowView;
   selectedStep: string | null;
   onSelectStep: (name: string | null) => void;
+  layout: ReturnType<typeof useBoxLayout>;
 }) {
   const theme = useTheme();
   const choose = useChoose(runId);
@@ -503,26 +567,6 @@ function WorkflowPanel({
 
   return (
     <>
-      {/* The run's phases. Each chip's text changes as the run goes, but the
-          strip itself is always there and always one row. */}
-      <Stack direction="row" spacing={1} sx={{ mb: 1.5 }} flexWrap="wrap" useFlexGap>
-        {workflow.stages.map((stage) => {
-          // A phase that fell through to its default did nothing, and "0.0s"
-          // next to it would only suggest it did something quickly.
-          const took = stage.status === "skipped" ? null : elapsedOf(stage, now);
-          return (
-            <Tooltip key={stage.name} title={timeline(stage) ?? "Not reached"}>
-              <Chip
-                size="small"
-                variant="outlined"
-                color={stageColor(stage.status)}
-                label={`${stage.name}: ${stage.status}${took ? ` · ${took}` : ""}`}
-              />
-            </Tooltip>
-          );
-        })}
-      </Stack>
-
       {(workflow.warnings ?? []).map((warning) => (
         <Alert
           key={warning}
@@ -587,163 +631,181 @@ function WorkflowPanel({
       )}
 
       {/*
-        Graph and logs side by side once there is width for both, stacked below
-        that. Watching a step run means watching two things — which node is
-        lit, and what it is printing — and stacked panes put one of them off
-        the bottom of the screen at exactly the moment both matter. The
-        breakpoint is `lg` because the graph needs real width before splitting
-        it helps: narrower than that, a half-width flowchart is worse than a
-        full-width one above the logs.
-
-        Both panes are fixed: a header of fixed height, then a body of fixed
-        height. Selecting a step changes what they show, never where they are —
-        what a click adds goes in the inspector underneath, so the log you were
-        reading doesn't jump down the page to make room for it.
+        Every part of the page is a box you can move and resize; see
+        `BoxLayout`. Selecting a step changes what the boxes show, never where
+        they are — so the log you were reading doesn't jump to make room.
       */}
-      <Box
-        sx={{
-          display: "grid",
-          columnGap: 2,
-          rowGap: 1,
-          gridTemplateColumns: { xs: "1fr", lg: "minmax(0, 1fr) minmax(0, 1fr)" },
-        }}
-      >
-        <Box sx={{ minWidth: 0 }}>
-          <PaneHeader title="Graph">
-            {grouped && (
-              <VariableSearch
-                variables={drawnVariables}
-                onPick={(key) => {
-                  setFocused(envNodeId(key));
-                  onSelectStep(null);
-                }}
+      <BoxLayout
+        layouts={layout.layouts}
+        onChange={layout.onChange}
+        onFit={layout.fit}
+        boxes={[
+          {
+            id: "graph",
+            title: "Graph",
+            body: "fill",
+            actions: (
+              <>
+                {grouped && (
+                  <VariableSearch
+                    variables={drawnVariables}
+                    onPick={(key) => {
+                      setFocused(envNodeId(key));
+                      onSelectStep(null);
+                    }}
+                  />
+                )}
+                <GraphViewMenu>
+                <GraphToggle
+                  label="Environment"
+                  hint="Draw each environment variable as what it is — a dependency, feeding into every step that reads it. Values come from the run's resolved environment."
+                  checked={showEnv}
+                  onChange={(checked) => {
+                    setShowEnv(checked);
+                    // Focusing a node and then hiding it would dim the graph with
+                    // nothing left lit to explain why.
+                    if (
+                      !checked &&
+                      focused !== null &&
+                      (envKeyOf(focused) !== null || envGroupOf(focused) !== null)
+                    )
+                      setFocused(null);
+                  }}
+                />
+                <GraphToggle
+                  label="Files"
+                  hint="Draw the files each target reads and writes as nodes of their own: inputs feeding in from the left, outputs produced on the right. These are the file sets the cache keys on, so this is the graph the caching decision is actually made from."
+                  checked={showFiles}
+                  onChange={(checked) => {
+                    setShowFiles(checked);
+                    if (!checked && focused !== null && isFileNode(focused)) setFocused(null);
+                  }}
+                />
+                <GraphToggle
+                  label="Stack"
+                  hint="Draw each workflow file with several steps as one node, its steps stacked like cards. The strip across the top of the stack opens a list to choose the step shown. Off draws every step on its own."
+                  checked={stacked}
+                  onChange={setStacked}
+                />
+                <GraphToggle
+                  label="Order"
+                  hint="Number each node with its place in the run's sequence. Recovery steps aren't numbered — they only run if something fails."
+                  checked={showOrder}
+                  onChange={setShowOrder}
+                />
+                </GraphViewMenu>
+              </>
+            ),
+            children: (
+              <GraphCanvas
+                nodes={nodes}
+                edges={edges}
+                height="100%"
+                // Turning the environment column on and off changes the graph's
+                // extent, so the view has to be re-fitted around it.
+                fitKey={
+                  `${showEnv ? "env" : ""}${grouped ? "+grouped" : ""}${showFiles ? "+files" : ""}${
+                    stacked ? "+stacked" : ""
+                  }${inspect ? "+inspect" : ""}` || "steps-only"
+                }
+                onNodeClick={(_, node) => clickNode(node.id)}
+                onPaneClick={() => setFocused(null)}
+                nodeColor={(node) =>
+                  inspect && byNameHas(workflow, node.id)
+                    ? cacheTone(workflow.steps.find((s) => s.name === node.id)?.cache, theme)
+                    : statusColor(node.data?.status as StepStatus, theme)
+                }
               />
-            )}
-            <GraphToggle
-              label="Environment"
-              hint="Draw each environment variable as what it is — a dependency, feeding into every step that reads it. Values come from the run's resolved environment."
-              checked={showEnv}
-              onChange={(checked) => {
-                setShowEnv(checked);
-                // Focusing a node and then hiding it would dim the graph with
-                // nothing left lit to explain why.
-                if (
-                  !checked &&
-                  focused !== null &&
-                  (envKeyOf(focused) !== null || envGroupOf(focused) !== null)
-                )
-                  setFocused(null);
-              }}
-            />
-            <GraphToggle
-              label="Files"
-              hint="Draw the files each target reads and writes as nodes of their own: inputs feeding in from the left, outputs produced on the right. These are the file sets the cache keys on, so this is the graph the caching decision is actually made from."
-              checked={showFiles}
-              onChange={(checked) => {
-                setShowFiles(checked);
-                if (!checked && focused !== null && isFileNode(focused)) setFocused(null);
-              }}
-            />
-            <GraphToggle
-              label="Stack"
-              hint="Draw each workflow file with several steps as one node, its steps stacked like cards. The strip across the top of the stack opens a list to choose the step shown. Off draws every step on its own."
-              checked={stacked}
-              onChange={setStacked}
-            />
-            <GraphToggle
-              label="Order"
-              hint="Number each node with its place in the run's sequence. Recovery steps aren't numbered — they only run if something fails."
-              checked={showOrder}
-              onChange={setShowOrder}
-            />
-          </PaneHeader>
-          <GraphCanvas
-            nodes={nodes}
-            edges={edges}
-            height={PANE_HEIGHT}
-            // Turning the environment column on and off changes the graph's
-            // extent, so the view has to be re-fitted around it.
-            fitKey={
-              `${showEnv ? "env" : ""}${grouped ? "+grouped" : ""}${showFiles ? "+files" : ""}${
-                stacked ? "+stacked" : ""
-              }${inspect ? "+inspect" : ""}` ||
-              "steps-only"
-            }
-            onNodeClick={(_, node) => clickNode(node.id)}
-            onPaneClick={() => setFocused(null)}
-            nodeColor={(node) =>
-              inspect && byNameHas(workflow, node.id)
-                ? cacheTone(workflow.steps.find((s) => s.name === node.id)?.cache, theme)
-                : statusColor(node.data?.status as StepStatus, theme)
-            }
-          />
-        </Box>
-
-        <Box sx={{ minWidth: 0 }}>
-          <PaneHeader title={step ? `${step.name} logs` : "Workflow logs"}>
-            {step && (
+            ),
+          },
+          {
+            id: "logs",
+            title: step ? `${step.name} logs` : "Workflow logs",
+            body: "fill",
+            actions: step && (
               <Button size="small" onClick={clearSelection}>
                 All logs
               </Button>
-            )}
-          </PaneHeader>
-          <LogView
-            // Keyed by what is being shown, so switching steps starts the new
-            // log at its end rather than inheriting the old one's scroll.
-            key={step ? step.name : "__workflow__"}
-            lines={step ? step.logs : workflow.logs}
-            dropped={(step ? step.dropped_logs : workflow.dropped_logs) ?? 0}
-            height={PANE_HEIGHT}
-            title={step ? `${step.name} — run #${runId}` : `${workflow.name} — run #${runId}`}
-          />
-        </Box>
-      </Box>
-
-      <Inspector
-        project={project}
-        workflow={workflow}
-        step={step ?? null}
-        focused={focused}
-        now={now}
-        inspect={inspect}
-        onClear={clearSelection}
-        onFocus={setFocused}
+            ),
+            children: (
+              <LogView
+                // Keyed by what is being shown, so switching steps starts the new
+                // log at its end rather than inheriting the old one's scroll.
+                key={step ? step.name : "__workflow__"}
+                lines={step ? step.logs : workflow.logs}
+                dropped={(step ? step.dropped_logs : workflow.dropped_logs) ?? 0}
+                fill
+                title={step ? `${step.name} — run #${runId}` : `${workflow.name} — run #${runId}`}
+              />
+            ),
+          },
+          {
+            id: "details",
+            title: step ? step.name : "Details",
+            body: "scroll",
+            // As tall as what was clicked has to say: a hint line when nothing
+            // is, a step's whole story when one is.
+            fit: true,
+            children: (
+              <Inspector
+                project={project}
+                workflow={workflow}
+                step={step ?? null}
+                focused={focused}
+                now={now}
+                inspect={inspect}
+                onClear={clearSelection}
+                onFocus={setFocused}
+              />
+            ),
+          },
+          {
+            id: "env",
+            title: "Environment",
+            body: "scroll",
+            children: <EnvList report={workflow.env} />,
+          },
+        ] satisfies BoxItem[]}
       />
-
-      <Box sx={{ mt: 2 }}>
-        <EnvPanel report={workflow.env} title="Environment this run started with" />
-      </Box>
     </>
   );
 }
 
-/** How tall a pane's header is — the same for both, so the panes line up. */
-const PANE_HEADER = 36;
-
 /**
- * A pane's title row: one line, a fixed height, controls on the right.
- *
- * Fixed so the two panes stay level whatever their headers say. The log pane's
- * title changes with every step selected; if its header grew or shrank, the
- * log underneath would move with it.
+ * The graph's display switches, behind one button. Four switches in a row
+ * took most of the header, for settings changed once in a while rather than
+ * read on every glance.
  */
-function PaneHeader({ title, children }: { title: string; children?: React.ReactNode }) {
+function GraphViewMenu({ children }: { children: React.ReactNode }) {
+  const [anchor, setAnchor] = useState<HTMLElement | null>(null);
   return (
-    <Stack
-      direction="row"
-      alignItems="center"
-      spacing={1.5}
-      sx={{ height: PANE_HEADER, mb: 0.5, minWidth: 0 }}
-    >
-      <Typography variant="h3" noWrap sx={{ flexGrow: 1, minWidth: 0 }} title={title}>
-        {title}
-      </Typography>
-      {children}
-    </Stack>
+    <>
+      <Tooltip title="What the graph draws">
+        <Button
+          size="small"
+          startIcon={<TuneIcon fontSize="small" />}
+          onClick={(event) => setAnchor(event.currentTarget)}
+          aria-haspopup="menu"
+          aria-expanded={anchor !== null}
+        >
+          View
+        </Button>
+      </Tooltip>
+      <Menu
+        anchorEl={anchor}
+        open={anchor !== null}
+        onClose={() => setAnchor(null)}
+        anchorOrigin={{ vertical: "bottom", horizontal: "right" }}
+        transformOrigin={{ vertical: "top", horizontal: "right" }}
+        slotProps={{ paper: { sx: { minWidth: 220 } } }}
+      >
+        {children}
+      </Menu>
+    </>
   );
 }
 
-/** A switch in the graph's header. */
+/** A switch in the graph's view menu. The whole row toggles it. */
 function GraphToggle({
   label,
   hint,
@@ -756,24 +818,58 @@ function GraphToggle({
   onChange: (checked: boolean) => void;
 }) {
   return (
-    <Tooltip title={hint}>
-      <FormControlLabel
-        control={
-          <Switch size="small" checked={checked} onChange={(_, value) => onChange(value)} />
-        }
-        label={
-          <Typography variant="caption" color="text.secondary" noWrap>
-            {label}
-          </Typography>
-        }
-        sx={{ mr: 0, flexShrink: 0 }}
-      />
+    <Tooltip title={hint} placement="left">
+      <MenuItem
+        dense
+        role="menuitemcheckbox"
+        aria-checked={checked}
+        onClick={() => onChange(!checked)}
+      >
+        <ListItemText primary={label} />
+        <Switch size="small" edge="end" checked={checked} tabIndex={-1} />
+      </MenuItem>
     </Tooltip>
   );
 }
 
 /**
- * Everything about what was clicked, under the graph and the logs.
+ * The workflow's phases, in the run's header beside its status. Each is a
+ * small chip — name, and how long it took — coloured by how it went; the
+ * tooltip has the rest. A phase that fell through to its default did nothing,
+ * so it's dimmed and given no time: "0.0s" would only suggest it did
+ * something quickly.
+ */
+function PhaseStrip({ workflow }: { workflow: WorkflowView }) {
+  // Ticks only while the workflow is running, so a running phase shows its
+  // time so far; a finished one's times are fixed.
+  const now = useNow(workflow.status === "running");
+  return (
+    <Stack direction="row" spacing={0.5} flexWrap="wrap" useFlexGap>
+      {workflow.stages.map((stage) => {
+        const skipped = stage.status === "skipped";
+        const took = skipped ? null : elapsedOf(stage, now);
+        const when = timeline(stage);
+        return (
+          <Tooltip
+            key={stage.name}
+            title={`${stage.name}: ${stage.status}${when ? ` — ${when}` : skipped ? "" : " — not reached"}`}
+          >
+            <Chip
+              size="small"
+              variant="outlined"
+              color={stageColor(stage.status)}
+              label={took ? `${stage.name} · ${took}` : stage.name}
+              sx={{ height: 22, fontSize: 12, opacity: skipped ? 0.55 : 1 }}
+            />
+          </Tooltip>
+        );
+      })}
+    </Stack>
+  );
+}
+
+/**
+ * Everything about what was clicked, in its own box.
  *
  * This used to be spread across three places: a step's details pushed in
  * above its logs, a "what it waits for" note pushed in under the graph, and a
@@ -828,20 +924,8 @@ function Inspector({
   ) : null;
 
   return (
-    <Box
-      sx={{
-        mt: 1.5,
-        px: 1.5,
-        py: 1,
-        minHeight: 48,
-        border: 1,
-        borderColor: "divider",
-        borderRadius: 1,
-        display: "flex",
-        flexDirection: "column",
-        justifyContent: "center",
-      }}
-    >
+    // The box around it is the frame; this is only the content.
+    <Box sx={{ display: "flex", flexDirection: "column" }}>
       {body ?? (
         <Typography variant="caption" color="text.secondary">
           Click a step to see its logs, what it waits for and why it ran. Click a

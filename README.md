@@ -2008,7 +2008,9 @@ ciabatta watch make    # reuses the same daemon, opens /watch/<id>
 
 | Page | What it does |
 | --- | --- |
-| `/` | Dashboard — daemon status and every tool in one place. |
+| `/` | Landing — every project the daemon knows, to pick one (also the logo), plus the global todo list. |
+| `/dashboard` | The selected project at a glance: runs in progress, watch sessions, open todos, the cache, and its README. |
+| `/readme` | The selected project's `README.md`, rendered. |
 | `/todo` | Your personal task list (global, not per-project). |
 | `/watch` | Watch sessions; `/watch/<id>` is one session's live log. |
 | `/run` | Runs; `/run/<id>` is a live graph of one. |

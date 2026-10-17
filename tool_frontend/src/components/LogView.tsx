@@ -13,9 +13,20 @@
  * reuses the rows it already has, and the list sticks to the bottom the way a
  * terminal does — until you scroll up, which is the one moment sticking to the
  * bottom is the wrong thing to do.
+ *
+ * Find works like a browser's: every matching line is tinted where it sits,
+ * Enter steps to the next, and the log around it stays — see `FindBar`.
  */
 
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import {
+  useCallback,
+  useDeferredValue,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import {
   Box,
   Dialog,
@@ -26,13 +37,15 @@ import {
   Typography,
   useTheme,
 } from "@mui/material";
+import { alpha } from "@mui/material/styles";
 import CloseFullscreenIcon from "@mui/icons-material/CloseFullscreen";
 import OpenInFullIcon from "@mui/icons-material/OpenInFull";
 import VerticalAlignBottomIcon from "@mui/icons-material/VerticalAlignBottom";
 import WrapTextIcon from "@mui/icons-material/WrapText";
 import { useVirtualizer } from "@tanstack/react-virtual";
 
-import { AnsiText } from "./AnsiText";
+import { AnsiText, stripAnsi } from "./AnsiText";
+import { FindBar, stepMatch } from "./FindBar";
 import { monoFontStack } from "../theme";
 
 /** Row height when lines aren't wrapped, in px. Matches the line-height below. */
@@ -92,6 +105,21 @@ export function LogView({
   // anybody is on this page. Full screen is the same view with the room it
   // wants; Escape closes it.
   const [full, setFull] = useState(false);
+  // What to find, and which match is the current one. The search runs on the
+  // deferred value, so typing stays responsive on a long log.
+  const [query, setQuery] = useState("");
+  const needle = useDeferredValue(query).trim().toLowerCase();
+  const [current, setCurrent] = useState(0);
+  const matches = useMemo(() => {
+    if (!needle) return [];
+    const found: number[] = [];
+    lines.forEach((line, index) => {
+      if (stripAnsi(line).toLowerCase().includes(needle)) found.push(index);
+    });
+    return found;
+  }, [lines, needle]);
+  const matched = useMemo(() => new Set(matches), [matches]);
+  const currentLine = matches.length > 0 ? matches[Math.min(current, matches.length - 1)] : -1;
 
   const virtualizer = useVirtualizer({
     count: lines.length,
@@ -169,6 +197,33 @@ export function LogView({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [wrap]);
 
+  /** Bring match `index` into the middle of the view. Following stops, or the
+   *  next line of output would pull the view straight back to the end. */
+  const showMatch = useCallback(
+    (index: number) => {
+      const line = matches[index];
+      if (line === undefined) return;
+      setCurrent(index);
+      setFollow(false);
+      virtualizer.scrollToIndex(line, { align: "center" });
+    },
+    [matches, virtualizer],
+  );
+
+  // A new search starts at the first match from where you're reading, the
+  // way a browser's find does — not back at the top of the log.
+  useEffect(() => {
+    if (!needle || matches.length === 0) return;
+    const top = virtualizer.getVirtualItems()[0]?.index ?? 0;
+    const next = matches.findIndex((line) => line >= top);
+    showMatch(next === -1 ? 0 : next);
+    // Only when the search changes: new output arriving mustn't move the view.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [needle]);
+
+  const matchTint = alpha(theme.palette.warning.main, 0.14);
+  const currentTint = alpha(theme.palette.warning.main, 0.38);
+
   const items = virtualizer.getVirtualItems();
 
   const panel = (
@@ -181,6 +236,9 @@ export function LogView({
         display: "flex",
         flexDirection: "column",
         minHeight: 0,
+        // Long lines scroll inside the log, never the pane around it.
+        minWidth: 0,
+        overflow: "hidden",
         ...(fill || full ? { flex: 1 } : { height }),
       }}
     >
@@ -188,15 +246,36 @@ export function LogView({
         direction="row"
         spacing={0.5}
         alignItems="center"
-        sx={{ px: 1, py: 0.5, borderBottom: 1, borderColor: "divider", flexShrink: 0 }}
+        sx={{
+          px: 1,
+          py: 0.5,
+          borderBottom: 1,
+          borderColor: "divider",
+          flexShrink: 0,
+          minWidth: 0,
+        }}
       >
-        <Typography variant="caption" color="text.secondary" sx={{ flexGrow: 1, minWidth: 0 }}>
+        <Typography
+          variant="caption"
+          color="text.secondary"
+          noWrap
+          sx={{ flexGrow: 1, minWidth: 0 }}
+        >
           {lines.length === 0
             ? "No output yet."
             : `${lines.length.toLocaleString()} line${lines.length === 1 ? "" : "s"}`}
           {dropped > 0 &&
             ` · ${dropped.toLocaleString()} earlier line${dropped === 1 ? "" : "s"} dropped`}
         </Typography>
+
+        <FindBar
+          value={query}
+          onChange={setQuery}
+          count={matches.length}
+          current={Math.min(current, Math.max(matches.length - 1, 0))}
+          onStep={(by) => showMatch(stepMatch(current, matches.length, by))}
+          width={full ? 320 : 220}
+        />
 
         <Tooltip title={wrap ? "Don't wrap long lines" : "Wrap long lines"}>
           <ToggleButton
@@ -304,6 +383,16 @@ export function LogView({
                 // stderr is marked by the daemon rather than inferred, so this
                 // is a fact about the line, not a guess from its contents.
                 color: lines[item.index].startsWith("[stderr]") ? stderrColor : undefined,
+                background:
+                  item.index === currentLine
+                    ? currentTint
+                    : matched.has(item.index)
+                      ? matchTint
+                      : undefined,
+                boxShadow:
+                  item.index === currentLine
+                    ? `inset 2px 0 ${theme.palette.warning.main}`
+                    : undefined,
               }}
             >
               <AnsiText text={lines[item.index]} />

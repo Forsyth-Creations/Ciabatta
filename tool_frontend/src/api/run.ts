@@ -374,6 +374,20 @@ export function useRuns(project: string) {
   });
 }
 
+/**
+ * How many runs are in progress, across every project — for the badge on the
+ * nav rail's Run icon. Every project rather than the selected one: a build
+ * left running in another checkout is still a build somebody is waiting on.
+ */
+export function useActiveRuns(): number {
+  const runs = useQuery({
+    queryKey: ["run", "runs", "active"] as const,
+    queryFn: () => api.get<RunSummary[]>("/api/run/runs"),
+    refetchInterval: 3_000,
+  });
+  return (runs.data ?? []).filter((run) => !run.done).length;
+}
+
 export function useRunWorkflows(project: string) {
   return useQuery({
     queryKey: runKeys.workflows(project),

@@ -183,6 +183,24 @@ export function buildTheme(mode: "light" | "dark"): Theme {
           // A tabular figure keeps counts, sizes and timings from jittering as
           // they tick up, which on these pages they constantly do.
           body: { fontVariantNumeric: "tabular-nums" },
+          // Thin scrollbars in the theme's own colours. The browser's default
+          // is a wide light-grey bar, which across a dark log pane — scrolled
+          // sideways as often as down — is the brightest thing on the page.
+          // `scrollbar-*` is the standard (and what Chrome and Firefox use);
+          // the `::-webkit-scrollbar` rules are for Safari.
+          "*": {
+            scrollbarWidth: "thin",
+            scrollbarColor: `${dark ? surface.iron : brand.mist} transparent`,
+          },
+          "*::-webkit-scrollbar": { width: 8, height: 8 },
+          "*::-webkit-scrollbar-track, *::-webkit-scrollbar-corner": { background: "transparent" },
+          "*::-webkit-scrollbar-thumb": {
+            backgroundColor: dark ? surface.iron : brand.mist,
+            borderRadius: 8,
+            border: "2px solid transparent",
+            backgroundClip: "content-box",
+          },
+          "*::-webkit-scrollbar-thumb:hover": { backgroundColor: brand.slate },
         },
       },
       MuiAppBar: {

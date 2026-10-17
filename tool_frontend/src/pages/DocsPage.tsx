@@ -2467,9 +2467,23 @@ echo "deploying to $region"`}</Pre>
           items={[
             <>
               <strong>
-                <Link to="/">Dashboard</Link>
+                <Link to="/">Projects</Link>
               </strong>{" "}
-              — what this checkout is, what is running, and what changed recently.
+              — the logo&apos;s page: every checkout the daemon knows, to pick one, and the
+              global todo list.
+            </>,
+            <>
+              <strong>
+                <Link to="/dashboard">Dashboard</Link>
+              </strong>{" "}
+              — the selected project at a glance: runs in progress, watch sessions, open todos,
+              what the cache holds, and the README.
+            </>,
+            <>
+              <strong>
+                <Link to="/readme">README</Link>
+              </strong>{" "}
+              — the project&apos;s <C>README.md</C>, rendered.
             </>,
             <>
               <strong>

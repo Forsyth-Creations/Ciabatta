@@ -59,7 +59,8 @@ function Todos({ projectId }: { projectId: string }) {
           <Typography variant="body2">
             Something that isn&apos;t about this repo? The globe button makes it{" "}
             <strong>global</strong> — it leaves this list and appears on the{" "}
-            <Link to="/">dashboard</Link>, where it stays whichever project you switch to.
+            <Link to="/">projects page</Link> (the logo), where it stays whichever project you
+            switch to.
           </Typography>
           <Typography variant="caption" color="text.secondary">
             From a terminal: <code>ciabatta todo --global &quot;…&quot;</code>

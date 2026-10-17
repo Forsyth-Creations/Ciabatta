@@ -132,6 +132,8 @@ fn cargo_spec() -> crate::cache::cargo::CargoSpec {
     crate::cache::cargo::CargoSpec {
         package: Some("x".to_string()),
         packages: list(),
+        workspace: true,
+        exclude: list(),
         manifest: Some("x".to_string()),
         profile: Some("x".to_string()),
         target: Some("x".to_string()),

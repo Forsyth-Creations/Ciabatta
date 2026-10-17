@@ -1113,7 +1113,7 @@ cache:
   enabled: true
   gitignore: true          # leave whatever git ignores out of the inputs
   cargo:
-    package: api           # omit for what `cargo build` would build here
+    package: api           # omit for what `cargo build` would build here; `workspace: true` for all
     profile: release       # debug (the default) | release | ${CARGO_PROFILE:-release}
     artifacts: [bin]       # bin | lib | cdylib | dylib | staticlib
 ```
@@ -1132,9 +1132,46 @@ run: cargo build -p api $([ "${CARGO_PROFILE:-release}" = release ] && echo --re
 ```
 
 Inputs become every package directory in the path-dependency closure (git-ignored
-files left out), plus the workspace `Cargo.toml`, `Cargo.lock`, and any
-`rust-toolchain` or `.cargo/config`; outputs become the selected packages'
-artifacts under the target directory Cargo reports. Each step reads its own
+files left out), every crate a `[patch]`/`[replace]` entry points at by path, any
+target source outside its package (`[[bin]] path = "../shared/main.rs"`), plus
+the workspace `Cargo.toml`, `Cargo.lock`, and any `rust-toolchain` or
+`.cargo/config`; outputs become the selected packages' artifacts under the target
+directory Cargo reports — under `target/<triple>/` when the build is for one, whether
+that comes from `target:`, `CARGO_BUILD_TARGET` or `build.target` in
+`.cargo/config.toml`. The key also covers `rustc -vV` (so another compiler or
+another OS never reuses an artifact) and `RUSTFLAGS`, `CARGO_ENCODED_RUSTFLAGS`,
+`CARGO_BUILD_RUSTFLAGS` and `CARGO_BUILD_TARGET`, declared or not.
+
+**Building the whole workspace.** Leaving `package` out selects what a bare
+`cargo build` would: in a virtual workspace, its `default-members`, or every
+member when there are none; in a root `Cargo.toml` that is also a package, just
+that package. When the step runs `cargo build --workspace`, say so, or the
+members outside that set are neither keyed on nor stored:
+
+```yaml
+cache:
+  enabled: true
+  cargo:
+    workspace: true        # every member, as --workspace
+    exclude: [xtask]       # optional, as --exclude
+    profile: release
+    artifacts: [bin]
+steps:
+  - name: compile
+    run: cargo build --workspace --exclude xtask --release
+```
+
+`workspace: true` can't be combined with `package`/`packages`, and `exclude`
+needs it. An excluded member that a selected one depends on is still an input,
+just not an output.
+
+What Cargo can't say is reported once a build has shown it, with the fix: a file
+read from outside the crates (`include_str!("../../schemas/api.json")`) → add it
+to `cache.inputs` (`"schemas/**"` works); a variable a build script reruns on
+(`cargo:rerun-if-env-changed=PAGE_SIZE`) → list it in the workflow's `env:`. To
+share builds through the remote cache, pin the toolchain with
+`rust-toolchain.toml`: entries are shared only between identical compilers on
+the same host. Each step reads its own
 sub-workspace's `Cargo.toml` by default, so several Cargo workspaces in one repo
 each get their own lockfile, and a path dependency living in another ciabatta
 sub-workspace is keyed on rather than excluded. After a build, the dep-info files

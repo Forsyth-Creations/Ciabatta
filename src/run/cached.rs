@@ -923,6 +923,18 @@ impl Session {
             );
         }
 
+        // The same for what its build scripts read from the environment.
+        if let Ok(undeclared) = config.undeclared_build_env(&dir)
+            && !undeclared.is_empty()
+        {
+            eprintln!(
+                "warning: a build script of {} asks to be rerun when {} changes, but the \
+                 cache doesn't key on it — list it in the workflow's `env:`",
+                step.name,
+                undeclared.join(", "),
+            );
+        }
+
         // Whatever it produced is what its dependents key against, cached or not.
         self.fingerprints
             .insert(step.name.clone(), crate::cache::fingerprint(&outputs));

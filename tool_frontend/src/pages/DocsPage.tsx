@@ -1356,7 +1356,7 @@ cache:
   enabled: true
   gitignore: true
   cargo:
-    package: api          # omit for what \`cargo build\` would build here
+    package: api          # omit for what \`cargo build\` would build here; workspace: true for all
     profile: release      # debug (default) → target/debug, release → target/release
     artifacts: [bin]      # bin | lib | cdylib | dylib | staticlib
   inputs: ["assets/**/*"] # still allowed: anything outside the crates
@@ -1367,6 +1367,33 @@ steps:
         <P>
           <C>ciabatta cache init</C> writes this for you when the directory has a{" "}
           <C>Cargo.toml</C> Cargo can read.
+        </P>
+
+        <SubHeading>Building the whole workspace</SubHeading>
+        <P>
+          Without <C>package</C>, the selection is what a bare <C>cargo build</C> builds from the
+          manifest&apos;s directory: in a virtual workspace, its <C>default-members</C>, or every
+          member when there are none; in a root <C>Cargo.toml</C> that is also a package, only
+          that package. A step that runs <C>cargo build --workspace</C> builds more than that, and
+          the members outside the set would be neither keyed on nor stored — editing one would
+          hand back the old binaries. Say <C>workspace: true</C> instead:
+        </P>
+        <Pre>{`cache:
+  enabled: true
+  cargo:
+    workspace: true      # every member, as --workspace
+    exclude: [xtask]     # optional, as --exclude
+    profile: release
+    artifacts: [bin]
+
+steps:
+  - name: compile
+    run: cargo build --workspace --exclude xtask --release`}</Pre>
+        <P>
+          <C>workspace: true</C> can&apos;t be combined with <C>package</C> or <C>packages</C>,
+          and <C>exclude</C> only applies with it — each mismatch is an error, as is excluding a
+          member that doesn&apos;t exist. An excluded member that a selected one depends on is
+          still an input, since it&apos;s compiled into that member; it just isn&apos;t an output.
         </P>
 
         <SubHeading>Choosing the profile per run</SubHeading>
@@ -1403,7 +1430,7 @@ steps:
           rows={[
             [
               "inputs",
-              "Every package directory in the path-dependency closure of what was selected — the whole directory, because a build script or include_str! can read anything in it — plus the workspace Cargo.toml, Cargo.lock, and any rust-toolchain or .cargo/config between the manifest and the project root. Registry and git crates are pinned by Cargo.lock.",
+              "Every package directory in the path-dependency closure of what was selected — the whole directory, because a build script or include_str! can read anything in it — plus every crate a [patch] or [replace] entry points at by path, any target source living outside its package ([[bin]] path = \"../shared/main.rs\"), the workspace Cargo.toml, Cargo.lock, and any rust-toolchain or .cargo/config between the manifest and the project root. Registry and git crates are pinned by Cargo.lock.",
             ],
             [
               "exclude",
@@ -1411,7 +1438,11 @@ steps:
             ],
             [
               "outputs",
-              "The selected packages' artifacts of the kinds in artifacts, named per platform: app / app.exe, libcore.rlib, libext.so / .dylib / ext.dll, libc.a / c.lib — under target/<triple>/<profile>/ when target: is set.",
+              "The selected packages' artifacts of the kinds in artifacts, named per platform: app / app.exe, libcore.rlib, libext.so / .dylib / ext.dll, libc.a / c.lib — under target/<triple>/<profile>/ when the build is for a target triple (see below).",
+            ],
+            [
+              "key",
+              "The input files' hashes, the step's commands and the profile, plus what changes the code Cargo generates without touching a file: rustc -vV (the compiler release, commit and host — so another toolchain or another OS never reuses an artifact), and RUSTFLAGS, CARGO_ENCODED_RUSTFLAGS, CARGO_BUILD_RUSTFLAGS and CARGO_BUILD_TARGET, declared or not.",
             ],
           ]}
         />
@@ -1462,6 +1493,100 @@ steps:
           directory outside the project is refused rather than stored as a <C>../</C> path, which
           would escape its cache entry.
         </Alert>
+
+        <SubHeading>Building for another target</SubHeading>
+        <P>
+          A build for a target triple writes to <C>target/&lt;triple&gt;/&lt;profile&gt;/</C>{" "}
+          rather than <C>target/&lt;profile&gt;/</C>. The triple is worked out the way Cargo works
+          it out: <C>target:</C> in the section, else <C>CARGO_BUILD_TARGET</C>, else{" "}
+          <C>build.target</C> in the nearest <C>.cargo/config.toml</C> — a list there means one
+          set of artifacts per triple, and a custom <C>.json</C> target spec is named by its file
+          stem. Getting this wrong is not a miss but a wrong hit: the outputs looked for would be
+          whatever host binary was left lying in <C>target/release/</C>.
+        </P>
+        <Pre>{`cache:
+  enabled: true
+  cargo:
+    package: api
+    profile: release
+    target: x86_64-unknown-linux-musl   # or leave it to build.target / CARGO_BUILD_TARGET
+    artifacts: [bin]
+
+steps:
+  - name: compile
+    run: cargo build --release -p api --target x86_64-unknown-linux-musl`}</Pre>
+
+        <SubHeading>What Cargo can&apos;t tell it — and how you&apos;ll find out</SubHeading>
+        <P>
+          Two things a build depends on are only known once it has run, and both are reported
+          the moment they&apos;re seen — in the run log as the step finishes, in{" "}
+          <C>ciabatta dry-run</C>, and in <C>ciabatta why</C> — with the line to add:
+        </P>
+        <FieldTable
+          rows={[
+            [
+              "a file outside the crates",
+              "include_str!(\"../../schemas/api.json\"), or a build.rs reading ../proto. rustc's dep-info names it; the warning says to add it to cache.inputs — inputs: [\"schemas/**\"] — or a needs on the step that generates it.",
+            ],
+            [
+              "a variable a build script reads",
+              "A build.rs that prints cargo:rerun-if-env-changed=PAGE_SIZE. The output it leaves under target/…/build/ names it; the warning says to list it in the workflow's env:, which keys the cache on it.",
+            ],
+          ]}
+        />
+        <P>
+          Nothing reports a variable Cargo or a C compiler reads on its own — <C>CC</C>,{" "}
+          <C>CFLAGS</C> for a <C>cc</C>-crate build, <C>CARGO_PROFILE_RELEASE_LTO</C> — since
+          nothing records it. If your build sets one, list it in <C>env:</C> too.
+        </P>
+        <Pre>{`# packages/storage/.ciabatta/workflows/build.yaml
+env: [STORAGE_PAGE_SIZE]        # read by build.rs — the warning named it
+cache:
+  enabled: true
+  gitignore: true
+  inputs: ["schemas/**"]       # include_str!'d from outside the crate
+  cargo:
+    package: storage-engine
+    profile: \${CARGO_PROFILE:-release}
+    artifacts: [bin]`}</Pre>
+
+        <SubHeading>Sharing through the remote cache</SubHeading>
+        <P>
+          Because <C>rustc -vV</C> is in the key, two machines share entries only when they build
+          with the same compiler for the same host. Pin the toolchain with a{" "}
+          <C>rust-toolchain.toml</C> — it&apos;s an input too, so bumping it rebuilds once
+          everywhere — and CI and laptops on the same OS will hit each other&apos;s builds. A
+          macOS laptop never gets a Linux CI binary, and an <C>.rlib</C> is never handed to a
+          rustc that can&apos;t load it. If CI sets <C>RUSTFLAGS</C> and laptops don&apos;t,
+          they&apos;re different builds, and the cache treats them so.
+        </P>
+
+        <SubHeading>Why didn&apos;t it hit?</SubHeading>
+        <Bullets
+          items={[
+            <>
+              <C>ciabatta why &lt;step&gt;</C> lists every file in the key, the variables, and the
+              packages the closure reached — compare two machines&apos; output. Add{" "}
+              <C>--all</C> for every file with its size.
+            </>,
+            <>
+              Different <C>rustc -vV</C>: another toolchain, or the same version on another OS.
+              The miss is correct; pin the toolchain to share.
+            </>,
+            <>
+              <C>RUSTFLAGS</C> or <C>CARGO_BUILD_TARGET</C> set in one environment and not the
+              other.
+            </>,
+            <>
+              A new <C>[patch]</C> entry, or a path dependency added to any crate in the closure —
+              both change the inputs.
+            </>,
+            <>
+              Write <C>dir/**</C>, <C>dir/**/*</C> or just <C>dir</C> for everything under a
+              directory: all three walk it.
+            </>,
+          ]}
+        />
 
         <SubHeading>Asking rustc what it actually read</SubHeading>
         <P>

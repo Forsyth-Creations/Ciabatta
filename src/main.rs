@@ -3335,9 +3335,9 @@ fn cmd_cache(subcommand: CacheCommand) -> Result<()> {
                         &package.dir
                     };
                     let why = if package.selected {
-                        ""
+                        String::new()
                     } else {
-                        "  (path dependency)"
+                        format!("  ({})", package.role())
                     };
                     println!("  {:<20} {at}{why}", package.name);
                 }

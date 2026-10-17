@@ -94,6 +94,9 @@ pub struct TargetDeps {
     /// Files rustc reports the last build reading that no input covers.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub undeclared_reads: Vec<String>,
+    /// Variables its build scripts asked to be rerun on that don't key it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub undeclared_build_env: Vec<String>,
     /// Files its inputs match that an output pattern also covers: treated as
     /// outputs only, and worth a warning.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -246,6 +249,11 @@ fn one(context: &WorkspaceContext<'_>, root: &Path, step: &RunStep, detail: Deta
         } else {
             Vec::new()
         },
+        undeclared_build_env: if cache.cargo.is_some() && cargo_error.is_none() {
+            cache.undeclared_build_env(&dir).unwrap_or_default()
+        } else {
+            Vec::new()
+        },
         why_uncached: match &cargo_error {
             Some(error) => Some(error.clone()),
             None => cache.why_disabled().map(str::to_string),
@@ -269,11 +277,7 @@ fn describe_package(
     } else {
         &package.dir
     };
-    let why = if package.selected {
-        "selected".to_string()
-    } else {
-        "path dependency".to_string()
-    };
+    let why = package.role();
     match owning_member(root, &package.dir).filter(|m| Some(m.as_str()) != own) {
         Some(owner) => format!(
             "{} ({at}) — {why}, owned by sub-workspace {owner}",

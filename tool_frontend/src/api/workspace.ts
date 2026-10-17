@@ -34,7 +34,8 @@ export interface WorkflowStep {
   on_error: string | null;
   /** Variables this step sets for itself, on top of the run's environment. */
   env: Record<string, string>;
-  /** Variables this step reads — in its command, cwd, or conditions. */
+  /** Variables this step's `when` / `skip_if` conditions test. Commands and
+   *  scripts aren't scanned. */
   env_refs: string[];
 }
 

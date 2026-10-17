@@ -1347,7 +1347,7 @@ function TargetDependencies({ deps }: { deps: TargetDeps }) {
       )}
       {deps.cached && undeclared.length > 0 && (
         <Typography variant="caption" color="warning.main">
-          ⚠ reads {undeclared.join(", ")} without declaring{" "}
+          ⚠ tests {undeclared.join(", ")} in a condition without declaring{" "}
           {undeclared.length === 1 ? "it" : "them"} in cache.env, so changing{" "}
           {undeclared.length === 1 ? "it" : "them"} would not invalidate this target.
         </Typography>
@@ -1802,7 +1802,7 @@ function buildFlow(
 /**
  * What a workflow file says about a variable: `required_env` makes it
  * required, its `env` list makes it optional. Anything else is a variable the
- * steps happen to read, which the workflow never declared either way.
+ * steps test in a condition, which the workflow never declared either way.
  */
 type EnvRole = "required" | "optional" | null;
 

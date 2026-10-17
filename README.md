@@ -1036,8 +1036,10 @@ itself is never written down. `cache.env` is only for a variable a build reads
 from the ambient environment without declaring it. (`REQUIRED_ENV`, the
 spelling before 0.6.0, still works.)
 
-The run page shows both lists — `required_env` first, then `env`, then anything
-else the steps read — and marks every variable that is part of a cache key.
+The run page shows both lists — `required_env` first, then `env`, then the
+variables a step's `when`/`skip_if` conditions test — and marks every variable
+that is part of a cache key. Commands and scripts aren't scanned for `$VAR`:
+a variable a build depends on belongs in `env` or `required_env`.
 
 The third is what makes a *graph* cacheable rather than just a directory. Change
 a `.proto` file and `proto:generate` misses; its outputs change; every stage

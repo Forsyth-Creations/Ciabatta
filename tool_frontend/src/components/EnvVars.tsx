@@ -205,7 +205,7 @@ export function EnvPanel({ report, title = "Environment" }: { report: EnvReport;
 
   // Custom arguments have a block of their own, above. The rest is grouped
   // the way a workflow file declares it: `required_env`, then `env`, then
-  // whatever else the steps read from around them.
+  // the variables a step's conditions test.
   const vars = report.vars.filter((v) => v.origin !== "argument");
   const required = vars.filter((v) => v.required);
   const listed = vars.filter((v) => !v.required && v.declared);

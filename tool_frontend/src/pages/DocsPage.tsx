@@ -1521,7 +1521,17 @@ required_env: [API_URL, DEPLOY_TOKEN] # must be set, or the run won't start`}</P
           is decided by the <C>.env</C> the run sources — and so by the elected env profile — or
           by the terminal. Unlike <C>required_env</C>, a name in <C>env</C> may be unset. On the
           run graph, required variables are drawn solid with a ✱ and optional ones dashed with a
-          ?, each wired to the steps of the workflow that declares it.
+          ?, each wired to the steps of the workflow that declares it. Past six variables the graph
+          draws them as their groups — <em>required</em>, <em>optional</em> and{" "}
+          <em>undeclared</em> — instead: click a group to list and search its variables, or use the
+          search box above the graph, and the one you pick is drawn on its own.
+        </P>
+        <P>
+          On a graph spanning several workflow files, a file with more than one step is drawn as a
+          single stacked node — the <strong>Stack</strong> toggle above the graph turns this off.
+          The strip across the top of the stack (<C>step 2 of 3 ▾</C>) opens the list of its steps;
+          picking one puts it on top and opens its logs. The stack&apos;s border shows the worst
+          status inside it, so a failed step underneath is never hidden.
         </P>
         <P>
           Both lists key the cache. <C>required_env</C> values go in as a SHA-256 digest — that is

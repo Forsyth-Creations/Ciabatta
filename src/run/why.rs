@@ -462,7 +462,7 @@ fn render(answer: &Answer, all: bool) -> String {
     let undeclared = deps.undeclared_env();
     if deps.cached && !undeclared.is_empty() {
         out.push_str(&format!(
-            "\n  ⚠ it reads {} without declaring {} in `cache.env`, so changing {} \n    \
+            "\n  ⚠ it tests {} in a condition without declaring {} in `cache.env`, so changing {} \n    \
              would not invalidate its cache entry.\n",
             undeclared.join(", "),
             if undeclared.len() == 1 { "it" } else { "them" },

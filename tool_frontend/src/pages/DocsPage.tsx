@@ -1537,9 +1537,12 @@ required_env: [API_URL, DEPLOY_TOKEN] # must be set, or the run won't start`}</P
           Both lists key the cache. <C>required_env</C> values go in as a SHA-256 digest — that is
           where tokens get declared, and cache manifests are shared through the remote cache — so
           a new token still rebuilds, but the token itself is never written down. The run page
-          shows <C>required_env</C>, then <C>env</C>, then whatever else the steps read, and
-          marks each variable that is part of a cache key with a fingerprint.{" "}
-          <C>REQUIRED_ENV</C>, the spelling before 0.6.0, still works.
+          shows <C>required_env</C>, then <C>env</C>, then the variables a step&apos;s{" "}
+          <C>when</C>/<C>skip_if</C> conditions test, and marks each variable that is part of a cache key with a fingerprint.{" "}
+          <C>REQUIRED_ENV</C>, the spelling before 0.6.0, still works. Commands and scripts
+          aren&apos;t scanned for <C>$VAR</C> — guessing at shell text found loop counters and
+          variables a script sets itself, and missed everything a build tool reads on its own — so
+          a variable a step depends on belongs in one of the two lists.
         </P>
 
         <SubHeading>Where values come from</SubHeading>

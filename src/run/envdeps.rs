@@ -5,7 +5,7 @@
 //! variable that was set here and isn't there. The graph is drawn before it
 //! runs; this does the same for the environment, so `required_env`, the
 //! `.env` files a run sources, the `[env]` tables that cascade from
-//! sub-workspace to step, and the bare `$VAR` references inside the commands
+//! sub-workspace to step, and the variables its conditions test
 //! are all one list with values attached.
 //!
 //! One collector serves both surfaces: the terminal prints it before a run
@@ -751,39 +751,16 @@ pub fn implied_refs(
     out
 }
 
-/// Every variable one step reads: in its command, the script path, its working
-/// directory, its `when` / `skip_if` conditions, and the values of its own
-/// `[env]` table (which may themselves interpolate).
+/// The variables a step names outright: the ones its `when` / `skip_if`
+/// conditions test.
+///
+/// Commands and scripts are deliberately not read. Guessing at `$VAR` in shell
+/// text found variables a script sets for itself, loop counters and `awk`
+/// fields, and missed everything a build tool reads on its own — a list that
+/// looked authoritative and wasn't. What a workflow depends on is what it
+/// declares, in `required_env` and `env`.
 pub fn step_refs(step: &RunStep) -> Vec<String> {
     let mut keys: Vec<String> = Vec::new();
-    let mut push = |text: &str| {
-        for key in shell_refs(text) {
-            if !keys.contains(&key) {
-                keys.push(key);
-            }
-        }
-    };
-
-    if let Some(run) = step.run.as_deref() {
-        push(run);
-    }
-    if let Some(script) = step.script.as_deref() {
-        push(script);
-    }
-    if let Some(cwd) = step.cwd.as_deref() {
-        push(cwd);
-    }
-    for value in step.env.values() {
-        push(value);
-    }
-    for option in &step.options {
-        if let Some(run) = option.run.as_deref() {
-            push(run);
-        }
-        if let Some(script) = option.script.as_deref() {
-            push(script);
-        }
-    }
     // Conditions name a variable directly (`RUN_ENV == prod`) rather than
     // interpolating it, so they're read the way the evaluator reads them.
     for cond in step.when.iter().chain(step.skip_if.iter()) {
@@ -794,16 +771,6 @@ pub fn step_refs(step: &RunStep) -> Vec<String> {
         }
     }
     keys
-}
-
-/// The `$VAR` / `${VAR}` / `${VAR:-default}` references in a shell fragment.
-fn shell_refs(text: &str) -> Vec<String> {
-    static PATTERN: &str = r"\$\{([A-Za-z_][A-Za-z0-9_]*)[^}]*\}|\$([A-Za-z_][A-Za-z0-9_]*)";
-    let re = regex::Regex::new(PATTERN).expect("shell variable pattern compiles");
-    re.captures_iter(text)
-        .filter_map(|caps| caps.get(1).or_else(|| caps.get(2)))
-        .map(|m| m.as_str().to_string())
-        .collect()
 }
 
 /// The `{VAR}` placeholders in a config path — how `env_file = ".env.{STAGE}"`
@@ -907,37 +874,26 @@ mod tests {
     }
 
     #[test]
-    fn shell_references_are_found_in_every_form() {
-        assert_eq!(
-            shell_refs("deploy --region $AWS_REGION --stage ${STAGE} --to ${TARGET:-dev}"),
-            vec!["AWS_REGION", "STAGE", "TARGET"]
-        );
-        // Positional and special parameters aren't variables anyone configures.
-        assert!(shell_refs("echo $1 $@ $?").is_empty());
-    }
-
-    #[test]
-    fn a_step_declares_what_it_reads() {
+    fn a_steps_commands_are_not_read_for_variables() {
         let mut s = step("build", "make -j$JOBS");
         s.cwd = Some("packages/$PKG".into());
         s.when = vec!["env.RUN_ENV == prod".into()];
         s.env
             .insert("PROFILE".to_string(), "$BUILD_PROFILE".to_string());
 
-        let refs = step_refs(&s);
-        for key in ["JOBS", "PKG", "RUN_ENV", "BUILD_PROFILE"] {
-            assert!(
-                refs.contains(&key.to_string()),
-                "{key} missing from {refs:?}"
-            );
-        }
+        // Only the condition names a variable outright; shell text is not
+        // guessed at.
+        assert_eq!(step_refs(&s), vec!["RUN_ENV".to_string()]);
     }
 
     #[test]
     fn values_are_reported_with_where_they_came_from() {
         let resolved = ResolvedRun {
             required_env: vec!["API_TOKEN".to_string()],
-            steps: vec![step("build", "deploy --region $AWS_REGION")],
+            steps: vec![RunStep {
+                declared_env: vec!["AWS_REGION".to_string()],
+                ..step("build", "deploy --region $AWS_REGION")
+            }],
             ..Default::default()
         };
         let base = env(&[("AWS_REGION", "eu-west-1"), ("API_TOKEN", "s3cret")]);
@@ -1278,12 +1234,15 @@ mod tests {
             ..Default::default()
         };
         let report = collect(&resolved, Path::new("."), &env(&[]), None);
-        find(&report, "RELEASE_CHANNEL");
+        // Neither the built-in transfer's credentials (the command replaces
+        // it) nor a guess at what the command's text reads.
         assert!(
             report
                 .vars
                 .iter()
-                .all(|v| !v.key.starts_with("CIABATTA_NEXUS"))
+                .all(|v| !v.key.starts_with("CIABATTA_NEXUS") && v.key != "RELEASE_CHANNEL"),
+            "{:?}",
+            report.vars
         );
     }
 }

@@ -10,6 +10,7 @@ import { useEffect, useMemo, useState } from "react";
 import {
   Alert,
   AlertTitle,
+  Autocomplete,
   Box,
   LinearProgress,
   Button,
@@ -19,13 +20,21 @@ import {
   DialogContent,
   DialogTitle,
   FormControlLabel,
+  InputAdornment,
+  ListSubheader,
+  Menu,
+  MenuItem,
   Stack,
   Switch,
   Tab,
   Tabs,
+  TextField,
   Tooltip,
   Typography,
 } from "@mui/material";
+import ArrowDropDownIcon from "@mui/icons-material/ArrowDropDown";
+import LayersIcon from "@mui/icons-material/Layers";
+import SearchIcon from "@mui/icons-material/Search";
 import ArrowBackIcon from "@mui/icons-material/ArrowBack";
 import FolderOpenIcon from "@mui/icons-material/FolderOpen";
 import ManageSearchIcon from "@mui/icons-material/ManageSearch";
@@ -132,7 +141,63 @@ const outputStepOf = (id: string): string | null =>
  * logs of their own, so clicking one focuses the graph on what it touches
  * instead of opening it.
  */
-const isDependencyNode = (id: string) => isFileNode(id) || envKeyOf(id) !== null;
+const isDependencyNode = (id: string) =>
+  isFileNode(id) || envKeyOf(id) !== null || envGroupOf(id) !== null;
+
+/**
+ * More variables than this on the graph and they're drawn as their groups.
+ *
+ * Past a handful, one node per variable stops being a picture: the column runs
+ * off the bottom of the canvas, every node fans a wire into every step, and the
+ * steps — what the graph is for — end up a thin strip beside it. What the
+ * workflow declared each variable as is the grouping that still says
+ * something at a glance, and the search finds any one of them.
+ */
+const ENV_GROUP_LIMIT = 6;
+
+/** What a crowded variable column folds into: what the workflow file declared
+ *  each variable as, and the ones it never declared either way. */
+type EnvGroup = "required" | "optional" | "undeclared";
+const ENV_GROUPS: EnvGroup[] = ["required", "optional", "undeclared"];
+const envGroupNodeId = (group: EnvGroup) => `envgroup::${group}`;
+const envGroupOf = (id: string): EnvGroup | null =>
+  id.startsWith("envgroup::") ? (id.slice("envgroup::".length) as EnvGroup) : null;
+const envGroupOfVariable = (variable: EnvVar): EnvGroup => envRole(variable) ?? "undeclared";
+
+/** What each group is called on the canvas, and what hovering it explains. */
+const ENV_GROUP_INFO: Record<EnvGroup, { label: string; why: string }> = {
+  required: { label: "required", why: "required_env — the run refuses to start without them" },
+  optional: { label: "optional", why: "env — valued from .env, and allowed to be unset" },
+  undeclared: { label: "undeclared", why: "read by a step, but the workflow file doesn't list them" },
+};
+
+/** The node id a workflow file's stacked steps take, and back. */
+const stackNodeId = (key: string) => `stack::${key}`;
+const stackKeyOf = (id: string): string | null =>
+  id.startsWith("stack::") ? id.slice("stack::".length) : null;
+
+/**
+ * Workflow files whose steps are drawn as one stacked node.
+ *
+ * A monorepo graph is a graph of workflow files: `api:build` waits for
+ * `common:build`. The steps inside one file are its own business, and drawing
+ * every one of them makes a ten-package graph a hundred nodes wide. So a file
+ * with several steps is one node, its steps stacked like cards, with the one
+ * on top chosen from a pop-out.
+ */
+interface Stacks {
+  /** Each stack's steps, in the workflow's order, keyed by stack key. */
+  members: Map<string, string[]>;
+  /** The stack a step was folded into. */
+  of: Map<string, string>;
+  /** The step shown on top of each stack. */
+  top: Map<string, string>;
+}
+
+const NO_STACKS: Stacks = { members: new Map(), of: new Map(), top: new Map() };
+
+/** Height of the strip across the top of a stacked node that opens its steps. */
+const STACK_HEADER = 18;
 
 /** How far the graph fades what the focused node doesn't reach. */
 const DIMMED = 0.18;
@@ -145,7 +210,17 @@ const LINE = STEP_LINE;
 const DEPENDENCY_HEIGHT = 46;
 
 /** How tall a node is drawn — what `layeredLayout` centres its wires on. */
-function nodeHeight(id: string, byName: Map<string, StepView>, inspect: boolean): number {
+function nodeHeight(
+  id: string,
+  byName: Map<string, StepView>,
+  inspect: boolean,
+  stacks: Stacks = NO_STACKS,
+): number {
+  const stack = stackKeyOf(id);
+  if (stack !== null) {
+    // As tall as the step on top, plus the strip that opens the others.
+    return nodeHeight(stacks.top.get(stack) ?? "", byName, inspect) + STACK_HEADER;
+  }
   const step = byName.get(id);
   if (!step) return DEPENDENCY_HEIGHT;
   return stepNodeHeight(
@@ -378,10 +453,31 @@ function WorkflowPanel({
   // The dependency node the graph is focused on — a variable, a set of inputs,
   // or a step's outputs. Held as a node id so all three focus the same way.
   const [focused, setFocused] = useState<string | null>(null);
+  // A workflow file's steps stacked into one node. On by default: it's what
+  // keeps a monorepo graph a graph of packages rather than of every command.
+  const [stacked, setStacked] = useState(true);
+  // The step each stack was last turned to, by stack key.
+  const [chosen, setChosen] = useState<Record<string, string>>({});
+
+  const stacks = useMemo(
+    () => (stacked ? workflowStacks(workflow, chosen, selectedStep) : NO_STACKS),
+    [stacked, workflow, chosen, selectedStep],
+  );
+  const pickInStack = (stack: string, name: string) => {
+    setChosen((current) => ({ ...current, [stack]: name }));
+    setFocused(name);
+    onSelectStep(name);
+  };
+  // The variables the graph would draw, and whether there are enough of them
+  // to be drawn as their groups — the search is for exactly that case.
+  const drawnVariables = workflow.env.vars.filter((v) => v.steps.length > 0);
+  const grouped = showEnv && drawnVariables.length > ENV_GROUP_LIMIT;
 
   const { nodes, edges } = useMemo(
-    () => buildFlow(workflow, theme, showOrder, showEnv, showFiles, focused, inspect),
-    [workflow, theme, showOrder, showEnv, showFiles, focused, inspect],
+    () =>
+      buildFlow(workflow, theme, showOrder, showEnv, showFiles, focused, inspect, stacks, pickInStack),
+    // `pickInStack` only closes over setters and `onSelectStep`, which are stable.
+    [workflow, theme, showOrder, showEnv, showFiles, focused, inspect, stacks],
   );
   const step = workflow.steps.find((s) => s.name === selectedStep);
   // Ticks only while the workflow is running, so a running phase or step
@@ -392,7 +488,10 @@ function WorkflowPanel({
   // logs and details; for a dependency — a variable, or a set of files read or
   // written — it lights the steps that touch it. Clicking the same node again
   // puts the whole graph back.
-  const clickNode = (id: string) => {
+  const clickNode = (clicked: string) => {
+    // A stack stands for the step on top of it.
+    const stack = stackKeyOf(clicked);
+    const id = stack === null ? clicked : (stacks.top.get(stack) ?? clicked);
     const again = focused === id;
     setFocused(again ? null : id);
     onSelectStep(again || isDependencyNode(id) ? null : id);
@@ -511,6 +610,15 @@ function WorkflowPanel({
       >
         <Box sx={{ minWidth: 0 }}>
           <PaneHeader title="Graph">
+            {grouped && (
+              <VariableSearch
+                variables={drawnVariables}
+                onPick={(key) => {
+                  setFocused(envNodeId(key));
+                  onSelectStep(null);
+                }}
+              />
+            )}
             <GraphToggle
               label="Environment"
               hint="Draw each environment variable as what it is — a dependency, feeding into every step that reads it. Values come from the run's resolved environment."
@@ -519,7 +627,12 @@ function WorkflowPanel({
                 setShowEnv(checked);
                 // Focusing a node and then hiding it would dim the graph with
                 // nothing left lit to explain why.
-                if (!checked && focused !== null && envKeyOf(focused) !== null) setFocused(null);
+                if (
+                  !checked &&
+                  focused !== null &&
+                  (envKeyOf(focused) !== null || envGroupOf(focused) !== null)
+                )
+                  setFocused(null);
               }}
             />
             <GraphToggle
@@ -530,6 +643,12 @@ function WorkflowPanel({
                 setShowFiles(checked);
                 if (!checked && focused !== null && isFileNode(focused)) setFocused(null);
               }}
+            />
+            <GraphToggle
+              label="Stack"
+              hint="Draw each workflow file with several steps as one node, its steps stacked like cards. The strip across the top of the stack opens a list to choose the step shown. Off draws every step on its own."
+              checked={stacked}
+              onChange={setStacked}
             />
             <GraphToggle
               label="Order"
@@ -545,7 +664,9 @@ function WorkflowPanel({
             // Turning the environment column on and off changes the graph's
             // extent, so the view has to be re-fitted around it.
             fitKey={
-              `${showEnv ? "env" : ""}${showFiles ? "+files" : ""}${inspect ? "+inspect" : ""}` ||
+              `${showEnv ? "env" : ""}${grouped ? "+grouped" : ""}${showFiles ? "+files" : ""}${
+                stacked ? "+stacked" : ""
+              }${inspect ? "+inspect" : ""}` ||
               "steps-only"
             }
             onNodeClick={(_, node) => clickNode(node.id)}
@@ -586,6 +707,7 @@ function WorkflowPanel({
         now={now}
         inspect={inspect}
         onClear={clearSelection}
+        onFocus={setFocused}
       />
 
       <Box sx={{ mt: 2 }}>
@@ -668,6 +790,7 @@ function Inspector({
   now,
   inspect,
   onClear,
+  onFocus,
 }: {
   project: string;
   workflow: WorkflowView;
@@ -676,6 +799,7 @@ function Inspector({
   now: number;
   inspect: boolean;
   onClear: () => void;
+  onFocus: (id: string) => void;
 }) {
   const body = step ? (
     <StepInspector
@@ -687,7 +811,20 @@ function Inspector({
       onClear={onClear}
     />
   ) : focused !== null && isDependencyNode(focused) ? (
-    <FocusNote workflow={workflow} focused={focused} onClear={onClear} />
+    envGroupOf(focused) !== null ? (
+      <EnvGroupNote
+        // Keyed by group, so switching groups starts the search afresh.
+        key={focused}
+        group={envGroupOf(focused)!}
+        variables={workflow.env.vars.filter(
+          (v) => v.steps.length > 0 && envGroupOfVariable(v) === envGroupOf(focused),
+        )}
+        onPick={(key) => onFocus(envNodeId(key))}
+        onClear={onClear}
+      />
+    ) : (
+      <FocusNote workflow={workflow} focused={focused} onClear={onClear} />
+    )
   ) : null;
 
   return (
@@ -708,7 +845,9 @@ function Inspector({
       {body ?? (
         <Typography variant="caption" color="text.secondary">
           Click a step to see its logs, what it waits for and why it ran. Click a
-          variable or a file set to light up the steps that read it.
+          variable or a file set to light up the steps that read it — or a group of
+          variables to search it. A stacked node is one workflow file: its top strip
+          picks the step shown.
           {inspect && " Cache inspect mode is on: each step says what the cache made of it."}
         </Typography>
       )}
@@ -1347,7 +1486,7 @@ function TargetDependencies({ deps }: { deps: TargetDeps }) {
       )}
       {deps.cached && undeclared.length > 0 && (
         <Typography variant="caption" color="warning.main">
-          ⚠ reads {undeclared.join(", ")} without declaring{" "}
+          ⚠ tests {undeclared.join(", ")} in a condition without declaring{" "}
           {undeclared.length === 1 ? "it" : "them"} in cache.env, so changing{" "}
           {undeclared.length === 1 ? "it" : "them"} would not invalidate this target.
         </Typography>
@@ -1482,6 +1621,14 @@ function litSteps(
   if (key !== null) {
     return new Set(workflow.env.vars.find((variable) => variable.key === key)?.steps ?? []);
   }
+  const group = envGroupOf(id);
+  if (group !== null) {
+    return new Set(
+      workflow.env.vars
+        .filter((variable) => envGroupOfVariable(variable) === group)
+        .flatMap((variable) => variable.steps),
+    );
+  }
   const writer = outputStepOf(id);
   if (writer !== null) return new Set([writer]);
   return new Set(groups.get(id)?.steps ?? []);
@@ -1531,7 +1678,10 @@ function dependencyClosure(workflow: WorkflowView, start: string): Set<string> {
   // dimming all of it. `litSteps` is the same relation read the other way, so
   // the two directions cannot disagree about which edges exist.
   for (const variable of workflow.env.vars) {
-    if (variable.steps.some((name) => lit.has(name))) lit.add(envNodeId(variable.key));
+    if (variable.steps.some((name) => lit.has(name))) {
+      lit.add(envNodeId(variable.key));
+      lit.add(envGroupNodeId(envGroupOfVariable(variable)));
+    }
   }
   for (const [id, group] of inputGroups(workflow)) {
     if (group.steps.some((name) => lit.has(name))) lit.add(id);
@@ -1568,15 +1718,30 @@ function buildFlow(
   showFiles: boolean,
   focused: string | null,
   inspect: boolean,
+  stacks: Stacks,
+  onPick: (stack: string, step: string) => void,
 ): { nodes: Node[]; edges: Edge[] } {
-  const stepIds = workflow.steps.map((s) => s.name);
   const byName = new Map(workflow.steps.map((s) => [s.name, s]));
+
+  // Where a step is drawn: its own node, or the stack its workflow file
+  // became. Every edge goes through this, so a wire into any step of a stack
+  // arrives at the stack.
+  const nodeOf = (step: string) => {
+    const stack = stacks.of.get(step);
+    return stack === undefined ? step : stackNodeId(stack);
+  };
+  // The steps a node stands for: a stack's members, or the node itself.
+  const membersOf = (id: string) => {
+    const stack = stackKeyOf(id);
+    return stack === null ? [id] : (stacks.members.get(stack) ?? []);
+  };
+  const stepIds = [...new Set(workflow.steps.map((s) => nodeOf(s.name)))];
 
   // Input sets are grouped once, here, so the focus and the drawing agree
   // about which steps share a node.
   const groups = inputGroups(workflow);
 
-  const focus: Focus =
+  const stepFocus: Focus =
     focused === null
       ? NO_FOCUS
       : (() => {
@@ -1589,35 +1754,91 @@ function buildFlow(
             : dependencyClosure(workflow, focused);
           return { id: focused, lit: (id: string) => id === focused || reached.has(id) };
         })();
+  // The same focus, said of what is drawn: a stack is lit when any step in it
+  // is, and is the focused node when the focused step is one of its own.
+  const focus: Focus = {
+    id: stepFocus.id === null ? null : nodeOf(stepFocus.id),
+    lit: (id) => membersOf(id).some((member) => stepFocus.lit(member)),
+  };
+
+  // Every edge between two drawn nodes, once. Edges inside a stack are the
+  // file's own order and aren't drawn; two steps of one stack waiting on the
+  // same step upstream are one wire.
+  const viewEdges: { from: string; to: string; kind: WorkflowView["edges"][number]["kind"] }[] = [];
+  const seenEdges = new Set<string>();
+  for (const edge of workflow.edges) {
+    const from = nodeOf(edge.from);
+    const to = nodeOf(edge.to);
+    const key = `${from}\u0000${to}\u0000${edge.kind}`;
+    if (from === to || seenEdges.has(key)) continue;
+    seenEdges.add(key);
+    viewEdges.push({ from, to, kind: edge.kind });
+  }
 
   // Only `needs` edges define run order; error/retry branches are annotations
   // on top and would distort the layout if they drove depth.
-  const orderEdges = workflow.edges
+  const orderEdges = viewEdges
     .filter((e) => e.kind === "needs")
     .map((e) => ({ source: e.from, target: e.to }));
+
+  // One wire per drawn pair, for the dependency families too.
+  const unique = <T extends { source: string; target: string }>(list: T[]): T[] => {
+    const seen = new Set<string>();
+    return list.filter((e) => {
+      const key = `${e.source}\u0000${e.target}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  };
 
   // ── the dependency nodes, when they're on ────────────────────────────────
   // A variable nothing reads (a `.env` line no step uses) isn't drawn: it has
   // no edge to justify a node. The panel below the graph still lists it.
-  const present = new Set(stepIds);
-  const variables = showEnv ? workflow.env.vars.filter((v) => v.steps.length > 0) : [];
-  const envEdges = variables.flatMap((variable) =>
-    variable.steps
-      // A variable's step list comes from the resolved run, so guard against an
-      // edge into a node this view isn't drawing.
-      .filter((step) => present.has(step))
-      .map((step) => ({ source: envNodeId(variable.key), target: step })),
+  const present = new Set(workflow.steps.map((s) => s.name));
+  const shown = showEnv ? workflow.env.vars.filter((v) => v.steps.length > 0) : [];
+  // Too many to draw one by one: fold them into their groups. The one being
+  // looked at — picked from a group or from the search — still gets a node of
+  // its own, so focusing it shows its wires rather than its group's.
+  const grouping = shown.length > ENV_GROUP_LIMIT;
+  const pinned = focused === null ? null : envKeyOf(focused);
+  const variables = grouping ? shown.filter((v) => v.key === pinned) : shown;
+  const envGroups = new Map<EnvGroup, EnvVar[]>();
+  if (grouping) {
+    for (const group of ENV_GROUPS) {
+      const members = shown.filter((v) => envGroupOfVariable(v) === group && v.key !== pinned);
+      if (members.length > 0) envGroups.set(group, members);
+    }
+  }
+  const envEdges = unique(
+    variables.flatMap((variable) =>
+      variable.steps
+        // A variable's step list comes from the resolved run, so guard against
+        // an edge into a node this view isn't drawing.
+        .filter((step) => present.has(step))
+        .map((step) => ({ source: envNodeId(variable.key), target: nodeOf(step) })),
+    ),
+  );
+  const groupEdges = unique(
+    [...envGroups].flatMap(([group, members]) =>
+      members
+        .flatMap((variable) => variable.steps)
+        .filter((step) => present.has(step))
+        .map((step) => ({ source: envGroupNodeId(group), target: nodeOf(step) })),
+    ),
   );
 
   const inputs = showFiles ? [...groups.values()] : [];
-  const inputEdges = inputs.flatMap((group) =>
-    group.steps.map((step) => ({ source: inputNodeId(group.steps[0]), target: step })),
+  const inputEdges = unique(
+    inputs.flatMap((group) =>
+      group.steps.map((step) => ({ source: inputNodeId(group.steps[0]), target: nodeOf(step) })),
+    ),
   );
   const producers = showFiles
     ? workflow.steps.filter((step) => step.deps?.name && step.deps.outputs.length > 0)
     : [];
   const outputEdges = producers.map((step) => ({
-    source: step.name,
+    source: nodeOf(step.name),
     target: outputNodeId(step.name),
   }));
 
@@ -1625,11 +1846,14 @@ function buildFlow(
   // from a failed step's `on_error`, so they have no position in the sequence
   // the run takes when everything works. Background tasks are left out for the
   // opposite reason — they always run, but nothing waits for them, so they hold
-  // no position in the sequence either.
+  // no position in the sequence either. Numbered by step, not by node: a stack
+  // shows the number of the step on top of it.
   const sequence = showOrder
     ? executionOrder(
         workflow.steps.filter((s) => !s.recover).map((s) => s.name),
-        orderEdges,
+        workflow.edges
+          .filter((e) => e.kind === "needs")
+          .map((e) => ({ source: e.from, target: e.to })),
         { exclude: (id) => byName.get(id)?.background ?? false },
       )
     : new Map<string, number>();
@@ -1637,6 +1861,7 @@ function buildFlow(
   const ids = [
     ...stepIds,
     ...variables.map((variable) => envNodeId(variable.key)),
+    ...[...envGroups.keys()].map(envGroupNodeId),
     ...inputs.map((group) => inputNodeId(group.steps[0])),
     ...producers.map((step) => outputNodeId(step.name)),
   ];
@@ -1650,7 +1875,7 @@ function buildFlow(
   // back at the step they re-run, and ranking them would make a cycle.
   const layoutEdges: LayoutEdge[] = [
     ...orderEdges.map((e) => ({ ...e, group: "needs", merge: true })),
-    ...workflow.edges
+    ...viewEdges
       .filter((e) => e.kind !== "needs")
       .map((e) => ({
         source: e.from,
@@ -1659,6 +1884,7 @@ function buildFlow(
         rank: e.kind !== "retry",
       })),
     ...envEdges.map((e) => ({ ...e, group: "env" })),
+    ...groupEdges.map((e) => ({ ...e, group: "env" })),
     ...inputEdges.map((e) => ({ ...e, group: "in" })),
     ...outputEdges.map((e) => ({ ...e, group: "out" })),
   ];
@@ -1666,12 +1892,17 @@ function buildFlow(
   const { nodes: positioned, routes } = layeredLayout(
     ids,
     layoutEdges,
-    (id) => nodeData(id, byName, groups, sequence, showOrder, workflow, inspect),
+    (id) =>
+      nodeData(id, byName, groups, sequence, showOrder, workflow, inspect, {
+        stacks,
+        envGroups,
+        onPick,
+      }),
     {
       // The shared run-graph spacing: columns wide enough for a capped node
       // plus a gap the wires can turn in.
       ...STEP_LAYOUT,
-      heightOf: (id) => nodeHeight(id, byName, inspect),
+      heightOf: (id) => nodeHeight(id, byName, inspect, stacks),
       // Variables and input files are inputs to the run, not steps of it, so
       // they take columns of their own to the left — variables outside the
       // files, so the two kinds read as two columns rather than one pile.
@@ -1681,7 +1912,13 @@ function buildFlow(
       // column themselves when the files are off — an empty column between the
       // inputs and the run is just a gap to scroll past.
       pin: (id) =>
-        envKeyOf(id) !== null ? (showFiles ? -2 : -1) : id.startsWith("in::") ? -1 : undefined,
+        envKeyOf(id) !== null || envGroupOf(id) !== null
+          ? showFiles
+            ? -2
+            : -1
+          : id.startsWith("in::")
+            ? -1
+            : undefined,
       // Background tasks sit in a row underneath rather than in a column,
       // because a column would claim they gate what follows them. They don't.
       bottom: (id) => byName.get(id)?.background ?? false,
@@ -1690,24 +1927,36 @@ function buildFlow(
 
   const nodes: Node[] = positioned.map((node) => ({
     ...node,
-    style: nodeStyle(node.id, byName, theme, focus, inspect, node.data?.variable as EnvVar | undefined),
+    style: nodeStyle(
+      node.id,
+      byName,
+      theme,
+      focus,
+      inspect,
+      node.data?.variable as EnvVar | undefined,
+      stacks,
+      envGroups,
+    ),
   }));
   const route = (source: string, target: string) => ({
     route: routes.get(routeKey(source, target)),
   });
 
   // ── the edges ────────────────────────────────────────────────────────────
-  const edges: Edge[] = workflow.edges.map((edge, index) => {
+  const edges: Edge[] = viewEdges.map((edge) => {
     // An edge survives the dimming only if both ends did — so a focused node's
     // chain keeps the order between its steps, and everything else recedes.
     const on = focus.lit(edge.from) && focus.lit(edge.to);
     // Inspect mode: the edge along which an upstream step held this one back
     // from its cache. That's the relationship being asked about, so it's the
     // one drawn loudest.
+    const upstream = membersOf(edge.from);
     const blocking =
       inspect &&
       edge.kind === "needs" &&
-      (byName.get(edge.to)?.cache?.blocked_by.includes(edge.from) ?? false);
+      membersOf(edge.to).some((to) =>
+        (byName.get(to)?.cache?.blocked_by ?? []).some((from) => upstream.includes(from)),
+      );
     const stroke = blocking
       ? theme.palette.error.main
       : edge.kind === "error"
@@ -1722,7 +1971,7 @@ function buildFlow(
 
     return {
       ...ROUTED_EDGE,
-      id: `${edge.from}->${edge.to}-${index}`,
+      id: `${edge.from}->${edge.to}-${edge.kind}`,
       source: edge.from,
       target: edge.to,
       data: route(edge.from, edge.to),
@@ -1733,7 +1982,7 @@ function buildFlow(
       labelBgStyle: { fill: theme.palette.background.paper },
       labelBgPadding: [4, 2] as [number, number],
       labelBgBorderRadius: 4,
-      animated: byName.get(edge.from)?.status === "running",
+      animated: upstream.some((name) => byName.get(name)?.status === "running"),
       // Lifted above its neighbours while it is part of what you asked about.
       zIndex: on && focus.id !== null ? 1 : 0,
       markerEnd: { ...ROUTED_EDGE.markerEnd, color: stroke },
@@ -1783,12 +2032,18 @@ function buildFlow(
       edges.push(...dependencyEdge(edge.source, edge.target, colour));
     }
   }
+  for (const [group, members] of envGroups) {
+    const colour = envGroupColour(group, members, theme);
+    for (const edge of groupEdges.filter((e) => e.source === envGroupNodeId(group))) {
+      edges.push(...dependencyEdge(edge.source, edge.target, colour));
+    }
+  }
   for (const edge of inputEdges) {
     edges.push(...dependencyEdge(edge.source, edge.target, theme.palette.info.main));
   }
   for (const step of producers) {
     edges.push(
-      ...dependencyEdge(step.name, outputNodeId(step.name), theme.palette.success.main, {
+      ...dependencyEdge(nodeOf(step.name), outputNodeId(step.name), theme.palette.success.main, {
         // A finished step's outputs are on disk; a running one's are being
         // written as you watch.
         animated: step.status === "running",
@@ -1800,9 +2055,65 @@ function buildFlow(
 }
 
 /**
+ * Which workflow files to stack, and the step on top of each.
+ *
+ * A workflow file is a sub-workspace's contribution to the graph, so its steps
+ * are the ones sharing a `workspace`. Recovery steps and background tasks stay
+ * nodes of their own: one is a branch a failure jumps to, the other gates
+ * nothing, and folding either into the stack would hide the wire that says so.
+ *
+ * Nothing is stacked when the graph is a single workflow file — the stack
+ * would be the whole graph, one node with everything behind a menu.
+ *
+ * On top: the step that's been picked (`selected`, then the last choice made
+ * from the stack's own list), else the one worth looking at — running, then
+ * failed, then the first still to run, then the last.
+ */
+function workflowStacks(
+  workflow: WorkflowView,
+  chosen: Record<string, string>,
+  selected: string | null,
+): Stacks {
+  const files = new Map<string, StepView[]>();
+  for (const step of workflow.steps) {
+    if (step.recover || step.background) continue;
+    const key = step.workspace ?? "";
+    files.set(key, [...(files.get(key) ?? []), step]);
+  }
+  if (files.size < 2) return NO_STACKS;
+
+  const stacks: Stacks = { members: new Map(), of: new Map(), top: new Map() };
+  for (const [key, steps] of files) {
+    if (steps.length < 2) continue;
+    const names = steps.map((s) => s.name);
+    stacks.members.set(key, names);
+    for (const name of names) stacks.of.set(name, key);
+    const top =
+      [selected, chosen[key]].find((name) => name && names.includes(name)) ??
+      steps.find((s) => s.status === "running" || s.status === "restoring")?.name ??
+      steps.find((s) => s.status === "failed")?.name ??
+      steps.find((s) => s.status === "pending")?.name ??
+      names[names.length - 1];
+    stacks.top.set(key, top);
+  }
+  return stacks;
+}
+
+/**
+ * What a stack's border says: the worst thing happening in it. A failure in a
+ * step underneath must not hide behind a successful one on top.
+ */
+function stackStatus(steps: StepView[], top: StepView): StepStatus {
+  for (const status of ["failed", "running", "restoring", "stopped"] as StepStatus[]) {
+    if (steps.some((s) => s.status === status)) return status;
+  }
+  return top.status;
+}
+
+/**
  * What a workflow file says about a variable: `required_env` makes it
  * required, its `env` list makes it optional. Anything else is a variable the
- * steps happen to read, which the workflow never declared either way.
+ * steps test in a condition, which the workflow never declared either way.
  */
 type EnvRole = "required" | "optional" | null;
 
@@ -1833,6 +2144,15 @@ function envColour(variable: EnvVar, theme: Theme): string {
   return theme.palette.text.secondary;
 }
 
+/** A group of variables' colour: its members' role, or red if any of them is
+ *  a required variable nothing set. */
+function envGroupColour(group: EnvGroup, variables: EnvVar[], theme: Theme): string {
+  if (variables.some(unsetProblem)) return theme.palette.error.main;
+  if (group === "required") return theme.palette.warning.main;
+  if (group === "optional") return theme.palette.info.main;
+  return theme.palette.text.secondary;
+}
+
 /** What each kind of node puts on the canvas. */
 function nodeData(
   id: string,
@@ -1842,7 +2162,40 @@ function nodeData(
   showOrder: boolean,
   workflow: WorkflowView,
   inspect: boolean,
+  view: {
+    stacks: Stacks;
+    envGroups: Map<EnvGroup, EnvVar[]>;
+    onPick: (stack: string, step: string) => void;
+  },
 ): Record<string, unknown> {
+  const stack = stackKeyOf(id);
+  if (stack !== null) {
+    const steps = (view.stacks.members.get(stack) ?? [])
+      .map((name) => byName.get(name))
+      .filter((s): s is StepView => s !== undefined);
+    const top = byName.get(view.stacks.top.get(stack) ?? "") ?? steps[0];
+    return {
+      label: (
+        <StackNodeLabel
+          steps={steps}
+          top={top}
+          order={showOrder ? (sequence.get(top.name) ?? null) : null}
+          inspect={inspect}
+          onPick={(name) => view.onPick(stack, name)}
+        />
+      ),
+      status: stackStatus(steps, top),
+    };
+  }
+
+  const envGroup = envGroupOf(id);
+  if (envGroup !== null) {
+    return {
+      label: <EnvGroupLabel group={envGroup} variables={view.envGroups.get(envGroup) ?? []} />,
+      status: "pending" as StepStatus,
+    };
+  }
+
   const step = byName.get(id);
   if (step) {
     return {
@@ -1891,6 +2244,8 @@ function nodeStyle(
   focus: Focus,
   inspect: boolean,
   variable?: EnvVar,
+  stacks: Stacks = NO_STACKS,
+  envGroups: Map<EnvGroup, EnvVar[]> = new Map(),
 ): React.CSSProperties {
   // The ring marks the node that was *clicked*, not everything the click lit
   // up. With a step's whole upstream chain lit, ringing all of it would say
@@ -1903,7 +2258,7 @@ function nodeStyle(
     // Bounded, so a node can't grow across the gap the wires route through. A
     // long name wraps inside the box instead of widening it.
     width: NODE_WIDTH,
-    height: nodeHeight(id, byName, inspect),
+    height: nodeHeight(id, byName, inspect, stacks),
     // Border-box, so a border thickening on focus eats into the node rather
     // than growing it off the height the wires were routed to.
     boxSizing: "border-box" as const,
@@ -1914,6 +2269,59 @@ function nodeStyle(
     opacity: focus.lit(id) ? 1 : DIMMED,
     boxShadow: picked ? `0 0 0 3px ${theme.palette.secondary.main}55` : undefined,
   };
+
+  const stack = stackKeyOf(id);
+  if (stack !== null) {
+    const steps = (stacks.members.get(stack) ?? [])
+      .map((name) => byName.get(name))
+      .filter((s): s is StepView => s !== undefined);
+    const top = byName.get(stacks.top.get(stack) ?? "") ?? steps[0];
+    const border =
+      inspect && !top.recover
+        ? cacheTone(top.cache, theme)
+        : statusColor(stackStatus(steps, top), theme);
+    const base = stepNodeStyle({
+      theme,
+      height: common.height,
+      opacity: common.opacity,
+      picked,
+      border,
+    });
+    // The cards underneath: offset outlines behind the node, one for a stack
+    // of two and two for anything deeper — enough to read as a pile without
+    // claiming to count it. The count is in the strip across the top.
+    const card = (offset: number) => [
+      `${offset}px ${offset}px 0 -2px ${theme.palette.background.paper}`,
+      `${offset}px ${offset}px 0 0 ${border}99`,
+    ];
+    return {
+      ...base,
+      flexDirection: "column",
+      alignItems: "stretch",
+      padding: "0 12px 6px",
+      boxShadow: [
+        ...(picked ? [`0 0 0 3px ${theme.palette.secondary.main}55`] : []),
+        ...card(4),
+        ...(steps.length > 2 ? card(8) : []),
+      ].join(", "),
+      overflow: "visible",
+    };
+  }
+
+  const group = envGroupOf(id);
+  if (group !== null) {
+    const colour = envGroupColour(group, envGroups.get(group) ?? [], theme);
+    return {
+      ...common,
+      border: `${picked || group === "required" ? 2 : 1}px ${
+        picked || group === "required" ? "solid" : "dashed"
+      } ${colour}`,
+      borderRadius: 18,
+      fontSize: 11,
+      padding: "0 10px",
+      cursor: "pointer",
+    };
+  }
 
   const step = byName.get(id);
   if (step) {
@@ -2079,6 +2487,272 @@ function EnvNodeLabel({ variable }: { variable: EnvVar }) {
         )}
       </Box>
     </Box>
+  );
+}
+
+/**
+ * A group of variables on the canvas: how many, of which kind, and the first
+ * few names — enough to recognise the group without opening it.
+ */
+function EnvGroupLabel({ group, variables }: { group: EnvGroup; variables: EnvVar[] }) {
+  const theme = useTheme();
+  const colour = envGroupColour(group, variables, theme);
+  const Icon = group === "required" ? RequiredIcon : OptionalIcon;
+  const unset = variables.filter(unsetProblem).length;
+  return (
+    <Box
+      sx={{ fontFamily: monoFontStack, minWidth: 0, flexGrow: 1 }}
+      title={`${variables.length} ${ENV_GROUP_INFO[group].label} variables — ${
+        ENV_GROUP_INFO[group].why
+      }. Click to search them.\n\n${variables.map((v) => v.key).join("\n")}`}
+    >
+      <Box sx={{ display: "flex", alignItems: "center", gap: 0.5, minWidth: 0 }}>
+        {group !== "undeclared" && <Icon sx={{ fontSize: 12, color: colour, flexShrink: 0 }} />}
+        <Box sx={{ ...oneLine(LINE.name), fontWeight: 700, minWidth: 0 }}>
+          {variables.length} {ENV_GROUP_INFO[group].label}
+        </Box>
+        <SearchIcon sx={{ fontSize: 13, ml: "auto", opacity: 0.6, flexShrink: 0 }} />
+      </Box>
+      <Box sx={{ ...oneLine(LINE.name), opacity: 0.75, minWidth: 0 }}>
+        {unset > 0 ? `${unset} unset · ` : ""}
+        {variables.map((v) => v.key).join(", ")}
+      </Box>
+    </Box>
+  );
+}
+
+/**
+ * A stacked workflow file: a strip across the top saying which of its steps
+ * is showing, which opens the list of all of them, and the step on top drawn
+ * the way any step is.
+ *
+ * Clicks inside the strip and its menu stop at the menu. The menu is portalled
+ * out of the node, but React still bubbles its events through the node, and a
+ * click reaching react-flow would also select the stack.
+ */
+function StackNodeLabel({
+  steps,
+  top,
+  order,
+  inspect,
+  onPick,
+}: {
+  steps: StepView[];
+  top: StepView;
+  order: number | null;
+  inspect: boolean;
+  onPick: (name: string) => void;
+}) {
+  const [anchor, setAnchor] = useState<HTMLElement | null>(null);
+  const stop = (event: React.SyntheticEvent) => event.stopPropagation();
+  const index = steps.findIndex((s) => s.name === top.name);
+  return (
+    <Box sx={{ display: "flex", flexDirection: "column", minWidth: 0, flexGrow: 1 }}>
+      <Box
+        component="button"
+        type="button"
+        className="nodrag nopan"
+        title="Choose the step shown on top of this workflow file"
+        onClick={(event: React.MouseEvent<HTMLElement>) => {
+          stop(event);
+          setAnchor(event.currentTarget);
+        }}
+        sx={{
+          all: "unset",
+          boxSizing: "border-box",
+          height: STACK_HEADER,
+          display: "flex",
+          alignItems: "center",
+          gap: 0.5,
+          mx: -1.5,
+          px: 1.5,
+          fontSize: 10,
+          color: "text.secondary",
+          borderBottom: 1,
+          borderColor: "divider",
+          cursor: "pointer",
+          flexShrink: 0,
+          "&:hover": { color: "text.primary", bgcolor: "action.hover" },
+        }}
+      >
+        <LayersIcon sx={{ fontSize: 12 }} />
+        <Box component="span" sx={{ fontWeight: 600 }}>
+          step {index + 1} of {steps.length}
+        </Box>
+        <ArrowDropDownIcon sx={{ fontSize: 16, ml: "auto" }} />
+      </Box>
+      <Box sx={{ display: "flex", alignItems: "center", flexGrow: 1, minWidth: 0 }}>
+        <NodeLabel step={top} order={order} inspect={inspect} />
+      </Box>
+      <Menu
+        anchorEl={anchor}
+        open={anchor !== null}
+        onClose={() => setAnchor(null)}
+        onClick={stop}
+        onMouseDown={stop}
+      >
+        <ListSubheader sx={{ lineHeight: "32px" }}>
+          {top.workspace ? `${top.workspace} · ` : ""}
+          {steps.length} steps, in order
+        </ListSubheader>
+        {steps.map((step, i) => (
+          <MenuItem
+            key={step.name}
+            selected={step.name === top.name}
+            dense
+            onClick={() => {
+              setAnchor(null);
+              onPick(step.name);
+            }}
+          >
+            <Stack direction="row" spacing={1} alignItems="center" sx={{ minWidth: 0 }}>
+              <Typography variant="caption" color="text.secondary" sx={{ width: 16 }}>
+                {i + 1}
+              </Typography>
+              <StatusIcon status={step.status} />
+              <Typography variant="body2" sx={{ fontFamily: monoFontStack }}>
+                {step.name}
+              </Typography>
+              {step.description && (
+                <Typography variant="caption" color="text.secondary" noWrap sx={{ maxWidth: 260 }}>
+                  {step.description}
+                </Typography>
+              )}
+            </Stack>
+          </MenuItem>
+        ))}
+      </Menu>
+    </Box>
+  );
+}
+
+/**
+ * The graph header's variable search, shown when the variables are drawn as
+ * their groups. Picking one draws it on its own and lights the steps it
+ * feeds — the same as picking it from its group.
+ */
+function VariableSearch({
+  variables,
+  onPick,
+}: {
+  variables: EnvVar[];
+  onPick: (key: string) => void;
+}) {
+  const options = [...variables].sort(
+    (a, b) =>
+      ENV_GROUPS.indexOf(envGroupOfVariable(a)) - ENV_GROUPS.indexOf(envGroupOfVariable(b)) ||
+      a.key.localeCompare(b.key),
+  );
+  return (
+    <Autocomplete
+      size="small"
+      options={options}
+      groupBy={(v) => ENV_GROUP_INFO[envGroupOfVariable(v)].label}
+      getOptionLabel={(v) => v.key}
+      value={null}
+      blurOnSelect
+      clearOnBlur
+      onChange={(_, v) => v && onPick(v.key)}
+      renderOption={(props, v) => (
+        <li {...props} key={v.key}>
+          <Box sx={{ minWidth: 0 }}>
+            <Typography variant="body2" sx={{ fontFamily: monoFontStack }} noWrap>
+              {v.key}
+            </Typography>
+            <Typography variant="caption" color="text.secondary" noWrap component="div">
+              {envValueText(v)}
+            </Typography>
+          </Box>
+        </li>
+      )}
+      renderInput={(params) => (
+        <TextField
+          {...params}
+          placeholder={`Search ${variables.length} variables`}
+          InputProps={{
+            ...params.InputProps,
+            startAdornment: (
+              <InputAdornment position="start">
+                <SearchIcon sx={{ fontSize: 16 }} />
+              </InputAdornment>
+            ),
+          }}
+        />
+      )}
+      sx={{ width: 200, flexShrink: 0, "& .MuiInputBase-root": { py: 0, fontSize: 12 } }}
+    />
+  );
+}
+
+/**
+ * A focused group of variables: every one in it, searchable. Picking one draws
+ * it as its own node, so its wires — not the group's — are the lit ones.
+ */
+function EnvGroupNote({
+  group,
+  variables,
+  onPick,
+  onClear,
+}: {
+  group: EnvGroup;
+  variables: EnvVar[];
+  onPick: (key: string) => void;
+  onClear: () => void;
+}) {
+  const [query, setQuery] = useState("");
+  const needle = query.trim().toLowerCase();
+  const matches = variables.filter(
+    (v) =>
+      needle === "" ||
+      v.key.toLowerCase().includes(needle) ||
+      envValueText(v).toLowerCase().includes(needle),
+  );
+  return (
+    <Stack spacing={1} sx={{ py: 0.5 }}>
+      <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
+        <Typography variant="body2" sx={{ fontWeight: 600 }}>
+          {variables.length} {ENV_GROUP_INFO[group].label} variables
+        </Typography>
+        <Typography variant="caption" color="text.secondary" sx={{ flexGrow: 1 }}>
+          {ENV_GROUP_INFO[group].why}. Click one to draw it on its own.
+        </Typography>
+        <TextField
+          size="small"
+          autoFocus
+          placeholder="Search by name or value"
+          value={query}
+          onChange={(event) => setQuery(event.target.value)}
+          InputProps={{
+            startAdornment: (
+              <InputAdornment position="start">
+                <SearchIcon sx={{ fontSize: 16 }} />
+              </InputAdornment>
+            ),
+          }}
+          sx={{ width: 240, "& .MuiInputBase-root": { fontSize: 12 } }}
+        />
+        <Button size="small" onClick={onClear}>
+          Clear
+        </Button>
+      </Stack>
+      <Stack direction="row" spacing={0.75} flexWrap="wrap" useFlexGap>
+        {matches.map((variable) => (
+          <Box
+            key={variable.key}
+            component="span"
+            onClick={() => onPick(variable.key)}
+            sx={{ cursor: "pointer" }}
+          >
+            <EnvVarChip variable={variable} />
+          </Box>
+        ))}
+        {matches.length === 0 && (
+          <Typography variant="caption" color="text.secondary">
+            No {ENV_GROUP_INFO[group].label} variable matches “{query}”.
+          </Typography>
+        )}
+      </Stack>
+    </Stack>
   );
 }
 

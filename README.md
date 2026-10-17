@@ -198,6 +198,7 @@ artifacts are published from. For workflows it goes one level further out: the
 | `ciabatta remote-cache <init\|start\|login\|logout\|status\|add-user>` | Run or connect to a shared cache the whole team reads from. |
 | `ciabatta releases <list\|push\|pull>` | Versioned releases: list what's been published, or push and pull one by hand. See [Releases](#releases). |
 | `ciabatta self update` | Update this binary from the remote cache that serves it, verified against the SHA-256 it advertises. |
+| `ciabatta self lint` | Compile every workflow in the workspace and list each one that's broken — a file that won't parse, a `needs`/`depends_on`/`on_error` naming something that doesn't exist, a dependency cycle, a push to an undefined registry. Exits non-zero on any (`--json` for CI). |
 | `ciabatta convert --script PATH` | Turn an existing script into a workflow: its tools, its variables, its outputs, and the description in its header. |
 | `ciabatta register` | Tell the daemon this checkout exists, so it shows up in the web app's project switcher. `init` does this for you. |
 | `ciabatta config migrate` | Convert this checkout's TOML config files to YAML. |
@@ -1036,8 +1037,10 @@ itself is never written down. `cache.env` is only for a variable a build reads
 from the ambient environment without declaring it. (`REQUIRED_ENV`, the
 spelling before 0.6.0, still works.)
 
-The run page shows both lists — `required_env` first, then `env`, then anything
-else the steps read — and marks every variable that is part of a cache key.
+The run page shows both lists — `required_env` first, then `env`, then the
+variables a step's `when`/`skip_if` conditions test — and marks every variable
+that is part of a cache key. Commands and scripts aren't scanned for `$VAR`:
+a variable a build depends on belongs in `env` or `required_env`.
 
 The third is what makes a *graph* cacheable rather than just a directory. Change
 a `.proto` file and `proto:generate` misses; its outputs change; every stage

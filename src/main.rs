@@ -2913,13 +2913,38 @@ fn print_remote_status(url: &str, stats: &serde_json::Value) {
 
 // ─── self update ────────────────────────────────────────────────────────────
 
+/// `ciabatta self lint`: every workflow in the workspace, checked at once.
+fn cmd_self_lint(json: bool) -> Result<()> {
+    let cwd = std::env::current_dir()?;
+    let root = workspace::find_workspace_root(&cwd).ok_or_else(|| {
+        anyhow::anyhow!(
+            "No ciabatta workspace found at or above '{}'.",
+            cwd.display()
+        )
+    })?;
+    let report = workspace::lint::lint(&root)?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        print!("{}", workspace::lint::render(&report));
+    }
+    if !report.is_clean() {
+        // The report already said what's wrong; this is for the exit code.
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
 /// Dispatch `ciabatta self update`.
 ///
 /// The binary comes from the cache the workspace already trusts for artifacts,
 /// and is verified against the SHA-256 that cache advertised before anything on
 /// disk is touched.
 async fn cmd_self(subcommand: SelfCommand) -> Result<()> {
-    let SelfCommand::Update { from, check, force } = subcommand;
+    let (from, check, force) = match subcommand {
+        SelfCommand::Update { from, check, force } => (from, check, force),
+        SelfCommand::Lint { json } => return cmd_self_lint(json),
+    };
 
     let url = match from {
         Some(url) => url,

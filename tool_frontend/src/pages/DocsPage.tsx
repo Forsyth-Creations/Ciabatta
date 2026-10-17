@@ -568,6 +568,10 @@ const COMMANDS: CommandGroup[] = [
         note: "Inspect or restart the background daemon serving this app. You rarely need it — any command with a web view starts it.",
       },
       { usage: "ciabatta self update", note: "Update this binary from the remote cache serving it." },
+      {
+        usage: "ciabatta self lint",
+        note: "Compile every workflow in the workspace, as a run would, and list each broken one under the file to fix: a config that won't parse, a needs / depends_on / on_error naming something that doesn't exist, a dependency cycle, a push to an undefined registry. Exits non-zero on any; --json for CI.",
+      },
     ],
   },
 ];
@@ -1619,15 +1623,28 @@ required_env: [API_URL, DEPLOY_TOKEN] # must be set, or the run won't start`}</P
           is decided by the <C>.env</C> the run sources — and so by the elected env profile — or
           by the terminal. Unlike <C>required_env</C>, a name in <C>env</C> may be unset. On the
           run graph, required variables are drawn solid with a ✱ and optional ones dashed with a
-          ?, each wired to the steps of the workflow that declares it.
+          ?, each wired to the steps of the workflow that declares it. Past six variables the graph
+          draws them as their groups — <em>required</em>, <em>optional</em> and{" "}
+          <em>undeclared</em> — instead: click a group to list and search its variables, or use the
+          search box above the graph, and the one you pick is drawn on its own.
+        </P>
+        <P>
+          On a graph spanning several workflow files, a file with more than one step is drawn as a
+          single stacked node — the <strong>Stack</strong> toggle above the graph turns this off.
+          The strip across the top of the stack (<C>step 2 of 3 ▾</C>) opens the list of its steps;
+          picking one puts it on top and opens its logs. The stack&apos;s border shows the worst
+          status inside it, so a failed step underneath is never hidden.
         </P>
         <P>
           Both lists key the cache. <C>required_env</C> values go in as a SHA-256 digest — that is
           where tokens get declared, and cache manifests are shared through the remote cache — so
           a new token still rebuilds, but the token itself is never written down. The run page
-          shows <C>required_env</C>, then <C>env</C>, then whatever else the steps read, and
-          marks each variable that is part of a cache key with a fingerprint.{" "}
-          <C>REQUIRED_ENV</C>, the spelling before 0.6.0, still works.
+          shows <C>required_env</C>, then <C>env</C>, then the variables a step&apos;s{" "}
+          <C>when</C>/<C>skip_if</C> conditions test, and marks each variable that is part of a cache key with a fingerprint.{" "}
+          <C>REQUIRED_ENV</C>, the spelling before 0.6.0, still works. Commands and scripts
+          aren&apos;t scanned for <C>$VAR</C> — guessing at shell text found loop counters and
+          variables a script sets itself, and missed everything a build tool reads on its own — so
+          a variable a step depends on belongs in one of the two lists.
         </P>
 
         <SubHeading>Where values come from</SubHeading>

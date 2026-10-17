@@ -365,7 +365,7 @@ pub fn render(targets: &[TargetDeps], workflow: &str) -> Option<String> {
         let undeclared = target.undeclared_env();
         if target.cached && !undeclared.is_empty() {
             out.push_str(&format!(
-                "  {:width$}  ⚠ reads {} without declaring {} in `cache.env`\n",
+                "  {:width$}  ⚠ tests {} in a condition without declaring {} in `cache.env`\n",
                 "",
                 undeclared.join(", "),
                 if undeclared.len() == 1 { "it" } else { "them" },
@@ -450,6 +450,7 @@ mod tests {
         let step = RunStep {
             name: "build".into(),
             run: Some("cargo build --release --target $TARGET".into()),
+            when: vec!["TARGET != none".into()],
             needs: vec!["generate".into()],
             ..Default::default()
         };
@@ -470,8 +471,9 @@ mod tests {
         assert_eq!(target.needs, vec!["generate".to_string()]);
         assert!(target.cached);
 
-        // The variable the command reads but nobody declared: not in the key,
-        // and so the one worth saying out loud.
+        // The variable its condition tests but nobody declared: not in the
+        // key, and so the one worth saying out loud. (`$TARGET` in the command
+        // isn't read — only what the step names outright.)
         assert_eq!(target.undeclared_env(), vec!["TARGET"]);
 
         let text = render(&deps, "build").expect("a target to report");

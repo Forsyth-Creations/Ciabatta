@@ -568,6 +568,10 @@ const COMMANDS: CommandGroup[] = [
         note: "Inspect or restart the background daemon serving this app. You rarely need it — any command with a web view starts it.",
       },
       { usage: "ciabatta self update", note: "Update this binary from the remote cache serving it." },
+      {
+        usage: "ciabatta self lint",
+        note: "Compile every workflow in the workspace, as a run would, and list each broken one under the file to fix: a config that won't parse, a needs / depends_on / on_error naming something that doesn't exist, a dependency cycle, a push to an undefined registry. Exits non-zero on any; --json for CI.",
+      },
     ],
   },
 ];

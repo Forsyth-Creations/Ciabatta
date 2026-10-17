@@ -16,6 +16,7 @@
 //! * [`render`] draws that graph, and lists what's available across the repo.
 
 pub mod graph;
+pub mod lint;
 pub mod render;
 
 use std::collections::{BTreeMap, HashSet};
@@ -432,17 +433,53 @@ impl Workspace {
 
     /// Load the workspace rooted at `root`.
     pub fn load(root: &Path) -> Result<Self> {
+        let mut members: Vec<Member> = Vec::new();
+        for dir in Self::member_dirs_under(root)? {
+            members.push(load_member(root, &dir)?);
+        }
+        let workspace = Self::assemble(root, members);
+        workspace.check_unique_names()?;
+        Ok(workspace)
+    }
+
+    /// Load what can be loaded, and say what couldn't: a workspace of every
+    /// member whose config parses, and each one that didn't with its error.
+    ///
+    /// [`Self::load`] stops at the first broken file, which is right for a run
+    /// — it can't run half a graph — and wrong for `ciabatta self lint`,
+    /// whose job is to list every broken thing at once. Duplicate names are
+    /// returned as a problem too, rather than refusing the whole workspace.
+    pub fn load_lenient(root: &Path) -> Result<(Self, Vec<(PathBuf, anyhow::Error)>)> {
+        let mut members: Vec<Member> = Vec::new();
+        let mut broken: Vec<(PathBuf, anyhow::Error)> = Vec::new();
+        for dir in Self::member_dirs_under(root)? {
+            match load_member(root, &dir) {
+                Ok(member) => members.push(member),
+                Err(e) => broken.push((dir, e)),
+            }
+        }
+        let workspace = Self::assemble(root, members);
+        if let Err(e) = workspace.check_unique_names() {
+            broken.push((root.to_path_buf(), e));
+        }
+        Ok((workspace, broken))
+    }
+
+    fn member_dirs_under(root: &Path) -> Result<Vec<PathBuf>> {
         let mut dirs: Vec<PathBuf> = Vec::new();
         collect_member_dirs(root, 0, &mut dirs)?;
         dirs.sort();
+        Ok(dirs)
+    }
 
+    /// The workspace made of these members, in path order.
+    fn assemble(root: &Path, loaded: Vec<Member>) -> Self {
         let mut members: Vec<Member> = Vec::new();
         let mut toolchain: BTreeMap<String, ToolSpec> = BTreeMap::new();
         let mut env: BTreeMap<String, String> = BTreeMap::new();
         let mut root_meta = WorkspaceMeta::default();
 
-        for dir in dirs {
-            let member = load_member(root, &dir)?;
+        for member in loaded {
             if member.rel == "." {
                 root_meta = member.meta.clone();
             }
@@ -462,15 +499,13 @@ impl Workspace {
             members.push(member);
         }
 
-        let workspace = Workspace {
+        Workspace {
             root: root.to_path_buf(),
             members,
             root_meta,
             toolchain,
             env,
-        };
-        workspace.check_unique_names()?;
-        Ok(workspace)
+        }
     }
 
     /// Look up a member by name.

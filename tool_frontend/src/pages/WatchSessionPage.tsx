@@ -3,9 +3,13 @@
  *
  * The log is virtualized — the buffer holds up to 200,000 lines, so rendering
  * them all would be hopeless. Only the visible slice is ever in the DOM.
+ *
+ * Search finds lines in place rather than filtering down to them: matches are
+ * tinted where they sit and Enter steps between them, so each is read with
+ * the lines around it. The daemon does the matching, over its whole buffer.
  */
 
-import { useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   Alert,
   Box,
@@ -14,7 +18,6 @@ import {
   Divider,
   Drawer,
   IconButton,
-  InputAdornment,
   ListItemIcon,
   ListItemText,
   Menu,
@@ -27,7 +30,7 @@ import {
   Tooltip,
   Typography,
 } from "@mui/material";
-import { useTheme } from "@mui/material/styles";
+import { alpha, useTheme } from "@mui/material/styles";
 import ArrowBackIcon from "@mui/icons-material/ArrowBack";
 import BookmarkAddIcon from "@mui/icons-material/BookmarkAdd";
 import BookmarkIcon from "@mui/icons-material/Bookmark";
@@ -37,7 +40,6 @@ import DownloadIcon from "@mui/icons-material/Download";
 import IosShareIcon from "@mui/icons-material/IosShare";
 import NotificationsActiveIcon from "@mui/icons-material/NotificationsActive";
 import ScheduleIcon from "@mui/icons-material/Schedule";
-import SearchIcon from "@mui/icons-material/Search";
 import StopIcon from "@mui/icons-material/Stop";
 import VerticalAlignBottomIcon from "@mui/icons-material/VerticalAlignBottom";
 import { Link, useParams } from "@tanstack/react-router";
@@ -45,13 +47,29 @@ import { useMutation } from "@tanstack/react-query";
 import { useVirtualizer } from "@tanstack/react-virtual";
 
 import { api, downloadText } from "../api/client";
-import { useSearch, useStopSession, type LogLine } from "../api/watch";
+import { useSearch, useStopSession, type Bookmark, type LogLine } from "../api/watch";
 import { useWatchStream } from "../hooks/useWatchStream";
 import { AnsiText, stripAnsi } from "../components/AnsiText";
 import { ErrorNote, Loading } from "../components/Page";
+import { FindBar, stepMatch } from "../components/FindBar";
 import { monoFontStack } from "../theme";
 
 const LINE_HEIGHT = 20;
+
+/** Where line `seq` is in `lines`, which are in `seq` order; -1 when it has
+ *  dropped out of the buffer. A binary search: the buffer runs to 200,000. */
+function indexOfSeq(lines: LogLine[], seq: number): number {
+  let low = 0;
+  let high = lines.length - 1;
+  while (low <= high) {
+    const mid = (low + high) >> 1;
+    const at = lines[mid].seq;
+    if (at === seq) return mid;
+    if (at < seq) low = mid + 1;
+    else high = mid - 1;
+  }
+  return -1;
+}
 
 export function WatchSessionPage() {
   const { sessionId } = useParams({ from: "/watch/$sessionId" });
@@ -68,11 +86,29 @@ export function WatchSessionPage() {
 
   const search = useSearch(id, query, mode, false);
   const searching = query.trim().length > 0;
+  // The match that Enter last stepped to, by its place among the matches.
+  const [current, setCurrent] = useState(0);
+  // A line to point out for a moment — the one a bookmark was clicked for.
+  const [flash, setFlash] = useState<number | null>(null);
 
-  // When searching, the list shows matches instead of the live tail.
-  const rows: LogLine[] = useMemo(
-    () => (searching ? (search.data?.lines ?? []) : stream.lines),
-    [searching, search.data, stream.lines],
+  // The whole log, always: a search marks lines, it doesn't hide the others.
+  const rows: LogLine[] = stream.lines;
+  // Matches still in the page's copy of the log, in order. One that has
+  // dropped off the front of the buffer has nowhere to be shown.
+  const matches = useMemo(
+    () =>
+      searching
+        ? (search.data?.lines ?? [])
+            .map((line) => line.seq)
+            .filter((seq) => indexOfSeq(rows, seq) !== -1)
+        : [],
+    [searching, search.data, rows],
+  );
+  const matched = useMemo(() => new Set(matches), [matches]);
+  const currentSeq = matches.length > 0 ? matches[Math.min(current, matches.length - 1)] : null;
+  const marked = useMemo(
+    () => new Map(stream.bookmarks.map((mark) => [mark.seq, mark])),
+    [stream.bookmarks],
   );
 
   const parentRef = useRef<HTMLDivElement>(null);
@@ -109,13 +145,13 @@ export function WatchSessionPage() {
   // as follow-on, which is what it already was: no need to tell the two apart.
   const onScroll = () => {
     const el = parentRef.current;
-    if (!el || searching) return;
+    if (!el) return;
     const bottom = atBottom(el);
     if (bottom !== followRef.current) setFollowing(bottom);
   };
 
-  // Stick to the bottom while following. Only while not searching — jumping the
-  // view around under someone reading search results would be hostile.
+  // Stick to the bottom while following. Stepping to a match turns following
+  // off, so a match being read isn't scrolled away by the next line of output.
   //
   // Setting scrollTop directly rather than going through the virtualizer:
   // `scrollToIndex` schedules retries on later frames to land accurately on
@@ -126,9 +162,42 @@ export function WatchSessionPage() {
   // no visible jump.
   useLayoutEffect(() => {
     const el = parentRef.current;
-    if (!el || !follow || searching || rows.length === 0) return;
+    if (!el || !follow || rows.length === 0) return;
     el.scrollTop = el.scrollHeight;
-  }, [rows.length, follow, searching]);
+  }, [rows.length, follow]);
+
+  /** Bring line `seq` into the middle of the view, and stop following. */
+  const showLine = (seq: number) => {
+    const el = parentRef.current;
+    const index = indexOfSeq(rows, seq);
+    if (!el || index === -1) return;
+    setFollowing(false);
+    el.scrollTop = index * LINE_HEIGHT - el.clientHeight / 2 + LINE_HEIGHT / 2;
+  };
+  const showMatch = (index: number) => {
+    if (matches[index] === undefined) return;
+    setCurrent(index);
+    showLine(matches[index]);
+  };
+
+  // New results start at the first match from where you're reading, the way
+  // a browser's find does — not back at the top of the log.
+  useEffect(() => {
+    const el = parentRef.current;
+    if (!el || matches.length === 0) return;
+    const top = rows[Math.floor(el.scrollTop / LINE_HEIGHT)]?.seq ?? 0;
+    const next = matches.findIndex((seq) => seq >= top);
+    showMatch(next === -1 ? 0 : next);
+    // Only for a new set of results: output arriving mustn't move the view.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [search.data]);
+
+  const jumpToBookmark = (mark: Bookmark) => {
+    setSidebar(false);
+    showLine(mark.seq);
+    setFlash(mark.seq);
+    window.setTimeout(() => setFlash((seq) => (seq === mark.seq ? null : seq)), 1600);
+  };
 
   const addBookmark = useMutation({
     mutationFn: (line: LogLine) =>
@@ -138,6 +207,13 @@ export function WatchSessionPage() {
         // rather than on the part of the line that made it worth marking.
         label: stripAnsi(line.text).slice(0, 80),
       }),
+    onSuccess: () => stream.refresh(),
+  });
+
+  const removeBookmark = useMutation({
+    mutationFn: (bookmarkId: number) =>
+      api.post(`/api/watch/sessions/${id}/bookmarks/delete`, { id: bookmarkId }),
+    onSuccess: () => stream.refresh(),
   });
 
   if (!stream.ready && !stream.error) return <Loading label="Connecting to the session…" />;
@@ -186,21 +262,18 @@ export function WatchSessionPage() {
       </Stack>
 
       <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 1.5 }} flexWrap="wrap" useFlexGap>
-        <TextField
-          size="small"
-          placeholder="Search the whole buffer…"
+        <FindBar
           value={query}
-          onChange={(e) => setQuery(e.target.value)}
-          sx={{ minWidth: 280, flexGrow: 1, maxWidth: 520 }}
-          slotProps={{
-            input: {
-              startAdornment: (
-                <InputAdornment position="start">
-                  <SearchIcon fontSize="small" />
-                </InputAdornment>
-              ),
-            },
+          onChange={(next) => {
+            setQuery(next);
+            setCurrent(0);
           }}
+          count={matches.length}
+          current={Math.min(current, Math.max(matches.length - 1, 0))}
+          onStep={(by) => showMatch(stepMatch(current, matches.length, by))}
+          placeholder="Search the whole buffer…"
+          width={420}
+          note={search.data?.capped ? "Showing the first 2,000 matches" : undefined}
         />
 
         <ToggleButtonGroup
@@ -222,15 +295,13 @@ export function WatchSessionPage() {
           variant={follow ? "contained" : "outlined"}
           startIcon={<VerticalAlignBottomIcon />}
           onClick={() => setFollowing(!follow)}
-          disabled={searching}
         >
           Follow
         </Button>
 
-        {searching && (
-          <Typography variant="body2" color="text.secondary">
-            {search.data?.total ?? 0} matches
-            {search.data?.capped && " (showing the first 2,000)"}
+        {searching && search.data?.capped && (
+          <Typography variant="caption" color="text.secondary">
+            {search.data.total.toLocaleString()} matches — stepping through the first 2,000
           </Typography>
         )}
       </Stack>
@@ -254,12 +325,14 @@ export function WatchSessionPage() {
       >
         {rows.length === 0 ? (
           <Typography variant="body2" color="text.secondary" sx={{ p: 2 }}>
-            {searching ? "No matching lines." : "Waiting for output…"}
+            Waiting for output…
           </Typography>
         ) : (
           <Box sx={{ height: virtualizer.getTotalSize(), position: "relative" }}>
             {virtualizer.getVirtualItems().map((item) => {
               const line = rows[item.index];
+              const isCurrent = line.seq === currentSeq || line.seq === flash;
+              const mark = marked.get(line.seq);
               return (
                 <Box
                   key={item.key}
@@ -278,7 +351,14 @@ export function WatchSessionPage() {
                     fontSize: 12.5,
                     whiteSpace: "pre",
                     color: line.stream === "stderr" ? "error.main" : "text.primary",
-                    "&:hover": { bgcolor: "action.hover" },
+                    bgcolor: isCurrent
+                      ? alpha(theme.palette.warning.main, 0.38)
+                      : matched.has(line.seq)
+                        ? alpha(theme.palette.warning.main, 0.14)
+                        : undefined,
+                    boxShadow: isCurrent ? `inset 2px 0 ${theme.palette.warning.main}` : undefined,
+                    transition: "background-color 300ms",
+                    "&:hover": isCurrent ? undefined : { bgcolor: "action.hover" },
                     "&:hover .bookmark": { opacity: 1 },
                   }}
                 >
@@ -295,14 +375,30 @@ export function WatchSessionPage() {
                       }
                     />
                   </Box>
-                  <IconButton
-                    className="bookmark"
-                    size="small"
-                    sx={{ opacity: 0, transition: "opacity 120ms" }}
-                    onClick={() => addBookmark.mutate(line)}
-                  >
-                    <BookmarkAddIcon sx={{ fontSize: 15 }} />
-                  </IconButton>
+                  {mark ? (
+                    // A bookmarked line keeps its mark in view; clicking it
+                    // takes the bookmark off again.
+                    <Tooltip title={`Bookmarked: ${mark.label} — click to remove`}>
+                      <IconButton
+                        size="small"
+                        aria-label="Remove this bookmark"
+                        onClick={() => removeBookmark.mutate(mark.id)}
+                      >
+                        <BookmarkIcon color="primary" sx={{ fontSize: 15 }} />
+                      </IconButton>
+                    </Tooltip>
+                  ) : (
+                    <IconButton
+                      className="bookmark"
+                      size="small"
+                      aria-label="Bookmark this line"
+                      disabled={addBookmark.isPending}
+                      sx={{ opacity: 0, transition: "opacity 120ms" }}
+                      onClick={() => addBookmark.mutate(line)}
+                    >
+                      <BookmarkAddIcon sx={{ fontSize: 15 }} />
+                    </IconButton>
+                  )}
                 </Box>
               );
             })}
@@ -315,6 +411,8 @@ export function WatchSessionPage() {
         onClose={() => setSidebar(false)}
         sessionId={id}
         stream={stream}
+        onJump={jumpToBookmark}
+        onRemoveBookmark={(bookmarkId) => removeBookmark.mutate(bookmarkId)}
       />
     </Box>
   );
@@ -440,28 +538,32 @@ function SidePanel({
   onClose,
   sessionId,
   stream,
+  onJump,
+  onRemoveBookmark,
 }: {
   open: boolean;
   onClose: () => void;
   sessionId: number;
   stream: ReturnType<typeof useWatchStream>;
+  /** Show a bookmark's line in the log. */
+  onJump: (bookmark: Bookmark) => void;
+  onRemoveBookmark: (id: number) => void;
 }) {
   const [pattern, setPattern] = useState("");
 
   const addTrigger = useMutation({
     mutationFn: (value: string) =>
       api.post(`/api/watch/sessions/${sessionId}/triggers`, { pattern: value, is_regex: false }),
-    onSuccess: () => setPattern(""),
+    onSuccess: () => {
+      setPattern("");
+      stream.refresh();
+    },
   });
 
   const removeTrigger = useMutation({
     mutationFn: (id: number) =>
       api.post(`/api/watch/sessions/${sessionId}/triggers/delete`, { id }),
-  });
-
-  const removeBookmark = useMutation({
-    mutationFn: (id: number) =>
-      api.post(`/api/watch/sessions/${sessionId}/bookmarks/delete`, { id }),
+    onSuccess: () => stream.refresh(),
   });
 
   return (
@@ -531,7 +633,25 @@ function SidePanel({
           {stream.bookmarks.map((bookmark) => (
             <Stack key={bookmark.id} direction="row" alignItems="flex-start" spacing={1}>
               <BookmarkIcon fontSize="small" color="primary" sx={{ mt: 0.25 }} />
-              <Box sx={{ flexGrow: 1, minWidth: 0 }}>
+              <Box
+                component="button"
+                type="button"
+                onClick={() => onJump(bookmark)}
+                title="Show this line in the log"
+                sx={{
+                  flexGrow: 1,
+                  minWidth: 0,
+                  p: 0,
+                  border: 0,
+                  bgcolor: "transparent",
+                  color: "inherit",
+                  font: "inherit",
+                  textAlign: "left",
+                  cursor: "pointer",
+                  borderRadius: 0.5,
+                  "&:hover": { bgcolor: "action.hover" },
+                }}
+              >
                 <Typography variant="body2" sx={{ wordBreak: "break-word" }}>
                   {bookmark.label}
                 </Typography>
@@ -539,14 +659,19 @@ function SidePanel({
                   line {bookmark.seq}
                 </Typography>
               </Box>
-              <IconButton size="small" onClick={() => removeBookmark.mutate(bookmark.id)}>
+              <IconButton
+                size="small"
+                aria-label="Remove this bookmark"
+                onClick={() => onRemoveBookmark(bookmark.id)}
+              >
                 <DeleteOutlineIcon fontSize="small" />
               </IconButton>
             </Stack>
           ))}
           {stream.bookmarks.length === 0 && (
             <Typography variant="body2" color="text.secondary">
-              Hover a line and click the bookmark icon to save a point.
+              Hover a line and click the bookmark icon to save a point. Click a
+              bookmark here to jump back to it.
             </Typography>
           )}
         </Stack>

@@ -7,9 +7,9 @@
  * second would otherwise trigger a render per frame and lock the tab up.
  */
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
-import { streamUrl } from "../api/client";
+import { api, streamUrl } from "../api/client";
 import type { Bookmark, LogLine, RunStatus, Trigger, TriggerHit, WatchSnapshot } from "../api/watch";
 
 export interface WatchStreamState {
@@ -41,7 +41,10 @@ const EMPTY: WatchStreamState = {
 /** Hard cap on lines held in the browser, mirroring the daemon's ring buffer. */
 const MAX_CLIENT_LINES = 200_000;
 
-export function useWatchStream(sessionId: number, maxLines = MAX_CLIENT_LINES): WatchStreamState {
+export function useWatchStream(
+  sessionId: number,
+  maxLines = MAX_CLIENT_LINES,
+): WatchStreamState & { refresh: () => Promise<void> } {
   const [state, setState] = useState<WatchStreamState>(EMPTY);
 
   // Accumulated but not yet rendered.
@@ -112,5 +115,19 @@ export function useWatchStream(sessionId: number, maxLines = MAX_CLIENT_LINES): 
     };
   }, [sessionId, maxLines]);
 
-  return state;
+  /**
+   * Re-read the bookmarks and triggers after changing them.
+   *
+   * A running session's stream sends a frame for the change, but a finished
+   * one's stream has closed — so a bookmark added there never appeared until
+   * the page was reloaded. Asking for no lines makes this cheap.
+   */
+  const refresh = useCallback(async () => {
+    const snapshot = await api.get<WatchSnapshot>(`/api/watch/sessions/${sessionId}?limit=0`);
+    const marks = { bookmarks: snapshot.bookmarks ?? [], triggers: snapshot.triggers ?? [] };
+    latest.current = { ...latest.current, ...marks };
+    setState((previous) => ({ ...previous, ...marks }));
+  }, [sessionId]);
+
+  return { ...state, refresh };
 }

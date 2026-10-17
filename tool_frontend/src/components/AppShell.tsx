@@ -20,8 +20,10 @@
 
 import {
   AppBar,
+  Badge,
   Box,
   Chip,
+  CircularProgress,
   Divider,
   Drawer,
   IconButton,
@@ -51,6 +53,7 @@ import { Link, useRouterState } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
 import type { ReactNode } from "react";
 
+import { useActiveRuns } from "../api/run";
 import { useColorMode } from "../state/colorMode";
 import { ProjectSwitcher } from "./ProjectSwitcher";
 import { HealthIndicator } from "./HealthIndicator";
@@ -77,9 +80,7 @@ const NAV_ITEMS = [
  * Entries that aren't a tool. Kept out of `NAV_ITEMS` and pinned to the bottom
  * of the rail so the tool list stays a list of tools.
  */
-const FOOTER_ITEMS = [
-  { to: "/docs", label: "Docs", icon: <MenuBookIcon /> },
-] as const;
+const FOOTER_ITEMS = [{ to: "/docs", label: "Docs", icon: <MenuBookIcon /> }] as const;
 
 export function AppShell({ children }: { children: ReactNode }) {
   const pathname = useRouterState({ select: (s) => s.location.pathname });
@@ -89,17 +90,13 @@ export function AppShell({ children }: { children: ReactNode }) {
   const isNarrow = useMediaQuery(theme.breakpoints.down("md"));
 
   // On wide screens the rail starts open unless it was collapsed last time.
-  const [open, setOpen] = useState(
-    () => localStorage.getItem(NAV_STORAGE_KEY) !== "false",
-  );
+  const [open, setOpen] = useState(() => localStorage.getItem(NAV_STORAGE_KEY) !== "false");
 
   // Crossing the breakpoint resets to that layout's sensible default: hidden on
   // narrow, remembered on wide. Without this, shrinking the window would leave
   // an overlay drawer already open on top of the content.
   useEffect(() => {
-    setOpen(
-      isNarrow ? false : localStorage.getItem(NAV_STORAGE_KEY) !== "false",
-    );
+    setOpen(isNarrow ? false : localStorage.getItem(NAV_STORAGE_KEY) !== "false");
   }, [isNarrow]);
 
   const toggleNav = () => {
@@ -120,28 +117,46 @@ export function AppShell({ children }: { children: ReactNode }) {
       : theme.transitions.duration.enteringScreen,
   });
 
-  const entry = (item: NavItem, selected: boolean) => (
-    <Tooltip key={item.to} title={mini ? item.label : ""} placement="right">
-      <ListItemButton
-        component={Link}
-        to={item.to}
-        selected={selected}
-        aria-label={item.label}
-        // Picking a destination from the overlay should get out of the way.
-        onClick={() => isNarrow && setOpen(false)}
-        sx={{
-          borderRadius: 1,
-          mb: 0.25,
-          justifyContent: mini ? "center" : "flex-start",
-        }}
+  // Runs in progress, across every project: the Run icon carries a spinner
+  // while there are any, so a build left running is never out of sight.
+  const running = useActiveRuns();
+
+  const entry = (item: NavItem, selected: boolean) => {
+    const busy = item.to === "/run" && running > 0;
+    const icon = busy ? (
+      <Badge
+        overlap="circular"
+        anchorOrigin={{ vertical: "top", horizontal: "right" }}
+        badgeContent={<CircularProgress size={10} thickness={6} color="inherit" />}
+        sx={{ "& .MuiBadge-badge": { p: 0, minWidth: 0, height: "auto", color: "warning.main" } }}
       >
-        <ListItemIcon sx={{ minWidth: mini ? 0 : 38 }}>
-          {item.icon}
-        </ListItemIcon>
-        {!mini && <ListItemText primary={item.label} />}
-      </ListItemButton>
-    </Tooltip>
-  );
+        {item.icon}
+      </Badge>
+    ) : (
+      item.icon
+    );
+    const busyNote = busy ? ` — ${running} run${running === 1 ? "" : "s"} in progress` : "";
+    return (
+      <Tooltip
+        key={item.to}
+        title={mini || busy ? `${item.label}${busyNote}` : ""}
+        placement="right"
+      >
+        <ListItemButton
+          component={Link}
+          to={item.to}
+          selected={selected}
+          aria-label={`${item.label}${busyNote}`}
+          // Picking a destination from the overlay should get out of the way.
+          onClick={() => isNarrow && setOpen(false)}
+          sx={{ borderRadius: 1, mb: 0.25, justifyContent: mini ? "center" : "flex-start" }}
+        >
+          <ListItemIcon sx={{ minWidth: mini ? 0 : 38 }}>{icon}</ListItemIcon>
+          {!mini && <ListItemText primary={item.label} />}
+        </ListItemButton>
+      </Tooltip>
+    );
+  };
 
   const nav = (
     <Box
@@ -155,10 +170,7 @@ export function AppShell({ children }: { children: ReactNode }) {
     >
       <List sx={{ px: 1 }}>
         {NAV_ITEMS.map((item) =>
-          entry(
-            item,
-            isActive(pathname, item.to, "exact" in item && item.exact),
-          ),
+          entry(item, isActive(pathname, item.to, "exact" in item && item.exact)),
         )}
       </List>
 
@@ -171,11 +183,7 @@ export function AppShell({ children }: { children: ReactNode }) {
         <>
           <Divider />
           <Box sx={{ p: 2 }}>
-            <Chip
-              size="small"
-              variant="outlined"
-              label="one daemon · one app"
-            />
+            <Chip size="small" variant="outlined" label="one daemon · one app" />
           </Box>
         </>
       )}
@@ -216,10 +224,7 @@ export function AppShell({ children }: { children: ReactNode }) {
             sx={{ display: "flex", gap: 1, whiteSpace: "nowrap" }}
           >
             <span aria-hidden>🍞</span>
-            <Box
-              component="span"
-              sx={{ display: { xs: "none", sm: "inline" } }}
-            >
+            <Box component="span" sx={{ display: { xs: "none", sm: "inline" } }}>
               ciabatta
             </Box>
           </Typography>
@@ -229,14 +234,9 @@ export function AppShell({ children }: { children: ReactNode }) {
           <ProjectSwitcher />
           <HealthIndicator />
 
-          <Tooltip
-            title={mode === "dark" ? "Switch to light" : "Switch to dark"}
-          >
-            <IconButton
-              onClick={onToggleMode}
-              size="small"
-              aria-label="Toggle colour mode"
-            >
+
+          <Tooltip title={mode === "dark" ? "Switch to light" : "Switch to dark"}>
+            <IconButton onClick={onToggleMode} size="small" aria-label="Toggle colour mode">
               {mode === "dark" ? <LightModeIcon /> : <DarkModeIcon />}
             </IconButton>
           </Tooltip>

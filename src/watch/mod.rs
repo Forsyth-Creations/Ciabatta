@@ -322,7 +322,8 @@ impl WatchState {
         self.inner.lock().unwrap().next_seq
     }
 
-    /// Wait until something changes (a new line, or the process exiting).
+    /// Wait until something changes (a new line, the process exiting, or a
+    /// bookmark or trigger being added or removed).
     ///
     /// The SSE stream parks here instead of polling on a timer, so an idle
     /// session costs nothing.
@@ -537,6 +538,8 @@ impl WatchState {
             hits: 0,
         });
         self.save(&inner);
+        drop(inner);
+        self.changed.notify_waiters();
         Ok(id)
     }
 
@@ -546,6 +549,8 @@ impl WatchState {
         inner.triggers.retain(|t| t.id != id);
         inner.compiled.remove(&id);
         self.save(&inner);
+        drop(inner);
+        self.changed.notify_waiters();
     }
 
     /// Add a bookmark pointing at `seq` (snapshotting the line's text) and
@@ -577,6 +582,11 @@ impl WatchState {
             created_at: now_rfc3339(),
         });
         self.save(&inner);
+        // A frame goes out for this as for a new line: without it, a bookmark
+        // only appeared once the command next printed something — on a quiet
+        // or finished command, never.
+        drop(inner);
+        self.changed.notify_waiters();
         id
     }
 
@@ -585,6 +595,8 @@ impl WatchState {
         let mut inner = self.inner.lock().unwrap();
         inner.bookmarks.retain(|b| b.id != id);
         self.save(&inner);
+        drop(inner);
+        self.changed.notify_waiters();
     }
 
     /// A snapshot for `/state.json`: lines with `seq > after` (capped at `limit`)

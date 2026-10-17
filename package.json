@@ -18,5 +18,8 @@
         "check": "yarn workspaces foreach -A --topological-dev run check",
         "package": "yarn workspace ciabatta-vscode package",
         "clean": "yarn workspaces foreach -A run clean"
+    },
+    "resolutions": {
+        "@types/react-grid-layout/@types/react": "^18.3.12"
     }
 }

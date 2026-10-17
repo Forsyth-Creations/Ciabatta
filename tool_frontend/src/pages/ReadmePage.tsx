@@ -1,9 +1,12 @@
 /**
  * The selected project's README, rendered.
  *
- * Markdown goes through react-markdown, which builds React elements rather
- * than an HTML string: raw HTML in the README is shown as text, never run, so
- * a README can't put script into a page that holds the daemon's token.
+ * Rendered the way GitHub renders it. Raw HTML in the README — a centred
+ * logo, a `<details>` block, badges — is parsed and then sanitised with
+ * GitHub's own allow-list (`rehype-sanitize`'s default schema): what GitHub
+ * would show is shown, and `<script>`, event handlers and the rest are
+ * removed. That matters here more than on GitHub: this page holds the
+ * daemon's token. react-markdown builds React elements, never an HTML string.
  *
  * Images the README links relatively (`docs/arch.png`) are fetched from the
  * daemon, which serves images from inside the project and nothing else.
@@ -15,6 +18,8 @@ import { Box, Link as MuiLink, Typography } from "@mui/material";
 import { alpha } from "@mui/material/styles";
 import { useQuery } from "@tanstack/react-query";
 import ReactMarkdown, { type Components } from "react-markdown";
+import rehypeRaw from "rehype-raw";
+import rehypeSanitize from "rehype-sanitize";
 import remarkGfm from "remark-gfm";
 
 import { ApiError, api, streamUrl } from "../api/client";
@@ -32,13 +37,6 @@ const isAbsolute = (url: string) => /^[a-z][a-z0-9+.-]*:/i.test(url) || url.star
 
 export function ReadmePage() {
   const { project, projectId } = useProjectContext();
-  const readme = useQuery({
-    queryKey: ["project", projectId, "readme"] as const,
-    queryFn: () => api.get<Readme>(`/api/projects/${projectId}/readme`),
-    enabled: projectId !== undefined,
-    // A missing README is an answer, not a failure to retry.
-    retry: (count, error) => !(error instanceof ApiError && error.status === 404) && count < 2,
-  });
 
   if (!projectId) {
     return (
@@ -47,17 +45,46 @@ export function ReadmePage() {
       </Typography>
     );
   }
+  return (
+    <Box sx={{ maxWidth: 960 }}>
+      <ReadmeView projectId={projectId} projectName={project?.name} />
+    </Box>
+  );
+}
+
+/** The project's README, as one fetch shared by every view of it. */
+export function useReadme(projectId: string | undefined) {
+  return useQuery({
+    queryKey: ["project", projectId, "readme"] as const,
+    queryFn: () => api.get<Readme>(`/api/projects/${projectId}/readme`),
+    enabled: projectId !== undefined,
+    // A missing README is an answer, not a failure to retry.
+    retry: (count, error) => !(error instanceof ApiError && error.status === 404) && count < 2,
+  });
+}
+
+/** Whether a README query failed only because there isn't one. */
+export const noReadme = (error: unknown) => error instanceof ApiError && error.status === 404;
+
+/**
+ * A project's README, rendered — on its own tab, and on the project's
+ * dashboard. Says so plainly when there isn't one.
+ */
+export function ReadmeView({
+  projectId,
+  projectName,
+}: {
+  projectId: string;
+  projectName?: string;
+}) {
+  const readme = useReadme(projectId);
+
   if (readme.isLoading) return <Loading label="Reading the README…" />;
-  if (readme.error instanceof ApiError && readme.error.status === 404) {
+  if (noReadme(readme.error)) {
     return (
-      <>
-        <Typography variant="h1" sx={{ mb: 1 }}>
-          README
-        </Typography>
-        <Typography color="text.secondary">
-          {project?.name ?? "This project"} has no <code>README.md</code> at its root.
-        </Typography>
-      </>
+      <Typography color="text.secondary">
+        {projectName ?? "This project"} has no <code>README.md</code> at its root.
+      </Typography>
     );
   }
   if (readme.error) return <ErrorNote error={readme.error} />;
@@ -79,19 +106,22 @@ export function ReadmePage() {
         </Box>
       );
     },
-    img: ({ src, alt }) => {
+    // Width and height kept: a README sizes its logo with them.
+    img: ({ src, alt, width, height, title }) => {
       if (!src) return null;
       const url = isAbsolute(src)
         ? src
         : streamUrl(`/api/projects/${projectId}/readme/asset`, { path: src.replace(/^\.\//, "") });
-      return <img src={url} alt={alt ?? ""} loading="lazy" />;
+      return (
+        <img src={url} alt={alt ?? ""} width={width} height={height} title={title} loading="lazy" />
+      );
     },
   };
 
   return (
-    <Box sx={{ maxWidth: 960 }}>
+    <Box>
       <Typography variant="caption" color="text.secondary" sx={{ fontFamily: monoFontStack }}>
-        {project?.name}/{readme.data.file}
+        {projectName}/{readme.data.file}
       </Typography>
       <Box
         sx={(theme) => ({
@@ -147,7 +177,12 @@ export function ReadmePage() {
           "& a": { color: "primary.main" },
         })}
       >
-        <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>
+        <ReactMarkdown
+          remarkPlugins={[remarkGfm]}
+          // Raw HTML parsed first, then sanitised: the order is the safety.
+          rehypePlugins={[rehypeRaw, rehypeSanitize]}
+          components={components}
+        >
           {readme.data.text}
         </ReactMarkdown>
       </Box>

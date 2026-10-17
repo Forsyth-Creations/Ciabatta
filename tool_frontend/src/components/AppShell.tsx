@@ -65,10 +65,13 @@ const DRAWER_WIDTH = 232;
 const MINI_WIDTH = 60;
 const NAV_STORAGE_KEY = "ciabatta-nav-open";
 
-/** One entry per tool the daemon absorbed, plus the dashboard and the
- *  project's own README. */
+/**
+ * One entry per tool the daemon absorbed, plus the selected project's
+ * dashboard and README. All of it is about one project; choosing which is the
+ * landing page's job, reached from the logo rather than from this list.
+ */
 const NAV_ITEMS = [
-  { to: "/", label: "Dashboard", icon: <SpaceDashboardIcon />, exact: true },
+  { to: "/dashboard", label: "Dashboard", icon: <SpaceDashboardIcon /> },
   { to: "/readme", label: "README", icon: <ArticleIcon /> },
   { to: "/todo", label: "Todo", icon: <ChecklistIcon /> },
   { to: "/watch", label: "Watch", icon: <MonitorHeartIcon /> },
@@ -173,7 +176,7 @@ export function AppShell({ children }: { children: ReactNode }) {
     >
       <List sx={{ px: 1 }}>
         {NAV_ITEMS.map((item) =>
-          entry(item, isActive(pathname, item.to, "exact" in item && item.exact)),
+          entry(item, isActive(pathname, item.to)),
         )}
       </List>
 
@@ -221,10 +224,21 @@ export function AppShell({ children }: { children: ReactNode }) {
             </IconButton>
           </Tooltip>
 
+          {/* The way to the landing page, where projects are picked: it isn't
+              in the rail, because nothing else there is above the project. */}
           <Typography
             variant="h3"
-            component="div"
-            sx={{ display: "flex", gap: 1, whiteSpace: "nowrap" }}
+            component={Link}
+            to="/"
+            aria-label="ciabatta — all projects"
+            sx={{
+              display: "flex",
+              gap: 1,
+              whiteSpace: "nowrap",
+              color: "inherit",
+              textDecoration: "none",
+              "&:hover": { opacity: 0.8 },
+            }}
           >
             <span aria-hidden>🍞</span>
             <Box component="span" sx={{ display: { xs: "none", sm: "inline" } }}>
@@ -289,10 +303,9 @@ export function AppShell({ children }: { children: ReactNode }) {
 type NavItem = { to: string; label: string; icon: ReactNode };
 
 /**
- * Highlight a nav entry when it owns the current path. Only the dashboard
- * matches exactly; the rest stay lit on their sub-routes (`/watch/3`).
+ * Highlight a nav entry when it owns the current path, including its
+ * sub-routes (`/watch/3`).
  */
-function isActive(pathname: string, to: string, exact = false): boolean {
-  if (exact) return pathname === to;
+function isActive(pathname: string, to: string): boolean {
   return pathname === to || pathname.startsWith(`${to}/`);
 }

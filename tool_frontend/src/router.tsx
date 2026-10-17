@@ -14,7 +14,8 @@ import { AppShell } from "./components/AppShell";
 import { AnalyzePage } from "./pages/AnalyzePage";
 import { CachePage } from "./pages/CachePage";
 import { AiPage } from "./pages/AiPage";
-import { DashboardPage } from "./pages/DashboardPage";
+import { LandingPage } from "./pages/LandingPage";
+import { ProjectDashboardPage } from "./pages/ProjectDashboardPage";
 import { DocsPage } from "./pages/DocsPage";
 import { ReadmePage } from "./pages/ReadmePage";
 import { RunBuilderPage } from "./pages/RunBuilderPage";
@@ -41,7 +42,13 @@ const rootRoute = createRootRoute({
 const indexRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/",
-  component: DashboardPage,
+  component: LandingPage,
+});
+
+const dashboardRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/dashboard",
+  component: ProjectDashboardPage,
 });
 
 const readmeRoute = createRoute({
@@ -120,6 +127,7 @@ const docsRoute = createRoute({
 
 const routeTree = rootRoute.addChildren([
   indexRoute,
+  dashboardRoute,
   readmeRoute,
   todoRoute,
   watchRoute,

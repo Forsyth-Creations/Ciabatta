@@ -12,8 +12,10 @@
  *   dismisses itself when you pick a destination. Several pages (watch logs,
  *   the analyze graph, run logs) are wide, and a permanent 232px rail
  *   costs more than it's worth below ~900px.
- * - **Wide screens** get a permanent rail you can still collapse by hand, which
- *   is remembered — useful when you want the full width for a log view.
+ * - **Wide screens** get a permanent rail you can collapse by hand to its
+ *   icons alone, which is remembered — useful when you want the width for a
+ *   log view without losing one-click navigation. Collapsed, each icon names
+ *   itself in a tooltip.
  */
 
 import {
@@ -55,6 +57,8 @@ import { HealthIndicator } from "./HealthIndicator";
 import { InputPrompt } from "./InputPrompt";
 
 const DRAWER_WIDTH = 232;
+/** Wide enough for an icon and its button's padding, and no more. */
+const MINI_WIDTH = 60;
 const NAV_STORAGE_KEY = "ciabatta-nav-open";
 
 /** One entry per tool the daemon absorbed, plus the dashboard. */
@@ -73,7 +77,9 @@ const NAV_ITEMS = [
  * Entries that aren't a tool. Kept out of `NAV_ITEMS` and pinned to the bottom
  * of the rail so the tool list stays a list of tools.
  */
-const FOOTER_ITEMS = [{ to: "/docs", label: "Docs", icon: <MenuBookIcon /> }] as const;
+const FOOTER_ITEMS = [
+  { to: "/docs", label: "Docs", icon: <MenuBookIcon /> },
+] as const;
 
 export function AppShell({ children }: { children: ReactNode }) {
   const pathname = useRouterState({ select: (s) => s.location.pathname });
@@ -83,13 +89,17 @@ export function AppShell({ children }: { children: ReactNode }) {
   const isNarrow = useMediaQuery(theme.breakpoints.down("md"));
 
   // On wide screens the rail starts open unless it was collapsed last time.
-  const [open, setOpen] = useState(() => localStorage.getItem(NAV_STORAGE_KEY) !== "false");
+  const [open, setOpen] = useState(
+    () => localStorage.getItem(NAV_STORAGE_KEY) !== "false",
+  );
 
   // Crossing the breakpoint resets to that layout's sensible default: hidden on
   // narrow, remembered on wide. Without this, shrinking the window would leave
   // an overlay drawer already open on top of the content.
   useEffect(() => {
-    setOpen(isNarrow ? false : localStorage.getItem(NAV_STORAGE_KEY) !== "false");
+    setOpen(
+      isNarrow ? false : localStorage.getItem(NAV_STORAGE_KEY) !== "false",
+    );
   }, [isNarrow]);
 
   const toggleNav = () => {
@@ -99,46 +109,76 @@ export function AppShell({ children }: { children: ReactNode }) {
     if (!isNarrow) localStorage.setItem(NAV_STORAGE_KEY, String(next));
   };
 
+  // Collapsed on a wide screen: the rail stays, down to its icons. On a
+  // narrow one, closed means the overlay is gone entirely.
+  const mini = !isNarrow && !open;
+  const width = mini ? MINI_WIDTH : DRAWER_WIDTH;
+  const widthTransition = theme.transitions.create("width", {
+    easing: theme.transitions.easing.sharp,
+    duration: mini
+      ? theme.transitions.duration.leavingScreen
+      : theme.transitions.duration.enteringScreen,
+  });
+
+  const entry = (item: NavItem, selected: boolean) => (
+    <Tooltip key={item.to} title={mini ? item.label : ""} placement="right">
+      <ListItemButton
+        component={Link}
+        to={item.to}
+        selected={selected}
+        aria-label={item.label}
+        // Picking a destination from the overlay should get out of the way.
+        onClick={() => isNarrow && setOpen(false)}
+        sx={{
+          borderRadius: 1,
+          mb: 0.25,
+          justifyContent: mini ? "center" : "flex-start",
+        }}
+      >
+        <ListItemIcon sx={{ minWidth: mini ? 0 : 38 }}>
+          {item.icon}
+        </ListItemIcon>
+        {!mini && <ListItemText primary={item.label} />}
+      </ListItemButton>
+    </Tooltip>
+  );
+
   const nav = (
-    <Box sx={{ overflow: "auto", display: "flex", flexDirection: "column", height: "100%" }}>
+    <Box
+      sx={{
+        overflowY: "auto",
+        overflowX: "hidden",
+        display: "flex",
+        flexDirection: "column",
+        height: "100%",
+      }}
+    >
       <List sx={{ px: 1 }}>
-        {NAV_ITEMS.map((item) => (
-          <ListItemButton
-            key={item.to}
-            component={Link}
-            to={item.to}
-            selected={isActive(pathname, item.to, "exact" in item && item.exact)}
-            // Picking a destination from the overlay should get out of the way.
-            onClick={() => isNarrow && setOpen(false)}
-            sx={{ borderRadius: 1, mb: 0.25 }}
-          >
-            <ListItemIcon sx={{ minWidth: 38 }}>{item.icon}</ListItemIcon>
-            <ListItemText primary={item.label} />
-          </ListItemButton>
-        ))}
+        {NAV_ITEMS.map((item) =>
+          entry(
+            item,
+            isActive(pathname, item.to, "exact" in item && item.exact),
+          ),
+        )}
       </List>
 
       <Box sx={{ flexGrow: 1 }} />
       <Divider />
       <List sx={{ px: 1 }}>
-        {FOOTER_ITEMS.map((item) => (
-          <ListItemButton
-            key={item.to}
-            component={Link}
-            to={item.to}
-            selected={isActive(pathname, item.to)}
-            onClick={() => isNarrow && setOpen(false)}
-            sx={{ borderRadius: 1 }}
-          >
-            <ListItemIcon sx={{ minWidth: 38 }}>{item.icon}</ListItemIcon>
-            <ListItemText primary={item.label} />
-          </ListItemButton>
-        ))}
+        {FOOTER_ITEMS.map((item) => entry(item, isActive(pathname, item.to)))}
       </List>
-      <Divider />
-      <Box sx={{ p: 2 }}>
-        <Chip size="small" variant="outlined" label="one daemon · one app" />
-      </Box>
+      {!mini && (
+        <>
+          <Divider />
+          <Box sx={{ p: 2 }}>
+            <Chip
+              size="small"
+              variant="outlined"
+              label="one daemon · one app"
+            />
+          </Box>
+        </>
+      )}
     </Box>
   );
 
@@ -148,7 +188,17 @@ export function AppShell({ children }: { children: ReactNode }) {
       <InputPrompt />
       <AppBar position="fixed" sx={{ zIndex: (t) => t.zIndex.drawer + 1 }}>
         <Toolbar sx={{ gap: { xs: 1, sm: 2 } }}>
-          <Tooltip title={open ? "Hide navigation" : "Show navigation"}>
+          <Tooltip
+            title={
+              isNarrow
+                ? open
+                  ? "Hide navigation"
+                  : "Show navigation"
+                : open
+                  ? "Collapse navigation to icons"
+                  : "Expand navigation"
+            }
+          >
             <IconButton
               edge="start"
               onClick={toggleNav}
@@ -166,7 +216,10 @@ export function AppShell({ children }: { children: ReactNode }) {
             sx={{ display: "flex", gap: 1, whiteSpace: "nowrap" }}
           >
             <span aria-hidden>🍞</span>
-            <Box component="span" sx={{ display: { xs: "none", sm: "inline" } }}>
+            <Box
+              component="span"
+              sx={{ display: { xs: "none", sm: "inline" } }}
+            >
               ciabatta
             </Box>
           </Typography>
@@ -176,9 +229,14 @@ export function AppShell({ children }: { children: ReactNode }) {
           <ProjectSwitcher />
           <HealthIndicator />
 
-
-          <Tooltip title={mode === "dark" ? "Switch to light" : "Switch to dark"}>
-            <IconButton onClick={onToggleMode} size="small" aria-label="Toggle colour mode">
+          <Tooltip
+            title={mode === "dark" ? "Switch to light" : "Switch to dark"}
+          >
+            <IconButton
+              onClick={onToggleMode}
+              size="small"
+              aria-label="Toggle colour mode"
+            >
               {mode === "dark" ? <LightModeIcon /> : <DarkModeIcon />}
             </IconButton>
           </Tooltip>
@@ -188,17 +246,22 @@ export function AppShell({ children }: { children: ReactNode }) {
       <Drawer
         // Temporary drawers float over the content and dim it; permanent ones
         // reserve layout space. Below md the space isn't there to reserve.
-        variant={isNarrow ? "temporary" : "persistent"}
-        open={open}
+        variant={isNarrow ? "temporary" : "permanent"}
+        open={isNarrow ? open : true}
         onClose={() => setOpen(false)}
         ModalProps={{ keepMounted: true }}
         sx={{
-          // Constant width: a persistent drawer keeps its docked footprint when
-          // closed, and `main`'s negative margin below is what reclaims it.
-          // A temporary drawer is position-fixed, so this reserves nothing.
-          width: DRAWER_WIDTH,
+          // The docked footprint follows the rail, so `main` just takes what's
+          // left. A temporary drawer is position-fixed: this reserves nothing.
+          width,
           flexShrink: 0,
-          "& .MuiDrawer-paper": { width: DRAWER_WIDTH, boxSizing: "border-box" },
+          transition: widthTransition,
+          "& .MuiDrawer-paper": {
+            width,
+            boxSizing: "border-box",
+            overflowX: "hidden",
+            transition: widthTransition,
+          },
         }}
       >
         <Toolbar />
@@ -211,13 +274,6 @@ export function AppShell({ children }: { children: ReactNode }) {
           flexGrow: 1,
           p: { xs: 2, md: 3 },
           minWidth: 0,
-          // A persistent drawer doesn't push content, so reclaim the space
-          // ourselves when it's collapsed.
-          transition: theme.transitions.create("margin", {
-            easing: theme.transitions.easing.sharp,
-            duration: theme.transitions.duration.leavingScreen,
-          }),
-          ...(!isNarrow && !open && { marginLeft: `-${DRAWER_WIDTH}px` }),
         }}
       >
         <Toolbar />
@@ -226,6 +282,8 @@ export function AppShell({ children }: { children: ReactNode }) {
     </Box>
   );
 }
+
+type NavItem = { to: string; label: string; icon: ReactNode };
 
 /**
  * Highlight a nav entry when it owns the current path. Only the dashboard

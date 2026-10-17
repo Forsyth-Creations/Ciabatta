@@ -1356,7 +1356,7 @@ cache:
   enabled: true
   gitignore: true
   cargo:
-    package: api          # omit for what \`cargo build\` would build here
+    package: api          # omit for what \`cargo build\` would build here; workspace: true for all
     profile: release      # debug (default) → target/debug, release → target/release
     artifacts: [bin]      # bin | lib | cdylib | dylib | staticlib
   inputs: ["assets/**/*"] # still allowed: anything outside the crates
@@ -1367,6 +1367,33 @@ steps:
         <P>
           <C>ciabatta cache init</C> writes this for you when the directory has a{" "}
           <C>Cargo.toml</C> Cargo can read.
+        </P>
+
+        <SubHeading>Building the whole workspace</SubHeading>
+        <P>
+          Without <C>package</C>, the selection is what a bare <C>cargo build</C> builds from the
+          manifest&apos;s directory: in a virtual workspace, its <C>default-members</C>, or every
+          member when there are none; in a root <C>Cargo.toml</C> that is also a package, only
+          that package. A step that runs <C>cargo build --workspace</C> builds more than that, and
+          the members outside the set would be neither keyed on nor stored — editing one would
+          hand back the old binaries. Say <C>workspace: true</C> instead:
+        </P>
+        <Pre>{`cache:
+  enabled: true
+  cargo:
+    workspace: true      # every member, as --workspace
+    exclude: [xtask]     # optional, as --exclude
+    profile: release
+    artifacts: [bin]
+
+steps:
+  - name: compile
+    run: cargo build --workspace --exclude xtask --release`}</Pre>
+        <P>
+          <C>workspace: true</C> can&apos;t be combined with <C>package</C> or <C>packages</C>,
+          and <C>exclude</C> only applies with it — each mismatch is an error, as is excluding a
+          member that doesn&apos;t exist. An excluded member that a selected one depends on is
+          still an input, since it&apos;s compiled into that member; it just isn&apos;t an output.
         </P>
 
         <SubHeading>Choosing the profile per run</SubHeading>

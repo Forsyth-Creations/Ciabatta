@@ -67,7 +67,8 @@ use serde::{Deserialize, Serialize};
 pub struct CargoSpec {
     /// The package to build. Omitted, the selection is what `cargo build`
     /// would build from the manifest's directory: that package, for a package
-    /// manifest; the workspace's default members, for a virtual one.
+    /// manifest; the workspace's default members, for a virtual one. For
+    /// every member, whatever the manifest, see [`Self::workspace`].
     #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub package: Option<String>,
@@ -76,6 +77,18 @@ pub struct CargoSpec {
     #[serde(default)]
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub packages: Vec<String>,
+
+    /// Every workspace member, as `cargo build --workspace` builds them —
+    /// past `default-members`, and past the root package of a manifest that
+    /// is both a package and a workspace. Not with `package`/`packages`.
+    #[serde(default)]
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub workspace: bool,
+
+    /// Members to leave out of [`Self::workspace`], as `--exclude` does.
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub exclude: Vec<String>,
 
     /// The manifest to read, relative to the workspace root like every other
     /// cache path. Defaults to the step's own sub-workspace's `Cargo.toml`,
@@ -897,22 +910,51 @@ fn select(meta: &Metadata, manifest: &Path, spec: &CargoSpec) -> Result<Vec<Meta
         .filter(|p| meta.workspace_members.contains(&p.id))
         .collect();
 
+    let member = |name: &String| -> Result<&MetaPackage> {
+        match members.iter().find(|p| &p.name == name) {
+            Some(package) => Ok(package),
+            None => {
+                let available: Vec<&str> = members.iter().map(|p| p.name.as_str()).collect();
+                bail!(
+                    "`cache.cargo`: no package `{name}` in the Cargo workspace at {} \
+                     (it has: {})",
+                    meta.workspace_root.display(),
+                    available.join(", "),
+                );
+            }
+        }
+    };
+
     let names: Vec<&String> = spec.package.iter().chain(spec.packages.iter()).collect();
+    if spec.workspace && !names.is_empty() {
+        bail!(
+            "`cache.cargo`: `workspace: true` builds every member, so it can't also name \
+             `package`/`packages` — drop one, or leave members out with `exclude`"
+        );
+    }
+    if !spec.exclude.is_empty() && !spec.workspace {
+        bail!(
+            "`cache.cargo`: `exclude` only applies with `workspace: true`, as `--exclude` \
+             only applies with `--workspace`"
+        );
+    }
+
+    if spec.workspace {
+        let mut excluded = BTreeSet::new();
+        for name in &spec.exclude {
+            excluded.insert(member(name)?.id.clone());
+        }
+        return Ok(members
+            .into_iter()
+            .filter(|p| !excluded.contains(&p.id))
+            .cloned()
+            .collect());
+    }
+
     if !names.is_empty() {
         let mut found = Vec::new();
         for name in names {
-            match members.iter().find(|p| &p.name == name) {
-                Some(package) => found.push((*package).clone()),
-                None => {
-                    let available: Vec<&str> = members.iter().map(|p| p.name.as_str()).collect();
-                    bail!(
-                        "`cache.cargo`: no package `{name}` in the Cargo workspace at {} \
-                         (it has: {})",
-                        meta.workspace_root.display(),
-                        available.join(", "),
-                    );
-                }
-            }
+            found.push(member(name)?.clone());
         }
         return Ok(found);
     }
@@ -1519,6 +1561,90 @@ mod tests {
         for name in ["api", "cli", "core"] {
             assert!(message.contains(name), "{message}");
         }
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn workspace_builds_every_member_past_default_members_and_a_root_package() {
+        let every = CargoSpec {
+            workspace: true,
+            ..Default::default()
+        };
+
+        let root = workspace("whole");
+        write(
+            &root,
+            "Cargo.toml",
+            "[workspace]\nmembers = [\"crates/*\"]\ndefault-members = [\"crates/cli\"]\n",
+        );
+        let defaults = resolve(&root, None, &CargoSpec::default()).unwrap();
+        assert_eq!(names(&defaults), vec![("cli", true)]);
+        let all = resolve(&root, None, &every).unwrap();
+        assert_eq!(
+            names(&all),
+            vec![("api", true), ("cli", true), ("core", true)]
+        );
+
+        // An excluded member stays an input when a selected one depends on it.
+        let without = CargoSpec {
+            exclude: vec!["core".to_string()],
+            ..every.clone()
+        };
+        let some = resolve(&root, None, &without).unwrap();
+        assert_eq!(
+            names(&some),
+            vec![("api", true), ("cli", true), ("core", false)]
+        );
+
+        // A root manifest that is also a package: on its own, just that package.
+        write(
+            &root,
+            "Cargo.toml",
+            &format!(
+                "{}[workspace]\nmembers = [\"crates/*\"]\n",
+                package("app", "")
+            ),
+        );
+        write(&root, "src/main.rs", "fn main() {}");
+        let own = resolve(&root, None, &CargoSpec::default()).unwrap();
+        assert_eq!(names(&own), vec![("app", true)]);
+        let all = resolve(&root, None, &every).unwrap();
+        assert_eq!(
+            names(&all),
+            vec![("app", true), ("api", true), ("cli", true), ("core", true)]
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn workspace_conflicts_with_naming_packages_and_exclude_needs_it() {
+        let root = workspace("whole-errors");
+        let error = |spec: CargoSpec| format!("{:#}", resolve(&root, None, &spec).unwrap_err());
+
+        let both = error(CargoSpec {
+            workspace: true,
+            package: Some("api".to_string()),
+            ..Default::default()
+        });
+        assert!(both.contains("can't also name"), "{both}");
+
+        let alone = error(CargoSpec {
+            exclude: vec!["core".to_string()],
+            ..Default::default()
+        });
+        assert!(
+            alone.contains("only applies with `workspace: true`"),
+            "{alone}"
+        );
+
+        let unknown = error(CargoSpec {
+            workspace: true,
+            exclude: vec!["nope".to_string()],
+            ..Default::default()
+        });
+        assert!(unknown.contains("no package `nope`"), "{unknown}");
 
         let _ = std::fs::remove_dir_all(&root);
     }

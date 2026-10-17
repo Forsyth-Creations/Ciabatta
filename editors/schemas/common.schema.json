@@ -91,6 +91,16 @@
           "description": "Several packages, for a step that builds more than one (`-p a -p b`).",
           "items": { "type": "string" }
         },
+        "workspace": {
+          "type": "boolean",
+          "description": "Every workspace member, as `cargo build --workspace` builds them: past `default-members`, and past the root package of a manifest that is both a package and a workspace. Not with `package`/`packages`.",
+          "default": false
+        },
+        "exclude": {
+          "type": "array",
+          "description": "Members to leave out of `workspace: true`, as `--exclude` does.",
+          "items": { "type": "string" }
+        },
         "manifest": {
           "type": "string",
           "description": "The Cargo.toml to read, relative to the workspace root. Defaults to the step's own sub-workspace's Cargo.toml, then the root's.",

@@ -19,7 +19,12 @@
 //!
 //! Nothing here executes anything — it's the same compiled graph the run would
 //! have taken, shown before you commit to it.
+//!
+//! A long graph is a lot of waves to scroll through, so a wave folds: `←` on
+//! one of its steps folds it to its heading, `→` (or Enter) on a folded heading
+//! opens it again, and `z` folds or opens every wave at once.
 
+use std::collections::BTreeSet;
 use std::io;
 use std::time::Duration;
 
@@ -49,6 +54,8 @@ enum Row<'a> {
     Wave {
         index: usize,
         count: usize,
+        /// Folded to its heading: its steps aren't listed under it.
+        folded: bool,
     },
     Step(&'a RunStep),
     /// The heading above the recovery nodes, which belong to no wave.
@@ -56,12 +63,18 @@ enum Row<'a> {
 }
 
 impl Row<'_> {
-    /// Wave headings are scenery; only steps can be selected.
     fn step(&self) -> Option<&RunStep> {
         match self {
             Row::Step(step) => Some(step),
             _ => None,
         }
+    }
+
+    /// Whether the cursor can land here: a step, or a folded wave's heading —
+    /// the one thing left of the wave to open it from. An open wave's heading
+    /// is scenery.
+    fn selectable(&self) -> bool {
+        matches!(self, Row::Step(_) | Row::Wave { folded: true, .. })
     }
 }
 
@@ -91,9 +104,10 @@ async fn view_loop(
     graph: &WorkflowGraph,
     pruned: &Outcome,
 ) -> Result<()> {
-    let rows = rows(graph);
+    let mut folded: BTreeSet<usize> = BTreeSet::new();
+    let mut rows = rows(graph, &folded);
     // Start on the first real step rather than the wave heading above it.
-    let mut selected = rows.iter().position(|r| r.step().is_some()).unwrap_or(0);
+    let mut selected = rows.iter().position(Row::selectable).unwrap_or(0);
     let mut state = ListState::default();
     let mut events = EventStream::new();
 
@@ -119,10 +133,44 @@ async fn view_loop(
             KeyCode::Down | KeyCode::Char('j') => selected = next_step(&rows, selected, 1),
             KeyCode::Up | KeyCode::Char('k') => selected = next_step(&rows, selected, -1),
             KeyCode::Home | KeyCode::Char('g') => {
-                selected = rows.iter().position(|r| r.step().is_some()).unwrap_or(0)
+                selected = rows.iter().position(Row::selectable).unwrap_or(0)
             }
             KeyCode::End | KeyCode::Char('G') => {
-                selected = rows.iter().rposition(|r| r.step().is_some()).unwrap_or(0)
+                selected = rows.iter().rposition(Row::selectable).unwrap_or(0)
+            }
+            KeyCode::Left | KeyCode::Char('h') => {
+                if let Some(wave) = wave_of(&rows, selected) {
+                    folded.insert(wave);
+                    rows = self::rows(graph, &folded);
+                    selected = heading_of(&rows, wave);
+                }
+            }
+            KeyCode::Right | KeyCode::Char('l') | KeyCode::Enter => {
+                if let Some(Row::Wave {
+                    index,
+                    folded: true,
+                    ..
+                }) = rows.get(selected)
+                {
+                    let wave = *index;
+                    folded.remove(&wave);
+                    rows = self::rows(graph, &folded);
+                    selected = next_step(&rows, heading_of(&rows, wave), 1);
+                }
+            }
+            KeyCode::Char('z') => {
+                let wave = wave_of(&rows, selected);
+                let waves = graph.waves().len();
+                folded = match folded.len() == waves {
+                    true => BTreeSet::new(),
+                    false => (0..waves).collect(),
+                };
+                rows = self::rows(graph, &folded);
+                selected = match wave {
+                    Some(wave) if folded.contains(&wave) => heading_of(&rows, wave),
+                    Some(wave) => next_step(&rows, heading_of(&rows, wave), 1),
+                    None => selected.min(rows.len().saturating_sub(1)),
+                };
             }
             _ => {}
         }
@@ -131,14 +179,18 @@ async fn view_loop(
 
 /// Flatten the graph into display rows: each wave, its steps, then the recovery
 /// nodes that hang off them.
-fn rows(graph: &WorkflowGraph) -> Vec<Row<'_>> {
+fn rows<'a>(graph: &'a WorkflowGraph, folded: &BTreeSet<usize>) -> Vec<Row<'a>> {
     let mut rows: Vec<Row> = Vec::new();
     for (index, wave) in graph.waves().iter().enumerate() {
+        let folded = folded.contains(&index);
         rows.push(Row::Wave {
             index,
             count: wave.len(),
+            folded,
         });
-        rows.extend(wave.iter().map(|step| Row::Step(step)));
+        if !folded {
+            rows.extend(wave.iter().map(|step| Row::Step(step)));
+        }
     }
 
     let recoveries: Vec<&RunStep> = graph.steps.iter().filter(|s| s.recover).collect();
@@ -149,8 +201,8 @@ fn rows(graph: &WorkflowGraph) -> Vec<Row<'_>> {
     rows
 }
 
-/// Move the selection by `delta` rows, skipping headings so the cursor only
-/// ever lands on something with a detail pane to show.
+/// Move the selection by `delta` rows, skipping open waves' headings so the
+/// cursor only ever lands on something with a detail pane to show.
 fn next_step(rows: &[Row], from: usize, delta: isize) -> usize {
     let mut index = from as isize;
     loop {
@@ -158,10 +210,28 @@ fn next_step(rows: &[Row], from: usize, delta: isize) -> usize {
         if index < 0 || index as usize >= rows.len() {
             return from;
         }
-        if rows[index as usize].step().is_some() {
+        if rows[index as usize].selectable() {
             return index as usize;
         }
     }
+}
+
+/// The wave the row at `at` belongs to: its own, for a heading, or the one
+/// whose heading is above it. `None` for the recovery nodes, which belong to
+/// no wave.
+fn wave_of(rows: &[Row], at: usize) -> Option<usize> {
+    rows.get(..=at)?.iter().rev().find_map(|row| match row {
+        Row::Wave { index, .. } => Some(Some(*index)),
+        Row::RecoveryHeading => Some(None),
+        Row::Step(_) => None,
+    })?
+}
+
+/// Where wave `wave`'s heading is.
+fn heading_of(rows: &[Row], wave: usize) -> usize {
+    rows.iter()
+        .position(|row| matches!(row, Row::Wave { index, .. } if *index == wave))
+        .unwrap_or(0)
 }
 
 fn draw(
@@ -185,10 +255,16 @@ fn draw(
         .split(chunks[1]);
     step_list(frame, panes[0], rows, state);
 
-    let selected = state.and_then_selected(rows);
-    detail(frame, panes[1], selected, graph);
+    match state.selected().and_then(|at| rows.get(at)) {
+        Some(Row::Wave {
+            index,
+            folded: true,
+            ..
+        }) => folded_detail(frame, panes[1], graph, *index),
+        _ => detail(frame, panes[1], state.and_then_selected(rows), graph),
+    }
 
-    let hint = "  ↑/↓ move   g/G first/last   q quit — nothing here runs anything";
+    let hint = "  ↑/↓ move   ←/→ fold/open a wave   z fold all   g/G first/last   q quit — nothing here runs anything";
     frame.render_widget(
         Paragraph::new(hint).style(Style::default().fg(Color::DarkGray)),
         chunks[2],
@@ -247,8 +323,16 @@ fn step_list(frame: &mut Frame, area: Rect, rows: &[Row], state: &mut ListState)
     let items: Vec<ListItem> = rows
         .iter()
         .map(|row| match row {
-            Row::Wave { index, count } => ListItem::new(Line::from(Span::styled(
-                format!(" wave {} — {count} in parallel", index + 1),
+            Row::Wave {
+                index,
+                count,
+                folded,
+            } => ListItem::new(Line::from(Span::styled(
+                format!(
+                    " {} wave {} — {count} in parallel",
+                    if *folded { "▸" } else { "▾" },
+                    index + 1
+                ),
                 Style::default()
                     .fg(Color::DarkGray)
                     .add_modifier(Modifier::BOLD),
@@ -288,6 +372,37 @@ fn step_list(frame: &mut Frame, area: Rect, rows: &[Row], state: &mut ListState)
         )
         .highlight_symbol("▸ ");
     frame.render_stateful_widget(list, area, state);
+}
+
+/// The right-hand pane for a folded wave: the steps it is hiding.
+fn folded_detail(frame: &mut Frame, area: Rect, graph: &WorkflowGraph, wave: usize) {
+    let waves = graph.waves();
+    let mut lines = vec![
+        Line::from(Span::styled(
+            format!("wave {} — folded", wave + 1),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(Span::styled(
+            "→ or Enter to open it",
+            Style::default().fg(Color::DarkGray),
+        )),
+        Line::raw(""),
+    ];
+    lines.extend(
+        waves
+            .get(wave)
+            .into_iter()
+            .flatten()
+            .map(|step| Line::raw(format!("  {}", step.name))),
+    );
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .block(Block::default().borders(Borders::ALL).title(" detail ")),
+        area,
+    );
 }
 
 /// The right-hand pane: everything known about the selected step.
@@ -474,10 +589,17 @@ mod tests {
     #[test]
     fn rows_interleave_wave_headings_with_their_steps() {
         let graph = graph();
-        let rows = rows(&graph);
+        let rows = rows(&graph, &BTreeSet::new());
         // wave 1, proto:gen, wave 2, api:compile, recovery heading, api:fix
         assert_eq!(rows.len(), 6);
-        assert!(matches!(rows[0], Row::Wave { index: 0, count: 1 }));
+        assert!(matches!(
+            rows[0],
+            Row::Wave {
+                index: 0,
+                count: 1,
+                folded: false
+            }
+        ));
         assert_eq!(rows[1].step().unwrap().name, "proto:gen");
         assert!(matches!(rows[2], Row::Wave { index: 1, .. }));
         assert!(matches!(rows[4], Row::RecoveryHeading));
@@ -487,7 +609,7 @@ mod tests {
     #[test]
     fn navigation_skips_headings_and_stops_at_the_ends() {
         let graph = graph();
-        let rows = rows(&graph);
+        let rows = rows(&graph, &BTreeSet::new());
 
         // Down from the first step lands on the next one, not the heading.
         assert_eq!(next_step(&rows, 1, 1), 3);
@@ -497,5 +619,22 @@ mod tests {
         // And the same going up.
         assert_eq!(next_step(&rows, 3, -1), 1);
         assert_eq!(next_step(&rows, 1, -1), 1);
+    }
+
+    /// A folded wave lists no steps, and its heading becomes somewhere the
+    /// cursor can stop — the place to open it again from.
+    #[test]
+    fn a_folded_wave_hides_its_steps_behind_a_selectable_heading() {
+        let graph = graph();
+        let rows = rows(&graph, &BTreeSet::from([0]));
+        // wave 1 (folded), wave 2, api:compile, recovery heading, api:fix
+        assert_eq!(rows.len(), 5);
+        assert!(rows[0].selectable(), "the folded heading can be selected");
+        assert!(!rows[1].selectable(), "an open heading is scenery");
+        assert_eq!(next_step(&rows, 2, -1), 0);
+        assert_eq!(wave_of(&rows, 2), Some(1));
+        assert_eq!(wave_of(&rows, 0), Some(0));
+        assert_eq!(wave_of(&rows, 4), None, "recovery nodes belong to no wave");
+        assert_eq!(heading_of(&rows, 1), 1);
     }
 }

@@ -205,6 +205,10 @@ pub struct RunStep {
     /// is already all there is.
     #[serde(skip)]
     pub cache_id: Option<String>,
+    /// Its workflow's `wave_grouping`, for drawing — see
+    /// [`crate::workspace::Workflow::wave_grouping`]. Never read by the engine.
+    #[serde(skip)]
+    pub wave_group: Option<String>,
     /// Don't fail the whole run when this step fails: its dependents are
     /// skipped, every other branch carries on, and the run reports the failure
     /// at the end. Always applied when a `timeout` expires.

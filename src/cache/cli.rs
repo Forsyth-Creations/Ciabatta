@@ -677,6 +677,113 @@ pub fn write_cache_section(
     Ok(written)
 }
 
+/// Set the files one target reads and writes, in its workflow's file.
+///
+/// What the run page's file picker saves. `target` is the step's cache id,
+/// `<member>:<workflow>:<step>`, which says which file to open; the paths are
+/// relative to the workspace root, as every `cache:` path is. They go into the
+/// workflow's own `cache:` section — where `cache init` writes them, and where
+/// they apply to each of its steps — and caching is switched on there unless
+/// the section already says otherwise. Every other setting in the section
+/// (`env`, `exclude`, `no_outputs`, …) is kept.
+///
+/// A set, not an update: `inputs` and `outputs` *become* the section's lists,
+/// so a path unticked in the picker is gone from the file, and an empty list
+/// removes the key.
+///
+/// Refused rather than half-done when the result wouldn't do what was asked:
+/// a workflow written inline in `ciabatta.yaml`, or in TOML, or a step whose
+/// own `cache.inputs` would override what is written here.
+///
+/// Returns the file written, relative to the workspace root.
+pub fn save_target_files(
+    workspace: &Workspace,
+    target: &str,
+    inputs: &[String],
+    outputs: &[String],
+) -> Result<String> {
+    let mut parts = target.rsplitn(3, ':');
+    let (Some(step), Some(workflow), Some(member)) = (parts.next(), parts.next(), parts.next())
+    else {
+        bail!("'{target}' doesn't name a workflow step (`<member>:<workflow>:<step>`)");
+    };
+    let member = workspace
+        .member(member)
+        .ok_or_else(|| anyhow::anyhow!("no sub-workspace called '{member}'"))?;
+
+    let dir = member
+        .dir
+        .join(crate::config::CIABATTA_DIR)
+        .join(crate::workspace::WORKFLOWS_DIR);
+    let Some(path) = crate::format::find(&dir, workflow) else {
+        bail!(
+            "The '{workflow}' workflow of '{}' is written inside its ciabatta config rather \
+             than in .ciabatta/workflows/{workflow}.yaml, so there is no workflow file to save \
+             to. Move it into its own file, or add the paths to its `cache:` by hand.",
+            member.name
+        );
+    };
+    let relative = path
+        .strip_prefix(&workspace.root)
+        .unwrap_or(&path)
+        .to_string_lossy()
+        .replace('\\', "/");
+    if crate::format::Format::of_path(&path) != crate::format::Format::Yaml {
+        bail!("{relative} is TOML; only YAML workflow files can be edited from the web app");
+    }
+
+    let existing = std::fs::read_to_string(&path)
+        .with_context(|| format!("Failed to read {}", path.display()))?;
+    let current: crate::workspace::Workflow = crate::format::load(&path)?;
+    if let Some(own) = current
+        .steps
+        .iter()
+        .find(|s| s.name == step)
+        .and_then(|s| s.cache.as_ref())
+    {
+        let overridden: Vec<&str> = [
+            (!own.inputs.is_empty()).then_some("inputs"),
+            (!own.outputs.is_empty()).then_some("outputs"),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        if !overridden.is_empty() {
+            bail!(
+                "Step '{step}' in {relative} declares its own `cache.{}`, which would override \
+                 the workflow's — so saving there would change nothing. Edit the step's \
+                 `cache:` by hand.",
+                overridden.join("` and `cache.")
+            );
+        }
+    }
+
+    let mut cache = current.cache.clone().unwrap_or_default();
+    cache.inputs = inputs.to_vec();
+    cache.outputs = outputs.to_vec();
+    if cache.enabled.is_none() {
+        cache.enabled = Some(true);
+    }
+    let block = format!("cache:\n{}", crate::format::yaml_block(&cache)?);
+    let rendered = crate::format::set_top_level(&existing, "cache", &block);
+
+    // This edits a file the user owns; hand it back only if it still loads,
+    // and says what was asked.
+    let parsed: crate::workspace::Workflow =
+        crate::format::from_str(&rendered, crate::format::Format::Yaml).with_context(|| {
+            format!("Saving the files would have broken {relative}, so it was left alone")
+        })?;
+    let saved = parsed.cache.unwrap_or_default();
+    anyhow::ensure!(
+        saved.inputs == inputs && saved.outputs == outputs,
+        "The files didn't survive a round trip through {relative}; it was left alone"
+    );
+
+    std::fs::write(&path, rendered)
+        .with_context(|| format!("Failed to write {}", path.display()))?;
+    Ok(relative)
+}
+
 /// Point this checkout at a shared cache server, in `ciabatta.yaml`.
 ///
 /// Separate from the file definition on purpose: one endpoint serves every
@@ -880,6 +987,87 @@ mod tests {
         let path = dir.join(rel);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, body).unwrap();
+    }
+
+    /// The picker's save lands in the step's workflow file, keeps the rest of
+    /// that file — comments outside `cache:` and the section's other settings
+    /// included — and turns caching on.
+    #[test]
+    fn picked_files_are_saved_into_the_workflow_file() {
+        let root = scratch("savefiles");
+        write(
+            &root,
+            ".ciabatta/ciabatta.yaml",
+            "workspace:\n  umbrella: true\n",
+        );
+        write(
+            &root,
+            "packages/api/.ciabatta/ciabatta.yaml",
+            "workspace:\n  name: api\n",
+        );
+        let file = "packages/api/.ciabatta/workflows/build.yaml";
+        write(
+            &root,
+            file,
+            "# Build the api.\ndescription: build it\ncache:\n  env: [PROFILE]\n\
+             steps:\n  - name: compile\n    run: make\n",
+        );
+        let workspace = Workspace::load(&root).unwrap();
+        let written = save_target_files(
+            &workspace,
+            "api:build:compile",
+            &["packages/api/src".to_string()],
+            &["packages/api/dist".to_string()],
+        )
+        .unwrap();
+        assert_eq!(written, file);
+
+        let text = std::fs::read_to_string(root.join(file)).unwrap();
+        assert!(text.starts_with("# Build the api."), "{text}");
+        let saved: crate::workspace::Workflow =
+            crate::format::from_str(&text, crate::format::Format::Yaml).unwrap();
+        let cache = saved.cache.unwrap();
+        assert_eq!(cache.inputs, ["packages/api/src"]);
+        assert_eq!(cache.outputs, ["packages/api/dist"]);
+        assert_eq!(
+            cache.env,
+            ["PROFILE"],
+            "the section's other settings survive"
+        );
+        assert_eq!(cache.enabled, Some(true));
+        assert_eq!(saved.steps.len(), 1);
+
+        // Saving again replaces the lists rather than adding to them: what
+        // was unticked is gone, and an empty list clears the key.
+        let workspace = Workspace::load(&root).unwrap();
+        save_target_files(
+            &workspace,
+            "api:build:compile",
+            &["packages/api/Cargo.toml".to_string()],
+            &[],
+        )
+        .unwrap();
+        let text = std::fs::read_to_string(root.join(file)).unwrap();
+        let saved: crate::workspace::Workflow =
+            crate::format::from_str(&text, crate::format::Format::Yaml).unwrap();
+        let cache = saved.cache.unwrap();
+        assert_eq!(cache.inputs, ["packages/api/Cargo.toml"]);
+        assert!(cache.outputs.is_empty(), "{text}");
+        assert_eq!(cache.env, ["PROFILE"]);
+
+        // A step with its own inputs would ignore the workflow's: refused.
+        write(
+            &root,
+            file,
+            "steps:\n  - name: compile\n    run: make\n    cache:\n      inputs: [x]\n",
+        );
+        let workspace = Workspace::load(&root).unwrap();
+        let err = save_target_files(&workspace, "api:build:compile", &["y".into()], &[])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("its own `cache.inputs`"), "{err}");
+        assert!(save_target_files(&workspace, "nope", &["y".into()], &[]).is_err());
+        std::fs::remove_dir_all(&root).ok();
     }
 
     /// Every step resolves its paths against the workspace root, whichever

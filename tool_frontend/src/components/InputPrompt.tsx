@@ -2,10 +2,14 @@
  * The dialog a step's `ciabatta input` question appears in.
  *
  * Mounted once, in the app shell, so a question reaches the operator whatever
- * page they are on. It can't be dismissed — no Escape, no backdrop click, no
- * Cancel — because a step is blocked on it: the only ways out are answering,
- * the question timing out, or the run being stopped. Its state lives in the
- * daemon, not here, so reloading the page brings it straight back.
+ * page they are on. It can't be dismissed — no Escape, no backdrop click —
+ * because a step is blocked on it: the only ways out are answering, the
+ * question timing out, or the run being stopped. Cancel is that last one, said
+ * where the question is: it stops the whole run, as the run page's Stop does.
+ * Its state lives in the daemon, not here, so reloading the page brings it
+ * straight back.
+ *
+ * A `--yes-no` question is answered with Yes or No, sent as `y` / `n`.
  */
 
 import { useEffect, useMemo, useState } from "react";
@@ -25,7 +29,7 @@ import {
 import HelpOutlineIcon from "@mui/icons-material/HelpOutline";
 import { Link } from "@tanstack/react-router";
 
-import { useAnswerInput, useWaitingInputs } from "../api/run";
+import { useAnswerInput, useStopRun, useWaitingInputs } from "../api/run";
 import type { WaitingInput } from "../api/run";
 import { monoFontStack } from "../theme";
 
@@ -67,16 +71,18 @@ export function InputPrompt() {
 
 function Question({ input, queued }: { input: WaitingInput; queued: number }) {
   const [value, setValue] = useState("");
+  const [cancelling, setCancelling] = useState(false);
   const answer = useAnswerInput();
+  const stop = useStopRun();
   const remaining = useRemaining(input.deadline);
   const total = input.deadline
     ? new Date(input.deadline).getTime() - new Date(input.asked_at).getTime()
     : null;
   const expired = remaining !== null && remaining <= 0;
 
-  const submit = () => {
+  const submit = (given: string = value) => {
     if (expired || answer.isPending) return;
-    answer.mutate({ run: input.run, id: input.id, value });
+    answer.mutate({ run: input.run, id: input.id, value: given });
   };
 
   return (
@@ -126,7 +132,18 @@ function Question({ input, queued }: { input: WaitingInput; queued: number }) {
             {input.details}
           </Typography>
         )}
-        {!input.enter && (
+        {input.yes_no && (
+          <Typography variant="body2" color="text.secondary">
+            {[
+              input.default === "y" && "No answer in time means yes.",
+              input.default === "n" && "No answer in time means no.",
+              input.env && `Set ${input.env} to y or n to skip this question next time.`,
+            ]
+              .filter(Boolean)
+              .join(" ")}
+          </Typography>
+        )}
+        {!input.enter && !input.yes_no && (
           <TextField
             autoFocus
             fullWidth
@@ -164,23 +181,69 @@ function Question({ input, queued }: { input: WaitingInput; queued: number }) {
             The step carries on when you press Continue, or by itself when the time runs out.
           </Typography>
         )}
-        {answer.error && (
+        {(answer.error || stop.error) && (
           <Typography variant="body2" color="error" sx={{ mt: 1 }}>
-            {answer.error.message}
+            {(answer.error ?? stop.error)?.message}
+          </Typography>
+        )}
+        {cancelling && (
+          <Typography variant="body2" color="warning.main" sx={{ mt: 2 }}>
+            Cancel stops run #{input.run}: the step asking is killed and nothing further
+            starts. What has already happened stays happened.
           </Typography>
         )}
       </DialogContent>
       <DialogActions>
-        <Button
-          variant="contained"
-          onClick={submit}
-          autoFocus={input.enter}
-          disabled={
-            expired || answer.isPending || (!input.enter && !value && input.default === null)
-          }
-        >
-          {input.enter ? "Continue" : "Answer"}
-        </Button>
+        {cancelling ? (
+          <>
+            <Button onClick={() => setCancelling(false)}>Keep waiting</Button>
+            <Button
+              color="error"
+              variant="contained"
+              disabled={stop.isPending}
+              onClick={() => stop.mutate(input.run)}
+            >
+              Stop the run
+            </Button>
+          </>
+        ) : (
+          <>
+            <Button color="error" onClick={() => setCancelling(true)} sx={{ mr: "auto" }}>
+              Cancel
+            </Button>
+            {input.yes_no ? (
+              <>
+                <Button
+                  variant={input.default === "n" ? "contained" : "outlined"}
+                  onClick={() => submit("n")}
+                  autoFocus={input.default === "n"}
+                  disabled={expired || answer.isPending}
+                >
+                  No
+                </Button>
+                <Button
+                  variant={input.default === "n" ? "outlined" : "contained"}
+                  onClick={() => submit("y")}
+                  autoFocus={input.default !== "n"}
+                  disabled={expired || answer.isPending}
+                >
+                  Yes
+                </Button>
+              </>
+            ) : (
+              <Button
+                variant="contained"
+                onClick={() => submit()}
+                autoFocus={input.enter}
+                disabled={
+                  expired || answer.isPending || (!input.enter && !value && input.default === null)
+                }
+              >
+                {input.enter ? "Continue" : "Answer"}
+              </Button>
+            )}
+          </>
+        )}
       </DialogActions>
     </Dialog>
   );

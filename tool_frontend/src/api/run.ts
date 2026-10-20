@@ -46,6 +46,10 @@ export interface StepView extends Timed {
   status: StepStatus;
   /** Recovery nodes are the "fix-it" branches a failure can divert into. */
   recover: boolean;
+  /** `<member>:<workflow>:<step>` — which workflow file declared it. */
+  cache_id?: string | null;
+  /** Its workflow's `wave_grouping`, when it has one. */
+  wave_group?: string | null;
   action: string | null;
   /** Where the step's action runs, relative to the run's root. Null means the
    *  root itself. */
@@ -199,6 +203,10 @@ export interface TargetDeps {
   outputs: string[];
   /** Excluded from its inputs — including sub-workspaces excluded for it. */
   exclude: string[];
+  /** `inputs` / `outputs` as its config writes them, without what
+   *  `cache.cargo` resolved — what the file picker starts from. */
+  declared_inputs?: string[];
+  declared_outputs?: string[];
 
   /** What those globs currently match. */
   input_files: number;
@@ -225,6 +233,9 @@ export interface TargetDeps {
   /** Files its inputs match that an output pattern also covers: treated as
    *  outputs only, never part of the key. */
   outputs_in_inputs?: string[];
+  /** Input globs that match no file, with the likely fix — usually the
+   *  sub-workspace prefix every cache path needs. */
+  unmatched_inputs?: { glob: string; suggestion?: string | null; reason: string }[];
 
   cached: boolean;
   why_uncached: string | null;
@@ -274,6 +285,8 @@ export interface PendingInput {
   env: string | null;
   /** Only a go-ahead is wanted (`--enter`): show Continue, not a field. */
   enter?: boolean;
+  /** A yes-or-no question (`--yes-no`): show Yes and No, which send `y` / `n`. */
+  yes_no?: boolean;
   asked_at: string;
   /** When it stops waiting; null waits forever. */
   deadline: string | null;

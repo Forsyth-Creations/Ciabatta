@@ -1,6 +1,6 @@
 /** Queries for the build cache and the remote cache it talks to. */
 
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery } from "@tanstack/react-query";
 
 import { api } from "./client";
 import type { CachePlan, CacheStatus, FileHash, RemoteStatus } from "./types";
@@ -107,5 +107,35 @@ export function useCacheKeyFiles(
     enabled: Boolean(project && key),
     refetchInterval: live ? 3_000 : false,
     retry: false,
+  });
+}
+
+/** The checkout as the file picker browses it: what git wouldn't ignore. */
+export interface ProjectTree {
+  /** The workspace root every path is relative to. */
+  root: string;
+  files: string[];
+  dirs: string[];
+  /** More files than the daemon sends; the directories are all there. */
+  truncated: boolean;
+}
+
+/** Every file and directory of the checkout, for picking a step's inputs and
+ *  outputs. Fetched when the picker opens, not before. */
+export function useProjectTree(project: string | undefined, enabled: boolean) {
+  return useQuery({
+    queryKey: ["cache", "tree", project ?? ""] as const,
+    queryFn: () => api.get<ProjectTree>(`/api/cache/tree?project=${project}`),
+    enabled: Boolean(project) && enabled,
+    staleTime: 30_000,
+  });
+}
+
+/** Write a step's picked inputs and outputs into its workflow file's `cache:`.
+ *  Resolves to the file written, relative to the workspace root. */
+export function useSaveTargetFiles() {
+  return useMutation({
+    mutationFn: (body: { project: string; target: string; inputs: string[]; outputs: string[] }) =>
+      api.post<{ path: string }>("/api/cache/target-files", body),
   });
 }

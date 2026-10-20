@@ -149,6 +149,11 @@ export interface Stats {
   retention: { description: string };
   /** Whether "clear all" asks for a password. Absent from older servers. */
   clear?: { password_required: boolean };
+  /**
+   * Whether a new ciabatta can be uploaded — only once the config sets an
+   * `update` password — and the platform the server itself runs on.
+   */
+  update?: { enabled: boolean; platform: string };
   sessions: number;
   tls: boolean;
   projects: ProjectStats[];
@@ -230,4 +235,57 @@ export interface CreatedUser {
   token: string;
   note: string;
   login: string;
+}
+
+/** What `/api/release` advertises: the ciabatta builds this cache hands out. */
+export interface Release {
+  version: string;
+  notes: string | null;
+  builds: Record<
+    string,
+    {
+      sha256: string;
+      size: number;
+      modified_at: string | null;
+      /** Its own version, when it was uploaded with one; else `version`. */
+      version?: string | null;
+    }
+  >;
+}
+
+/**
+ * Upload a ciabatta binary for `platform`. The body is the file itself, so the
+ * `update` password travels in a header.
+ */
+export async function uploadBinary(
+  platform: string,
+  file: File,
+  password: string,
+  options: { version?: string; apply?: boolean } = {},
+): Promise<{ version: string | null; applied: boolean; sha256: string | null }> {
+  const query = new URLSearchParams();
+  if (options.version) query.set("version", options.version);
+  if (options.apply) query.set("apply", "true");
+  const headers: Record<string, string> = {
+    "Content-Type": "application/octet-stream",
+    "X-Ciabatta-Update-Password": password,
+  };
+  if (token) headers["Authorization"] = "Bearer " + token;
+  const response = await fetch(`/api/release/${encodeURIComponent(platform)}?${query}`, {
+    method: "PUT",
+    headers,
+    body: file,
+  });
+  const text = await response.text();
+  let body: unknown = null;
+  try {
+    body = text ? JSON.parse(text) : null;
+  } catch {
+    /* not JSON */
+  }
+  if (!response.ok) {
+    const message = (body as { error?: string } | null)?.error;
+    throw new Error(message || text || response.statusText);
+  }
+  return body as { version: string | null; applied: boolean; sha256: string | null };
 }

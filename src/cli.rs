@@ -102,6 +102,27 @@ pub enum Commands {
         /// out, or that nobody can see (CI), carries on.
         #[arg(long, conflicts_with = "secret")]
         enter: bool,
+        /// Ask a yes-or-no question: Yes and No buttons in the web app,
+        /// `[y/n]` in a terminal. Prints `y` or `n` — whatever was typed,
+        /// `yes`, `Y` or `true` included — so a script can test
+        /// `[ "$answer" = y ]`. `--default` and `--env` take y/n (or
+        /// yes/no) too.
+        #[arg(long = "yes-no", visible_alias = "confirm", conflicts_with_all = ["secret", "enter"])]
+        yes_no: bool,
+    },
+
+    /// The Python library for `ciabatta input`, carried in this binary.
+    ///
+    /// `import ciabatta` gives a Python step `ciabatta.input()`,
+    /// `ciabatta.confirm()` (yes/no, returns a bool) and `ciabatta.pause()`,
+    /// which ask through the run exactly as `ciabatta input` does — in the
+    /// terminal or as a dialog in the web app. Standard library only; Python
+    /// 3.9 and newer, on Linux, macOS and Windows. The wheel matches this
+    /// binary's version.
+    #[command(visible_alias = "py")]
+    Python {
+        #[command(subcommand)]
+        command: PythonCommand,
     },
 
     /// Run a workflow across the monorepo, by name.
@@ -757,6 +778,47 @@ pub enum RemoteCacheCommand {
         url: Option<String>,
     },
 
+    /// Upload a new ciabatta binary to a remote cache.
+    ///
+    /// The cache hands it out from then on: clients on that platform are told
+    /// a newer ciabatta is available, and `ciabatta self update` installs it.
+    /// With --apply the cache also runs it — it swaps its own binary (keeping
+    /// the old one as `<name>.previous`) and restarts in place.
+    ///
+    /// Needs an admin login and the cache's `update` password; a cache whose
+    /// config sets no `update` password refuses uploads altogether.
+    ///
+    ///   ciabatta remote-cache upload ./ciabatta --apply
+    ///   ciabatta remote-cache upload ciabatta.exe --platform windows --version 0.7.1
+    Upload {
+        /// The binary — the executable itself, not the release archive.
+        #[arg(name = "BINARY")]
+        binary: std::path::PathBuf,
+
+        /// The cache to upload to. Defaults to the one this workspace uses.
+        #[arg(long, value_name = "URL")]
+        url: Option<String>,
+
+        /// Which platform it is for: linux, macos or windows. Defaults to
+        /// this machine's.
+        #[arg(long, value_name = "PLATFORM")]
+        platform: Option<String>,
+
+        /// The version it is. Needed only for a platform the cache can't run
+        /// — it asks a binary for its own platform itself.
+        #[arg(long, value_name = "VERSION")]
+        version: Option<String>,
+
+        /// Have the cache run it too: replace its own binary and restart.
+        #[arg(long)]
+        apply: bool,
+
+        /// Read the `update` password from this environment variable instead
+        /// of prompting.
+        #[arg(long, value_name = "VAR")]
+        password_env: Option<String>,
+    },
+
     /// Mint a token for a user and print the config line to add.
     #[command(name = "add-user")]
     AddUser {
@@ -1350,4 +1412,27 @@ mod tests {
         assert!(!workflow_args(&["ciabatta", "workflow", "build", "--no-tui"]).use_tui());
         assert!(!workflow_args(&["ciabatta", "workflow", "build", "--no-tui", "--tui"]).use_tui());
     }
+}
+
+#[derive(Subcommand, Debug)]
+pub enum PythonCommand {
+    /// Write the library as a wheel (`ciabatta-<version>-py3-none-any.whl`),
+    /// to install with pip yourself or publish to a package index.
+    Wheel {
+        /// The directory to write it into.
+        #[arg(short, long, value_name = "DIR", default_value = ".")]
+        out: std::path::PathBuf,
+    },
+    /// pip-install the library into a Python: `<python> -m pip install` of
+    /// the wheel. Anything after `--` goes to pip (`-- --user`).
+    Install {
+        /// The interpreter to install into — `python3.12`, a virtualenv's
+        /// `bin/python`, `py -3.9`'s path on Windows. Defaults to `python3`
+        /// (`python` on Windows).
+        #[arg(long, value_name = "PYTHON")]
+        python: Option<String>,
+        /// Extra arguments for pip.
+        #[arg(last = true, value_name = "PIP_ARGS")]
+        pip_args: Vec<String>,
+    },
 }

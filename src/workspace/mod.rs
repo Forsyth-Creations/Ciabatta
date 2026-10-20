@@ -270,6 +270,22 @@ pub struct Workflow {
     #[serde(default)]
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub background: Vec<String>,
+    /// A label lining this workflow up with others that carry the same one,
+    /// in the waves a graph is drawn in.
+    ///
+    /// Waves come from `needs` alone, which is right for running and not
+    /// always for reading: the `lint` of three packages lands in three
+    /// different waves when one package happens to have a longer chain ahead
+    /// of it, though anyone looking at the graph thinks of them as one thing.
+    /// Workflows sharing a `wave_grouping` start in the same wave where they
+    /// can: each moves later, as a whole, to where the latest of them starts,
+    /// and whatever waits on it moves with it.
+    ///
+    /// A preference, never a rule: no step is ever drawn before a step it
+    /// needs, and the order the engine runs things in doesn't change.
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wave_grouping: Option<String>,
 }
 
 /// A workflow's `env`: a list of variable names, or one name on its own.
@@ -330,6 +346,7 @@ impl Workflow {
         "cache",
         "steps",
         "background",
+        "wave_grouping",
     ];
 }
 
@@ -1288,6 +1305,7 @@ mod tests {
             cache: Some(Default::default()),
             steps: vec![Default::default()],
             background: vec!["b".into()],
+            wave_grouping: Some("g".into()),
         };
 
         let yaml = crate::format::to_string(&workflow, crate::format::Format::Yaml).unwrap();

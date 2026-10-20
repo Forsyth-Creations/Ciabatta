@@ -36,6 +36,7 @@ import {
   RateGauge,
 } from "../components/charts";
 import { ClearCache } from "../components/ClearCache";
+import { UpdateServer } from "../components/UpdateServer";
 import { ChartCard, EmptyRow, Mono, Prose, Section, StatTile, Tag, When } from "../components/ui";
 import { ago, human, rate, saved } from "../format";
 import { useLoad } from "../useLoad";
@@ -376,6 +377,10 @@ export function Overview({ refreshKey }: { refreshKey: number }) {
             entries={s.least_recently_used}
           />
         </Box>
+      </Section>
+
+      <Section title="ciabatta" sub="The build this cache hands out to its clients, and runs itself.">
+        <UpdateServer stats={s} onUpdated={reload} />
       </Section>
     </Box>
   );

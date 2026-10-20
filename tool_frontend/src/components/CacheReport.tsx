@@ -34,6 +34,7 @@ import TipsAndUpdatesIcon from "@mui/icons-material/TipsAndUpdates";
 import { humanizeBytes, humanizeMs } from "../api/cache";
 import type { CacheEntryInfo, CacheReport } from "../api/run";
 import { monoFontStack } from "../theme";
+import { SHORT_LIST_MAX, SeeMore } from "./ShortList";
 
 /**
  * A hint as the daemon wrote it — prose with `backticked` config names — with
@@ -193,6 +194,15 @@ export function CacheReportView({
   detailed?: boolean;
 }) {
   const reused = wasReused(report);
+  // What moved, five files at most: the file tree under the inspector has the
+  // rest, and reads better than a page of paths.
+  const [allMoved, setAllMoved] = useState(false);
+  const moved = report.diff
+    ? allMoved
+      ? report.diff.files
+      : report.diff.files.slice(0, SHORT_LIST_MAX)
+    : [];
+  const movedHidden = report.diff ? report.diff.files_total - moved.length : 0;
   const OutcomeIcon = reused
     ? report.source === "remote"
       ? CloudDoneIcon
@@ -255,7 +265,7 @@ export function CacheReportView({
             What moved: {report.diff.summary}
           </Typography>
           <Box component="ul" sx={{ m: 0, pl: 2.5 }}>
-            {report.diff.files.slice(0, detailed ? undefined : 6).map((file) => (
+            {moved.map((file) => (
               <Typography
                 component="li"
                 key={file.path}
@@ -269,9 +279,9 @@ export function CacheReportView({
                 </Box>
               </Typography>
             ))}
-            {report.diff.files_total > (detailed ? report.diff.files.length : 6) && (
+            {movedHidden > 0 && (
               <Typography component="li" variant="caption" color="text.secondary">
-                … and {report.diff.files_total - (detailed ? report.diff.files.length : 6)} more
+                <SeeMore hidden={movedHidden} onExpand={() => setAllMoved(true)} />
               </Typography>
             )}
             {report.diff.env.map((name) => (

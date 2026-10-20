@@ -97,6 +97,10 @@ export interface GraphNode extends WorkflowStep {
   cwd: string | null;
   /** Its dependency layer, or null for a recovery node. */
   wave: number | null;
+  /** Its workflow's `wave_grouping`, when it has one. */
+  wave_group?: string | null;
+  /** `<member>:<workflow>:<step>` — which workflow it came from. */
+  cache_id?: string | null;
 }
 
 export interface GraphEdge {

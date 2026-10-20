@@ -14,6 +14,7 @@ mod format;
 mod git;
 mod lsp;
 mod migrate;
+mod python;
 mod registry;
 mod remote_cache;
 mod run;
@@ -33,7 +34,7 @@ use owo_colors::OwoColorize;
 
 use cli::{
     AiCommand, CacheCommand, Cli, Commands, ConfigCommand, ConfigureCommand, DaemonCommand,
-    EnvCommand, RemoteCacheCommand, SelfCommand,
+    EnvCommand, PythonCommand, RemoteCacheCommand, SelfCommand,
 };
 use config::{CiabattaConfig, find_root, load_config, load_config_file};
 use environment::CiabattaEnv;
@@ -97,6 +98,7 @@ async fn main() -> Result<()> {
             secret,
             timeout,
             enter,
+            yes_no,
         } => {
             let ask = run::input::Ask {
                 prompt,
@@ -106,6 +108,7 @@ async fn main() -> Result<()> {
                 env,
                 timeout,
                 enter,
+                yes_no,
             };
             let vars: HashMap<String, String> = env::vars().collect();
             let answer = run::input::ask(ask, &vars).await?;
@@ -115,6 +118,17 @@ async fn main() -> Result<()> {
                 println!("{answer}");
             }
         }
+
+        Commands::Python { command } => match command {
+            PythonCommand::Wheel { out } => {
+                let path = python::write_wheel(&out)?;
+                println!("{}", path.display());
+            }
+            PythonCommand::Install { python, pip_args } => {
+                let python = python.as_deref().unwrap_or(python::default_python());
+                python::install(python, &pip_args)?;
+            }
+        },
 
         Commands::Env { subcommand } => match subcommand {
             EnvCommand::List => cmd_env_list()?,
@@ -534,7 +548,7 @@ async fn cmd_workflow(
         // The daemon owns the run, so it compiles the graph itself from the
         // same declarations rather than being handed our copy.
         report_run_dependencies(&resolved, &name, &ws.root, &vars, false);
-        return cmd_workflow_gui(&args, &workflows, &ws.root, vars, custom_args).await;
+        return cmd_workflow_gui(&args, &workflows, &ws.root, &cwd, vars, custom_args).await;
     }
 
     execute_workflow(
@@ -722,10 +736,23 @@ async fn cmd_workflow_gui(
     args: &cli::WorkflowArgs,
     workflows: &[String],
     root: &Path,
+    cwd: &Path,
     vars: HashMap<String, String>,
     custom_args: &[String],
 ) -> Result<()> {
     let session = daemon::connect(args.port).await?;
+    // Where this was typed, so the daemon searches the same `.env` files this
+    // terminal would have: from here up to the root.
+    let start = cwd
+        .canonicalize()
+        .ok()
+        .zip(root.canonicalize().ok())
+        .and_then(|(cwd, root)| {
+            cwd.strip_prefix(&root)
+                .ok()
+                .map(|rel| rel.to_string_lossy().replace('\\', "/"))
+        })
+        .unwrap_or_default();
 
     let response = session
         .daemon
@@ -744,6 +771,10 @@ async fn cmd_workflow_gui(
             // keeps them with the run, so "run again" repeats them.
             "args": custom_args,
             "env_profile": args.env_profile,
+            "cwd": start,
+            // `env` is this terminal's whole environment: the daemon keeps it
+            // (in memory) for the runs the browser starts next.
+            "terminal": true,
         }))
         .send()
         .await?;
@@ -2557,6 +2588,58 @@ async fn cmd_remote_cache(subcommand: RemoteCacheCommand) -> Result<()> {
             Ok(())
         }
 
+        RemoteCacheCommand::Upload {
+            binary,
+            url,
+            platform,
+            version,
+            apply,
+            password_env,
+        } => {
+            let url = match url {
+                Some(url) => url,
+                None => configured_remote()?.ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "No remote cache is configured for this workspace, and none was named.\n\
+                         Usage: ciabatta remote-cache upload <BINARY> --url <URL>"
+                    )
+                })?,
+            };
+            let platform =
+                platform.unwrap_or_else(|| remote_cache::releases::current_platform().to_string());
+            let bytes = std::fs::read(&binary)
+                .with_context(|| format!("couldn't read {}", binary.display()))?;
+            // Caught here as well as on the server, before the upload.
+            remote_cache::releases::check_binary(&platform, &bytes)?;
+            let password = match &password_env {
+                Some(var) => env::var(var)
+                    .with_context(|| format!("--password-env names {var}, but it isn't set"))?,
+                None => prompt_secret(&format!("Update password for {url}: "))?,
+            };
+            let size = cache::store::human_size(bytes.len() as u64);
+            println!(
+                "Uploading {} ({size}) to {url} for {platform}…",
+                binary.display()
+            );
+            let client = Client::saved(&url)?;
+            let reply = match client
+                .upload_release(&platform, bytes, &password, version.as_deref(), apply)
+                .await
+            {
+                Ok(reply) => reply,
+                Err(e) => return Err(explain_auth_failure(&url, e)),
+            };
+            let version = reply["version"].as_str().unwrap_or("its previous version");
+            println!(
+                "{url} now hands out ciabatta {version} for {platform} — clients there can run \
+                 `ciabatta self update`."
+            );
+            if apply {
+                println!("It is restarting on the new binary.");
+            }
+            Ok(())
+        }
+
         RemoteCacheCommand::AddUser { name, read_only } => {
             let token = remote_cache::auth::generate_token();
             let hash = cache::hash_bytes(token.as_bytes());
@@ -2976,7 +3059,7 @@ async fn cmd_self(subcommand: SelfCommand) -> Result<()> {
         remote_cache::releases::UpdateStatus::UpToDate if !force => {
             println!(
                 "Already running what {url} serves (ciabatta {}).",
-                release.version
+                release.version_for(platform)
             );
             return Ok(());
         }
@@ -2989,7 +3072,7 @@ async fn cmd_self(subcommand: SelfCommand) -> Result<()> {
 
     if check {
         println!("An update is available from {url}:");
-        println!("  version  {}", release.version);
+        println!("  version  {}", release.version_for(platform));
         println!("  size     {}", cache::store::human_size(build.size));
         println!("  sha256   {}", build.sha256);
         if let Some(notes) = &release.notes {
@@ -2999,9 +3082,10 @@ async fn cmd_self(subcommand: SelfCommand) -> Result<()> {
         return Ok(());
     }
 
+    remote_cache::releases::check_writable()?;
     println!(
         "Downloading ciabatta {} for {platform} from {url} ({})…",
-        release.version,
+        release.version_for(platform),
         cache::store::human_size(build.size)
     );
     let bytes = client.download_release(platform).await?;
@@ -3011,7 +3095,7 @@ async fn cmd_self(subcommand: SelfCommand) -> Result<()> {
     let path = remote_cache::releases::install(&bytes, &build.sha256)?;
     println!(
         "Installed ciabatta {} to {}",
-        release.version,
+        release.version_for(platform),
         path.display()
     );
     if let Some(notes) = &release.notes {

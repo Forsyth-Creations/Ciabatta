@@ -78,6 +78,23 @@ pub struct Request {
     /// in the web app. The answer is empty.
     #[serde(default)]
     pub enter: bool,
+    /// A yes-or-no question: Yes/No buttons in the web app, `[y/n]` in a
+    /// terminal. The answer is always `y` or `n`, whatever was typed.
+    #[serde(default)]
+    pub yes_no: bool,
+}
+
+/// `y` or `n` for anything that reads as yes or no — `yes`, `Y`, `true`,
+/// `no`, `0` — and `None` for anything that doesn't.
+///
+/// The convention scripts test for (`[ "$answer" = y ]`), so a yes-or-no
+/// question hands back exactly one of the two however it was answered.
+pub fn yes_no(value: &str) -> Option<&'static str> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "y" | "yes" | "true" | "1" | "on" => Some("y"),
+        "n" | "no" | "false" | "0" | "off" => Some("n"),
+        _ => None,
+    }
 }
 
 /// The broker's answer: a value, or why there isn't one.
@@ -106,6 +123,9 @@ pub struct Pending {
     /// Only a go-ahead is wanted — viewers show a Continue button, not a field.
     #[serde(default)]
     pub enter: bool,
+    /// Only yes or no is wanted — viewers show Yes and No, and send `y`/`n`.
+    #[serde(default)]
+    pub yes_no: bool,
     /// When it was asked, RFC 3339.
     pub asked_at: String,
     /// When it stops waiting, RFC 3339 — absent for a question that waits
@@ -382,6 +402,7 @@ where
         secret: request.secret,
         env: request.env.clone(),
         enter: request.enter,
+        yes_no: request.yes_no,
         asked_at: chrono::Local::now().to_rfc3339(),
         deadline: timeout.map(|limit| {
             (chrono::Local::now() + chrono::Duration::from_std(limit).unwrap_or_default())
@@ -430,6 +451,12 @@ where
                 let value = match (value.is_empty(), &request.default) {
                     (true, Some(default)) => default.clone(),
                     _ => value,
+                };
+                // The daemon refuses anything else, so this only tidies `yes`
+                // into `y`.
+                let value = match request.yes_no {
+                    true => yes_no(&value).map(str::to_string).unwrap_or(value),
+                    false => value,
                 };
                 log(format!("input: {} → {}", request.prompt, logged(&request, &value))).await;
                 (Outcome::Answered, Reply::Value(value))
@@ -522,6 +549,9 @@ pub fn ask_terminal(
         }
     }
     let mut hints = Vec::new();
+    if pending.yes_no {
+        hints.push("y or n".to_string());
+    }
     match (&pending.default, pending.enter) {
         (_, true) => hints.push("press Enter to continue".to_string()),
         (Some(default), false) => {
@@ -559,6 +589,11 @@ pub fn ask_terminal(
 
         let shown_text = match (pending.enter, pending.secret) {
             (true, _) => faint("⏎ continue"),
+            (false, _) if pending.yes_no && typed.is_empty() => faint(&match &pending.default {
+                Some(d) if d == "y" => "[Y/n]".to_string(),
+                Some(d) if d == "n" => "[y/N]".to_string(),
+                _ => "[y/n]".to_string(),
+            }),
             (false, true) => "•".repeat(typed.chars().count()),
             (false, false) => typed.clone(),
         };
@@ -587,6 +622,18 @@ pub fn ask_terminal(
             continue;
         }
         match key.code {
+            // A yes-or-no question takes nothing else: an answer that isn't
+            // one is cleared, and the prompt waits for one that is.
+            KeyCode::Enter if pending.yes_no => {
+                let value = match (typed.is_empty(), &pending.default) {
+                    (true, Some(default)) => default.clone(),
+                    _ => typed.clone(),
+                };
+                match yes_no(&value) {
+                    Some(answer) => break Ok(answer.to_string()),
+                    None => typed.clear(),
+                }
+            }
             KeyCode::Enter => break Ok(typed.clone()),
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 break Err(NoAnswer::Interrupted);
@@ -627,6 +674,7 @@ pub struct Ask {
     pub env: Option<String>,
     pub timeout: Option<String>,
     pub enter: bool,
+    pub yes_no: bool,
 }
 
 /// Get the answer to `ask`: from its variable when that is set, from the run's
@@ -637,12 +685,36 @@ pub async fn ask(mut ask: Ask, env: &HashMap<String, String>) -> Result<String> 
     if ask.enter && ask.default.is_none() {
         ask.default = Some(String::new());
     }
+    if ask.yes_no
+        && let Some(default) = &ask.default
+    {
+        match yes_no(default) {
+            Some(answer) => ask.default = Some(answer.to_string()),
+            None => bail!("--default for a yes-or-no question is y or n, not '{default}'"),
+        }
+    }
     if let Some(var) = &ask.env
         && let Some(value) = env.get(var).filter(|v| !v.is_empty())
     {
-        return Ok(value.clone());
+        return match ask.yes_no {
+            false => Ok(value.clone()),
+            true => yes_no(value)
+                .map(str::to_string)
+                .with_context(|| format!("{var} is '{value}', which isn't yes or no")),
+        };
     }
+    let yes_no_wanted = ask.yes_no;
+    let answer = ask_somewhere(ask, env).await?;
+    match yes_no_wanted {
+        false => Ok(answer),
+        true => yes_no(&answer)
+            .map(str::to_string)
+            .with_context(|| format!("'{answer}' isn't yes or no")),
+    }
+}
 
+/// [`ask`], once a variable hasn't answered it.
+async fn ask_somewhere(ask: Ask, env: &HashMap<String, String>) -> Result<String> {
     match (env.get(ADDR_VAR), env.get(TOKEN_VAR)) {
         (Some(addr), Some(token)) => {
             let request = Request {
@@ -655,6 +727,7 @@ pub async fn ask(mut ask: Ask, env: &HashMap<String, String>) -> Result<String> 
                 env: ask.env,
                 timeout: ask.timeout,
                 enter: ask.enter,
+                yes_no: ask.yes_no,
             };
             match request_answer(addr, &request).await? {
                 Reply::Value(value) => Ok(value),
@@ -700,6 +773,7 @@ async fn ask_here(ask: Ask) -> Result<String> {
         secret: ask.secret,
         env: ask.env,
         enter: ask.enter,
+        yes_no: ask.yes_no,
         asked_at: String::new(),
         deadline: None,
     };
@@ -909,6 +983,63 @@ mod tests {
             }
         };
         assert!(enter, "viewers are told to show a Continue button");
+    }
+
+    #[test]
+    fn yes_and_no_come_back_as_y_and_n() {
+        for yes in ["y", "Y", "yes", "YES", " true ", "1"] {
+            assert_eq!(yes_no(yes), Some("y"), "{yes}");
+        }
+        for no in ["n", "No", "false", "0", "off"] {
+            assert_eq!(yes_no(no), Some("n"), "{no}");
+        }
+        assert_eq!(yes_no("maybe"), None);
+        assert_eq!(yes_no(""), None);
+    }
+
+    #[tokio::test]
+    async fn a_yes_or_no_question_answers_y_or_n() {
+        // A variable saying `yes` answers it as `y`; one saying anything else
+        // is an error rather than a value a script would misread.
+        let mut q = question("Deploy?");
+        q.yes_no = true;
+        q.env = Some("DEPLOY".into());
+        let env = HashMap::from([("DEPLOY".to_string(), "Yes".to_string())]);
+        assert_eq!(ask(q.clone(), &env).await.unwrap(), "y");
+        let env = HashMap::from([("DEPLOY".to_string(), "later".to_string())]);
+        assert!(ask(q, &env).await.is_err());
+
+        // Through the broker, a `no` from the web app comes back as `n`, and
+        // the viewers were told to show Yes/No.
+        let (attended, mut rx, bus) = broker(None, true).await;
+        let env = env_of(&attended);
+        let mut q = question("Deploy?");
+        q.yes_no = true;
+        let asking = tokio::spawn(async move { ask(q, &env).await });
+        let pending = loop {
+            if let ProgressUpdate::InputRequested { input, .. } = rx.recv().await.unwrap() {
+                break input;
+            }
+        };
+        assert!(pending.yes_no);
+        bus.unwrap()
+            .send(Answer {
+                id: pending.id,
+                value: "no".into(),
+            })
+            .unwrap();
+        assert_eq!(asking.await.unwrap().unwrap(), "n");
+
+        // An unattended run takes the default, normalised too.
+        let (unattended, _rx, _bus) = broker(None, false).await;
+        let mut q = question("Deploy?");
+        q.yes_no = true;
+        q.default = Some("YES".into());
+        assert_eq!(ask(q, &env_of(&unattended)).await.unwrap(), "y");
+        let mut q = question("Deploy?");
+        q.yes_no = true;
+        q.default = Some("perhaps".into());
+        assert!(ask(q, &env_of(&unattended)).await.is_err());
     }
 
     #[tokio::test]

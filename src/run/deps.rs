@@ -49,6 +49,13 @@ pub struct TargetDeps {
     /// Globs excluded from its inputs, including the sub-workspaces excluded
     /// automatically.
     pub exclude: Vec<String>,
+    /// `inputs` and `outputs` as its config writes them, without what
+    /// `cache.cargo` resolved — what the web app's file picker starts from and
+    /// saves back, so a Cargo closure is never frozen into a hand-written list.
+    #[serde(default)]
+    pub declared_inputs: Vec<String>,
+    #[serde(default)]
+    pub declared_outputs: Vec<String>,
 
     /// The input files those globs currently match.
     pub input_files: usize,
@@ -101,11 +108,92 @@ pub struct TargetDeps {
     /// outputs only, and worth a warning.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub outputs_in_inputs: Vec<String>,
+    /// Input globs that match no file, each with what is probably wrong.
+    ///
+    /// "0 files" next to a list of globs that plainly name files reads as the
+    /// cache being broken. Usually it is the path: every `cache:` path is
+    /// relative to the workspace root, so a package's `src/**` has to be
+    /// written `packages/api/src/**` — and a glob written relative to the
+    /// package matches nothing at the root.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unmatched_inputs: Vec<UnmatchedGlob>,
 
     /// Whether the cache is in play for it.
     pub cached: bool,
     /// Why it isn't, when it isn't.
     pub why_uncached: Option<String>,
+}
+
+/// A declared input glob that matches nothing, and the likely reason.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct UnmatchedGlob {
+    pub glob: String,
+    /// What it would have to say to match, when that can be worked out — the
+    /// same glob under the step's own sub-workspace.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suggestion: Option<String>,
+    /// One sentence on why it matches nothing.
+    pub reason: String,
+}
+
+/// Why each of `globs` matches no file under `dir`, for those that don't.
+///
+/// Each is tried on its own, against the files as they are, without the
+/// exclusions — then, if that finds nothing, under the step's sub-workspace.
+/// Best-effort: a glob that can't be listed is skipped rather than reported.
+pub fn unmatched_inputs(
+    cache: &crate::cache::CacheConfig,
+    dir: &Path,
+    member: Option<&str>,
+) -> Vec<UnmatchedGlob> {
+    let listed = |glob: &str| crate::cache::list_matching(dir, &[glob.to_string()], &[]).ok();
+    // What the inputs keep once exclusions and .gitignore have had their say.
+    let kept: Option<std::collections::HashSet<String>> = cache
+        .list_inputs(dir, member)
+        .ok()
+        .map(|files| files.into_iter().map(|f| f.path).collect());
+    let mut unmatched = Vec::new();
+    for glob in &cache.inputs {
+        let Some(alone) = listed(glob) else { continue };
+        if !alone.is_empty() {
+            // It matches files. Worth saying only when every one of them is
+            // then left out, so that it contributes nothing at all.
+            let contributes = kept
+                .as_ref()
+                .is_none_or(|kept| alone.iter().any(|f| kept.contains(&f.path)));
+            if !contributes {
+                unmatched.push(UnmatchedGlob {
+                    glob: glob.clone(),
+                    suggestion: None,
+                    reason: format!(
+                        "matches {} file(s), but every one is left out — by `exclude`, by an \
+                         output pattern, or by .gitignore",
+                        alone.len()
+                    ),
+                });
+            }
+            continue;
+        }
+        let prefixed = member
+            .map(|rel| format!("{rel}/{}", glob.trim_start_matches("./")))
+            .filter(|candidate| listed(candidate).is_some_and(|files| !files.is_empty()));
+        unmatched.push(match prefixed {
+            Some(suggestion) => UnmatchedGlob {
+                reason: format!(
+                    "matches nothing at the workspace root, which every cache path is relative \
+                     to — written from the sub-workspace, it is `{suggestion}`"
+                ),
+                glob: glob.clone(),
+                suggestion: Some(suggestion),
+            },
+            None => UnmatchedGlob {
+                glob: glob.clone(),
+                suggestion: None,
+                reason: "matches no file — paths are relative to the workspace root".to_string(),
+            },
+        });
+    }
+    unmatched
 }
 
 impl TargetDeps {
@@ -223,6 +311,8 @@ fn one(context: &WorkspaceContext<'_>, root: &Path, step: &RunStep, detail: Deta
         workspace: step.workspace.clone(),
         dir: relative(root, &dir),
         commands: crate::cache::graph::commands_of(step),
+        declared_inputs: cache.inputs.clone(),
+        declared_outputs: cache.outputs.clone(),
         inputs: inputs_declared,
         outputs: outputs_declared,
         exclude,
@@ -263,6 +353,7 @@ fn one(context: &WorkspaceContext<'_>, root: &Path, step: &RunStep, detail: Deta
         outputs_in_inputs: cache
             .outputs_in_inputs(&dir, member.as_deref())
             .unwrap_or_default(),
+        unmatched_inputs: unmatched_inputs(&cache, &dir, member.as_deref()),
     }
 }
 
@@ -554,5 +645,32 @@ mod tests {
         assert!(text.contains("uncached"));
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A package's glob written relative to the package matches nothing at the
+    /// root — the usual reason a target says "0 files" — and the fix is named.
+    #[test]
+    fn a_glob_written_from_the_package_is_caught_with_its_fix() {
+        let dir = scratch("unmatched");
+        write(&dir, "packages/api/src/lib.rs", "");
+        write(&dir, "packages/api/target/out", "");
+        let cache = crate::cache::CacheConfig {
+            enabled: Some(true),
+            inputs: vec![
+                "src/**".into(),
+                "packages/api/src/**".into(),
+                "nowhere/**".into(),
+                "packages/api/target/**".into(),
+            ],
+            exclude: vec!["packages/api/target".into()],
+            ..Default::default()
+        };
+        let found = unmatched_inputs(&cache, &dir, Some("packages/api"));
+        let globs: Vec<&str> = found.iter().map(|u| u.glob.as_str()).collect();
+        assert_eq!(globs, ["src/**", "nowhere/**", "packages/api/target/**"]);
+        assert_eq!(found[0].suggestion.as_deref(), Some("packages/api/src/**"));
+        assert!(found[1].suggestion.is_none());
+        assert!(found[2].reason.contains("left out"), "{}", found[2].reason);
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

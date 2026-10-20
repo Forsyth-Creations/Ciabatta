@@ -119,6 +119,8 @@ import {
 } from "../components/CacheReport";
 import { useInspectMode } from "../state/inspect";
 import { CacheKeyFilesView } from "../components/CacheKeyFiles";
+import { CACHE_FILES_ANCHOR, ShortList } from "../components/ShortList";
+import { CacheFilePicker } from "../components/CacheFilePicker";
 import { ErrorNote, Loading } from "../components/Page";
 import { monoFontStack } from "../theme";
 
@@ -1017,9 +1019,38 @@ function StepInspector({
         now={now}
         env={workflow.env.vars.filter((variable) => variable.steps.includes(step.name))}
       />
+      {inspect && !step.recover && step.deps?.name && (
+        <PickFilesButton project={project} step={step} />
+      )}
       {step.restoring && <RestoringPanel step={step} />}
       <StepCacheSection project={project} step={step} inspect={inspect} />
     </Stack>
+  );
+}
+
+/**
+ * Inspect mode's way to fix a step's file lists: browse the checkout, tick
+ * what it reads and writes, and save that into its workflow file.
+ */
+function PickFilesButton({ project, step }: { project: string; step: StepView }) {
+  const [open, setOpen] = useState(false);
+  const unmatched = step.deps.unmatched_inputs?.length ?? 0;
+  return (
+    <Box>
+      <Button
+        size="small"
+        variant={unmatched > 0 || step.deps.input_files === 0 ? "contained" : "outlined"}
+        color="warning"
+        startIcon={<FolderOpenIcon />}
+        onClick={() => setOpen(true)}
+      >
+        Choose input &amp; output files…
+      </Button>
+      {/* Mounted only while open, so it starts from the step's config each time. */}
+      {open && (
+        <CacheFilePicker project={project} step={step} open onClose={() => setOpen(false)} />
+      )}
+    </Box>
   );
 }
 
@@ -1101,7 +1132,10 @@ function StepCacheSection({
       </Typography>
       <CacheReportView report={step.cache} detailed={inspect} />
       {inspect && step.cache.key && (
-        <Box sx={{ mt: 1.25, pt: 1, borderTop: 1, borderColor: "divider" }}>
+        <Box
+          id={CACHE_FILES_ANCHOR}
+          sx={{ mt: 1.25, pt: 1, borderTop: 1, borderColor: "divider", scrollMarginTop: 16 }}
+        >
           <CacheKeyFilesView
             project={project}
             cacheKey={step.cache.key}
@@ -1522,25 +1556,35 @@ function TargetDependencies({ deps }: { deps: TargetDeps }) {
       <DepRow
         label="reads"
         value={
-          deps.inputs.length === 0
-            ? "no input files declared"
-            : `${deps.input_files} file(s), ${humanizeBytes(deps.input_bytes)} — ${deps.inputs.join(", ")}`
+          deps.inputs.length === 0 ? (
+            "no input files declared"
+          ) : (
+            <>
+              {deps.input_files} file(s), {humanizeBytes(deps.input_bytes)} —{" "}
+              <ShortList items={deps.inputs} />
+            </>
+          )
         }
         title={deps.exclude.length > 0 ? `excluding ${deps.exclude.join(", ")}` : undefined}
       />
       {deps.cargo && deps.cargo.length > 0 && (
         <DepRow
           label="cargo"
-          value={deps.cargo.join("; ")}
+          value={<ShortList items={deps.cargo} />}
           title="Packages cache.cargo resolved this target's files from"
         />
       )}
       <DepRow
         label="writes"
         value={
-          deps.outputs.length === 0
-            ? "no output files declared, so nothing could be restored"
-            : `${deps.output_files} file(s), ${humanizeBytes(deps.output_bytes)} — ${deps.outputs.join(", ")}`
+          deps.outputs.length === 0 ? (
+            "no output files declared, so nothing could be restored"
+          ) : (
+            <>
+              {deps.output_files} file(s), {humanizeBytes(deps.output_bytes)} —{" "}
+              <ShortList items={deps.outputs} />
+            </>
+          )
         }
       />
       <DepRow
@@ -1554,7 +1598,7 @@ function TargetDependencies({ deps }: { deps: TargetDeps }) {
       )}
       {deps.cached && deps.undeclared_reads && deps.undeclared_reads.length > 0 && (
         <Typography variant="caption" color="warning.main">
-          ⚠ rustc reports the last build reading {deps.undeclared_reads.join(", ")}, outside
+          ⚠ rustc reports the last build reading <ShortList items={deps.undeclared_reads} />, outside
           its cache inputs, so changing {deps.undeclared_reads.length === 1 ? "it" : "them"}{" "}
           would not invalidate this target.
         </Typography>
@@ -1563,11 +1607,15 @@ function TargetDependencies({ deps }: { deps: TargetDeps }) {
         <Typography variant="caption" color="warning.main">
           ⚠ {deps.outputs_in_inputs.length} file(s) match both its inputs and its outputs, so
           they are treated as outputs only and left out of the key:{" "}
-          {deps.outputs_in_inputs.slice(0, 5).join(", ")}
-          {deps.outputs_in_inputs.length > 5 && `, and ${deps.outputs_in_inputs.length - 5} more`}.
-          Narrow cache.inputs, or add them to exclude.
+          <ShortList items={deps.outputs_in_inputs} />. Narrow cache.inputs, or add them to
+          exclude.
         </Typography>
       )}
+      {(deps.unmatched_inputs ?? []).map((miss) => (
+        <Typography key={miss.glob} variant="caption" color="warning.main">
+          ⚠ input <code>{miss.glob}</code> <Prose text={miss.reason} />.
+        </Typography>
+      ))}
       {deps.cached && undeclared.length > 0 && (
         <Typography variant="caption" color="warning.main">
           ⚠ tests {undeclared.join(", ")} in a condition without declaring{" "}
@@ -1658,7 +1706,7 @@ function DepRow({
   mono,
 }: {
   label: string;
-  value: string;
+  value: React.ReactNode;
   title?: string;
   mono?: boolean;
 }) {
@@ -2006,6 +2054,13 @@ function buildFlow(
       // Background tasks sit in a row underneath rather than in a column,
       // because a column would claim they gate what follows them. They don't.
       bottom: (id) => byName.get(id)?.background ?? false,
+      // Workflows sharing a `wave_grouping` start in the same column. A stack
+      // is its workflow file, so it lines up as one.
+      align: (id) => {
+        const step = byName.get(membersOf(id)[0]);
+        const unit = step?.cache_id?.slice(0, step.cache_id.lastIndexOf(":"));
+        return step?.wave_group && unit ? { group: step.wave_group, unit } : undefined;
+      },
     },
   );
 

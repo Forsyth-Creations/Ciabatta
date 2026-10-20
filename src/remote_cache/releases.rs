@@ -39,6 +39,11 @@ pub struct ReleaseConfig {
 
     /// Notes shown alongside the update prompt — what changed, or a link.
     pub notes: Option<String>,
+
+    /// Platform → version, for builds uploaded with one (see
+    /// [`ReleaseConfig::with_uploads`]). Never read from the config file.
+    #[serde(skip)]
+    pub uploaded_versions: BTreeMap<String, String>,
 }
 
 impl ReleaseConfig {
@@ -61,7 +66,8 @@ impl ReleaseConfig {
 
         for (platform, path) in &self.binaries {
             match hash_binary(path) {
-                Ok(build) => {
+                Ok(mut build) => {
+                    build.version = self.uploaded_versions.get(platform).cloned();
                     builds.insert(platform.clone(), build);
                 }
                 Err(e) => {
@@ -85,6 +91,238 @@ impl ReleaseConfig {
     }
 }
 
+impl ReleaseConfig {
+    /// This config with what has been uploaded to `storage` laid over it: an
+    /// uploaded binary replaces the configured one for its platform, and the
+    /// version it was uploaded as replaces `version`.
+    pub fn with_uploads(&self, storage: &Path) -> ReleaseConfig {
+        let mut merged = self.clone();
+        for platform in PLATFORMS {
+            let path = uploaded_path(storage, platform);
+            if path.is_file() {
+                merged.binaries.insert(platform.to_string(), path);
+            }
+        }
+        merged.uploaded_versions = read_record(storage).versions;
+        merged
+    }
+}
+
+/// The platforms a binary can be uploaded for — [`current_platform`]'s names.
+pub const PLATFORMS: [&str; 3] = ["linux", "macos", "windows"];
+
+/// Where uploaded binaries are kept: `<storage>/release/<platform>/`.
+pub fn upload_dir(storage: &Path) -> PathBuf {
+    storage.join("release")
+}
+
+const UPLOAD_RECORD: &str = "upload.json";
+
+/// What each uploaded build is, and who sent it.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct UploadRecord {
+    /// Platform → the version its upload is.
+    #[serde(default)]
+    versions: BTreeMap<String, String>,
+    #[serde(default)]
+    by: String,
+    #[serde(default)]
+    at: String,
+}
+
+fn read_record(storage: &Path) -> UploadRecord {
+    std::fs::read_to_string(upload_dir(storage).join(UPLOAD_RECORD))
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_default()
+}
+
+/// Where the uploaded binary for `platform` lives.
+pub fn uploaded_path(storage: &Path, platform: &str) -> PathBuf {
+    let name = if platform == "windows" {
+        "ciabatta.exe"
+    } else {
+        "ciabatta"
+    };
+    upload_dir(storage).join(platform).join(name)
+}
+
+/// Refuse what plainly isn't a program for `platform` — a text file, an
+/// archive, the wrong OS's binary. The magic numbers, not a full parse:
+/// enough to catch the upload of `ciabatta-linux-x86_64.tar.gz` instead of
+/// what is inside it.
+pub fn check_binary(platform: &str, bytes: &[u8]) -> Result<()> {
+    let head = &bytes[..bytes.len().min(4)];
+    let fits = match platform {
+        "linux" => head == b"\x7fELF",
+        "windows" => head.starts_with(b"MZ"),
+        "macos" => matches!(
+            head,
+            [0xcf, 0xfa, 0xed, 0xfe] | [0xce, 0xfa, 0xed, 0xfe] | [0xca, 0xfe, 0xba, 0xbe]
+        ),
+        other => bail!(
+            "'{other}' isn't a platform this server hands out ({})",
+            PLATFORMS.join(", ")
+        ),
+    };
+    if !fits {
+        let what = if head.starts_with(&[0x1f, 0x8b]) {
+            " — that's a gzip archive; upload the binary inside it"
+        } else if head.starts_with(b"PK") {
+            " — that's a zip archive; upload the .exe inside it"
+        } else {
+            ""
+        };
+        bail!("That isn't a {platform} executable{what}.");
+    }
+    Ok(())
+}
+
+/// What version a ciabatta binary says it is, by running `--version` — which
+/// also proves it starts on this machine before anything relies on it.
+pub fn binary_version(path: &Path) -> Result<String> {
+    let output = std::process::Command::new(path)
+        .arg("--version")
+        .output()
+        .with_context(|| format!("couldn't run {}", path.display()))?;
+    anyhow::ensure!(
+        output.status.success(),
+        "{} --version failed ({})",
+        path.display(),
+        output.status
+    );
+    let text = String::from_utf8_lossy(&output.stdout);
+    let version = text
+        .split_whitespace()
+        .nth(1)
+        .filter(|_| text.starts_with("ciabatta"))
+        .with_context(|| format!("{} doesn't say it's ciabatta: {text:?}", path.display()))?;
+    Ok(version.to_string())
+}
+
+/// Keep `bytes` as the binary this server hands out for `platform`.
+///
+/// For this server's own platform the binary is run (`--version`) first, so a
+/// build that won't start here is refused before it replaces anything, and
+/// its own answer is the version recorded. For another platform it can't be
+/// run, so `version` says what it is — or, left out, the version stays what it
+/// was. Written beside its final path and renamed into place, so a client
+/// mid-download never reads half a file.
+pub fn store_upload(
+    storage: &Path,
+    platform: &str,
+    bytes: &[u8],
+    version: Option<&str>,
+    by: &str,
+) -> Result<(PathBuf, Option<String>)> {
+    check_binary(platform, bytes)?;
+    let path = uploaded_path(storage, platform);
+    let dir = path.parent().expect("uploaded paths have a directory");
+    std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    let staged = dir.join(format!(".upload-{}", std::process::id()));
+    std::fs::write(&staged, bytes).with_context(|| format!("writing {}", staged.display()))?;
+    make_executable(&staged)?;
+
+    let version = if platform == current_platform() {
+        match binary_version(&staged) {
+            Ok(found) => Some(found),
+            Err(e) => {
+                let _ = std::fs::remove_file(&staged);
+                return Err(e.context("the uploaded binary doesn't run on this server"));
+            }
+        }
+    } else {
+        version.map(str::to_string)
+    };
+    std::fs::rename(&staged, &path).with_context(|| format!("moving it to {}", path.display()))?;
+    // A new binary with no version said isn't the old version any more.
+    let mut record = read_record(storage);
+    match &version {
+        Some(version) => record
+            .versions
+            .insert(platform.to_string(), version.clone()),
+        None => record.versions.remove(platform),
+    };
+    record.by = by.to_string();
+    record.at = chrono::Utc::now().to_rfc3339();
+    std::fs::write(
+        upload_dir(storage).join(UPLOAD_RECORD),
+        serde_json::to_vec_pretty(&record)?,
+    )?;
+    Ok((path, version))
+}
+
+#[cfg(unix)]
+fn make_executable(path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
+        .with_context(|| format!("making {} executable", path.display()))
+}
+
+#[cfg(not(unix))]
+fn make_executable(_: &Path) -> Result<()> {
+    Ok(())
+}
+
+/// Put `new` where the running binary is, keeping the old one beside it as
+/// `<name>.previous` to roll back to. Returns the path to start again from —
+/// found before anything moves, because once the file is replaced the
+/// process can no longer ask where it was started from.
+///
+/// A running executable can be renamed on every OS (it can't be overwritten
+/// on Windows), so the old file moves aside and the new one is renamed in.
+pub fn replace_running(new: &Path) -> Result<PathBuf> {
+    let exe = std::env::current_exe().context("couldn't find the running binary")?;
+    let exe = exe.canonicalize().unwrap_or(exe);
+    let dir = exe
+        .parent()
+        .context("the running binary has no directory")?;
+    let name = exe
+        .file_name()
+        .context("the running binary has no name")?
+        .to_string_lossy();
+    let staged = dir.join(format!(".{name}.new"));
+    let previous = dir.join(format!("{name}.previous"));
+    std::fs::copy(new, &staged).with_context(|| {
+        format!(
+            "couldn't write into {} — the server needs write access to the directory it runs from",
+            dir.display()
+        )
+    })?;
+    make_executable(&staged)?;
+    let _ = std::fs::remove_file(&previous);
+    std::fs::rename(&exe, &previous)
+        .with_context(|| format!("couldn't move {} aside", exe.display()))?;
+    if let Err(e) = std::fs::rename(&staged, &exe) {
+        // Put the old one back rather than leave nothing to restart.
+        let _ = std::fs::rename(&previous, &exe);
+        return Err(e).with_context(|| format!("couldn't put the new binary at {}", exe.display()));
+    }
+    Ok(exe)
+}
+
+/// Start `exe` again with the arguments this process was started with. On
+/// Unix the process image is replaced, keeping its PID — so a container whose
+/// first process is the server, or a supervisor watching the PID, sees one
+/// process that changed version. On Windows a new process is started and this
+/// one exits. Only returns if that failed.
+pub fn restart(exe: &Path) -> anyhow::Error {
+    let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        let error = std::process::Command::new(exe).args(&args).exec();
+        anyhow::Error::from(error).context(format!("couldn't start {}", exe.display()))
+    }
+    #[cfg(not(unix))]
+    {
+        match std::process::Command::new(exe).args(&args).spawn() {
+            Ok(_) => std::process::exit(0),
+            Err(e) => anyhow::Error::from(e).context(format!("couldn't start {}", exe.display())),
+        }
+    }
+}
+
 /// One platform's binary, as advertised to clients.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Build {
@@ -94,6 +332,11 @@ pub struct Build {
     pub size: u64,
     /// RFC 3339 timestamp of the file's last modification.
     pub modified_at: Option<String>,
+    /// This build's own version, when it was uploaded with one — builds for
+    /// different platforms can be uploaded at different versions. Absent, the
+    /// release's `version` stands for it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
 }
 
 /// What a server advertises: a version, and a build per platform.
@@ -110,6 +353,14 @@ impl Release {
     /// The build for a platform, if this server carries one.
     pub fn build(&self, platform: &str) -> Option<&Build> {
         self.builds.get(platform)
+    }
+
+    /// The version a platform's build is: its own, when it was uploaded with
+    /// one, else the release's.
+    pub fn version_for(&self, platform: &str) -> &str {
+        self.build(platform)
+            .and_then(|b| b.version.as_deref())
+            .unwrap_or(&self.version)
     }
 
     /// Whether this server has anything at all to hand out.
@@ -131,6 +382,7 @@ pub fn hash_binary(path: &Path) -> Result<Build> {
             .modified()
             .ok()
             .map(|t| chrono::DateTime::<chrono::Utc>::from(t).to_rfc3339()),
+        version: None,
     })
 }
 
@@ -147,6 +399,53 @@ pub fn current_platform() -> &'static str {
         "macos"
     } else {
         "linux"
+    }
+}
+
+/// Fail early — before a download that can't be installed — when this
+/// binary's directory isn't the user's to write.
+pub fn check_writable() -> Result<()> {
+    let exe = std::env::current_exe().context("Could not find this ciabatta binary on disk")?;
+    let dir = exe
+        .parent()
+        .context("This ciabatta binary has no parent directory")?;
+    let probe = dir.join(format!(".ciabatta-write-check-{}", std::process::id()));
+    match std::fs::File::create(&probe) {
+        Ok(_) => {
+            let _ = std::fs::remove_file(&probe);
+            Ok(())
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+            bail!("{}", not_writable(&exe, dir))
+        }
+        // Anything else is for the install itself to report.
+        Err(_) => Ok(()),
+    }
+}
+
+/// What to say when the directory ciabatta is installed in isn't the user's
+/// to write — `/usr/local/bin`, typically, from an install that used sudo.
+pub fn not_writable(exe: &Path, dir: &Path) -> String {
+    if cfg!(windows) {
+        format!(
+            "{} isn't writable by you, so ciabatta can't replace itself there. Run \
+             `ciabatta self update` from a terminal opened with \"Run as administrator\", \
+             or reinstall into a folder you own (install.ps1's default, \
+             %LOCALAPPDATA%\\Programs\\ciabatta).",
+            dir.display()
+        )
+    } else {
+        format!(
+            "{dir} isn't writable by you, so ciabatta can't replace itself there.\n\
+             Either update it with sudo — naming the cache, because sudo runs from \
+             root's home and doesn't see your workspace's settings:\n\
+             \n    sudo {exe} self update --from <URL>\n\n\
+             or move ciabatta somewhere you own, once, and never need sudo again:\n\
+             \n    curl -fsSL https://forsyth-creations.github.io/Ciabatta/install.sh | sh -s -- --dir ~/.local/bin\n\
+             \n(then remove {exe}, and make sure ~/.local/bin is on your PATH).",
+            dir = dir.display(),
+            exe = exe.display(),
+        )
     }
 }
 
@@ -185,7 +484,7 @@ impl UpdateStatus {
         match own_hash() {
             Ok(mine) if mine == build.sha256 => UpdateStatus::UpToDate,
             Ok(_) => UpdateStatus::Available {
-                version: release.version.clone(),
+                version: release.version_for(platform).to_string(),
                 build: build.clone(),
             },
             Err(e) => UpdateStatus::Unknown(format!("{e:#}")),
@@ -234,12 +533,12 @@ pub fn install(bytes: &[u8], expected: &str) -> Result<PathBuf> {
         .context("This ciabatta binary has no parent directory")?;
 
     let staged = dir.join(format!(".ciabatta-update-{}", std::process::id()));
-    std::fs::write(&staged, bytes).with_context(|| {
-        format!(
-            "Failed to write {} — is the directory writable?",
-            staged.display()
-        )
-    })?;
+    if let Err(e) = std::fs::write(&staged, bytes) {
+        if e.kind() == std::io::ErrorKind::PermissionDenied {
+            bail!("{}", not_writable(&exe, dir));
+        }
+        return Err(e).with_context(|| format!("Failed to write {}", staged.display()));
+    }
     copy_permissions(&exe, &staged)?;
 
     // The running binary can't be removed on Windows, but it can be renamed.
@@ -309,6 +608,7 @@ mod tests {
                 ("linux".to_string(), PathBuf::from("ciabatta-linux")),
                 ("windows".to_string(), PathBuf::from("ciabatta-windows.exe")),
             ]),
+            ..Default::default()
         };
         config.resolve_relative(&dir);
         assert_eq!(config.binaries["linux"], dir.join("ciabatta-linux"));
@@ -362,6 +662,7 @@ mod tests {
                     sha256: running.clone(),
                     size: 1,
                     modified_at: None,
+                    version: None,
                 },
             )]),
         };
@@ -381,6 +682,7 @@ mod tests {
                     sha256: crate::cache::hash_bytes(b"something else entirely"),
                     size: 1,
                     modified_at: None,
+                    version: None,
                 },
             )]),
         };

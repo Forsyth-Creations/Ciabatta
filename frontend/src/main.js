@@ -239,6 +239,32 @@ function editorCard(e) {
     </div>`;
 }
 
+// The Python library for `ciabatta input`. One pure-Python wheel installs
+// everywhere; the release workflow copies it onto this site under python/,
+// next to an index page pip can read with --find-links.
+const SITE = "https://forsyth-creations.github.io/Ciabatta";
+const WHEEL = `ciabatta-${VERSION}-py3-none-any.whl`;
+const PYTHON = [
+  {
+    os: "🐍",
+    label: "Python 3.9+",
+    file: WHEEL,
+    hint: "Linux, macOS and Windows",
+    what: "<code>pip install ciabatta --find-links " + SITE + "/python/</code> — or <code>ciabatta python install</code>, which installs the copy built into your binary.",
+  },
+];
+
+function pythonCard(p) {
+  return `
+    <div class="pcard">
+      <div class="pcard__os">${p.os}</div>
+      <div class="pcard__label">${p.label}</div>
+      <a class="pcard__dl" href="python/${p.file}" download>${p.file} ↓</a>
+      <div class="pcard__hint">${p.hint}</div>
+      <p class="pcard__what">${p.what}</p>
+    </div>`;
+}
+
 function platformCard(p) {
   return `
     <div class="pcard">
@@ -418,6 +444,21 @@ function render() {
           <code>127.0.0.1:8099/extensions</code>, built from the commit that built it — see the
           Editors page of <code>ciabatta docs</code>.
         </p>
+      </section>
+
+      <section class="section reveal" id="python">
+        <div class="section__head">
+          <div class="eyebrow">Python</div>
+          <h2>Ask the operator from Python.</h2>
+          <p class="section__sub">
+            A step written in Python asks its questions the way <code>ciabatta input</code> does —
+            under the run in a terminal, or as a dialog in the web app — with a function call:
+            <code>ciabatta.input("Which region?", default="us-east-1")</code>,
+            <code>ciabatta.confirm("Deploy?")</code> for a yes-or-no that returns a bool, and
+            <code>ciabatta.pause()</code> for a go-ahead. Standard library only.
+          </p>
+        </div>
+        <div class="platforms">${PYTHON.map(pythonCard).join("")}</div>
       </section>
 
       <section class="section reveal">

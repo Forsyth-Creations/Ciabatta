@@ -93,10 +93,19 @@ pub struct ServerConfig {
     /// admin. See [`ClearConfig`].
     #[serde(default)]
     pub clear: ClearConfig,
+
+    /// The password for uploading a new ciabatta to this server — to hand out
+    /// to clients, and to run itself. The same shape as `clear`. Unlike
+    /// clearing, uploading is refused outright until one is set: replacing
+    /// the binary the server runs is not something an admin session alone
+    /// should be able to do.
+    #[serde(default)]
+    pub update: ClearConfig,
 }
 
 /// The guard on "clear all": a password that has to be typed before every
-/// artifact the cache holds is deleted.
+/// artifact the cache holds is deleted. `update:` — uploading a new ciabatta —
+/// takes the same two keys.
 ///
 /// ```yaml
 /// clear:
@@ -387,10 +396,22 @@ auth:
 #   # …or the password itself, from the server's environment.
 #   # password_env: CIABATTA_CLEAR_PASSWORD
 
+# ─── Uploading a new ciabatta ─────────────────────────────────────────────────
+# `ciabatta remote-cache upload <binary>` (or the admin page's Update panel)
+# sends this server a new ciabatta: to hand out to clients, and with --apply to
+# run itself, restarting in place. It needs an admin *and* this password, and is
+# refused until one is set.
+#
+# update:
+#   password_sha256: "…"
+#   # password_env: CIABATTA_UPDATE_PASSWORD
+
 # ─── Handing out ciabatta itself ───────────────────────────────────────────────
 # Point these at the binaries you want your team on. The server hashes them,
 # tells connected clients when the hash changes, and serves them to
 # `ciabatta self update` — so upgrading everyone is copying two files here.
+# A binary uploaded (see `update:` above) takes over from the one listed here
+# for its platform.
 #
 # releases:
 #   version: "0.2.0"

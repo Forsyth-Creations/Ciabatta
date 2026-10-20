@@ -789,6 +789,16 @@ steps:
       echo "goodbye!"
     needs: [ask]
 
+  - name: wave
+    description: A yes-or-no question — Yes/No in the web app, [Y/n] in a terminal
+    run: |
+      if [ "$(ciabatta input "Wave as well?" --yes-no --default y)" = y ]; then
+        echo "👋"
+      else
+        echo "no wave, then"
+      fi
+    needs: [confirm]
+
   - name: tick
     description: Runs alongside the questions, to show the rest of the run keeps going
     run: "for i in 1 2 3; do echo \"tick $i\"; sleep 1; done"

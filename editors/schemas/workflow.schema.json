@@ -72,6 +72,11 @@
       "description": "Workflows that must be RUNNING for this one to finish: a mock API the integration tests call, a database container, a bundler in watch mode. Named the same way `needs` names things — \"<member>\" for that sub-workspace's workflow of this name, \"<member>:<workflow>\" for a specific one — because they are the same kind of thing: a target that already exists, declared once, in its own package. The only difference from `needs` is that a `needs` target is waited for and a `background` target is merely started: its steps gate nothing, so no mistake in one can hold a build up, and they are stopped again once every stage has succeeded or failed. That lifetime is the whole difference from a step with `persistent: true`, which the daemon keeps alive on purpose so a `dev` workflow leaves you a server to work against.",
       "items": { "type": "string" },
       "examples": [["mock-api:serve", "database"]]
+    },
+    "wave_grouping": {
+      "type": "string",
+      "description": "A label lining this workflow up with every other workflow that carries the same one, in the waves a graph is drawn in. Waves come from `needs` alone; workflows sharing a `wave_grouping` start in the same wave where they can — each moves later, as a whole, to where the latest of them starts, and whatever waits on it moves with it. A preference for reading the graph, never a rule: no step is drawn before a step it needs, and the order the engine runs things in doesn't change.",
+      "examples": ["lint", "checks"]
     }
   }
 }

@@ -143,6 +143,17 @@ pub struct Runs {
     /// opened, in which case runs work exactly as they used to — in memory,
     /// until the daemon exits.
     store: Option<crate::daemon::run_store::RunStore>,
+    /// The environment the last `--gui` launch brought from its terminal, per
+    /// monorepo root — not per project, since the CLI registers the package it
+    /// was typed in while the browser usually has the root open. Memory only, for the same reason `CreatePayload::env` is never
+    /// stored: it is somebody's shell, tokens and all.
+    ///
+    /// The daemon's own environment is whatever the shell that first started
+    /// it had — often days old, and from another terminal. A run started from
+    /// the browser layers this over it, so a variable exported in the terminal
+    /// that has been driving the project reaches the run the browser starts
+    /// too, not only the one `--gui` started.
+    terminal_env: Mutex<HashMap<std::path::PathBuf, HashMap<String, String>>>,
 }
 
 impl Runs {
@@ -196,6 +207,7 @@ impl Runs {
             inner: Mutex::new(inner),
             next_id: AtomicU64::new(highest + 1),
             store,
+            terminal_env: Mutex::default(),
         })
     }
 
@@ -277,6 +289,26 @@ impl Runs {
     fn next_id(&self) -> u64 {
         self.next_id.fetch_add(1, Ordering::Relaxed)
     }
+
+    /// The environment a run starts with: the daemon's own, then — for a run
+    /// the browser started — the last terminal's for this project, then what
+    /// the request itself carried. A terminal launch replaces the remembered
+    /// one, since it is now the latest word on what that shell holds.
+    fn environment_for(
+        &self,
+        root: &std::path::Path,
+        payload: &CreatePayload,
+    ) -> HashMap<String, String> {
+        let mut env: HashMap<String, String> = std::env::vars().collect();
+        let mut remembered = lock(&self.terminal_env);
+        if payload.terminal {
+            remembered.insert(root.to_path_buf(), payload.env.clone());
+        } else if let Some(terminal) = remembered.get(root) {
+            env.extend(terminal.clone());
+        }
+        env.extend(payload.env.clone());
+        env
+    }
 }
 
 // ─── Payloads ───────────────────────────────────────────────────────────────
@@ -328,6 +360,19 @@ pub struct CreatePayload {
     /// The env profile to run under (`--env-profile`).
     #[serde(default)]
     env_profile: Option<String>,
+    /// Where the run was started, relative to the monorepo root — the
+    /// directory a `--gui` launch was typed in. The `.env` search runs from
+    /// there up to the root, exactly as it does for a run in the terminal;
+    /// without it a run from `packages/api` would never read
+    /// `packages/api/.env`. Kept with the run, so "run again" searches the
+    /// same files.
+    #[serde(default)]
+    cwd: Option<String>,
+    /// Sent by `--gui`: `env` is that terminal's whole environment, and is
+    /// remembered for the runs the browser starts next in the same checkout (see
+    /// [`Runs::environment_for`]).
+    #[serde(default, skip_serializing)]
+    terminal: bool,
 }
 
 #[derive(Deserialize)]
@@ -424,6 +469,22 @@ async fn rerun(State(state): State<AppState>, Path(id): Path<u64>) -> RouteResul
     start(state, payload).await
 }
 
+/// The directory a run's `.env` search starts from: `cwd` under `root`, or
+/// the root itself when it is missing, or would lead out of the checkout.
+fn start_dir(root: &std::path::Path, cwd: Option<&str>) -> std::path::PathBuf {
+    let Some(cwd) = cwd.filter(|c| !c.is_empty() && *c != ".") else {
+        return root.to_path_buf();
+    };
+    let relative = std::path::Path::new(cwd);
+    let inside = relative
+        .components()
+        .all(|part| matches!(part, std::path::Component::Normal(_)));
+    match inside && root.join(relative).is_dir() {
+        true => root.join(relative),
+        false => root.to_path_buf(),
+    }
+}
+
 async fn start(state: AppState, payload: CreatePayload) -> RouteResult<Json<Value>> {
     let project_root = state.project_root(&payload.project)?;
     let config = crate::config::load_config(&project_root)?;
@@ -464,15 +525,20 @@ async fn start(state: AppState, payload: CreatePayload) -> RouteResult<Json<Valu
 
         let name = graph.label();
         let resolved = crate::workspace::graph::into_run(graph).map_err(RouteError::bad_request)?;
+        // Settled here, before anything reads the environment: the view, the
+        // pre-flight and the engine all call `with_env_levels` and keep the
+        // first answer, so this one is the answer for all three.
+        let start = start_dir(&workspace.root, payload.cwd.as_deref());
+        let meta = workspace.root_meta.clone();
+        let resolved = crate::run::with_env_levels(resolved, &workspace.root, &start, &meta);
         (workspace.root, vec![(name, resolved)])
     };
     let names: Vec<String> = runs.iter().map(|(name, _)| name.clone()).collect();
 
-    // Seed from the daemon's own environment, so a run started from the browser
-    // sees what one started from a terminal would (`build_env_vars` does the
-    // same), then layer whatever the caller supplied on top.
-    let mut env: HashMap<String, String> = std::env::vars().collect();
-    env.extend(payload.env.clone());
+    // Seed from the daemon's own environment and, for a run the browser
+    // started, the last terminal's (`build_env_vars` does the same for a run in
+    // a terminal), then layer whatever the caller supplied on top.
+    let mut env = state.runs.environment_for(&root, &payload);
     // Custom arguments and the profile after everything else: they were asked
     // for, for this run.
     env.extend(crate::cli::parse_custom_args(&payload.args).map_err(RouteError::bad_request)?);
@@ -1014,6 +1080,20 @@ async fn answer(
             "That question isn't waiting any more — it was answered, timed out, or its step ended.",
         ));
     }
+    // A yes-or-no question gets yes or no, or nothing that a script testing
+    // `[ "$answer" = y ]` could misread.
+    let question = lock(&run.state)
+        .pending_inputs()
+        .into_iter()
+        .map(|(_, input)| input)
+        .find(|input| input.id == payload.id);
+    if let Some(question) = question
+        && question.yes_no
+        && crate::run::input::yes_no(&payload.value).is_none()
+        && !(payload.value.is_empty() && question.default.is_some())
+    {
+        return Err(RouteError::bad_request("This question takes yes or no."));
+    }
     run.inputs
         .send(crate::run::input::Answer {
             id: payload.id,
@@ -1062,6 +1142,57 @@ fn get_run(state: &AppState, id: u64) -> RouteResult<Arc<Run>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn payload(project: &str, env: &[(&str, &str)], terminal: bool) -> CreatePayload {
+        serde_json::from_value(serde_json::json!({
+            "project": project,
+            "env": env.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect::<HashMap<_, _>>(),
+            "terminal": terminal,
+        }))
+        .unwrap()
+    }
+
+    /// A variable exported in the terminal that last launched with `--gui`
+    /// reaches a run the browser starts in the same checkout, even when that
+    /// terminal registered a package rather than the root.
+    #[test]
+    fn a_browser_run_inherits_the_last_terminals_environment() {
+        let runs = Runs::default();
+        let root = std::path::Path::new("/checkout");
+        let from_terminal =
+            runs.environment_for(root, &payload("api", &[("MYVAR", "hello")], true));
+        assert_eq!(
+            from_terminal.get("MYVAR").map(String::as_str),
+            Some("hello")
+        );
+
+        let from_browser = runs.environment_for(root, &payload("root", &[], false));
+        assert_eq!(from_browser.get("MYVAR").map(String::as_str), Some("hello"));
+
+        // What the browser typed itself still wins, and another checkout is
+        // none of that terminal's business.
+        let typed = runs.environment_for(root, &payload("root", &[("MYVAR", "typed")], false));
+        assert_eq!(typed.get("MYVAR").map(String::as_str), Some("typed"));
+        let elsewhere =
+            runs.environment_for(std::path::Path::new("/other"), &payload("x", &[], false));
+        assert!(!elsewhere.contains_key("MYVAR"));
+    }
+
+    /// The `.env` search starts where the terminal was, but never outside the
+    /// checkout.
+    #[test]
+    fn the_env_search_starts_where_the_run_was_typed() {
+        let root = std::env::temp_dir().join(format!("ciabatta-startdir-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("packages/api")).unwrap();
+        assert_eq!(
+            start_dir(&root, Some("packages/api")),
+            root.join("packages/api")
+        );
+        assert_eq!(start_dir(&root, None), root);
+        assert_eq!(start_dir(&root, Some("../elsewhere")), root);
+        assert_eq!(start_dir(&root, Some("packages/missing")), root);
+        std::fs::remove_dir_all(&root).ok();
+    }
 
     /// The reason [`lock`] exists: one panic must not turn every later read of
     /// a run into a panic of its own, because the first one is the one worth

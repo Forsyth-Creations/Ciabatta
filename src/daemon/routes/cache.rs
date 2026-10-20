@@ -12,7 +12,7 @@
 //! every viewer's browser history.
 
 use axum::extract::{Query, State};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::json;
@@ -27,6 +27,101 @@ pub fn router() -> Router<AppState> {
         .route("/api/cache/status", get(status))
         .route("/api/cache/remote", get(remote_status))
         .route("/api/cache/files", get(files))
+        .route("/api/cache/tree", get(tree))
+        .route("/api/cache/target-files", post(save_target_files))
+}
+
+#[derive(Deserialize)]
+pub struct TreeQuery {
+    project: String,
+}
+
+/// The most paths the picker is sent. A checkout bigger than this is browsed
+/// by its directories, which are always all there.
+const TREE_LIMIT: usize = 50_000;
+
+/// Every file in the checkout git wouldn't ignore, relative to the workspace
+/// root — what the run page's file picker browses to choose a step's inputs
+/// and outputs. Ignored files are left out because they are what a build
+/// *makes*: an output is picked by its directory, which is listed.
+async fn tree(
+    State(state): State<AppState>,
+    Query(query): Query<TreeQuery>,
+) -> RouteResult<Json<serde_json::Value>> {
+    let project = state.project_root(&query.project)?;
+    let root = crate::workspace::Workspace::discover(&project)
+        .map(|ws| ws.root)
+        .unwrap_or(project);
+    let listed = tokio::task::spawn_blocking({
+        let root = root.clone();
+        move || crate::cache::not_ignored(&root)
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("listing the checkout failed: {e}"))??;
+    let mut files: Vec<String> = Vec::new();
+    let mut dirs: Vec<String> = Vec::new();
+    for path in listed {
+        if path.is_empty() {
+            continue;
+        }
+        match root.join(&path).is_dir() {
+            true => dirs.push(path),
+            false => files.push(path),
+        }
+    }
+    files.sort();
+    dirs.sort();
+    let truncated = files.len() > TREE_LIMIT;
+    files.truncate(TREE_LIMIT);
+    Ok(Json(json!({
+        "root": root.to_string_lossy().replace('\\', "/"),
+        "files": files,
+        "dirs": dirs,
+        "truncated": truncated,
+    })))
+}
+
+#[derive(Deserialize)]
+pub struct TargetFilesPayload {
+    project: String,
+    /// The step's cache id, `<member>:<workflow>:<step>`.
+    target: String,
+    #[serde(default)]
+    inputs: Vec<String>,
+    #[serde(default)]
+    outputs: Vec<String>,
+}
+
+/// Set the inputs and outputs picked for a step in its workflow file — the
+/// lists are replaced, not added to. See
+/// [`crate::cache::cli::save_target_files`].
+async fn save_target_files(
+    State(state): State<AppState>,
+    Json(payload): Json<TargetFilesPayload>,
+) -> RouteResult<Json<serde_json::Value>> {
+    // Every path stays inside the checkout: these are written into a config
+    // that a later run resolves against the root.
+    let escapes = |p: &String| {
+        p.is_empty()
+            || std::path::Path::new(p).is_absolute()
+            || p.split(['/', '\\']).any(|part| part == "..")
+    };
+    if payload.inputs.iter().chain(&payload.outputs).any(escapes) {
+        return Err(RouteError::bad_request(
+            "Paths are relative to the workspace root and stay inside it.",
+        ));
+    }
+    let project = state.project_root(&payload.project)?;
+    let workspace =
+        crate::workspace::Workspace::discover(&project).map_err(RouteError::bad_request)?;
+    let written = crate::cache::cli::save_target_files(
+        &workspace,
+        &payload.target,
+        &payload.inputs,
+        &payload.outputs,
+    )
+    .map_err(RouteError::bad_request)?;
+    Ok(Json(json!({ "path": written })))
 }
 
 #[derive(Deserialize)]

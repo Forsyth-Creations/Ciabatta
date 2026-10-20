@@ -158,6 +158,13 @@ export function WorkflowFlow({
           return heightOf(Boolean(node?.workspace), planned.has(id));
         },
         bottom: (id) => byId.get(id)?.background ?? false,
+        // The daemon's waves already honour `wave_grouping`; this keeps the
+        // drawing in step with them.
+        align: (id) => {
+          const node = byId.get(id);
+          const unit = node?.cache_id?.slice(0, node.cache_id.lastIndexOf(":"));
+          return node?.wave_group && unit ? { group: node.wave_group, unit } : undefined;
+        },
       },
     );
 

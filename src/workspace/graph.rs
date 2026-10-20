@@ -70,8 +70,6 @@ impl WorkflowGraph {
     /// Recovery nodes belong to the step that routes to them rather than to a
     /// wave of their own, so they're left out here.
     pub fn waves(&self) -> Vec<Vec<&RunStep>> {
-        let mut placed: HashMap<&str, usize> = HashMap::new();
-        let mut waves: Vec<Vec<&RunStep>> = Vec::new();
         // Background tasks are in the graph but not in the order: they are
         // started before the first wave and nothing waits for them, so putting
         // one in a wave would claim the next wave waits for it.
@@ -81,7 +79,10 @@ impl WorkflowGraph {
             .filter(|s| !s.recover && !s.background)
             .collect();
 
+        let mut placed: HashMap<&str, usize> = HashMap::new();
+        let mut leftover: Vec<&RunStep> = Vec::new();
         let mut remaining: Vec<&RunStep> = normal.clone();
+        let mut wave = 0;
         while !remaining.is_empty() {
             // Everything whose dependencies have already been placed forms the
             // next wave.
@@ -92,15 +93,31 @@ impl WorkflowGraph {
             if ready.is_empty() {
                 // Can only happen if validation was skipped; emit the rest as a
                 // final wave rather than looping forever.
-                waves.push(rest);
+                leftover = rest;
                 break;
             }
-            let index = waves.len();
             for step in &ready {
-                placed.insert(step.name.as_str(), index);
+                placed.insert(step.name.as_str(), wave);
             }
-            waves.push(ready);
+            wave += 1;
             remaining = rest;
+        }
+
+        align_wave_groups(&normal, &mut placed);
+
+        let mut waves: Vec<Vec<&RunStep>> =
+            vec![Vec::new(); placed.values().max().map_or(0, |last| last + 1)];
+        // Declaration order within a wave, as it always was.
+        for step in &normal {
+            if let Some(&at) = placed.get(step.name.as_str()) {
+                waves[at].push(step);
+            }
+        }
+        // Grouping can leave a wave with nothing in it; an empty wave says
+        // nothing and would only be a gap.
+        waves.retain(|wave| !wave.is_empty());
+        if !leftover.is_empty() {
+            waves.push(leftover);
         }
         waves
     }
@@ -111,6 +128,112 @@ impl WorkflowGraph {
             .iter()
             .filter(|s| s.workspace.as_deref() == Some(member))
             .collect()
+    }
+}
+
+/// Line up workflows that share a `wave_grouping`, as a last pass over waves
+/// already computed from `needs`.
+///
+/// Within a group, the workflows that don't depend on another workflow of the
+/// group are lined up: each moves later, as a whole, to start where the latest
+/// of them starts. One that does depend on another member can never share its
+/// wave — it has to come after it — so it isn't counted, and simply follows
+/// whatever it waits on. Then every step is pushed after the steps it needs
+/// again, so whatever waits on a moved workflow moves with it. Nothing ever
+/// moves earlier, which is what keeps the rule — a step comes after
+/// everything it needs — intact however the groups are drawn.
+fn align_wave_groups<'a>(steps: &[&'a RunStep], placed: &mut HashMap<&'a str, usize>) {
+    // The workflow a step came from: its cache id without the step's name.
+    let unit_of = |step: &RunStep| {
+        step.cache_id
+            .as_deref()
+            .and_then(|id| id.rsplit_once(':'))
+            .map(|(unit, _)| unit.to_string())
+    };
+    let by_name: HashMap<&str, &RunStep> = steps.iter().map(|s| (s.name.as_str(), *s)).collect();
+    let mut groups: BTreeMap<String, BTreeMap<String, Vec<&'a RunStep>>> = BTreeMap::new();
+    for step in steps {
+        if let (Some(group), Some(unit)) = (step.wave_group.clone(), unit_of(step)) {
+            groups
+                .entry(group)
+                .or_default()
+                .entry(unit)
+                .or_default()
+                .push(step);
+        }
+    }
+
+    for units in groups.values() {
+        // The workflows each one waits on, however indirectly.
+        let upstream = |members: &[&RunStep]| {
+            let mut seen: HashSet<&str> = HashSet::new();
+            let mut stack: Vec<&str> = members
+                .iter()
+                .flat_map(|s| s.needs.iter().map(String::as_str))
+                .collect();
+            let mut found: HashSet<String> = HashSet::new();
+            while let Some(name) = stack.pop() {
+                if !seen.insert(name) {
+                    continue;
+                }
+                if let Some(step) = by_name.get(name) {
+                    if let Some(unit) = unit_of(step) {
+                        found.insert(unit);
+                    }
+                    stack.extend(step.needs.iter().map(String::as_str));
+                }
+            }
+            found
+        };
+        let free: Vec<&Vec<&RunStep>> = units
+            .iter()
+            .filter(|(unit, members)| {
+                upstream(members)
+                    .iter()
+                    .all(|other| other == *unit || !units.contains_key(other))
+            })
+            .map(|(_, members)| members)
+            .collect();
+        let start = |members: &[&RunStep], placed: &HashMap<&str, usize>| {
+            members
+                .iter()
+                .filter_map(|s| placed.get(s.name.as_str()).copied())
+                .min()
+                .unwrap_or(0)
+        };
+        let target = free.iter().map(|m| start(m, placed)).max().unwrap_or(0);
+        for members in free {
+            let shift = target - start(members, placed);
+            for step in members {
+                if let Some(at) = placed.get_mut(step.name.as_str()) {
+                    *at += shift;
+                }
+            }
+        }
+
+        // Every step after what it needs, again. Terminates: the steps here
+        // are the acyclic ones the waves were built from.
+        loop {
+            let mut pushed = false;
+            for step in steps {
+                let after = step
+                    .needs
+                    .iter()
+                    .filter_map(|need| placed.get(need.as_str()))
+                    .map(|at| at + 1)
+                    .max()
+                    .unwrap_or(0);
+                if let Some(at) = placed.get_mut(step.name.as_str())
+                    && *at < after
+                {
+                    *at = after;
+                    pushed = true;
+                }
+            }
+            if !pushed {
+                break;
+            }
+        }
     }
 }
 
@@ -690,6 +813,7 @@ fn compile(
             let mut compiled = step.clone();
             compiled.name = node_id(unit, &step.name);
             compiled.cache_id = Some(format!("{}:{}:{}", unit.member, unit.workflow, step.name));
+            compiled.wave_group = workflow.wave_grouping.clone();
             compiled.workspace = Some(member.name.clone());
             compiled.cwd = Some(member.rel.clone());
 
@@ -875,6 +999,7 @@ fn compile(
             let mut compiled = step.clone();
             compiled.name = node_id(unit, &step.name);
             compiled.cache_id = Some(format!("{}:{}:{}", unit.member, unit.workflow, step.name));
+            compiled.wave_group = workflow.wave_grouping.clone();
             compiled.workspace = Some(member.name.clone());
             compiled.cwd = Some(member.rel.clone());
             compiled.background = true;
@@ -1939,6 +2064,65 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("has no steps"), "{err}");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Workflows sharing a `wave_grouping` start in the same wave — the later
+    /// one's — and what follows them moves along, never ahead of its needs.
+    #[test]
+    fn a_wave_grouping_lines_workflows_up_without_breaking_needs() {
+        let root = scratch("wavegroup");
+        let proto = member(&root, "packages/proto", "[workspace]\nname = \"proto\"\n");
+        workflow(
+            &proto,
+            "build",
+            "[[steps]]\nname = \"gen\"\nrun = \"true\"\n",
+        );
+        workflow(
+            &proto,
+            "lint",
+            "wave_grouping = \"lint\"\n[[steps]]\nname = \"check\"\nrun = \"true\"\n",
+        );
+        let api = member(
+            &root,
+            "packages/api",
+            "[workspace]\nname = \"api\"\ndepends_on = [\"proto:build\"]\n",
+        );
+        workflow(
+            &api,
+            "build",
+            "[[steps]]\nname = \"compile\"\nrun = \"true\"\n",
+        );
+        workflow(
+            &api,
+            "lint",
+            "wave_grouping = \"lint\"\nneeds = [\"self:build\"]\n\
+             [[steps]]\nname = \"check\"\nrun = \"true\"\n\
+             [[steps]]\nname = \"report\"\nrun = \"true\"\nneeds = [\"check\"]\n",
+        );
+        let ws = Workspace::load(&root).unwrap();
+        let graph = build_many(&ws, &["lint".to_string()], &Selection::default()).unwrap();
+        let waves: Vec<Vec<String>> = graph
+            .waves()
+            .iter()
+            .map(|wave| wave.iter().map(|s| s.name.clone()).collect())
+            .collect();
+        let wave_of = |needle: &str| {
+            waves
+                .iter()
+                .position(|wave| wave.iter().any(|name| name.contains(needle)))
+                .unwrap_or_else(|| panic!("{needle} in {waves:?}"))
+        };
+        // proto's lint would be wave 1 on its own; grouped, it waits for api's.
+        assert_eq!(wave_of("proto:lint"), wave_of("api:lint"), "{waves:?}");
+        assert!(wave_of("api:build") < wave_of("api:lint"));
+        assert!(
+            wave_of("api:lint")
+                < waves
+                    .iter()
+                    .rposition(|w| w.iter().any(|n| n.ends_with("report")))
+                    .unwrap()
+        );
         std::fs::remove_dir_all(&root).ok();
     }
 }

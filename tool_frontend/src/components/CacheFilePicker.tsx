@@ -12,7 +12,10 @@
  * a directory path. Globs the config already has that aren't a plain path
  * (`src/**\/*.rs`) are kept as written, shown as chips you can remove.
  *
- * Saving writes the workflow's own `cache:` section (see
+ * Saving *sets* the lists: what is ticked when you press Save is the whole of
+ * the step's inputs and outputs, so unticking a path removes it from the file
+ * and an empty tab clears that list. It writes the workflow's own `cache:`
+ * section (see
  * `save_target_files` in the daemon) — the file the step was declared in, so
  * the change is one a reviewer sees in a diff, not a setting hidden in the
  * browser. The run on screen keeps what it ran with; the next run uses it.
@@ -222,7 +225,7 @@ export function CacheFilePicker({
         <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
           Tick what the step reads as its inputs and what it writes as its outputs. Paths are from
           the workspace root, which is what every cache path is relative to; a ticked folder means
-          everything in it.
+          everything in it. Saving replaces both lists with exactly what is ticked here.
         </Typography>
         {(step.deps.cargo?.length ?? 0) > 0 && (
           <Alert severity="info" sx={{ mb: 1, py: 0.25 }}>
@@ -328,7 +331,7 @@ export function CacheFilePicker({
         <Button onClick={onClose}>{save.isSuccess ? "Done" : "Cancel"}</Button>
         <Button
           variant="contained"
-          disabled={!target || save.isPending || !changed || (picked.inputs.length === 0 && picked.outputs.length === 0)}
+          disabled={!target || save.isPending || !changed}
           onClick={() =>
             target &&
             save.mutate({ project, target, inputs: picked.inputs, outputs: picked.outputs })

@@ -201,6 +201,9 @@ fn step() -> crate::run::RunStep {
         required_env: Vec::new(),
         declared_env: Vec::new(),
         cache_id: None,
+        // Not a config key — copied from the workflow's `wave_grouping` when
+        // the graph compiles — so the schemas don't name it.
+        wave_group: None,
     }
 }
 
@@ -226,6 +229,7 @@ fn workflow() -> crate::workspace::Workflow {
         cache: Some(cache()),
         steps: vec![step()],
         background: list(),
+        wave_grouping: Some(one()),
     }
 }
 

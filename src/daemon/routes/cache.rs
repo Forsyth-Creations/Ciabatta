@@ -92,17 +92,13 @@ pub struct TargetFilesPayload {
     outputs: Vec<String>,
 }
 
-/// Save the inputs and outputs picked for a step into its workflow file — see
+/// Set the inputs and outputs picked for a step in its workflow file — the
+/// lists are replaced, not added to. See
 /// [`crate::cache::cli::save_target_files`].
 async fn save_target_files(
     State(state): State<AppState>,
     Json(payload): Json<TargetFilesPayload>,
 ) -> RouteResult<Json<serde_json::Value>> {
-    if payload.inputs.is_empty() && payload.outputs.is_empty() {
-        return Err(RouteError::bad_request(
-            "Pick at least one input or output.",
-        ));
-    }
     // Every path stays inside the checkout: these are written into a config
     // that a later run resolves against the root.
     let escapes = |p: &String| {

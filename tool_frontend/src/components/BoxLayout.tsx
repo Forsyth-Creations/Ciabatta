@@ -203,12 +203,13 @@ export function BoxLayout({
             borderRadius: 1,
             bgcolor: "background.paper",
             overflow: "hidden",
-            // The library's grips are drawn in near-black, which disappears on
-            // a dark theme. Corners keep a small grip in the theme's colour;
-            // edges become strips the full length of the side, which light
-            // up under the pointer — easier to find than a 20px square.
+            // The library draws a triangular grip in each corner, which pops
+            // up under the pointer and reads as clutter. The corners still
+            // resize — the cursor says so — but draw nothing; edges become
+            // strips the full length of the side, which light up under the
+            // pointer — easier to find than a 20px square.
             "& > .react-resizable-handle": { zIndex: 3, backgroundImage: "none" },
-            "& > .react-resizable-handle::after": { borderColor: "text.secondary" },
+            "& > .react-resizable-handle::after": { display: "none" },
             "& > .react-resizable-handle-e, & > .react-resizable-handle-w": {
               top: 36,
               bottom: 16,

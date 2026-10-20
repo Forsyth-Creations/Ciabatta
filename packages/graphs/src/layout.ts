@@ -242,6 +242,12 @@ export function layeredLayout(
      * column claims an ordering that isn't there.
      */
     bottom?: (id: string) => boolean;
+    /**
+     * A workflow's `wave_grouping`, for the nodes that have one: `group` is
+     * the label, `unit` the workflow the node came from. Workflows sharing a
+     * label are lined up to start in the same column — see [`alignGroups`].
+     */
+    align?: (id: string) => { group: string; unit: string } | undefined;
   } = {},
 ): LayeredGraph {
   const columnWidth = options.columnWidth ?? 300;
@@ -259,10 +265,9 @@ export function layeredLayout(
   const layered = ids.filter((id) => !isBottom(id));
   const parked = ids.filter(isBottom);
 
-  const depth = computeDepths(
-    layered,
-    edges.filter((edge) => edge.rank !== false),
-  );
+  const ranked = edges.filter((edge) => edge.rank !== false);
+  const depth = computeDepths(layered, ranked);
+  if (options.align) alignGroups(layered, ranked, depth, options.align);
   if (options.pin) {
     for (const id of layered) {
       const pinned = options.pin(id);
@@ -873,6 +878,65 @@ function computeDepths(ids: string[], edges: { source: string; target: string }[
   }
 
   return depth;
+}
+
+/**
+ * Line up workflows that share a `wave_grouping` — the same pass the daemon's
+ * `waves()` makes, so the run page and the workspace page agree with it.
+ *
+ * Each workflow of a group moves later, as a whole, to start where the latest
+ * of them starts; then every node is pushed after what it needs again, so
+ * what waits on a moved workflow moves with it. Nothing ever moves earlier,
+ * so no node is drawn before a node it needs. Repeated until nothing moves; if
+ * the groups never settle (a group holding a workflow and one that needs it
+ * can't line up), the depths are left as `needs` made them.
+ */
+function alignGroups(
+  ids: string[],
+  edges: { source: string; target: string }[],
+  depth: Map<string, number>,
+  align: (id: string) => { group: string; unit: string } | undefined,
+) {
+  const grouped = ids.flatMap((id) => {
+    const at = align(id);
+    return at ? [{ id, ...at }] : [];
+  });
+  if (grouped.length === 0) return;
+  const original = new Map(depth);
+
+  for (let pass = 0; pass <= ids.length; pass++) {
+    const starts = new Map<string, number>();
+    for (const { id, unit } of grouped) {
+      const at = depth.get(id) ?? 0;
+      starts.set(unit, Math.min(starts.get(unit) ?? at, at));
+    }
+    const target = new Map<string, number>();
+    for (const { group, unit } of grouped) {
+      target.set(group, Math.max(target.get(group) ?? 0, starts.get(unit)!));
+    }
+    let moved = false;
+    for (const { id, group, unit } of grouped) {
+      const shift = target.get(group)! - starts.get(unit)!;
+      if (shift > 0) {
+        depth.set(id, (depth.get(id) ?? 0) + shift);
+        moved = true;
+      }
+    }
+    // Every node after what it needs, again.
+    for (let relax = 0; relax <= ids.length; relax++) {
+      let pushed = false;
+      for (const edge of edges) {
+        const from = depth.get(edge.source);
+        const to = depth.get(edge.target);
+        if (from === undefined || to === undefined || to >= from + 1) continue;
+        depth.set(edge.target, from + 1);
+        pushed = true;
+      }
+      if (!pushed) break;
+    }
+    if (!moved) return;
+  }
+  for (const [id, at] of original) depth.set(id, at);
 }
 
 /** Convenience: turn `{from,to}` pairs into react-flow edges. */

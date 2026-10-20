@@ -687,6 +687,10 @@ pub fn write_cache_section(
 /// the section already says otherwise. Every other setting in the section
 /// (`env`, `exclude`, `no_outputs`, …) is kept.
 ///
+/// A set, not an update: `inputs` and `outputs` *become* the section's lists,
+/// so a path unticked in the picker is gone from the file, and an empty list
+/// removes the key.
+///
 /// Refused rather than half-done when the result wouldn't do what was asked:
 /// a workflow written inline in `ciabatta.yaml`, or in TOML, or a step whose
 /// own `cache.inputs` would override what is written here.
@@ -738,8 +742,8 @@ pub fn save_target_files(
         .and_then(|s| s.cache.as_ref())
     {
         let overridden: Vec<&str> = [
-            (!own.inputs.is_empty() && !inputs.is_empty()).then_some("inputs"),
-            (!own.outputs.is_empty() && !outputs.is_empty()).then_some("outputs"),
+            (!own.inputs.is_empty()).then_some("inputs"),
+            (!own.outputs.is_empty()).then_some("outputs"),
         ]
         .into_iter()
         .flatten()
@@ -755,12 +759,8 @@ pub fn save_target_files(
     }
 
     let mut cache = current.cache.clone().unwrap_or_default();
-    if !inputs.is_empty() {
-        cache.inputs = inputs.to_vec();
-    }
-    if !outputs.is_empty() {
-        cache.outputs = outputs.to_vec();
-    }
+    cache.inputs = inputs.to_vec();
+    cache.outputs = outputs.to_vec();
     if cache.enabled.is_none() {
         cache.enabled = Some(true);
     }
@@ -775,8 +775,7 @@ pub fn save_target_files(
         })?;
     let saved = parsed.cache.unwrap_or_default();
     anyhow::ensure!(
-        (inputs.is_empty() || saved.inputs == inputs)
-            && (outputs.is_empty() || saved.outputs == outputs),
+        saved.inputs == inputs && saved.outputs == outputs,
         "The files didn't survive a round trip through {relative}; it was left alone"
     );
 
@@ -1037,6 +1036,24 @@ mod tests {
         );
         assert_eq!(cache.enabled, Some(true));
         assert_eq!(saved.steps.len(), 1);
+
+        // Saving again replaces the lists rather than adding to them: what
+        // was unticked is gone, and an empty list clears the key.
+        let workspace = Workspace::load(&root).unwrap();
+        save_target_files(
+            &workspace,
+            "api:build:compile",
+            &["packages/api/Cargo.toml".to_string()],
+            &[],
+        )
+        .unwrap();
+        let text = std::fs::read_to_string(root.join(file)).unwrap();
+        let saved: crate::workspace::Workflow =
+            crate::format::from_str(&text, crate::format::Format::Yaml).unwrap();
+        let cache = saved.cache.unwrap();
+        assert_eq!(cache.inputs, ["packages/api/Cargo.toml"]);
+        assert!(cache.outputs.is_empty(), "{text}");
+        assert_eq!(cache.env, ["PROFILE"]);
 
         // A step with its own inputs would ignore the workflow's: refused.
         write(

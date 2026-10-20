@@ -2054,6 +2054,13 @@ function buildFlow(
       // Background tasks sit in a row underneath rather than in a column,
       // because a column would claim they gate what follows them. They don't.
       bottom: (id) => byName.get(id)?.background ?? false,
+      // Workflows sharing a `wave_grouping` start in the same column. A stack
+      // is its workflow file, so it lines up as one.
+      align: (id) => {
+        const step = byName.get(membersOf(id)[0]);
+        const unit = step?.cache_id?.slice(0, step.cache_id.lastIndexOf(":"));
+        return step?.wave_group && unit ? { group: step.wave_group, unit } : undefined;
+      },
     },
   );
 

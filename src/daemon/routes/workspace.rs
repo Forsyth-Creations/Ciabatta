@@ -214,6 +214,8 @@ async fn graph(
             value["workspace"] = json!(step.workspace);
             value["cwd"] = json!(step.cwd);
             value["wave"] = json!(wave_of.get(step.name.as_str()));
+            value["wave_group"] = json!(step.wave_group);
+            value["cache_id"] = json!(step.cache_id);
             value
         })
         .collect();

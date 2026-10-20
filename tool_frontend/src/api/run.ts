@@ -48,6 +48,8 @@ export interface StepView extends Timed {
   recover: boolean;
   /** `<member>:<workflow>:<step>` — which workflow file declared it. */
   cache_id?: string | null;
+  /** Its workflow's `wave_grouping`, when it has one. */
+  wave_group?: string | null;
   action: string | null;
   /** Where the step's action runs, relative to the run's root. Null means the
    *  root itself. */

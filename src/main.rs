@@ -97,6 +97,7 @@ async fn main() -> Result<()> {
             secret,
             timeout,
             enter,
+            yes_no,
         } => {
             let ask = run::input::Ask {
                 prompt,
@@ -106,6 +107,7 @@ async fn main() -> Result<()> {
                 env,
                 timeout,
                 enter,
+                yes_no,
             };
             let vars: HashMap<String, String> = env::vars().collect();
             let answer = run::input::ask(ask, &vars).await?;

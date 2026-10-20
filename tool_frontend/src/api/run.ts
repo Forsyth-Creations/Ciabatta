@@ -274,6 +274,8 @@ export interface PendingInput {
   env: string | null;
   /** Only a go-ahead is wanted (`--enter`): show Continue, not a field. */
   enter?: boolean;
+  /** A yes-or-no question (`--yes-no`): show Yes and No, which send `y` / `n`. */
+  yes_no?: boolean;
   asked_at: string;
   /** When it stops waiting; null waits forever. */
   deadline: string | null;

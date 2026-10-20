@@ -1080,6 +1080,20 @@ async fn answer(
             "That question isn't waiting any more — it was answered, timed out, or its step ended.",
         ));
     }
+    // A yes-or-no question gets yes or no, or nothing that a script testing
+    // `[ "$answer" = y ]` could misread.
+    let question = lock(&run.state)
+        .pending_inputs()
+        .into_iter()
+        .map(|(_, input)| input)
+        .find(|input| input.id == payload.id);
+    if let Some(question) = question
+        && question.yes_no
+        && crate::run::input::yes_no(&payload.value).is_none()
+        && !(payload.value.is_empty() && question.default.is_some())
+    {
+        return Err(RouteError::bad_request("This question takes yes or no."));
+    }
     run.inputs
         .send(crate::run::input::Answer {
             id: payload.id,

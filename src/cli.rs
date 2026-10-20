@@ -102,6 +102,13 @@ pub enum Commands {
         /// out, or that nobody can see (CI), carries on.
         #[arg(long, conflicts_with = "secret")]
         enter: bool,
+        /// Ask a yes-or-no question: Yes and No buttons in the web app,
+        /// `[y/n]` in a terminal. Prints `y` or `n` — whatever was typed,
+        /// `yes`, `Y` or `true` included — so a script can test
+        /// `[ "$answer" = y ]`. `--default` and `--env` take y/n (or
+        /// yes/no) too.
+        #[arg(long = "yes-no", visible_alias = "confirm", conflicts_with_all = ["secret", "enter"])]
+        yes_no: bool,
     },
 
     /// Run a workflow across the monorepo, by name.

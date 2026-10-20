@@ -1345,9 +1345,13 @@ ciabatta cache status           # what the local cache is holding, and what it s
 
         <SubHeading>Picking the files instead</SubHeading>
         <P>
-          In cache inspect mode, a step&apos;s details have a <strong>Pick files</strong> button:
-          a tree of the checkout (what git doesn&apos;t ignore) with an Inputs tab and an Outputs
-          tab. Tick files or folders — a folder means everything in it — and{" "}
+          In cache inspect mode, a step&apos;s details have a <strong>Choose input &amp; output files…</strong> button:
+          a tree of the whole checkout with an Inputs tab and an Outputs tab. Everything is
+          listed, including what git ignores — <C>target/</C>, <C>dist/</C>,{" "}
+          <C>node_modules/</C> — marked <strong>git-ignored</strong>, since that is where an
+          output is usually picked from. (An ignored path ticked as an input is skipped when the
+          workflow sets <C>gitignore: true</C>; read another step&apos;s build output the way
+          below instead.) Tick files or folders — a folder means everything in it — and{" "}
           <strong>Save to the workflow file</strong> writes them into that workflow&apos;s{" "}
           <C>cache:</C> section, switching caching on if the section didn&apos;t say otherwise.
           Saving <em>sets</em> the lists: what is ticked when you press Save is the whole of the
@@ -1356,6 +1360,30 @@ ciabatta cache status           # what the local cache is holding, and what it s
           the rest of the file are kept. It writes YAML workflow files; a step that sets its own{" "}
           <C>cache.inputs</C> or <C>outputs</C> would override the workflow&apos;s, so the picker
           refuses and says to edit that step instead.
+        </P>
+
+        <SubHeading>Reading an earlier step&apos;s outputs</SubHeading>
+        <P>
+          The Inputs tab also lists the steps this one runs after, each with the outputs it
+          declares. Tick one and its outputs become this workflow&apos;s inputs: saving writes{" "}
+          <C>cache.inputs_from</C>, naming the step by its cache id, and a change to what that
+          step wrote rebuilds this one. The outputs are looked up from its workflow file at every
+          run, so editing them there carries through — nothing is copied.
+        </P>
+        <Pre>{`# packages/api/.ciabatta/workflows/build.yaml
+cache:
+  enabled: true
+  inputs: [packages/api/src]
+  inputs_from: [proto:build:generate]   # proto's outputs are inputs here`}</Pre>
+        <P>
+          A step is named <C>&lt;member&gt;:&lt;workflow&gt;:&lt;step&gt;</C>, or by the shorter{" "}
+          <C>&lt;workflow&gt;:&lt;step&gt;</C> or <C>&lt;step&gt;</C> when only one step in the
+          graph goes by it. It has to run first — something this workflow <C>needs</C>, directly
+          or through its sub-workspace&apos;s <C>depends_on</C> — and declare{" "}
+          <C>cache.outputs</C>; otherwise the run stops before starting and says which. Its
+          outputs are read even under <C>gitignore: true</C>, because build output is usually
+          ignored and naming the step is asking for it. Run with <C>--isolated</C> and a named
+          step that isn&apos;t part of the run is skipped.
         </P>
         <P>
           Long lists — what a step read, what it wrote, what moved since the last build — show

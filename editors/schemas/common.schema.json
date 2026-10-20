@@ -53,6 +53,12 @@
           "items": { "type": "string" },
           "examples": [["target/release/app", "dist/**/*"]]
         },
+        "inputs_from": {
+          "type": "array",
+          "description": "Earlier steps whose `outputs` this build reads as inputs: each one's output patterns are added to the inputs, so a change to what it wrote rebuilds this one. Name a step by its cache id, `<member>:<workflow>:<step>`, or `<workflow>:<step>` / `<step>` when unambiguous. It has to run before this one (something this workflow needs). Not filtered by `gitignore`.",
+          "items": { "type": "string" },
+          "examples": [["api:build:compile"]]
+        },
         "no_outputs": {
           "type": "boolean",
           "description": "This build writes nothing a later step reads — a test, a lint, a type check. With no `outputs`, a step is otherwise one the cache can't account for: it runs every time, and so does every step that needs it. Setting this lets it be skipped when its inputs are unchanged, and stops it forcing its dependents to rebuild. Ignored when `outputs` are declared."

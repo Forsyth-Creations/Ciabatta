@@ -111,6 +111,10 @@ fn cache() -> crate::cache::CacheConfig {
     crate::cache::CacheConfig {
         enabled: Some(true),
         inputs: list(),
+        inputs_from: list(),
+        // Filled in by the workflow compiler from `inputs_from`; empty here, so
+        // it isn't serialized and the schemas don't name it.
+        upstream_outputs: Vec::new(),
         outputs: list(),
         no_outputs: Some(true),
         env: list(),

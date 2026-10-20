@@ -114,9 +114,13 @@ export function useCacheKeyFiles(
 export interface ProjectTree {
   /** The workspace root every path is relative to. */
   root: string;
+  /** Every file, git-ignored ones included — those listed after the rest. */
   files: string[];
   dirs: string[];
-  /** More files than the daemon sends; the directories are all there. */
+  /** The top of each subtree git ignores (`target`, `node_modules`, `*.log`
+   *  files): listed so outputs can be picked from them, and marked. */
+  ignored?: string[];
+  /** More files than the daemon sends; the ones git keeps come first. */
   truncated: boolean;
 }
 
@@ -135,7 +139,14 @@ export function useProjectTree(project: string | undefined, enabled: boolean) {
  *  Resolves to the file written, relative to the workspace root. */
 export function useSaveTargetFiles() {
   return useMutation({
-    mutationFn: (body: { project: string; target: string; inputs: string[]; outputs: string[] }) =>
+    mutationFn: (body: {
+      project: string;
+      target: string;
+      inputs: string[];
+      /** Cache ids of earlier steps whose outputs it reads (`cache.inputs_from`). */
+      inputs_from: string[];
+      outputs: string[];
+    }) =>
       api.post<{ path: string }>("/api/cache/target-files", body),
   });
 }

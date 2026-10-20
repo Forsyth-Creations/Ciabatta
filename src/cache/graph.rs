@@ -369,6 +369,12 @@ pub fn layer_over(base: &mut CacheConfig, over: &CacheConfig) {
     if !over.inputs.is_empty() {
         base.inputs = over.inputs.clone();
     }
+    if !over.inputs_from.is_empty() {
+        base.inputs_from = over.inputs_from.clone();
+    }
+    if !over.upstream_outputs.is_empty() {
+        base.upstream_outputs = over.upstream_outputs.clone();
+    }
     if !over.outputs.is_empty() {
         base.outputs = over.outputs.clone();
     }

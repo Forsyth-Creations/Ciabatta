@@ -36,14 +36,17 @@ pub struct TreeQuery {
     project: String,
 }
 
-/// The most paths the picker is sent. A checkout bigger than this is browsed
-/// by its directories, which are always all there.
+/// The most files, and the most directories, the picker is sent.
 const TREE_LIMIT: usize = 50_000;
 
-/// Every file in the checkout git wouldn't ignore, relative to the workspace
-/// root — what the run page's file picker browses to choose a step's inputs
-/// and outputs. Ignored files are left out because they are what a build
-/// *makes*: an output is picked by its directory, which is listed.
+/// Every file and directory in the checkout, relative to the workspace root —
+/// what the run page's file picker browses to choose a step's inputs and
+/// outputs. Paths git ignores are listed too, since `target/` is where an
+/// output is picked from, and `ignored` names the top of each ignored subtree
+/// so the picker can mark them.
+///
+/// Past [`TREE_LIMIT`], what git keeps is listed first: a checkout with a
+/// huge `node_modules` still shows all of its sources.
 async fn tree(
     State(state): State<AppState>,
     Query(query): Query<TreeQuery>,
@@ -52,33 +55,72 @@ async fn tree(
     let root = crate::workspace::Workspace::discover(&project)
         .map(|ws| ws.root)
         .unwrap_or(project);
-    let listed = tokio::task::spawn_blocking({
+    let (all, kept) = tokio::task::spawn_blocking({
         let root = root.clone();
-        move || crate::cache::not_ignored(&root)
+        move || -> anyhow::Result<_> {
+            Ok((
+                crate::cache::every_path(&root)?,
+                crate::cache::not_ignored(&root)?,
+            ))
+        }
     })
     .await
     .map_err(|e| anyhow::anyhow!("listing the checkout failed: {e}"))??;
+    Ok(Json(listing(&root, all, &kept)))
+}
+
+/// [`tree`]'s answer, from every path and the ones git keeps.
+fn listing(
+    root: &std::path::Path,
+    all: Vec<(String, bool)>,
+    kept: &std::collections::HashSet<String>,
+) -> serde_json::Value {
     let mut files: Vec<String> = Vec::new();
     let mut dirs: Vec<String> = Vec::new();
-    for path in listed {
-        if path.is_empty() {
+    let mut ignored_files: Vec<String> = Vec::new();
+    let mut ignored_dirs: Vec<String> = Vec::new();
+    let mut ignored: Vec<String> = Vec::new();
+    for (path, is_dir) in all {
+        if kept.contains(&path) {
+            if is_dir {
+                dirs.push(path)
+            } else {
+                files.push(path)
+            }
             continue;
         }
-        match root.join(&path).is_dir() {
-            true => dirs.push(path),
-            false => files.push(path),
+        // The top of an ignored subtree: its parent is kept (or is the root).
+        let parent = path.rsplit_once('/').map(|(p, _)| p);
+        if parent.is_none_or(|p| kept.contains(p)) {
+            ignored.push(path.clone());
+        }
+        if is_dir {
+            ignored_dirs.push(path)
+        } else {
+            ignored_files.push(path)
         }
     }
-    files.sort();
-    dirs.sort();
-    let truncated = files.len() > TREE_LIMIT;
+    let total = files.len() + ignored_files.len();
+    for list in [
+        &mut files,
+        &mut dirs,
+        &mut ignored_files,
+        &mut ignored_dirs,
+        &mut ignored,
+    ] {
+        list.sort();
+    }
+    files.extend(ignored_files);
+    dirs.extend(ignored_dirs);
     files.truncate(TREE_LIMIT);
-    Ok(Json(json!({
+    dirs.truncate(TREE_LIMIT);
+    json!({
         "root": root.to_string_lossy().replace('\\', "/"),
         "files": files,
         "dirs": dirs,
-        "truncated": truncated,
-    })))
+        "ignored": ignored,
+        "truncated": total > TREE_LIMIT,
+    })
 }
 
 #[derive(Deserialize)]
@@ -88,6 +130,9 @@ pub struct TargetFilesPayload {
     target: String,
     #[serde(default)]
     inputs: Vec<String>,
+    /// Earlier steps whose outputs it reads, by cache id.
+    #[serde(default)]
+    inputs_from: Vec<String>,
     #[serde(default)]
     outputs: Vec<String>,
 }
@@ -106,7 +151,9 @@ async fn save_target_files(
             || std::path::Path::new(p).is_absolute()
             || p.split(['/', '\\']).any(|part| part == "..")
     };
-    if payload.inputs.iter().chain(&payload.outputs).any(escapes) {
+    if payload.inputs.iter().chain(&payload.outputs).any(escapes)
+        || payload.inputs_from.iter().any(String::is_empty)
+    {
         return Err(RouteError::bad_request(
             "Paths are relative to the workspace root and stay inside it.",
         ));
@@ -118,6 +165,7 @@ async fn save_target_files(
         &workspace,
         &payload.target,
         &payload.inputs,
+        &payload.inputs_from,
         &payload.outputs,
     )
     .map_err(RouteError::bad_request)?;
@@ -414,5 +462,48 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+}
+
+#[cfg(test)]
+mod tree_tests {
+    use std::path::Path;
+
+    /// `target/` is what the 0.7.1 picker couldn't offer: git ignores it, and
+    /// it is where a build's outputs are picked from.
+    #[test]
+    fn the_tree_lists_what_git_ignores_and_marks_it() {
+        let dir = std::env::temp_dir().join(format!("ciabatta-tree-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        for (rel, body) in [
+            (".gitignore", "target/\n*.log\n"),
+            ("src/main.rs", "fn main() {}"),
+            ("target/release/app", "bin"),
+            ("src/debug.log", "log"),
+        ] {
+            let path = dir.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, body).unwrap();
+        }
+        let all = crate::cache::every_path(&dir).unwrap();
+        let kept = crate::cache::not_ignored(&dir).unwrap();
+        let listed = super::listing(Path::new(&dir), all, &kept);
+        let strings =
+            |key: &str| -> Vec<String> { serde_json::from_value(listed[key].clone()).unwrap() };
+
+        let files = strings("files");
+        assert!(
+            files.contains(&"target/release/app".to_string()),
+            "{files:?}"
+        );
+        assert!(files.contains(&"src/debug.log".to_string()), "{files:?}");
+        // What git keeps comes first.
+        assert!(
+            files.iter().position(|f| f == "src/main.rs")
+                < files.iter().position(|f| f == "target/release/app")
+        );
+        assert!(strings("dirs").contains(&"target/release".to_string()));
+        assert_eq!(strings("ignored"), ["src/debug.log", "target"]);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

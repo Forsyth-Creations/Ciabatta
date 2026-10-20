@@ -373,6 +373,137 @@ fn resolve_transfer_refs(steps: &mut [RunStep]) -> Result<()> {
     Ok(())
 }
 
+/// Resolve every `cache.inputs_from` into the output patterns of the steps it
+/// names, so planning and running a step need nothing but the step itself.
+///
+/// A named step has to be upstream — reached through `needs`, directly or by
+/// way of its workflow — or its outputs could still be being written while
+/// this step's inputs are hashed. With `isolated` the steps it names may
+/// not be in the graph at all; those are skipped, since what isn't run
+/// can't be read from here.
+fn resolve_inputs_from(steps: &mut [RunStep], isolated: bool) -> Result<()> {
+    let outputs: HashMap<String, Vec<String>> = steps
+        .iter()
+        .map(|s| {
+            let outputs = s
+                .cache
+                .as_ref()
+                .map(|c| c.outputs.clone())
+                .unwrap_or_default();
+            (s.name.clone(), outputs)
+        })
+        .collect();
+    // Every name a step goes by: its node id and its cache id.
+    let names: Vec<(String, String)> = steps
+        .iter()
+        .flat_map(|s| {
+            let node = (s.name.clone(), s.name.clone());
+            let cache = s.cache_id.clone().map(|id| (id, s.name.clone()));
+            std::iter::once(node).chain(cache)
+        })
+        .collect();
+    let needs: HashMap<String, Vec<String>> = steps
+        .iter()
+        .map(|s| (s.name.clone(), s.needs.clone()))
+        .collect();
+    let upstream_of = |start: &str| -> HashSet<String> {
+        let mut seen = HashSet::new();
+        let mut queue: Vec<&str> = needs
+            .get(start)
+            .map(|n| n.iter().map(|s| s.as_str()).collect())
+            .unwrap_or_default();
+        while let Some(at) = queue.pop() {
+            if seen.insert(at.to_string()) {
+                queue.extend(needs.get(at).into_iter().flatten().map(|s| s.as_str()));
+            }
+        }
+        seen
+    };
+
+    for step in steps.iter_mut() {
+        let Some(cache) = step.cache.as_mut() else {
+            continue;
+        };
+        cache.upstream_outputs.clear();
+        // A recovery node isn't planned or cached, and is entered through
+        // `on_error` rather than after anything.
+        if cache.inputs_from.is_empty() || step.recover {
+            continue;
+        }
+        // A short name is read from where the step was written first: a
+        // sibling in its own workflow, then a step of its own sub-workspace.
+        let id = step.cache_id.clone().unwrap_or_else(|| step.name.clone());
+        let mut scopes: Vec<String> = Vec::new();
+        let mut parts: Vec<&str> = id.split(':').collect();
+        while parts.len() > 1 {
+            parts.pop();
+            scopes.push(format!("{}:", parts.join(":")));
+        }
+        scopes.push(String::new());
+        let ancestors = upstream_of(&step.name);
+
+        for reference in cache.inputs_from.clone() {
+            let found = scopes.iter().find_map(|scope| {
+                let wanted = format!("{scope}{reference}");
+                let mut hits: Vec<&String> = names
+                    .iter()
+                    .filter(|(name, _)| {
+                        *name == wanted
+                            || (scope.is_empty() && name.ends_with(&format!(":{reference}")))
+                    })
+                    .map(|(_, node)| node)
+                    .collect();
+                hits.sort();
+                hits.dedup();
+                (!hits.is_empty()).then_some(hits)
+            });
+            let node = match found.as_deref() {
+                Some([one]) => (*one).clone(),
+                Some(many) => bail!(
+                    "Step '{}' reads `inputs_from: {reference}`, which could be any of {}. \
+                     Name it in full, as `<member>:<workflow>:<step>`.",
+                    step.name,
+                    many.iter()
+                        .map(|s| s.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+                None if isolated => continue,
+                None => bail!(
+                    "Step '{}' reads `inputs_from: {reference}`, which names no step in this \
+                     graph. Use a step's cache id, `<member>:<workflow>:<step>`.",
+                    step.name
+                ),
+            };
+            if node == step.name {
+                bail!("Step '{}' lists itself in `inputs_from`.", step.name);
+            }
+            if !ancestors.contains(&node) {
+                bail!(
+                    "Step '{}' reads the outputs of '{node}' (`inputs_from: {reference}`), but \
+                     doesn't run after it, so they could still be being written. Make its \
+                     workflow need that one.",
+                    step.name
+                );
+            }
+            let produced = &outputs[&node];
+            if produced.is_empty() {
+                bail!(
+                    "Step '{}' reads the outputs of '{node}' (`inputs_from: {reference}`), \
+                     which declares no `cache.outputs` to read.",
+                    step.name
+                );
+            }
+            for pattern in produced {
+                if !cache.upstream_outputs.contains(pattern) {
+                    cache.upstream_outputs.push(pattern.clone());
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Which sub-workspaces to start from.
 #[derive(Debug, Clone, Default)]
 pub struct Selection {
@@ -478,7 +609,9 @@ pub fn build_many(
     }
 
     let order = topological_order(&deps)?;
-    compile(workspace, workflows, &order, &background, &deps)
+    let mut graph = compile(workspace, workflows, &order, &background, &deps)?;
+    resolve_inputs_from(&mut graph.steps, selection.isolated)?;
+    Ok(graph)
 }
 
 /// The units the graph starts from, honouring `--only` and reporting clearly
@@ -1914,6 +2047,97 @@ mod tests {
             .to_string();
         assert!(err.contains("not a step in that workflow"), "{err}");
         assert!(err.contains("depends_on"), "{err}");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// `inputs_from` reads an earlier step's outputs as inputs, by whichever of
+    /// its names is unambiguous, and refuses a step that doesn't run first.
+    #[test]
+    fn inputs_from_resolves_to_the_named_steps_outputs() {
+        let root = scratch("inputsfrom");
+        let proto = member(&root, "proto", "[workspace]\nname = \"proto\"\n");
+        workflow(
+            &proto,
+            "build",
+            "[cache]\nenabled = true\ninputs = [\"proto/src\"]\noutputs = [\"proto/gen\"]\n\
+             [[steps]]\nname = \"generate\"\nrun = \"make\"\n",
+        );
+        let api = member(
+            &root,
+            "api",
+            "[workspace]\nname = \"api\"\ndepends_on = [\"proto:build\"]\n",
+        );
+        for reference in ["proto:build:generate", "proto:generate", "generate"] {
+            workflow(
+                &api,
+                "build",
+                &format!(
+                    "[cache]\nenabled = true\ninputs = [\"api/src\"]\n\
+                     inputs_from = [\"{reference}\"]\n\
+                     [[steps]]\nname = \"compile\"\nrun = \"make\"\n"
+                ),
+            );
+            let ws = Workspace::load(&root).unwrap();
+            let graph = build(&ws, "build", &Selection::default()).unwrap();
+            let compile = graph
+                .steps
+                .iter()
+                .find(|s| s.name == "api:compile")
+                .unwrap();
+            let cache = compile.cache.as_ref().unwrap();
+            assert_eq!(cache.upstream_outputs, ["proto/gen"], "{reference}");
+            assert_eq!(cache.inputs, ["api/src"], "its own inputs stay as written");
+        }
+
+        // And they are read, though they sit in another sub-workspace — whose
+        // files are otherwise kept out of this one's inputs.
+        std::fs::create_dir_all(root.join("proto/gen")).unwrap();
+        std::fs::write(root.join("proto/gen/out.rs"), "// generated").unwrap();
+        std::fs::write(root.join("proto/notes.txt"), "not an output").unwrap();
+        let ws = Workspace::load(&root).unwrap();
+        let graph = build(&ws, "build", &Selection::default()).unwrap();
+        let compile = graph
+            .steps
+            .iter()
+            .find(|s| s.name == "api:compile")
+            .unwrap();
+        let read: Vec<String> = compile
+            .cache
+            .clone()
+            .unwrap()
+            .list_inputs(&root, Some("api"))
+            .unwrap()
+            .into_iter()
+            .map(|f| f.path)
+            .collect();
+        assert_eq!(read, ["proto/gen/out.rs"], "{read:?}");
+
+        // The other way round: proto doesn't run after api.
+        workflow(
+            &proto,
+            "build",
+            "[cache]\nenabled = true\ninputs = [\"proto/src\"]\noutputs = [\"proto/gen\"]\n\
+             inputs_from = [\"api:build:compile\"]\n\
+             [[steps]]\nname = \"generate\"\nrun = \"make\"\n",
+        );
+        let ws = Workspace::load(&root).unwrap();
+        let err = build(&ws, "build", &Selection::default())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("doesn't run after it"), "{err}");
+
+        // A name that isn't in the graph.
+        workflow(
+            &proto,
+            "build",
+            "[cache]\nenabled = true\ninputs = [\"x\"]\ninputs_from = [\"nope\"]\n\
+             [[steps]]\nname = \"generate\"\nrun = \"make\"\n",
+        );
+        let ws = Workspace::load(&root).unwrap();
+        let err = build(&ws, "build", &Selection::default())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("names no step"), "{err}");
         std::fs::remove_dir_all(&root).ok();
     }
 

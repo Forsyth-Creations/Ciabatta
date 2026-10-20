@@ -207,6 +207,9 @@ export interface TargetDeps {
    *  `cache.cargo` resolved — what the file picker starts from. */
   declared_inputs?: string[];
   declared_outputs?: string[];
+  /** `cache.inputs_from` as written: the cache ids of earlier steps whose
+   *  outputs it reads. Their output globs are already in `inputs`. */
+  declared_inputs_from?: string[];
 
   /** What those globs currently match. */
   input_files: number;

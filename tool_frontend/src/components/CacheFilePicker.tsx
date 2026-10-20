@@ -12,6 +12,14 @@
  * a directory path. Globs the config already has that aren't a plain path
  * (`src/**\/*.rs`) are kept as written, shown as chips you can remove.
  *
+ * Every path is listed, including what git ignores: `target/` is where an
+ * output is picked from, and a step can read another's build output. Ignored
+ * paths are marked, since `gitignore: true` leaves them out of the inputs.
+ *
+ * An earlier step can be picked too (`cache.inputs_from`): its outputs become
+ * this step's inputs, resolved from its workflow file at every run, so they
+ * follow when its outputs change.
+ *
  * Saving *sets* the lists: what is ticked when you press Save is the whole of
  * the step's inputs and outputs, so unticking a path removes it from the file
  * and an empty tab clears that list. It writes the workflow's own `cache:`
@@ -93,6 +101,22 @@ function plain(entry: string): string {
   return entry.replace(/^\.\//, "").replace(/\/+$/, "");
 }
 
+/** The workflow file a cache id (`<member>:<workflow>:<step>`) belongs to. */
+function workflowOf(cacheId: string): string {
+  return cacheId.slice(0, cacheId.lastIndexOf(":"));
+}
+
+/** Whether `path` is, or is under, one of the subtrees git ignores. */
+function underIgnored(path: string, ignored: Set<string>): boolean {
+  let at = path;
+  for (;;) {
+    if (ignored.has(at)) return true;
+    const cut = at.lastIndexOf("/");
+    if (cut < 0) return false;
+    at = at.slice(0, cut);
+  }
+}
+
 /** The ticked directory `path` falls under, if any. */
 function coveredBy(path: string, picked: Set<string>): string | null {
   let at = path;
@@ -106,11 +130,14 @@ function coveredBy(path: string, picked: Set<string>): string | null {
 export function CacheFilePicker({
   project,
   step,
+  earlier = [],
   open,
   onClose,
 }: {
   project: string;
   step: StepView;
+  /** The steps this one runs after, any of which it can read the outputs of. */
+  earlier?: StepView[];
   open: boolean;
   onClose: () => void;
 }) {
@@ -129,6 +156,23 @@ export function CacheFilePicker({
     outputs: declared.outputs.map((e) => (isPattern(e) ? e : plain(e))),
   }));
   const current = useMemo(() => new Set(picked[side]), [picked, side]);
+  const declaredFrom = step.deps.declared_inputs_from ?? [];
+  const [inputsFrom, setInputsFrom] = useState<string[]>(declaredFrom);
+  const ignored = useMemo(() => new Set(data?.ignored ?? []), [data]);
+
+  // A workflow's `cache:` is shared by every step in its file, so a sibling
+  // can't be one: it would be told to read itself. One step per cache id.
+  const own = step.cache_id ? workflowOf(step.cache_id) : null;
+  const sources = useMemo(() => {
+    const seen = new Set<string>();
+    return earlier.filter((s) => {
+      if (!s.cache_id || s.recover || workflowOf(s.cache_id) === own || seen.has(s.cache_id)) return false;
+      seen.add(s.cache_id);
+      return true;
+    });
+  }, [earlier, own]);
+  // Named in the file but not among this run's earlier steps: kept, and shown.
+  const unlisted = inputsFrom.filter((id) => !sources.some((s) => s.cache_id === id));
 
   const tree = useMemo(() => (data ? buildTree(data.dirs, data.files) : []), [data]);
   const matches = useMemo(() => {
@@ -159,6 +203,7 @@ export function CacheFilePicker({
   const row = (path: string, dir: boolean, depth: number, label: string) => {
     const covered = coveredBy(path, current);
     const ticked = current.has(path);
+    const isIgnored = underIgnored(path, ignored);
     return (
       <Stack
         key={path}
@@ -192,11 +237,27 @@ export function CacheFilePicker({
           noWrap
           title={path}
           onClick={() => (dir && matches === null ? expand(path) : toggle(path))}
-          sx={{ fontFamily: monoFontStack, fontSize: 12, cursor: "pointer", minWidth: 0 }}
+          sx={{
+            fontFamily: monoFontStack,
+            fontSize: 12,
+            cursor: "pointer",
+            minWidth: 0,
+            color: isIgnored ? "text.secondary" : undefined,
+          }}
         >
           {label}
           {dir && "/"}
         </Typography>
+        {isIgnored && ignored.has(path) && (
+          <Typography
+            variant="caption"
+            color="text.disabled"
+            title="git ignores this. Fine for an output; as an input it is skipped when the workflow sets gitignore: true."
+            sx={{ fontSize: 10, flexShrink: 0, pl: 0.5 }}
+          >
+            git-ignored
+          </Typography>
+        )}
       </Stack>
     );
   };
@@ -209,6 +270,7 @@ export function CacheFilePicker({
 
   const target = step.cache_id ?? null;
   const changed =
+    inputsFrom.join("\n") !== declaredFrom.join("\n") ||
     picked.inputs.join("\n") !== declared.inputs.map((e) => (isPattern(e) ? e : plain(e))).join("\n") ||
     picked.outputs.join("\n") !== declared.outputs.map((e) => (isPattern(e) ? e : plain(e))).join("\n");
 
@@ -237,7 +299,11 @@ export function CacheFilePicker({
         )}
         <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
           <Tabs value={side} onChange={(_, value) => setSide(value)} sx={{ minHeight: 36 }}>
-            <Tab value="inputs" label={`Inputs (${picked.inputs.length})`} sx={{ minHeight: 36 }} />
+            <Tab
+              value="inputs"
+              label={`Inputs (${picked.inputs.length + inputsFrom.length})`}
+              sx={{ minHeight: 36 }}
+            />
             <Tab value="outputs" label={`Outputs (${picked.outputs.length})`} sx={{ minHeight: 36 }} />
           </Tabs>
           <Box sx={{ flexGrow: 1 }} />
@@ -249,6 +315,57 @@ export function CacheFilePicker({
             sx={{ width: 240, "& input": { py: 0.5, fontSize: 13 } }}
           />
         </Stack>
+
+        {side === "inputs" && (sources.length > 0 || inputsFrom.length > 0) && (
+          <Box sx={{ mt: 1, p: 1, border: 1, borderColor: "divider", borderRadius: 1 }}>
+            <Typography variant="caption" color="text.secondary" sx={{ display: "block", mb: 0.5 }}>
+              Read an earlier step's outputs: ticking one makes whatever it writes an input of this
+              workflow, and follows its outputs if they change.
+            </Typography>
+            {sources.map((source) => {
+              const id = source.cache_id!;
+              const outputs = source.deps?.declared_outputs ?? [];
+              const ticked = inputsFrom.includes(id);
+              return (
+                <Stack key={id} direction="row" alignItems="center" spacing={0.5} sx={{ minWidth: 0 }}>
+                  <Checkbox
+                    size="small"
+                    checked={ticked}
+                    disabled={!ticked && outputs.length === 0}
+                    onChange={() =>
+                      setInputsFrom((all) => (ticked ? all.filter((x) => x !== id) : [...all, id]))
+                    }
+                    inputProps={{ "aria-label": `read the outputs of ${id}` }}
+                    sx={{ p: 0.25 }}
+                  />
+                  <Typography variant="body2" sx={{ fontFamily: monoFontStack, fontSize: 12, flexShrink: 0 }}>
+                    {id}
+                  </Typography>
+                  <Typography
+                    variant="caption"
+                    color="text.secondary"
+                    noWrap
+                    title={outputs.join(", ")}
+                    sx={{ fontFamily: monoFontStack, minWidth: 0 }}
+                  >
+                    {outputs.length > 0 ? `→ ${outputs.join(", ")}` : "declares no outputs"}
+                  </Typography>
+                </Stack>
+              );
+            })}
+            {unlisted.map((id) => (
+              <Chip
+                key={id}
+                size="small"
+                label={id}
+                variant="outlined"
+                title="Named in the workflow file, but not an earlier step of this run"
+                onDelete={() => setInputsFrom((all) => all.filter((x) => x !== id))}
+                sx={{ fontFamily: monoFontStack, fontSize: 12, mr: 0.5 }}
+              />
+            ))}
+          </Box>
+        )}
 
         {picked[side].length > 0 && (
           <Stack direction="row" spacing={0.5} flexWrap="wrap" useFlexGap sx={{ my: 1 }}>
@@ -302,12 +419,13 @@ export function CacheFilePicker({
         </Box>
         {data?.truncated && (
           <Typography variant="caption" color="text.secondary">
-            A big checkout: not every file is listed, but every folder is.
+            A big checkout: not every file is listed. Everything git keeps comes first.
           </Typography>
         )}
         <Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: 0.5 }}>
-          Files git ignores aren't listed — they are what a build makes. Tick the folder an output
-          lands in.
+          Everything is listed, including what git ignores — tick the folder an output lands in,
+          such as <code>target/release</code>. An ignored input is skipped when the workflow sets{" "}
+          <code>gitignore: true</code>; read another step's build output through its step above.
         </Typography>
 
         {save.isSuccess && (
@@ -334,7 +452,13 @@ export function CacheFilePicker({
           disabled={!target || save.isPending || !changed}
           onClick={() =>
             target &&
-            save.mutate({ project, target, inputs: picked.inputs, outputs: picked.outputs })
+            save.mutate({
+              project,
+              target,
+              inputs: picked.inputs,
+              inputs_from: inputsFrom,
+              outputs: picked.outputs,
+            })
           }
         >
           Save to the workflow file

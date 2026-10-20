@@ -56,6 +56,10 @@ pub struct TargetDeps {
     pub declared_inputs: Vec<String>,
     #[serde(default)]
     pub declared_outputs: Vec<String>,
+    /// The earlier steps whose outputs it reads (`cache.inputs_from`), as
+    /// written; their output patterns are already among `inputs`.
+    #[serde(default)]
+    pub declared_inputs_from: Vec<String>,
 
     /// The input files those globs currently match.
     pub input_files: usize,
@@ -279,6 +283,7 @@ fn one(context: &WorkspaceContext<'_>, root: &Path, step: &RunStep, detail: Deta
 
     let mut exclude = cache.input_exclude(&dir, member.as_deref());
     let mut inputs_declared = cache.inputs.clone();
+    inputs_declared.extend(cache.upstream_outputs.iter().cloned());
     let mut outputs_declared = cache.outputs.clone();
     let mut cargo = Vec::new();
     let mut cargo_error = None;
@@ -313,6 +318,7 @@ fn one(context: &WorkspaceContext<'_>, root: &Path, step: &RunStep, detail: Deta
         commands: crate::cache::graph::commands_of(step),
         declared_inputs: cache.inputs.clone(),
         declared_outputs: cache.outputs.clone(),
+        declared_inputs_from: cache.inputs_from.clone(),
         inputs: inputs_declared,
         outputs: outputs_declared,
         exclude,

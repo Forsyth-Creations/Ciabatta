@@ -86,6 +86,34 @@ pub struct CacheConfig {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub inputs: Vec<String>,
 
+    /// Earlier steps whose `outputs` this build reads: each one's output
+    /// patterns are added to this build's inputs, so a change to what it wrote
+    /// rebuilds this one — and the list never goes stale when its outputs are
+    /// edited, which a copy of them would.
+    ///
+    /// Each entry is a step's cache id, `<member>:<workflow>:<step>`, or the
+    /// shorter `<workflow>:<step>` / `<step>` when that is unambiguous in the
+    /// graph. The step has to come before this one — something it `needs`,
+    /// directly or through its workflow — so its outputs are written before
+    /// they are read. Resolved when the graph compiles, into
+    /// [`Self::upstream_outputs`].
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub inputs_from: Vec<String>,
+
+    /// What [`Self::inputs_from`] resolved to: the output patterns of the
+    /// steps it names. Filled in by the workflow compiler — whatever a config
+    /// writes here is replaced — and serialized only so a step handed to the
+    /// daemon arrives with it.
+    ///
+    /// Kept apart from `inputs` for two reasons: a level declaring
+    /// `inputs_from` must not replace the `inputs` it inherited, and
+    /// `gitignore` doesn't apply to these — build output is usually ignored,
+    /// and it is exactly what was asked for.
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub upstream_outputs: Vec<String>,
+
     /// Glob patterns for the files a build writes, relative to the workspace
     /// root like [`Self::inputs`]. These are what gets stored and restored on a
     /// hit, and what's verified against the manifest before a hit is granted.
@@ -313,7 +341,11 @@ impl CacheConfig {
     pub fn why_disabled(&self) -> Option<&'static str> {
         if !self.is_on() {
             Some("caching is off (set `cache.enabled: true` to turn it on)")
-        } else if self.inputs.is_empty() && self.cargo.is_none() {
+        } else if self.inputs.is_empty()
+            && self.inputs_from.is_empty()
+            && self.upstream_outputs.is_empty()
+            && self.cargo.is_none()
+        {
             Some("no `cache.inputs` are declared, so there's nothing to key on")
         } else {
             None
@@ -380,6 +412,18 @@ impl CacheConfig {
             kept.as_ref(),
             hash,
         )?;
+        // An upstream step's outputs, unfiltered by `gitignore` and by the
+        // sibling-workspace exclusion: they are usually build output, often in
+        // another sub-workspace, and naming the step is asking for them.
+        if !self.upstream_outputs.is_empty() {
+            let exclude = self.exclude.clone();
+            let mut merged: BTreeMap<String, FileHash> =
+                files.drain(..).map(|f| (f.path.clone(), f)).collect();
+            for file in matching(dir, &self.upstream_outputs, &exclude, None, hash)? {
+                merged.entry(file.path.clone()).or_insert(file);
+            }
+            files = merged.into_values().collect();
+        }
 
         let Some(resolved) = self.cargo_resolved(dir)? else {
             return Ok(files);
@@ -803,6 +847,29 @@ pub fn not_ignored(dir: &Path) -> Result<HashSet<String>> {
         }
     }
     Ok(kept)
+}
+
+/// Every path under `dir`, ignored or not, each with whether it is a
+/// directory — what the web app's file picker browses. `.git` is left out;
+/// nothing else is.
+pub fn every_path(dir: &Path) -> Result<Vec<(String, bool)>> {
+    let mut all = Vec::new();
+    let walk = ignore::WalkBuilder::new(dir)
+        .standard_filters(false)
+        .filter_entry(|entry| entry.file_name() != ".git")
+        .build();
+    for entry in walk {
+        let entry = entry.with_context(|| format!("Failed to walk {}", dir.display()))?;
+        let Ok(rel) = entry.path().strip_prefix(dir) else {
+            continue;
+        };
+        let rel = rel.to_string_lossy().replace('\\', "/");
+        if !rel.is_empty() {
+            let is_dir = entry.file_type().is_some_and(|t| t.is_dir());
+            all.push((rel, is_dir));
+        }
+    }
+    Ok(all)
 }
 
 /// Rewrite a `**` glued to other text into the spelling the matcher accepts.
@@ -1835,6 +1902,21 @@ mod tests {
         // Outputs are never filtered: they live in ignored directories.
         config.outputs = vec!["crates/api/target/debug/api".to_string()];
         assert_eq!(config.hash_outputs(&dir).unwrap().len(), 1);
+
+        // Nor is what an upstream step wrote, read through `inputs_from`.
+        config.outputs.clear();
+        config.upstream_outputs = vec!["crates/api/generated".to_string()];
+        let hashed: Vec<String> = config
+            .hash_inputs(&dir, None)
+            .unwrap()
+            .into_iter()
+            .map(|f| f.path)
+            .collect();
+        assert!(
+            hashed.contains(&"crates/api/generated/out.rs".to_string()),
+            "{hashed:?}"
+        );
+        assert!(!hashed.contains(&"crates/api/build.log".to_string()));
 
         let _ = std::fs::remove_dir_all(&dir);
     }

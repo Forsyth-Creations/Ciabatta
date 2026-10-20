@@ -1020,7 +1020,11 @@ function StepInspector({
         env={workflow.env.vars.filter((variable) => variable.steps.includes(step.name))}
       />
       {inspect && !step.recover && step.deps?.name && (
-        <PickFilesButton project={project} step={step} />
+        <PickFilesButton
+          project={project}
+          step={step}
+          earlier={workflow.steps.filter((s) => upstream.includes(s.name))}
+        />
       )}
       {step.restoring && <RestoringPanel step={step} />}
       <StepCacheSection project={project} step={step} inspect={inspect} />
@@ -1032,7 +1036,15 @@ function StepInspector({
  * Inspect mode's way to fix a step's file lists: browse the checkout, tick
  * what it reads and writes, and save that into its workflow file.
  */
-function PickFilesButton({ project, step }: { project: string; step: StepView }) {
+function PickFilesButton({
+  project,
+  step,
+  earlier,
+}: {
+  project: string;
+  step: StepView;
+  earlier: StepView[];
+}) {
   const [open, setOpen] = useState(false);
   const unmatched = step.deps.unmatched_inputs?.length ?? 0;
   return (
@@ -1048,7 +1060,13 @@ function PickFilesButton({ project, step }: { project: string; step: StepView })
       </Button>
       {/* Mounted only while open, so it starts from the step's config each time. */}
       {open && (
-        <CacheFilePicker project={project} step={step} open onClose={() => setOpen(false)} />
+        <CacheFilePicker
+          project={project}
+          step={step}
+          earlier={earlier}
+          open
+          onClose={() => setOpen(false)}
+        />
       )}
     </Box>
   );

@@ -700,6 +700,7 @@ pub fn save_target_files(
     workspace: &Workspace,
     target: &str,
     inputs: &[String],
+    inputs_from: &[String],
     outputs: &[String],
 ) -> Result<String> {
     let mut parts = target.rsplitn(3, ':');
@@ -743,6 +744,7 @@ pub fn save_target_files(
     {
         let overridden: Vec<&str> = [
             (!own.inputs.is_empty()).then_some("inputs"),
+            (!own.inputs_from.is_empty()).then_some("inputs_from"),
             (!own.outputs.is_empty()).then_some("outputs"),
         ]
         .into_iter()
@@ -760,6 +762,7 @@ pub fn save_target_files(
 
     let mut cache = current.cache.clone().unwrap_or_default();
     cache.inputs = inputs.to_vec();
+    cache.inputs_from = inputs_from.to_vec();
     cache.outputs = outputs.to_vec();
     if cache.enabled.is_none() {
         cache.enabled = Some(true);
@@ -775,7 +778,7 @@ pub fn save_target_files(
         })?;
     let saved = parsed.cache.unwrap_or_default();
     anyhow::ensure!(
-        saved.inputs == inputs && saved.outputs == outputs,
+        saved.inputs == inputs && saved.inputs_from == inputs_from && saved.outputs == outputs,
         "The files didn't survive a round trip through {relative}; it was left alone"
     );
 
@@ -1017,6 +1020,7 @@ mod tests {
             &workspace,
             "api:build:compile",
             &["packages/api/src".to_string()],
+            &["proto:build:generate".to_string()],
             &["packages/api/dist".to_string()],
         )
         .unwrap();
@@ -1028,6 +1032,7 @@ mod tests {
             crate::format::from_str(&text, crate::format::Format::Yaml).unwrap();
         let cache = saved.cache.unwrap();
         assert_eq!(cache.inputs, ["packages/api/src"]);
+        assert_eq!(cache.inputs_from, ["proto:build:generate"]);
         assert_eq!(cache.outputs, ["packages/api/dist"]);
         assert_eq!(
             cache.env,
@@ -1045,6 +1050,7 @@ mod tests {
             "api:build:compile",
             &["packages/api/Cargo.toml".to_string()],
             &[],
+            &[],
         )
         .unwrap();
         let text = std::fs::read_to_string(root.join(file)).unwrap();
@@ -1053,6 +1059,7 @@ mod tests {
         let cache = saved.cache.unwrap();
         assert_eq!(cache.inputs, ["packages/api/Cargo.toml"]);
         assert!(cache.outputs.is_empty(), "{text}");
+        assert!(cache.inputs_from.is_empty(), "{text}");
         assert_eq!(cache.env, ["PROFILE"]);
 
         // A step with its own inputs would ignore the workflow's: refused.
@@ -1062,11 +1069,11 @@ mod tests {
             "steps:\n  - name: compile\n    run: make\n    cache:\n      inputs: [x]\n",
         );
         let workspace = Workspace::load(&root).unwrap();
-        let err = save_target_files(&workspace, "api:build:compile", &["y".into()], &[])
+        let err = save_target_files(&workspace, "api:build:compile", &["y".into()], &[], &[])
             .unwrap_err()
             .to_string();
         assert!(err.contains("its own `cache.inputs`"), "{err}");
-        assert!(save_target_files(&workspace, "nope", &["y".into()], &[]).is_err());
+        assert!(save_target_files(&workspace, "nope", &["y".into()], &[], &[]).is_err());
         std::fs::remove_dir_all(&root).ok();
     }
 

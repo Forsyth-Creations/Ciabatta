@@ -111,6 +111,20 @@ pub enum Commands {
         yes_no: bool,
     },
 
+    /// The Python library for `ciabatta input`, carried in this binary.
+    ///
+    /// `import ciabatta` gives a Python step `ciabatta.input()`,
+    /// `ciabatta.confirm()` (yes/no, returns a bool) and `ciabatta.pause()`,
+    /// which ask through the run exactly as `ciabatta input` does — in the
+    /// terminal or as a dialog in the web app. Standard library only; Python
+    /// 3.9 and newer, on Linux, macOS and Windows. The wheel matches this
+    /// binary's version.
+    #[command(visible_alias = "py")]
+    Python {
+        #[command(subcommand)]
+        command: PythonCommand,
+    },
+
     /// Run a workflow across the monorepo, by name.
     ///
     /// Equivalent to typing the workflow name directly: `ciabatta workflow
@@ -1357,4 +1371,27 @@ mod tests {
         assert!(!workflow_args(&["ciabatta", "workflow", "build", "--no-tui"]).use_tui());
         assert!(!workflow_args(&["ciabatta", "workflow", "build", "--no-tui", "--tui"]).use_tui());
     }
+}
+
+#[derive(Subcommand, Debug)]
+pub enum PythonCommand {
+    /// Write the library as a wheel (`ciabatta-<version>-py3-none-any.whl`),
+    /// to install with pip yourself or publish to a package index.
+    Wheel {
+        /// The directory to write it into.
+        #[arg(short, long, value_name = "DIR", default_value = ".")]
+        out: std::path::PathBuf,
+    },
+    /// pip-install the library into a Python: `<python> -m pip install` of
+    /// the wheel. Anything after `--` goes to pip (`-- --user`).
+    Install {
+        /// The interpreter to install into — `python3.12`, a virtualenv's
+        /// `bin/python`, `py -3.9`'s path on Windows. Defaults to `python3`
+        /// (`python` on Windows).
+        #[arg(long, value_name = "PYTHON")]
+        python: Option<String>,
+        /// Extra arguments for pip.
+        #[arg(last = true, value_name = "PIP_ARGS")]
+        pip_args: Vec<String>,
+    },
 }

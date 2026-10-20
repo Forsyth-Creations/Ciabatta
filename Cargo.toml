@@ -16,6 +16,8 @@ categories = ["command-line-utilities", "development-tools"]
 include = [
     "src/**/*",
     "build.rs",
+    # The Python library for `ciabatta input`, compiled in for `ciabatta python`.
+    "python/ciabatta/*.py",
     "tool_frontend/dist/**/*",
     "remote-cache-web/dist/**/*",
     # The config schemas are embedded in the binary and served to editors, so a

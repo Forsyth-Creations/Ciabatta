@@ -122,6 +122,47 @@ jobs:
       - name: Gates
         run: ciabatta test
 
+      # The Python library for `ciabatta input` is compiled into the binary,
+      # which writes it as a wheel. One pure-Python wheel serves every OS, so
+      # every leg installs it into both supported ends of the range — 3.9 and
+      # 3.12 — and asks it a question, with the binary just built first on
+      # PATH so it answers as a released one would.
+      - name: Set up Python 3.9
+        id: py39
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.9"
+      - name: Set up Python 3.12
+        id: py312
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Try the Python library
+        shell: bash
+        run: |
+          export PATH="$PWD/target/release:$PATH"
+          wheel=$(ciabatta python wheel --out python-dist)
+          version=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          for py in "${{ steps.py39.outputs.python-path }}" "${{ steps.py312.outputs.python-path }}"; do
+            dir="py-$("$py" -c 'import sys; print("%d%d" % sys.version_info[:2])')"
+            ciabatta python install --python "$py" -- --quiet --target "$dir"
+            printf 'yes\n' | ANSWER=no PYTHONPATH="$dir" "$py" -c "
+          import sys, ciabatta
+          assert ciabatta.__version__ == '$version', ciabatta.__version__
+          assert ciabatta.confirm('env answers', env='ANSWER') is False
+          assert ciabatta.confirm('stdin answers') is True
+          print('ok on', sys.version.split()[0])
+          "
+          done
+
+      - name: Upload the Python wheel
+        if: matrix.os == 'ubuntu-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ciabatta-python-wheel
+          path: python-dist/*.whl
+          if-no-files-found: error
+
       # The Zed extension is the one thing here nothing else would notice
       # breaking: it compiles to wasm for Zed's own host rather than being
       # embedded in the binary, so it is outside the `build` graph and no other
@@ -145,7 +186,24 @@ jobs:
           if-no-files-found: error
 
       # The public website is a member of the same graph, so `ciabatta build`
-      # above already built it. Only *publishing* waits for a tag.
+      # above already built it. Only *publishing* waits for a tag. The Python
+      # wheel goes on it too, under python/, with an index page so
+      # `pip install ciabatta --find-links <site>/python/` works.
+      - name: Put the Python wheel on the website
+        if: matrix.os == 'ubuntu-latest' && startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        run: |
+          mkdir -p frontend/dist/python
+          cp python-dist/*.whl frontend/dist/python/
+          {
+            echo '<!doctype html><html><head><meta charset="utf-8"><title>ciabatta for Python</title></head><body>'
+            for whl in frontend/dist/python/*.whl; do
+              name=$(basename "$whl")
+              echo "<a href=\"$name\">$name</a><br>"
+            done
+            echo '</body></html>'
+          } > frontend/dist/python/index.html
+
       - name: Upload pages artifact
         if: matrix.os == 'ubuntu-latest' && startsWith(github.ref, 'refs/tags/')
         uses: actions/upload-pages-artifact@v5

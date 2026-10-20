@@ -14,6 +14,7 @@ mod format;
 mod git;
 mod lsp;
 mod migrate;
+mod python;
 mod registry;
 mod remote_cache;
 mod run;
@@ -33,7 +34,7 @@ use owo_colors::OwoColorize;
 
 use cli::{
     AiCommand, CacheCommand, Cli, Commands, ConfigCommand, ConfigureCommand, DaemonCommand,
-    EnvCommand, RemoteCacheCommand, SelfCommand,
+    EnvCommand, PythonCommand, RemoteCacheCommand, SelfCommand,
 };
 use config::{CiabattaConfig, find_root, load_config, load_config_file};
 use environment::CiabattaEnv;
@@ -117,6 +118,17 @@ async fn main() -> Result<()> {
                 println!("{answer}");
             }
         }
+
+        Commands::Python { command } => match command {
+            PythonCommand::Wheel { out } => {
+                let path = python::write_wheel(&out)?;
+                println!("{}", path.display());
+            }
+            PythonCommand::Install { python, pip_args } => {
+                let python = python.as_deref().unwrap_or(python::default_python());
+                python::install(python, &pip_args)?;
+            }
+        },
 
         Commands::Env { subcommand } => match subcommand {
             EnvCommand::List => cmd_env_list()?,

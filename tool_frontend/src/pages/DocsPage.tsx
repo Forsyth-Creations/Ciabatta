@@ -385,13 +385,14 @@ const COMMANDS: CommandGroup[] = [
       },
       {
         usage: 'value=$(ciabatta input "PROMPT" [--env VAR] [--default VALUE])',
-        note: "From inside a step: ask whoever is watching the run for a value, and print the answer to stdout. A terminal run prompts with a countdown; a --gui or daemon run shows a dialog in this app that can't be dismissed until it's answered. Alias: `ciabatta read`. See \"Ask for a value mid-run\".",
+        note: "From inside a step: ask whoever is watching the run for a value, and print the answer to stdout. A terminal run prompts with a countdown; a --gui or daemon run shows a dialog in this app, whose Cancel stops the run. Alias: `ciabatta read`. See \"Ask for a value mid-run\".",
         flags: [
           ["-d, --details TEXT", "Longer text shown with the question — what the value is for, where to find it."],
           ["-e, --env VAR", "Answer with this variable's value, without asking, when it's set and not empty."],
           ["--default VALUE", "The answer for an empty reply, a timeout, or a run nobody can answer."],
           ["-s, --secret", "Mask the answer as it's typed and in the logs."],
           ["--enter", "Wait for a go-ahead, not a value: Enter in a terminal, a Continue button here. Prints nothing; carries on when it times out or nobody can be asked."],
+          ["--yes-no", "A yes-or-no question: Yes/No buttons here, [y/n] in a terminal. Always prints y or n, whatever was typed (yes, Y, true…). --default and --env take y/n too. Alias: --confirm."],
           ["-t, --timeout DURATION", "How long to wait, overriding workspace.input_timeout. 0 waits forever."],
         ],
       },
@@ -567,7 +568,18 @@ const COMMANDS: CommandGroup[] = [
         usage: "ciabatta daemon <status|stop|restart|logs>",
         note: "Inspect or restart the background daemon serving this app. You rarely need it — any command with a web view starts it.",
       },
-      { usage: "ciabatta self update", note: "Update this binary from the remote cache serving it." },
+      {
+        usage: "ciabatta self update",
+        note: "Update this binary from the remote cache serving it. If its directory needs sudo, see \"Handing out ciabatta itself\" under Remote cache.",
+      },
+      {
+        usage: "ciabatta python <wheel|install>",
+        note: "The Python library for ciabatta input, carried in this binary: `wheel --out DIR` writes ciabatta-<version>-py3-none-any.whl, `install [--python PY] [-- PIP_ARGS]` pip-installs it. See \"Ask for a value mid-run\".",
+      },
+      {
+        usage: "ciabatta remote-cache upload <BINARY> [--apply]",
+        note: "Send a remote cache a new ciabatta to hand out (and with --apply, to run itself, restarting in place). Needs an admin login and the cache's update password. --platform and --version for another OS's build.",
+      },
       {
         usage: "ciabatta self lint",
         note: "Compile every workflow in the workspace, as a run would, and list each broken one under the file to fix: a config that won't parse, a needs / depends_on / on_error naming something that doesn't exist, a dependency cycle, a push to an undefined registry. Exits non-zero on any; --json for CI.",
@@ -1321,6 +1333,36 @@ ciabatta cache status           # what the local cache is holding, and what it s
           caching decision is actually made from.
         </P>
 
+        <SubHeading>A glob that matches nothing</SubHeading>
+        <P>
+          Cache paths are relative to the <strong>workspace root</strong>, not the package — so{" "}
+          <C>src/**</C> in <C>packages/api</C>&apos;s workflow names the root&apos;s{" "}
+          <C>src</C>, which is usually nothing, and the step&apos;s key quietly covers no files.
+          In cache inspect mode a step whose input glob matches nothing says so, with the fix
+          when it can see one (<C>packages/api/src/**</C>), and a glob whose every match is
+          then left out by <C>exclude</C> says that instead.
+        </P>
+
+        <SubHeading>Picking the files instead</SubHeading>
+        <P>
+          In cache inspect mode, a step&apos;s details have a <strong>Pick files</strong> button:
+          a tree of the checkout (what git doesn&apos;t ignore) with an Inputs tab and an Outputs
+          tab. Tick files or folders — a folder means everything in it — and{" "}
+          <strong>Save to the workflow file</strong> writes them into that workflow&apos;s{" "}
+          <C>cache:</C> section, switching caching on if the section didn&apos;t say otherwise.
+          Saving <em>sets</em> the lists: what is ticked when you press Save is the whole of the
+          step&apos;s inputs and outputs, so unticking a path removes it from the file and an empty
+          tab clears that list. Everything else in the section (<C>env</C>, <C>exclude</C>, …) and
+          the rest of the file are kept. It writes YAML workflow files; a step that sets its own{" "}
+          <C>cache.inputs</C> or <C>outputs</C> would override the workflow&apos;s, so the picker
+          refuses and says to edit that step instead.
+        </P>
+        <P>
+          Long lists — what a step read, what it wrote, what moved since the last build — show
+          the first five; <strong>… and N more — see files</strong> scrolls to the full file
+          tree.
+        </P>
+
         <SubHeading>Proving the list is complete</SubHeading>
         <P>
           An <C>inputs</C> list that is missing a file is worse than no list at all: the step gets
@@ -1703,6 +1745,14 @@ required_env: [API_URL, DEPLOY_TOKEN] # must be set, or the run won't start`}</P
               files are never searched.
             </>,
             <>
+              <strong>Runs in this app see the terminal too.</strong> <C>ciabatta build --gui</C>{" "}
+              hands the daemon the terminal&apos;s environment and the directory you typed it in,
+              so the run searches from there and an exported variable wins exactly as it would in
+              the terminal. A run started later from the <Link to="/run">Run page</Link> uses the
+              environment of the last terminal that ran that workspace with <C>--gui</C>; restart
+              the daemon to forget it.
+            </>,
+            <>
               <strong>Within one workspace,</strong> the <C>.env</C> beats the defaults file:{" "}
               <C>env_default</C> if declared, otherwise a <C>.env.default</C> beside it. An
               elected profile <em>is</em> the <C>.env</C>: <C>ciabatta env use &lt;name&gt;</C>{" "}
@@ -1987,6 +2037,7 @@ steps:
             ["env_file", ".env path(s) relative to the package, sourced before the graph runs."],
             ["env", "Variables applied to every step here."],
             ["cache", "What this workflow's builds read, write and key on."],
+            ["wave_grouping", "A label. Workflows that share one are drawn starting in the same wave, where needs allows. Display only — it never changes what runs when."],
             ["steps", "The steps. Order in the file doesn't matter — needs does."],
           ]}
         />
@@ -2032,6 +2083,28 @@ steps:
     artifact: dist/api.tgz
     publish_path: "team/api/{CIABATTA_COMMIT}/api.tgz"
     needs: [package]`}</Pre>
+
+        <SubHeading>Lining waves up: wave_grouping</SubHeading>
+        <P>
+          Waves come from <C>needs</C>: each step sits one wave after the latest thing it waits
+          for. That is right for running, but it can scatter workflows you think of together —
+          three packages&apos; <C>lint</C> workflows in waves 1, 1 and 3 because one of them
+          waits on a build. Give them the same <C>wave_grouping</C> and they are drawn together:
+        </P>
+        <Pre>{`# packages/*/.ciabatta/workflows/lint.yaml
+wave_grouping: lint
+steps:
+  - name: check
+    run: ./lint.sh`}</Pre>
+        <P>
+          As a last step after the waves are worked out, each workflow in a group moves later —
+          never earlier — to start where the latest of them starts, and whatever waits on a
+          moved workflow moves with it. A workflow that needs another member of its own group
+          can&apos;t share its wave, so it simply follows it. The rules of waves always win: no
+          step is ever drawn before a step it needs. It changes the drawing only — the run
+          graph, the workspace page, <C>--graph</C> and the TUI — while the engine still starts
+          every step the moment its <C>needs</C> are met.
+        </P>
 
         <SubHeading>Checking it as you type</SubHeading>
         <P>
@@ -2093,6 +2166,18 @@ cd packages/api && ciabatta build           # same as --only api; --all for ever
               <C>--jobs</C> (the CPU count by default), and the next starts as soon as one
               finishes. Edges that skip columns are routed down lanes of their own, so a line
               crossing a node never means the two are connected.
+            </>,
+            <>
+              <strong>Waves fold.</strong> On the Workspace page&apos;s list view, click a wave&apos;s
+              heading to fold it to one line naming its steps; <strong>Collapse all waves</strong>{" "}
+              and <strong>Expand all</strong> do every wave at once. In <C>--graph --tui</C>,{" "}
+              <C>←</C>/<C>h</C> folds the wave under the cursor, <C>→</C>/<C>l</C>/Enter opens it,
+              and <C>z</C> folds or opens them all.
+            </>,
+            <>
+              <strong>Boxes on this page move and resize.</strong> Drag a box by its title bar;
+              pull its left, right or bottom edge (they light up under the pointer) or a bottom
+              corner to resize it. <strong>Reset layout</strong> puts them back.
             </>,
             <>
               <strong>A cache icon on a node means it used its cached version</strong> — already
@@ -2238,10 +2323,11 @@ echo "deploying to $region"`}</Pre>
             <>
               <strong>This app</strong> (<C>ciabatta deploy --gui</C>, or a run started from the
               Run page): a dialog opens on whatever page you&apos;re on, showing the question, its
-              details, which step and run are asking, and the countdown. It can&apos;t be
-              dismissed — the step is blocked on it — and because the question lives in the
+              details, which step and run are asking, and the countdown. Clicking away doesn&apos;t
+              close it — the step is blocked on it — and because the question lives in the
               daemon, reloading the page brings it straight back. Several questions queue, oldest
-              first.
+              first. <strong>Cancel</strong>, after a confirmation, stops the whole run: the
+              asking step is killed and nothing further starts.
             </>,
             <>
               <strong>Nobody</strong> (CI, piped output, <C>--tui</C>): the question settles
@@ -2258,6 +2344,42 @@ echo "deploying to $region"`}</Pre>
           field. It prints nothing, so call it on its own rather than inside <C>$(…)</C>. A
           go-ahead that times out, or that nobody can see (CI), carries on rather than failing
           the step — add <C>--default</C> only if you want to say otherwise in the log.
+        </P>
+
+        <SubHeading>Yes or no</SubHeading>
+        <P>
+          <C>--yes-no</C> (or <C>--confirm</C>) asks a yes-or-no question: <strong>Yes</strong>{" "}
+          and <strong>No</strong> buttons in this app, <C>[y/n]</C> in a terminal. Whatever is
+          typed — <C>yes</C>, <C>Y</C>, <C>true</C>, <C>no</C>, <C>0</C> — the answer printed is
+          always <C>y</C> or <C>n</C>, so the script tests one value. <C>--default</C> and{" "}
+          <C>--env</C> take the same spellings; anything else is asked again in a terminal and
+          refused by the dialog.
+        </P>
+        <Pre>{`if [ "$(ciabatta input "Run the migrations too?" --yes-no --default n)" = y ]; then
+  ./migrate.sh
+fi`}</Pre>
+
+        <SubHeading>Asking from Python</SubHeading>
+        <P>
+          A step written in Python asks with a function call. The library is built into the
+          binary — <C>ciabatta python install</C> pip-installs it into <C>python3</C> (or{" "}
+          <C>--python path/to/python</C>, and anything after <C>--</C> goes to pip), and{" "}
+          <C>ciabatta python wheel --out dist</C> writes the wheel to install yourself. It is
+          also on the website: <C>pip install ciabatta --find-links
+          https://forsyth-creations.github.io/Ciabatta/python/</C>. One pure-Python wheel, standard
+          library only, for Python 3.9 and newer on Linux, macOS and Windows.
+        </P>
+        <Pre>{`import ciabatta
+
+region = ciabatta.input("Which region?", default="us-east-1", env="DEPLOY_REGION")
+token = ciabatta.input("One-time code", secret=True, timeout="2m")
+if ciabatta.confirm("Deploy to production?", default=False):   # True / False
+    ...
+ciabatta.pause("Flip the maintenance switch, then continue")`}</Pre>
+        <P>
+          Inside a run, the question goes wherever <C>ciabatta input</C>&apos;s would — this
+          app&apos;s dialog or the terminal. Outside one it asks on the terminal. No answer and
+          no default raises <C>ciabatta.InputError</C>.
         </P>
 
         <SubHeading>Answering from a variable</SubHeading>
@@ -2773,6 +2895,86 @@ ciabatta remote-cache status         # hit rate, storage, retention`}</Pre>
           Nothing updates automatically. A build tool that swaps its own binary out from under a
           running CI job is a bad build tool; this notices, tells you, and waits to be asked.
         </P>
+
+        <SubHeading>Uploading a new ciabatta to the cache</SubHeading>
+        <P>
+          Instead of copying files onto the server, send it the new binary — the executable
+          itself, not the release archive:
+        </P>
+        <Pre>{`ciabatta remote-cache upload ./ciabatta                 # hand it out to linux clients
+ciabatta remote-cache upload ./ciabatta --apply         # …and run it on the cache too
+ciabatta remote-cache upload ciabatta.exe --platform windows --version 0.7.1`}</Pre>
+        <P>
+          It takes an admin login <em>and</em> the cache&apos;s <C>update</C> password, and the
+          cache refuses uploads altogether until its config sets one:
+        </P>
+        <Pre>{`update:
+  # printf %s 'the password' | sha256sum
+  password_sha256: "…"
+  # …or the password itself, from the server's environment:
+  # password_env: CIABATTA_UPDATE_PASSWORD`}</Pre>
+        <Bullets
+          items={[
+            <>
+              <strong>Clients update from it.</strong> An uploaded build replaces{" "}
+              <C>releases.binaries</C> for its platform, so connected clients are told a newer
+              ciabatta is available and <C>ciabatta self update</C> installs it — checked against
+              its SHA-256 as always.
+            </>,
+            <>
+              <strong>The version is the binary&apos;s own.</strong> For the server&apos;s own
+              platform the cache runs <C>--version</C> on the upload, which also refuses a build
+              that won&apos;t start there; for another platform, say it with{" "}
+              <C>--version</C>.
+            </>,
+            <>
+              <strong>--apply</strong> swaps the server&apos;s own binary — keeping the old one as{" "}
+              <C>&lt;name&gt;.previous</C> to roll back to — and restarts it in place with the same
+              arguments (the same process on Linux and macOS, so containers and supervisors see
+              one process). The server needs write access to the directory it runs from; a
+              container whose binary is baked into its image should be updated by rebuilding the
+              image instead.
+            </>,
+            <>
+              The server&apos;s page has the same thing under <strong>ciabatta</strong> on its
+              Cache tab: <strong>Upload a new ciabatta</strong>, greyed out with the reason until
+              an <C>update</C> password is configured.
+            </>,
+          ]}
+        />
+
+        <SubHeading>When self update needs sudo</SubHeading>
+        <P>
+          <C>ciabatta self update</C> replaces the binary where it is installed, so it needs
+          write access to that directory. Installed into <C>/usr/local/bin</C> with sudo, it
+          won&apos;t have it, and it says so before downloading anything. Three ways through:
+        </P>
+        <Bullets
+          items={[
+            <>
+              <strong>Move it somewhere you own, once</strong> — the lasting fix. Reinstall into a
+              directory in your home, remove the old copy, and every later update needs no sudo:
+              <Pre>{`curl -fsSL https://forsyth-creations.github.io/Ciabatta/install.sh | sh -s -- --dir ~/.local/bin
+sudo rm /usr/local/bin/ciabatta
+export PATH="$HOME/.local/bin:$PATH"     # in ~/.bashrc or ~/.zshrc, if it isn't already`}</Pre>
+            </>,
+            <>
+              <strong>Update with sudo, naming the cache.</strong> Under sudo ciabatta runs as
+              root, from root&apos;s home: it can&apos;t see your workspace&apos;s{" "}
+              <C>cache.remote</C> or your saved login, so give it the URL. Downloading a build
+              needs no login.
+              <Pre>{`sudo "$(command -v ciabatta)" self update --from https://cache.example.com:8443`}</Pre>
+              A cache with a self-signed certificate also needs <C>sudo -E</C> (to keep{" "}
+              <C>CIABATTA_REMOTE_CA</C>) or root&apos;s own trust of it.
+            </>,
+            <>
+              <strong>On Windows</strong>, install.ps1 puts ciabatta in{" "}
+              <C>%LOCALAPPDATA%\Programs\ciabatta</C>, which needs no elevation. A copy under{" "}
+              <C>Program Files</C> updates from a terminal opened with{" "}
+              <strong>Run as administrator</strong>, or reinstall with install.ps1.
+            </>,
+          ]}
+        />
         <P>
           It also tells you loudly. Every workflow run asks the configured remote cache which
           version it runs, and when that differs from this ciabatta the run opens with a warning

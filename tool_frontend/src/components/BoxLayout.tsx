@@ -207,10 +207,13 @@ export function BoxLayout({
             // up under the pointer and reads as clutter. The corners still
             // resize — the cursor says so — but draw nothing; edges become
             // strips the full length of the side, which light up under the
-            // pointer — easier to find than a 20px square.
-            "& > .react-resizable-handle": { zIndex: 3, backgroundImage: "none" },
-            "& > .react-resizable-handle::after": { display: "none" },
-            "& > .react-resizable-handle-e, & > .react-resizable-handle-w": {
+            // pointer — easier to find than a 20px square. The selectors name
+            // the grid item and both handle classes to outrank the library's
+            // own (`.react-grid-item > .react-resizable-handle.…-w`), which
+            // turns each side handle 45° — a long diagonal bar otherwise.
+            "&.react-grid-item > .react-resizable-handle": { zIndex: 3, backgroundImage: "none" },
+            "&.react-grid-item > .react-resizable-handle::after": { display: "none" },
+            "&.react-grid-item > .react-resizable-handle.react-resizable-handle-e, &.react-grid-item > .react-resizable-handle.react-resizable-handle-w": {
               top: 36,
               bottom: 16,
               height: "auto",
@@ -220,7 +223,7 @@ export function BoxLayout({
               "&::after": { display: "none" },
               "&:hover": { bgcolor: "action.selected" },
             },
-            "& > .react-resizable-handle-s": {
+            "&.react-grid-item > .react-resizable-handle.react-resizable-handle-s": {
               left: 16,
               right: 16,
               width: "auto",

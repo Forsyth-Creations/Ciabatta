@@ -622,6 +622,35 @@ impl Client {
         parse(response).await
     }
 
+    /// Upload a ciabatta binary for `platform` — see the server's
+    /// `upload_release`. Needs an admin session and the `update` password.
+    pub async fn upload_release(
+        &self,
+        platform: &str,
+        binary: Vec<u8>,
+        password: &str,
+        version: Option<&str>,
+        apply: bool,
+    ) -> Result<serde_json::Value> {
+        let mut query: Vec<(&str, String)> = Vec::new();
+        if let Some(version) = version {
+            query.push(("version", version.to_string()));
+        }
+        if apply {
+            query.push(("apply", "true".into()));
+        }
+        let response = self
+            .authed(self.http.put(self.url(&format!("/api/release/{platform}"))))
+            .query(&query)
+            .header(super::server::UPDATE_PASSWORD_HEADER, password)
+            .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
+            .body(binary)
+            .send()
+            .await
+            .with_context(|| format!("Could not reach the remote cache at {}", self.base))?;
+        parse(response).await
+    }
+
     /// Download the binary for a platform.
     pub async fn download_release(&self, platform: &str) -> Result<Vec<u8>> {
         let response = self

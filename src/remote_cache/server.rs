@@ -9,6 +9,7 @@
 //! /api/users…                              credentials, for an admin
 //! /api/projects…                           project identity and cache traffic
 //! /api/release  /api/release/{platform}    the ciabatta binaries it hands out
+//!                                          (PUT: upload one — admin + `update` password)
 //! ```
 //!
 //! Artifacts move as raw bytes over `PUT`/`GET` on a path per file rather than
@@ -64,6 +65,11 @@ pub struct AppState {
     /// See [`super::activity`].
     pub activity: Arc<super::activity::Activity>,
     pub started_at: String,
+    /// Set by an applied upload: the binary to start again from once the
+    /// server has finished what it is doing.
+    pub restart: Arc<std::sync::Mutex<Option<std::path::PathBuf>>>,
+    /// Woken when `restart` is set, to stop serving.
+    pub restart_now: Arc<tokio::sync::Notify>,
 }
 
 impl AppState {
@@ -81,7 +87,7 @@ impl AppState {
         let workflows = super::workflows::Store::open(&config.server.storage)?;
         let activity = super::activity::Activity::open(&config.server.storage)?;
         let builds = super::builds::Store::open(&config.server.storage)?;
-        let release = config.releases.scan();
+        let release = config.releases.with_uploads(&config.server.storage).scan();
 
         Ok(AppState {
             store: Arc::new(store),
@@ -93,6 +99,8 @@ impl AppState {
             sessions: Arc::new(Sessions::open(&config.server.storage)),
             release: Arc::new(std::sync::RwLock::new(release)),
             started_at: crate::cache::store::now(),
+            restart: Arc::default(),
+            restart_now: Arc::default(),
             config: Arc::new(config),
         })
     }
@@ -299,7 +307,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/users", get(list_users).post(create_user))
         .route("/api/users/{name}", delete(revoke_user))
         .route("/api/release", get(get_release))
-        .route("/api/release/{platform}", get(download_release))
+        .route(
+            "/api/release/{platform}",
+            get(download_release).put(upload_release),
+        )
         // The admin app, as the fallback, so no API path can be shadowed by it.
         .fallback(super::web::serve)
         .layer(DefaultBodyLimit::max(MAX_ARTIFACT_BYTES))
@@ -325,6 +336,8 @@ const REDACTED_HEADERS: &[&str] = &[
     "set-cookie",
     "x-api-key",
     "x-auth-token",
+    // The `update` password, sent with an uploaded binary.
+    UPDATE_PASSWORD_HEADER,
 ];
 
 /// Log every request as it arrives and every response as it leaves.
@@ -430,10 +443,15 @@ fn render_headers(headers: &HeaderMap) -> String {
                 // The *shape* of the credential is the useful part — "they sent
                 // a bearer token" versus "they sent nothing at all" is most of
                 // a 401 investigation — so keep the scheme and drop the secret.
+                // Only when a credential *follows* it: a value that is one
+                // word is all secret, however much it looks like a scheme.
                 let scheme = value
                     .to_str()
                     .ok()
-                    .and_then(|v| v.split_whitespace().next().map(str::to_string))
+                    .and_then(|v| match v.split_whitespace().collect::<Vec<_>>()[..] {
+                        [scheme, _, ..] => Some(scheme.to_string()),
+                        _ => None,
+                    })
                     .filter(|scheme| scheme.chars().all(|c| c.is_ascii_alphabetic()))
                     .map(|scheme| format!("{scheme} "))
                     .unwrap_or_default();
@@ -705,6 +723,12 @@ async fn stats(
         },
         "clear": {
             "password_required": state.config.clear.password_required(),
+        },
+        // Whether a new ciabatta can be uploaded here at all: only once the
+        // config sets an `update` password.
+        "update": {
+            "enabled": state.config.update.password_required(),
+            "platform": super::releases::current_platform(),
         },
         "sessions": state.sessions.live_count(),
         "release": *state.release.read().unwrap(),
@@ -1414,10 +1438,12 @@ async fn download_release(
             ApiError::not_found(format!("This cache has no ciabatta build for {platform}"))
         })?;
 
-    let path = state
+    let binaries = state
         .config
         .releases
-        .binaries
+        .with_uploads(&state.config.server.storage)
+        .binaries;
+    let path = binaries
         .get(&platform)
         .ok_or_else(|| ApiError::not_found(format!("No binary configured for {platform}")))?;
 
@@ -1449,6 +1475,123 @@ async fn download_release(
     ))
 }
 
+/// The header an upload carries the `update` password in. A header rather
+/// than the body, which is the binary itself.
+pub const UPDATE_PASSWORD_HEADER: &str = "x-ciabatta-update-password";
+
+#[derive(Deserialize)]
+struct UploadQuery {
+    /// What the binary is, for a platform this server can't run it on to ask.
+    #[serde(default)]
+    version: Option<String>,
+    /// Run it: replace this server's own binary and restart. Only for this
+    /// server's own platform.
+    #[serde(default)]
+    apply: bool,
+}
+
+/// Upload a ciabatta binary: to hand out to clients on `platform`, and with
+/// `?apply=true`, to become what this server runs.
+///
+/// An admin, and the `update` password — refused outright when no password
+/// is configured, because replacing the server's binary is the one request
+/// that hands whoever sends it everything the server can do.
+async fn upload_release(
+    State(state): State<AppState>,
+    Path(platform): Path<String>,
+    Query(query): Query<UploadQuery>,
+    headers: header::HeaderMap,
+    body: Bytes,
+) -> ApiResult<Json<serde_json::Value>> {
+    let identity = state.identify_admin(&headers)?;
+    let typed = headers
+        .get(UPDATE_PASSWORD_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .filter(|v| !v.is_empty());
+    if !state.config.update.password_required() {
+        return Err(ApiError::new(
+            StatusCode::FORBIDDEN,
+            "This cache doesn't take uploaded binaries until its config sets an `update` \
+             password (`update: { password_sha256: … }` or `password_env`).",
+        ));
+    }
+    if !state.config.update.accepts(typed) {
+        tracing::warn!(
+            "{} tried to upload a ciabatta binary with the wrong password",
+            identity.name
+        );
+        return Err(ApiError::new(
+            StatusCode::FORBIDDEN,
+            if typed.is_none() {
+                "Uploading a binary needs this cache's `update` password."
+            } else {
+                "That isn't this cache's `update` password."
+            },
+        ));
+    }
+    let here = super::releases::current_platform();
+    if query.apply && platform != here {
+        return Err(ApiError::bad_request(anyhow::anyhow!(
+            "This server runs on {here}, so it can't run a {platform} binary. Upload it \
+             without --apply to hand it out to {platform} clients."
+        )));
+    }
+
+    // Writing, running `--version`, and hashing every build again are all
+    // blocking — and hashing a few hundred megabytes takes a while — so off
+    // the runtime, where they don't hold up every other request.
+    let (path, version, rescanned) = {
+        let state = state.clone();
+        let platform = platform.clone();
+        let name = identity.name.clone();
+        tokio::task::spawn_blocking(move || {
+            let storage = &state.config.server.storage;
+            let (path, version) = super::releases::store_upload(
+                storage,
+                &platform,
+                &body,
+                query.version.as_deref(),
+                &name,
+            )
+            .map_err(ApiError::bad_request)?;
+            let rescanned = state.config.releases.with_uploads(storage).scan();
+            Ok::<_, ApiError>((path, version, rescanned))
+        })
+        .await
+        .map_err(|e| ApiError::from(anyhow::anyhow!("the upload stopped: {e}")))??
+    };
+    let sha256 = rescanned.build(&platform).map(|b| b.sha256.clone());
+    *state.release.write().unwrap() = rescanned;
+    tracing::info!(
+        "{} uploaded ciabatta {} for {platform}{}",
+        identity.name,
+        version.as_deref().unwrap_or("(version unchanged)"),
+        if query.apply {
+            ", and is restarting the server on it"
+        } else {
+            ""
+        }
+    );
+
+    if query.apply {
+        let exe = super::releases::replace_running(&path).map_err(ApiError::from)?;
+        *state.restart.lock().unwrap() = Some(exe);
+        // After this reply is on its way.
+        let wake = state.restart_now.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            wake.notify_one();
+        });
+    }
+    Ok(Json(json!({
+        "ok": true,
+        "platform": platform,
+        "version": version,
+        "sha256": sha256,
+        "applied": query.apply,
+    })))
+}
+
 // ─── Serving ────────────────────────────────────────────────────────────────
 
 /// Bind and serve until interrupted, sweeping expired artifacts as it goes.
@@ -1477,9 +1620,14 @@ pub async fn serve(config: ServerConfig) -> Result<()> {
     tokio::spawn(sweeper(state.clone(), listen.sweep_every.clone()));
     tokio::spawn(flusher(state.clone()));
 
-    let shutdown = async {
-        let _ = tokio::signal::ctrl_c().await;
-        tracing::info!("shutting the remote cache down");
+    let restart_now = state.restart_now.clone();
+    let shutdown = async move {
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => tracing::info!("shutting the remote cache down"),
+            () = restart_now.notified() => {
+                tracing::info!("restarting the remote cache on the uploaded binary");
+            }
+        }
     };
 
     // `into_make_service_with_connect_info` rather than a plain service: the
@@ -1502,6 +1650,10 @@ pub async fn serve(config: ServerConfig) -> Result<()> {
     // The counters since the last flush, so a restart loses nothing.
     if let Err(e) = state.activity.flush() {
         tracing::warn!("couldn't save the cache's activity record: {e:#}");
+    }
+    let restart = state.restart.lock().unwrap().take();
+    if let Some(exe) = restart {
+        return Err(super::releases::restart(&exe));
     }
     served.context("The remote cache server stopped unexpectedly")
 }
@@ -1626,7 +1778,15 @@ async fn sweeper(state: AppState, every: String) {
             dropped => tracing::info!("retention: dropped {dropped} expired session(s)"),
         }
 
-        let rescanned = state.config.releases.scan();
+        // Hashing the binaries is blocking work, and can be slow.
+        let config = state.config.clone();
+        let Ok(rescanned) = tokio::task::spawn_blocking(move || {
+            config.releases.with_uploads(&config.server.storage).scan()
+        })
+        .await
+        else {
+            continue;
+        };
         let mut current = state.release.write().unwrap();
         if rescanned.builds != current.builds {
             tracing::info!(
@@ -2084,6 +2244,7 @@ mod tests {
                 version: Some("0.2.0".into()),
                 notes: None,
                 binaries: std::collections::BTreeMap::from([("linux".to_string(), binary)]),
+                ..Default::default()
             },
             ..Default::default()
         });
@@ -2199,6 +2360,9 @@ mod tests {
         );
         headers.insert(header::COOKIE, "session=s3cr3t".parse().unwrap());
         headers.insert("x-api-key", "s3cr3t".parse().unwrap());
+        // A one-word secret that could pass for a scheme is still a secret.
+        headers.insert(UPDATE_PASSWORD_HEADER, "sesame".parse().unwrap());
+        headers.insert("x-auth-token", "abcdef".parse().unwrap());
         headers.insert(header::USER_AGENT, "ciabatta/0.2.1".parse().unwrap());
         headers.insert(header::CONTENT_LENGTH, "4096".parse().unwrap());
 
@@ -2213,6 +2377,14 @@ mod tests {
         );
         assert!(rendered.contains("cookie=<redacted>"), "{rendered}");
         assert!(rendered.contains("x-api-key=<redacted>"), "{rendered}");
+        assert!(
+            rendered.contains(&format!("{UPDATE_PASSWORD_HEADER}=<redacted>")),
+            "{rendered}"
+        );
+        assert!(
+            !rendered.contains("sesame") && !rendered.contains("abcdef"),
+            "{rendered}"
+        );
 
         // Everything else is logged as sent — that's the point.
         assert!(rendered.contains("user-agent=ciabatta/0.2.1"), "{rendered}");
@@ -2291,6 +2463,137 @@ mod tests {
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A new ciabatta is taken only from an admin with the `update` password,
+    /// and only once the config sets one; another platform's build is handed
+    /// out, never run.
+    #[tokio::test]
+    async fn uploading_a_binary_needs_an_update_password_configured_and_typed() {
+        let put = |uri: &str, password: Option<&str>, body: &'static [u8]| {
+            let mut request = Request::builder().method("PUT").uri(uri);
+            if let Some(password) = password {
+                request = request.header(UPDATE_PASSWORD_HEADER, password);
+            }
+            request.body(Body::from(body)).unwrap()
+        };
+        let exe: &'static [u8] = b"MZ\x90\x00 a windows build";
+
+        // No `update` password in the config: refused, whatever is typed.
+        let dir = scratch("upload-off");
+        let state = open_state(&dir);
+        let stats = json(
+            router(state.clone())
+                .oneshot(get("/api/stats"))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(stats["update"]["enabled"], false);
+        let response = router(state.clone())
+            .oneshot(put(
+                "/api/release/windows?version=9.9.9",
+                Some("anything"),
+                exe,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert!(!super::super::releases::uploaded_path(&dir, "windows").exists());
+
+        let dir = scratch("upload-on");
+        let state = state_with(ServerConfig {
+            server: Listen {
+                storage: dir.clone(),
+                ..Default::default()
+            },
+            update: super::super::ClearConfig {
+                password_sha256: Some(crate::cache::hash_bytes(b"sesame")),
+                password_env: None,
+            },
+            ..Default::default()
+        });
+        let stats = json(
+            router(state.clone())
+                .oneshot(get("/api/stats"))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(stats["update"]["enabled"], true);
+
+        // Missing, then wrong.
+        for password in [None, Some("guess")] {
+            let response = router(state.clone())
+                .oneshot(put("/api/release/windows", password, exe))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        }
+        // Right password, wrong file: an archive, not the binary inside it.
+        let response = router(state.clone())
+            .oneshot(put(
+                "/api/release/linux",
+                Some("sesame"),
+                b"\x1f\x8b\x08 tarball",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        // Another platform's binary can be handed out, but not run here.
+        let other = if super::super::releases::current_platform() == "windows" {
+            "linux"
+        } else {
+            "windows"
+        };
+        let body: &'static [u8] = if other == "windows" {
+            exe
+        } else {
+            b"\x7fELF linux"
+        };
+        let response = router(state.clone())
+            .oneshot(put(
+                &format!("/api/release/{other}?apply=true"),
+                Some("sesame"),
+                body,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        let response = router(state.clone())
+            .oneshot(put(
+                &format!("/api/release/{other}?version=9.9.9"),
+                Some("sesame"),
+                body,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let release = json(
+            router(state.clone())
+                .oneshot(get("/api/release"))
+                .await
+                .unwrap(),
+        )
+        .await;
+        // The version is the build's own: another platform's stays as it was.
+        assert_eq!(release["builds"][other]["version"], "9.9.9");
+        assert_eq!(release["version"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(
+            release["builds"][other]["sha256"],
+            crate::cache::hash_bytes(body)
+        );
+        let response = router(state.clone())
+            .oneshot(get(&format!("/api/release/{other}")))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let served = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(&served[..], body);
+        assert!(state.restart.lock().unwrap().is_none());
     }
 
     /// On an authenticating cache, user management is an admin's job — and the

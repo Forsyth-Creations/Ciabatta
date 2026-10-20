@@ -2588,6 +2588,58 @@ async fn cmd_remote_cache(subcommand: RemoteCacheCommand) -> Result<()> {
             Ok(())
         }
 
+        RemoteCacheCommand::Upload {
+            binary,
+            url,
+            platform,
+            version,
+            apply,
+            password_env,
+        } => {
+            let url = match url {
+                Some(url) => url,
+                None => configured_remote()?.ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "No remote cache is configured for this workspace, and none was named.\n\
+                         Usage: ciabatta remote-cache upload <BINARY> --url <URL>"
+                    )
+                })?,
+            };
+            let platform =
+                platform.unwrap_or_else(|| remote_cache::releases::current_platform().to_string());
+            let bytes = std::fs::read(&binary)
+                .with_context(|| format!("couldn't read {}", binary.display()))?;
+            // Caught here as well as on the server, before the upload.
+            remote_cache::releases::check_binary(&platform, &bytes)?;
+            let password = match &password_env {
+                Some(var) => env::var(var)
+                    .with_context(|| format!("--password-env names {var}, but it isn't set"))?,
+                None => prompt_secret(&format!("Update password for {url}: "))?,
+            };
+            let size = cache::store::human_size(bytes.len() as u64);
+            println!(
+                "Uploading {} ({size}) to {url} for {platform}…",
+                binary.display()
+            );
+            let client = Client::saved(&url)?;
+            let reply = match client
+                .upload_release(&platform, bytes, &password, version.as_deref(), apply)
+                .await
+            {
+                Ok(reply) => reply,
+                Err(e) => return Err(explain_auth_failure(&url, e)),
+            };
+            let version = reply["version"].as_str().unwrap_or("its previous version");
+            println!(
+                "{url} now hands out ciabatta {version} for {platform} — clients there can run \
+                 `ciabatta self update`."
+            );
+            if apply {
+                println!("It is restarting on the new binary.");
+            }
+            Ok(())
+        }
+
         RemoteCacheCommand::AddUser { name, read_only } => {
             let token = remote_cache::auth::generate_token();
             let hash = cache::hash_bytes(token.as_bytes());
@@ -3007,7 +3059,7 @@ async fn cmd_self(subcommand: SelfCommand) -> Result<()> {
         remote_cache::releases::UpdateStatus::UpToDate if !force => {
             println!(
                 "Already running what {url} serves (ciabatta {}).",
-                release.version
+                release.version_for(platform)
             );
             return Ok(());
         }
@@ -3020,7 +3072,7 @@ async fn cmd_self(subcommand: SelfCommand) -> Result<()> {
 
     if check {
         println!("An update is available from {url}:");
-        println!("  version  {}", release.version);
+        println!("  version  {}", release.version_for(platform));
         println!("  size     {}", cache::store::human_size(build.size));
         println!("  sha256   {}", build.sha256);
         if let Some(notes) = &release.notes {
@@ -3030,9 +3082,10 @@ async fn cmd_self(subcommand: SelfCommand) -> Result<()> {
         return Ok(());
     }
 
+    remote_cache::releases::check_writable()?;
     println!(
         "Downloading ciabatta {} for {platform} from {url} ({})…",
-        release.version,
+        release.version_for(platform),
         cache::store::human_size(build.size)
     );
     let bytes = client.download_release(platform).await?;
@@ -3042,7 +3095,7 @@ async fn cmd_self(subcommand: SelfCommand) -> Result<()> {
     let path = remote_cache::releases::install(&bytes, &build.sha256)?;
     println!(
         "Installed ciabatta {} to {}",
-        release.version,
+        release.version_for(platform),
         path.display()
     );
     if let Some(notes) = &release.notes {

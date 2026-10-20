@@ -778,6 +778,47 @@ pub enum RemoteCacheCommand {
         url: Option<String>,
     },
 
+    /// Upload a new ciabatta binary to a remote cache.
+    ///
+    /// The cache hands it out from then on: clients on that platform are told
+    /// a newer ciabatta is available, and `ciabatta self update` installs it.
+    /// With --apply the cache also runs it — it swaps its own binary (keeping
+    /// the old one as `<name>.previous`) and restarts in place.
+    ///
+    /// Needs an admin login and the cache's `update` password; a cache whose
+    /// config sets no `update` password refuses uploads altogether.
+    ///
+    ///   ciabatta remote-cache upload ./ciabatta --apply
+    ///   ciabatta remote-cache upload ciabatta.exe --platform windows --version 0.7.1
+    Upload {
+        /// The binary — the executable itself, not the release archive.
+        #[arg(name = "BINARY")]
+        binary: std::path::PathBuf,
+
+        /// The cache to upload to. Defaults to the one this workspace uses.
+        #[arg(long, value_name = "URL")]
+        url: Option<String>,
+
+        /// Which platform it is for: linux, macos or windows. Defaults to
+        /// this machine's.
+        #[arg(long, value_name = "PLATFORM")]
+        platform: Option<String>,
+
+        /// The version it is. Needed only for a platform the cache can't run
+        /// — it asks a binary for its own platform itself.
+        #[arg(long, value_name = "VERSION")]
+        version: Option<String>,
+
+        /// Have the cache run it too: replace its own binary and restart.
+        #[arg(long)]
+        apply: bool,
+
+        /// Read the `update` password from this environment variable instead
+        /// of prompting.
+        #[arg(long, value_name = "VAR")]
+        password_env: Option<String>,
+    },
+
     /// Mint a token for a user and print the config line to add.
     #[command(name = "add-user")]
     AddUser {

@@ -25,3 +25,5 @@ ciabatta-analyze.json
 editors/vscode/schemas/
 editors/zed/target/
 editors/zed/extension.wasm
+python-dist/
+__pycache__/

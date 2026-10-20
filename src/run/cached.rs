@@ -1266,7 +1266,7 @@ fn rebuild_hints(
         Reason::OutputsModified { modified } => hints.push(format!(
             "Something changed {} after it was built. If another step writes there too, \
              two steps share an output and keep invalidating each other.",
-            modified.join(", ")
+            listed(&modified.iter().map(String::as_str).collect::<Vec<_>>())
         )),
         Reason::Forced => {
             hints.push("The run was started with --force, which ignores the cache.".to_string())
@@ -1360,10 +1360,13 @@ fn glob_covers(pattern: &str, path: &str) -> bool {
     !dir.is_empty() && !dir.contains('*') && path.starts_with(&format!("{dir}/"))
 }
 
+/// Paths named in a hint: the first five, then how many more. A hint is read
+/// as a sentence, and the inspector's file tree has the full list.
 fn listed(paths: &[&str]) -> String {
+    const SHOWN: usize = 5;
     match paths.len() {
-        0..=3 => paths.join(", "),
-        n => format!("{} and {} more", paths[..3].join(", "), n - 3),
+        0..=SHOWN => paths.join(", "),
+        n => format!("{} and {} more", paths[..SHOWN].join(", "), n - SHOWN),
     }
 }
 

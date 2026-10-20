@@ -119,6 +119,7 @@ import {
 } from "../components/CacheReport";
 import { useInspectMode } from "../state/inspect";
 import { CacheKeyFilesView } from "../components/CacheKeyFiles";
+import { CACHE_FILES_ANCHOR, ShortList } from "../components/ShortList";
 import { ErrorNote, Loading } from "../components/Page";
 import { monoFontStack } from "../theme";
 
@@ -1101,7 +1102,10 @@ function StepCacheSection({
       </Typography>
       <CacheReportView report={step.cache} detailed={inspect} />
       {inspect && step.cache.key && (
-        <Box sx={{ mt: 1.25, pt: 1, borderTop: 1, borderColor: "divider" }}>
+        <Box
+          id={CACHE_FILES_ANCHOR}
+          sx={{ mt: 1.25, pt: 1, borderTop: 1, borderColor: "divider", scrollMarginTop: 16 }}
+        >
           <CacheKeyFilesView
             project={project}
             cacheKey={step.cache.key}
@@ -1522,25 +1526,35 @@ function TargetDependencies({ deps }: { deps: TargetDeps }) {
       <DepRow
         label="reads"
         value={
-          deps.inputs.length === 0
-            ? "no input files declared"
-            : `${deps.input_files} file(s), ${humanizeBytes(deps.input_bytes)} — ${deps.inputs.join(", ")}`
+          deps.inputs.length === 0 ? (
+            "no input files declared"
+          ) : (
+            <>
+              {deps.input_files} file(s), {humanizeBytes(deps.input_bytes)} —{" "}
+              <ShortList items={deps.inputs} />
+            </>
+          )
         }
         title={deps.exclude.length > 0 ? `excluding ${deps.exclude.join(", ")}` : undefined}
       />
       {deps.cargo && deps.cargo.length > 0 && (
         <DepRow
           label="cargo"
-          value={deps.cargo.join("; ")}
+          value={<ShortList items={deps.cargo} />}
           title="Packages cache.cargo resolved this target's files from"
         />
       )}
       <DepRow
         label="writes"
         value={
-          deps.outputs.length === 0
-            ? "no output files declared, so nothing could be restored"
-            : `${deps.output_files} file(s), ${humanizeBytes(deps.output_bytes)} — ${deps.outputs.join(", ")}`
+          deps.outputs.length === 0 ? (
+            "no output files declared, so nothing could be restored"
+          ) : (
+            <>
+              {deps.output_files} file(s), {humanizeBytes(deps.output_bytes)} —{" "}
+              <ShortList items={deps.outputs} />
+            </>
+          )
         }
       />
       <DepRow
@@ -1554,7 +1568,7 @@ function TargetDependencies({ deps }: { deps: TargetDeps }) {
       )}
       {deps.cached && deps.undeclared_reads && deps.undeclared_reads.length > 0 && (
         <Typography variant="caption" color="warning.main">
-          ⚠ rustc reports the last build reading {deps.undeclared_reads.join(", ")}, outside
+          ⚠ rustc reports the last build reading <ShortList items={deps.undeclared_reads} />, outside
           its cache inputs, so changing {deps.undeclared_reads.length === 1 ? "it" : "them"}{" "}
           would not invalidate this target.
         </Typography>
@@ -1563,9 +1577,8 @@ function TargetDependencies({ deps }: { deps: TargetDeps }) {
         <Typography variant="caption" color="warning.main">
           ⚠ {deps.outputs_in_inputs.length} file(s) match both its inputs and its outputs, so
           they are treated as outputs only and left out of the key:{" "}
-          {deps.outputs_in_inputs.slice(0, 5).join(", ")}
-          {deps.outputs_in_inputs.length > 5 && `, and ${deps.outputs_in_inputs.length - 5} more`}.
-          Narrow cache.inputs, or add them to exclude.
+          <ShortList items={deps.outputs_in_inputs} />. Narrow cache.inputs, or add them to
+          exclude.
         </Typography>
       )}
       {deps.cached && undeclared.length > 0 && (
@@ -1658,7 +1671,7 @@ function DepRow({
   mono,
 }: {
   label: string;
-  value: string;
+  value: React.ReactNode;
   title?: string;
   mono?: boolean;
 }) {

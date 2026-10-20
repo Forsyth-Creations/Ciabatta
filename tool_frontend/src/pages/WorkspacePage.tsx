@@ -443,6 +443,16 @@ function GraphPanel({ project, workflow }: { project: string; workflow: string }
   // details at once.
   const [view, setView] = useState<"graph" | "list">("graph");
   const [selected, setSelected] = useState<string | null>(null);
+  // Which waves of the list are folded to one line. Kept per workflow by
+  // index, since the same graph recompiles into the same waves.
+  const [folded, setFolded] = useState<Set<number>>(new Set());
+  const toggleWave = (index: number) =>
+    setFolded((current) => {
+      const next = new Set(current);
+      if (next.has(index)) next.delete(index);
+      else next.add(index);
+      return next;
+    });
 
   if (isLoading) return <Loading label={`Compiling the “${workflow}” graph…`} />;
   if (error) return <ErrorNote error={error} />;
@@ -561,28 +571,80 @@ function GraphPanel({ project, workflow }: { project: string; workflow: string }
             </>
           )}
 
+          {view === "list" && data.waves.length > 1 && (
+            <Stack direction="row" spacing={1} justifyContent="flex-end">
+              <Button size="small" onClick={() => setFolded(new Set(data.waves.map((_, i) => i)))}>
+                Collapse all waves
+              </Button>
+              <Button size="small" onClick={() => setFolded(new Set())}>
+                Expand all
+              </Button>
+            </Stack>
+          )}
+
           {view === "list" && data.waves.map((wave, index) => {
             const steps = wave.filter((id) => !isBackground.has(id));
             // A wave that held nothing but background tasks isn't a wave.
             if (steps.length === 0) return null;
+            const closed = folded.has(index);
             return (
               <Box key={index}>
-                <Typography variant="overline" color="text.secondary">
-                  wave {index + 1} — runs in parallel
-                </Typography>
-                <Stack spacing={1} sx={{ mt: 0.5 }}>
-                  {steps.map((id) => {
-                    const node = byId.get(id);
-                    return node ? (
-                      <GraphNodeCard
-                        key={id}
-                        node={node}
-                        env={envFor(data, id)}
-                        planned={planned.get(id)}
-                      />
-                    ) : null;
-                  })}
+                {/* Folded, a wave is one line naming its steps — enough to
+                    keep your place in a long graph without its cards. */}
+                <Stack
+                  direction="row"
+                  spacing={0.5}
+                  alignItems="center"
+                  role="button"
+                  tabIndex={0}
+                  aria-expanded={!closed}
+                  onClick={() => toggleWave(index)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter" || event.key === " ") {
+                      event.preventDefault();
+                      toggleWave(index);
+                    }
+                  }}
+                  sx={{ cursor: "pointer", width: "fit-content", maxWidth: "100%", minWidth: 0 }}
+                >
+                  <ExpandMoreIcon
+                    fontSize="small"
+                    sx={{
+                      color: "text.secondary",
+                      transform: closed ? "rotate(-90deg)" : "none",
+                      transition: "transform 120ms",
+                    }}
+                  />
+                  <Typography variant="overline" color="text.secondary" sx={{ flexShrink: 0 }}>
+                    wave {index + 1} — runs in parallel
+                    {closed && ` · ${steps.length} step${steps.length === 1 ? "" : "s"}`}
+                  </Typography>
+                  {closed && (
+                    <Typography
+                      variant="caption"
+                      color="text.secondary"
+                      noWrap
+                      sx={{ fontFamily: monoFontStack, minWidth: 0 }}
+                    >
+                      {steps.join(", ")}
+                    </Typography>
+                  )}
                 </Stack>
+                {!closed && (
+                  <Stack spacing={1} sx={{ mt: 0.5 }}>
+                    {steps.map((id) => {
+                      const node = byId.get(id);
+                      return node ? (
+                        <GraphNodeCard
+                          key={id}
+                          node={node}
+                          env={envFor(data, id)}
+                          planned={planned.get(id)}
+                        />
+                      ) : null;
+                    })}
+                  </Stack>
+                )}
               </Box>
             );
           })}

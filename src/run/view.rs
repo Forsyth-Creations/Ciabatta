@@ -147,6 +147,10 @@ pub struct StepView {
     // failing "compile" in a six-package build names no package at all.
     /// The sub-workspace this node came from, when the run is a workflow graph.
     workspace: Option<String>,
+    /// Its cache id, `<member>:<workflow>:<step>` — which workflow file it
+    /// was declared in, so the file picker knows where to save.
+    #[serde(default)]
+    cache_id: Option<String>,
     /// One line on what the step does.
     description: Option<String>,
     /// Who to ask about it.
@@ -665,6 +669,7 @@ pub fn initial_state(
                 logs: VecDeque::new(),
                 dropped_logs: 0,
                 workspace: step.workspace.clone(),
+                cache_id: step.cache_id.clone(),
                 description: step.description.clone(),
                 owner: step.owner.clone(),
                 kind: step.kind.clone(),

@@ -291,6 +291,17 @@ pub fn set_top_level(document: &str, key: &str, block: &str) -> String {
     let lines: Vec<&str> = document.lines().collect();
     let mut out: Vec<String> = lines[..start].iter().map(|s| s.to_string()).collect();
     out.extend(block.lines().map(|s| s.to_string()));
+    // The blank lines that separated the old block from the next one belong
+    // to the layout, not to the block: keep them, or the next section ends up
+    // jammed against this one.
+    let spacing = lines[start..end]
+        .iter()
+        .rev()
+        .take_while(|l| l.trim().is_empty())
+        .count();
+    if end < lines.len() {
+        out.extend(std::iter::repeat_n(String::new(), spacing));
+    }
     out.extend(lines[end..].iter().map(|s| s.to_string()));
 
     let mut rendered = out.join("\n");
@@ -485,6 +496,17 @@ pub fn migrated_path(path: &Path) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
+    /// Replacing a block keeps the blank line that set it apart from the next.
+    #[test]
+    fn replacing_a_block_keeps_the_spacing_after_it() {
+        let document = "description: x\ncache:\n  inputs: [a]\n\nsteps:\n  - name: s\n";
+        let out = super::set_top_level(document, "cache", "cache:\n  inputs: [b]");
+        assert_eq!(
+            out,
+            "description: x\ncache:\n  inputs: [b]\n\nsteps:\n  - name: s\n"
+        );
+    }
+
     use super::*;
     use serde::Deserialize;
 

@@ -534,7 +534,7 @@ async fn cmd_workflow(
         // The daemon owns the run, so it compiles the graph itself from the
         // same declarations rather than being handed our copy.
         report_run_dependencies(&resolved, &name, &ws.root, &vars, false);
-        return cmd_workflow_gui(&args, &workflows, &ws.root, vars, custom_args).await;
+        return cmd_workflow_gui(&args, &workflows, &ws.root, &cwd, vars, custom_args).await;
     }
 
     execute_workflow(
@@ -722,10 +722,23 @@ async fn cmd_workflow_gui(
     args: &cli::WorkflowArgs,
     workflows: &[String],
     root: &Path,
+    cwd: &Path,
     vars: HashMap<String, String>,
     custom_args: &[String],
 ) -> Result<()> {
     let session = daemon::connect(args.port).await?;
+    // Where this was typed, so the daemon searches the same `.env` files this
+    // terminal would have: from here up to the root.
+    let start = cwd
+        .canonicalize()
+        .ok()
+        .zip(root.canonicalize().ok())
+        .and_then(|(cwd, root)| {
+            cwd.strip_prefix(&root)
+                .ok()
+                .map(|rel| rel.to_string_lossy().replace('\\', "/"))
+        })
+        .unwrap_or_default();
 
     let response = session
         .daemon
@@ -744,6 +757,10 @@ async fn cmd_workflow_gui(
             // keeps them with the run, so "run again" repeats them.
             "args": custom_args,
             "env_profile": args.env_profile,
+            "cwd": start,
+            // `env` is this terminal's whole environment: the daemon keeps it
+            // (in memory) for the runs the browser starts next.
+            "terminal": true,
         }))
         .send()
         .await?;

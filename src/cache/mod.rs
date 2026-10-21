@@ -40,6 +40,7 @@ pub mod cargo;
 pub mod cli;
 pub mod diff;
 pub mod graph;
+pub mod scope;
 pub mod store;
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
@@ -399,7 +400,19 @@ impl CacheConfig {
     pub fn cargo_resolved(&self, dir: &Path) -> Result<Option<cargo::Resolved>> {
         self.cargo
             .as_ref()
-            .map(|spec| cargo::resolve_with(dir, self.home.as_deref(), spec, &self.values))
+            .map(|spec| {
+                // A step asks for its closure several times over while it is
+                // planned — for its inputs, its outputs, its warnings.
+                let key = format!(
+                    "{}\0{:?}\0{spec:?}\0{:?}",
+                    dir.display(),
+                    self.home,
+                    self.values
+                );
+                scope::resolved(key, || {
+                    cargo::resolve_with(dir, self.home.as_deref(), spec, &self.values)
+                })
+            })
             .transpose()
     }
 
@@ -547,10 +560,11 @@ impl CacheConfig {
         }
         let mut exclude = self.exclude.clone();
         exclude.extend(nested_workspaces_except(dir, own));
+        let outputs = Excluder::new(dir, &self.outputs);
         Ok(list_matching(dir, &self.inputs, &exclude)?
             .into_iter()
             .map(|f| f.path)
-            .filter(|path| is_excluded(path, dir, &self.outputs))
+            .filter(|path| outputs.matches(path))
             .collect())
     }
 
@@ -665,8 +679,24 @@ pub fn nested_workspaces_except(dir: &Path, own: Option<&str>) -> Vec<String> {
 /// `through` says yes to rather than only the step's own — the ones a
 /// `cache.cargo` closure has to reach into.
 pub fn nested_workspaces_through(dir: &Path, through: impl Fn(&str) -> bool) -> Vec<String> {
-    let mut found = Vec::new();
-    collect_nested(dir, dir, &through, 0, &mut found);
+    let all = scope::members(dir.to_path_buf(), || {
+        let mut all = Vec::new();
+        collect_members(dir, dir, 0, &mut all);
+        all
+    });
+    // A member is somebody else's when `through` says no to it and yes to
+    // every member it sits inside: below one that is somebody else's, it
+    // belongs to that one, and is excluded along with it.
+    let mut found: Vec<String> = Vec::new();
+    for member in &all {
+        let inside_through = all
+            .iter()
+            .filter(|outer| member.starts_with(&format!("{outer}/")))
+            .all(|outer| through(outer));
+        if inside_through && !through(member) {
+            found.push(member.clone());
+        }
+    }
     found
 }
 
@@ -674,13 +704,10 @@ pub fn nested_workspaces_through(dir: &Path, through: impl Fn(&str) -> bool) -> 
 /// own limit, so the two agree about what counts as a member.
 const MAX_NEST_DEPTH: usize = 6;
 
-fn collect_nested(
-    root: &Path,
-    dir: &Path,
-    through: &dyn Fn(&str) -> bool,
-    depth: usize,
-    found: &mut Vec<String>,
-) {
+/// Every sub-workspace under `root`, at any depth up to [`MAX_NEST_DEPTH`],
+/// parents before what is nested in them. The same for every step, so it is
+/// scanned once per plan; which of them a step excludes is worked out from it.
+fn collect_members(root: &Path, dir: &Path, depth: usize, found: &mut Vec<String>) {
     if depth >= MAX_NEST_DEPTH {
         return;
     }
@@ -699,24 +726,12 @@ fn collect_nested(
         if name.starts_with('.') || SKIP_SCAN_DIRS.contains(&name.as_ref()) {
             continue;
         }
-        let rel = path
-            .strip_prefix(root)
-            .ok()
-            .map(|rel| rel.to_string_lossy().replace('\\', "/"));
-        if path.join(crate::config::CIABATTA_DIR).is_dir() {
-            // The step's own member: its files are what this build reads, so
-            // keep them, and carry on down to exclude anything nested inside it.
-            if rel.as_deref().is_some_and(through) {
-                collect_nested(root, &path, through, depth + 1, found);
-                continue;
-            }
-            if let Some(rel) = rel {
-                found.push(rel);
-            }
-            // Stop here: whatever is below belongs to this member, not to us.
-            continue;
+        if path.join(crate::config::CIABATTA_DIR).is_dir()
+            && let Ok(rel) = path.strip_prefix(root)
+        {
+            found.push(rel.to_string_lossy().replace('\\', "/"));
         }
-        collect_nested(root, &path, through, depth + 1, found);
+        collect_members(root, &path, depth + 1, found);
     }
 }
 
@@ -759,6 +774,10 @@ pub struct FileHash {
 
 /// The SHA-256 of a file's contents, hex encoded.
 pub fn hash_file(path: &Path) -> Result<String> {
+    scope::hash(path.to_path_buf(), || hash_file_now(path))
+}
+
+fn hash_file_now(path: &Path) -> Result<String> {
     let mut file =
         std::fs::File::open(path).with_context(|| format!("Failed to read {}", path.display()))?;
     let mut hasher = Sha256::new();
@@ -825,6 +844,10 @@ pub fn list_matching(dir: &Path, patterns: &[String], exclude: &[String]) -> Res
 /// whether or not anyone has run `git init`, and a CI job building from a
 /// source tarball should get the same key as one building from a clone.
 pub fn not_ignored(dir: &Path) -> Result<HashSet<String>> {
+    scope::not_ignored(dir.to_path_buf(), || not_ignored_now(dir))
+}
+
+fn not_ignored_now(dir: &Path) -> Result<HashSet<String>> {
     let mut kept = HashSet::new();
     let walk = ignore::WalkBuilder::new(dir)
         .hidden(false)
@@ -834,7 +857,7 @@ pub fn not_ignored(dir: &Path) -> Result<HashSet<String>> {
         .git_ignore(true)
         .git_exclude(true)
         .require_git(false)
-        .filter_entry(|entry| entry.file_name() != ".git")
+        .filter_entry(|entry| entry.file_name() != ".git" && !is_state_dir(entry.path()))
         .build();
     for entry in walk {
         let entry = entry.with_context(|| format!("Failed to walk {}", dir.display()))?;
@@ -856,7 +879,7 @@ pub fn every_path(dir: &Path) -> Result<Vec<(String, bool)>> {
     let mut all = Vec::new();
     let walk = ignore::WalkBuilder::new(dir)
         .standard_filters(false)
-        .filter_entry(|entry| entry.file_name() != ".git")
+        .filter_entry(|entry| entry.file_name() != ".git" && !is_state_dir(entry.path()))
         .build();
     for entry in walk {
         let entry = entry.with_context(|| format!("Failed to walk {}", dir.display()))?;
@@ -870,6 +893,25 @@ pub fn every_path(dir: &Path) -> Result<Vec<(String, bool)>> {
         }
     }
     Ok(all)
+}
+
+/// Where ciabatta keeps its own state inside a project — the local cache
+/// store, run history — under any sub-workspace's `.ciabatta/`.
+const STATE_DIRS: &[&str] = &["cache", "history", ".cache"];
+
+/// Whether `path` is one of [`STATE_DIRS`]: never an input, and never worth
+/// walking. A project that doesn't list them in `.gitignore` would otherwise
+/// have every step walk the store — tens of thousands of files after a few
+/// hundred builds, and more with each one — and a step reading the whole
+/// tree would key on its own cache, and never hit.
+fn is_state_dir(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| STATE_DIRS.contains(&name))
+        && path
+            .parent()
+            .and_then(Path::file_name)
+            .is_some_and(|parent| parent == crate::config::CIABATTA_DIR)
 }
 
 /// Rewrite a `**` glued to other text into the spelling the matcher accepts.
@@ -930,6 +972,7 @@ fn matching(
     hash: bool,
 ) -> Result<Vec<FileHash>> {
     let mut seen: BTreeMap<String, FileHash> = BTreeMap::new();
+    let exclude = Excluder::new(dir, exclude);
 
     for pattern in patterns {
         let normalized = normalize_glob(pattern);
@@ -962,7 +1005,7 @@ fn matching(
             .with_context(|| format!("Invalid cache pattern '{pattern}'"))?;
 
         for entry in entries.flatten() {
-            collect_into(dir, &entry, exclude, kept, hash, &mut seen)?;
+            collect_into(dir, &entry, &exclude, kept, hash, &mut seen)?;
         }
     }
 
@@ -973,7 +1016,7 @@ fn matching(
 fn collect_into(
     dir: &Path,
     path: &Path,
-    exclude: &[String],
+    exclude: &Excluder,
     kept: Option<&HashSet<String>>,
     hash: bool,
     seen: &mut BTreeMap<String, FileHash>,
@@ -998,7 +1041,7 @@ fn collect_into(
             dir.display(),
         );
     }
-    if !rel.is_empty() && is_excluded(&rel, dir, exclude) {
+    if !rel.is_empty() && exclude.matches(&rel) {
         return Ok(());
     }
     if !rel.is_empty() && kept.is_some_and(|kept| !kept.contains(&rel)) {
@@ -1006,6 +1049,9 @@ fn collect_into(
     }
 
     if path.is_dir() {
+        if is_state_dir(path) {
+            return Ok(());
+        }
         // Sorted so the walk order — and so any error a caller sees — doesn't
         // depend on the filesystem. The hashes end up in a BTreeMap either way.
         let mut children: Vec<PathBuf> = std::fs::read_dir(path)
@@ -1039,26 +1085,78 @@ fn collect_into(
     Ok(())
 }
 
-/// Whether `rel` (a `/`-separated path relative to `dir`) matches any exclude
-/// pattern.
-fn is_excluded(rel: &str, dir: &Path, exclude: &[String]) -> bool {
-    exclude.iter().any(|pattern| {
-        // Match the pattern both as a glob over the relative path and as a bare
-        // prefix, so `exclude: [target]` does what everyone expects without
-        // anyone having to write `target/**/*`.
-        let as_prefix =
-            rel == pattern || rel.starts_with(&format!("{}/", pattern.trim_end_matches('/')));
-        if as_prefix {
-            return true;
+/// Exclude patterns, compiled once for a whole walk.
+///
+/// Every path a walk visits is checked against every pattern, and a step in
+/// a monorepo excludes each sibling sub-workspace — eighty siblings is eighty
+/// patterns. Compiling them per check made that the bulk of planning a
+/// `cache.cargo` step: two glob compiles per pattern per file.
+struct Excluder {
+    dir: PathBuf,
+    patterns: Vec<ExcludePattern>,
+}
+
+struct ExcludePattern {
+    /// As written: matched exactly, and as a directory prefix.
+    raw: String,
+    /// `raw` without trailing slashes, plus one: the prefix test.
+    prefix: String,
+    /// The glob over the relative path.
+    relative: Option<glob::Pattern>,
+    /// The glob joined onto `dir`, matched against the full path.
+    full: Option<glob::Pattern>,
+}
+
+impl Excluder {
+    fn new(dir: &Path, exclude: &[String]) -> Self {
+        let patterns = exclude
+            .iter()
+            .map(|pattern| {
+                let normalized = normalize_glob(pattern);
+                // A plain path — every sibling sub-workspace is one — matches
+                // only itself and what is under it, which the prefix test
+                // answers; a glob is only worth running for a glob. Joined
+                // onto `dir`, a relative pattern matches just what it matches
+                // on its own, so the full-path form is for absolute ones.
+                let is_glob = normalized.contains(['*', '?', '[', ']', '{', '}']);
+                let absolute = Path::new(&normalized).is_absolute();
+                ExcludePattern {
+                    raw: pattern.clone(),
+                    prefix: format!("{}/", pattern.trim_end_matches('/')),
+                    relative: is_glob
+                        .then(|| glob::Pattern::new(&normalized).ok())
+                        .flatten(),
+                    full: absolute
+                        .then(|| {
+                            dir.join(&normalized)
+                                .to_str()
+                                .and_then(|full| glob::Pattern::new(full).ok())
+                        })
+                        .flatten(),
+                }
+            })
+            .collect();
+        Excluder {
+            dir: dir.to_path_buf(),
+            patterns,
         }
-        let pattern = &normalize_glob(pattern);
-        glob::Pattern::new(pattern).is_ok_and(|p| p.matches(rel))
-            || dir
-                .join(pattern)
-                .to_str()
-                .and_then(|full| glob::Pattern::new(full).ok())
-                .is_some_and(|p| p.matches_path(&dir.join(rel)))
-    })
+    }
+
+    /// Whether `rel` (a `/`-separated path relative to `dir`) matches any
+    /// pattern.
+    fn matches(&self, rel: &str) -> bool {
+        // Match each pattern both as a glob over the relative path and as a
+        // bare prefix, so `exclude: [target]` does what everyone expects
+        // without anyone having to write `target/**/*`.
+        self.patterns.iter().any(|p| {
+            rel == p.raw
+                || rel.starts_with(&p.prefix)
+                || p.relative.as_ref().is_some_and(|g| g.matches(rel))
+                || p.full
+                    .as_ref()
+                    .is_some_and(|g| g.matches_path(&self.dir.join(rel)))
+        })
+    }
 }
 
 /// One sentence about files matched by both `inputs` and `outputs`, naming the
@@ -1637,6 +1735,107 @@ mod tests {
     /// Its inputs are named through the root (`packages/api/src/**/*`), so
     /// excluding every member from every step would exclude the step's entire
     /// reason for existing — leaving it keyed on nothing, which hits forever.
+    /// Members nested in members: inside the step's own one they are still
+    /// somebody else's; inside somebody else's they go with it. The scan is
+    /// shared by every step of a plan, so this is worked out from one list.
+    #[test]
+    fn nested_members_are_excluded_by_whoever_contains_them() {
+        let dir = scratch("nestednest");
+        for member in ["api", "api/plugins/auth", "web", "web/extras/lib"] {
+            write(
+                &dir,
+                &format!("{member}/.ciabatta/ciabatta.yaml"),
+                "workspace: {}\n",
+            );
+        }
+        let mut except_api = nested_workspaces_except(&dir, Some("api"));
+        except_api.sort();
+        assert_eq!(except_api, ["api/plugins/auth", "web"]);
+        let mut root = nested_workspaces_except(&dir, None);
+        root.sort();
+        assert_eq!(root, ["api", "web"]);
+        // Planning remembers the scan; the answer is the same through it.
+        scope::planning(|| {
+            let mut again = nested_workspaces_except(&dir, Some("api"));
+            again.sort();
+            assert_eq!(again, except_api);
+            assert_eq!(nested_workspaces_except(&dir, Some("web")).len(), 2);
+        });
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// ciabatta's own store and history are never inputs or worth walking —
+    /// whether or not the project's `.gitignore` says so.
+    #[test]
+    fn the_cache_store_is_never_an_input() {
+        let dir = scratch("statedirs");
+        write(&dir, "src/main.rs", "fn main() {}");
+        write(&dir, ".ciabatta/ciabatta.yaml", "workspace: {}\n");
+        write(&dir, ".ciabatta/cache/entries/abc.json", "{}");
+        write(&dir, ".ciabatta/history/workflows.json", "{}");
+        write(&dir, "api/.ciabatta/cache/artifacts/x", "blob");
+        let config = CacheConfig {
+            enabled: Some(true),
+            inputs: vec![".".to_string()],
+            ..Default::default()
+        };
+        let read: Vec<String> = config
+            .list_inputs(&dir, None)
+            .unwrap()
+            .into_iter()
+            .map(|f| f.path)
+            .collect();
+        assert!(
+            read.contains(&".ciabatta/ciabatta.yaml".to_string()),
+            "{read:?}"
+        );
+        assert!(
+            read.iter()
+                .all(|p| !p.contains("/cache/") && !p.contains("history")),
+            "{read:?}"
+        );
+        let kept = not_ignored(&dir).unwrap();
+        assert!(
+            !kept.iter().any(|p| p.contains(".ciabatta/cache")),
+            "{kept:?}"
+        );
+        assert!(
+            every_path(&dir)
+                .unwrap()
+                .iter()
+                .all(|(p, _)| !p.contains(".ciabatta/cache"))
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Compiled once, exclude patterns still mean what they did: a plain path
+    /// and everything under it, a glob, and an absolute pattern.
+    #[test]
+    fn exclude_patterns_match_as_paths_globs_and_absolute_paths() {
+        let dir = Path::new("/work");
+        let mut patterns = vec![
+            "dist".to_string(),
+            "gen/".to_string(),
+            "**/*.log".to_string(),
+        ];
+        // `/work` is only absolute where paths start at `/`.
+        if cfg!(unix) {
+            patterns.push("/work/vendor/*".to_string());
+        }
+        let exclude = Excluder::new(dir, &patterns);
+        for (rel, excluded) in [
+            ("dist", true),
+            ("dist/app.js", true),
+            ("distant/x", false),
+            ("gen/a.rs", true),
+            ("src/debug.log", true),
+            ("src/main.rs", false),
+            ("vendor/lib", cfg!(unix)),
+        ] {
+            assert_eq!(exclude.matches(rel), excluded, "{rel}");
+        }
+    }
+
     #[test]
     fn a_members_own_files_survive_the_nested_workspace_exclusion() {
         let dir = scratch("ownmember");

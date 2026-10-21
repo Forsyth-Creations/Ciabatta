@@ -236,6 +236,15 @@ pub fn collect_with(
     steps: &[RunStep],
     detail: Detail,
 ) -> Vec<TargetDeps> {
+    crate::cache::scope::planning(|| collect_now(config, root, steps, detail))
+}
+
+fn collect_now(
+    config: &CiabattaConfig,
+    root: &Path,
+    steps: &[RunStep],
+    detail: Detail,
+) -> Vec<TargetDeps> {
     // A run started inside one package still needs its siblings' settings, since
     // a compiled workflow graph spans them. No workspace is an ordinary state:
     // then every step resolves against the root project's own config.

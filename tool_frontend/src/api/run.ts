@@ -23,6 +23,9 @@ export type StepStatus =
   | "success"
   | "failed"
   | "skipped"
+  /** The cache is deciding about it: hashing its inputs, resolving its Cargo
+   *  closure. Ends when it starts, is skipped, or starts restoring. */
+  | "processing"
   /** Its outputs are coming down from the remote cache — see `restoring`. */
   | "restoring"
   /** Cut short: the run was stopped, or the daemon restarted under it. */

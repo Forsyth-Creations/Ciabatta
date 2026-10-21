@@ -234,6 +234,16 @@ pub struct PendingChoice {
 }
 
 impl WorkflowView {
+    /// A step left mid-decision when its workflow ended never got started:
+    /// back to "not started", not a spinner that never stops.
+    fn settle_processing(&mut self) {
+        for step in &mut self.steps {
+            if step.status == "processing" {
+                step.status = "pending".into();
+            }
+        }
+    }
+
     fn step_mut(&mut self, name: &str) -> Option<&mut StepView> {
         self.steps.iter_mut().find(|s| s.name == name)
     }
@@ -322,6 +332,14 @@ impl GuiState {
                     }
                     let line = format!("[{step}] skipped: {reason}");
                     push_log(&mut r.logs, &mut r.dropped_logs, line);
+                }
+            }
+            ProgressUpdate::StepProcessing { workflow, step } => {
+                if let Some(r) = self.recipe_mut(&workflow)
+                    && let Some(s) = r.step_mut(&step)
+                    && s.status == "pending"
+                {
+                    s.status = "processing".into();
                 }
             }
             ProgressUpdate::StepRestoring {
@@ -417,6 +435,7 @@ impl GuiState {
                     r.pending = None;
                     r.inputs.clear();
                     r.finished_at = Some(now());
+                    r.settle_processing();
                 }
             }
             ProgressUpdate::Failed(name, err) => {
@@ -430,6 +449,7 @@ impl GuiState {
                     r.status = outcome.into();
                     r.error = Some(err.clone());
                     r.pending = None;
+                    r.settle_processing();
                     r.inputs.clear();
                     let at = now();
                     r.finished_at = Some(at.clone());
@@ -532,7 +552,7 @@ impl GuiState {
             workflow.pending = None;
             workflow.inputs.clear();
             for step in &mut workflow.steps {
-                if step.status == "running" {
+                if matches!(step.status.as_str(), "running" | "processing" | "restoring") {
                     step.status = "stopped".into();
                 }
             }
@@ -562,7 +582,9 @@ impl GuiState {
             total += 1;
             match step.status.as_str() {
                 "pending" => {}
-                "running" => running.push(step.name.clone()),
+                // Being decided or coming down from the remote cache is work
+                // in progress too, not work done.
+                "running" | "processing" | "restoring" => running.push(step.name.clone()),
                 _ => done += 1,
             }
         }
@@ -837,6 +859,36 @@ mod tests {
         assert!(after.restoring.is_none());
         let json = serde_json::to_value(&after).unwrap();
         assert!(json.get("restoring").is_none(), "{json}");
+    }
+
+    /// While the cache decides about a step it shows as processing, and
+    /// counts as in progress; starting it, or the workflow ending first, ends
+    /// that.
+    #[test]
+    fn a_step_being_decided_shows_as_processing_until_it_moves_on() {
+        let processing = || ProgressUpdate::StepProcessing {
+            workflow: "build".into(),
+            step: "compile".into(),
+        };
+        let status = |state: &GuiState| state.workflows[0].steps[0].status.clone();
+
+        let mut state = one_step_run();
+        state.apply(processing());
+        assert_eq!(status(&state), "processing");
+        assert_eq!(state.progress(), (0, 1, vec!["compile".to_string()]));
+        state.apply(ProgressUpdate::StepStarted {
+            workflow: "build".into(),
+            step: "compile".into(),
+        });
+        assert_eq!(status(&state), "running");
+        // Late, for a step already past it: ignored.
+        state.apply(processing());
+        assert_eq!(status(&state), "running");
+
+        let mut state = one_step_run();
+        state.apply(processing());
+        state.apply(ProgressUpdate::Failed("build".into(), "boom".into()));
+        assert_eq!(status(&state), "pending", "no spinner left behind");
     }
 
     #[test]

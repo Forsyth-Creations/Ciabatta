@@ -130,6 +130,17 @@ pub fn plan_graph(
     env: &BTreeMap<String, String>,
     store: &Store,
 ) -> Result<Plan> {
+    // Nothing builds while a plan is made, so what one step learns about the
+    // disk holds for the next: see [`super::scope`].
+    super::scope::planning(|| plan_graph_now(steps, context, env, store))
+}
+
+fn plan_graph_now(
+    steps: &[RunStep],
+    context: &dyn StepContext,
+    env: &BTreeMap<String, String>,
+    store: &Store,
+) -> Result<Plan> {
     // Step name → the fingerprint of what it produced, carried forward to its
     // dependents as their third dependency.
     let mut fingerprints: BTreeMap<String, String> = BTreeMap::new();

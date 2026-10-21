@@ -114,6 +114,15 @@ pub enum ProgressUpdate {
         step: String,
         report: Box<crate::run::cached::CacheReport>,
     },
+    /// The cache is deciding about a step: hashing its inputs, resolving its
+    /// `cache.cargo` closure, checking its outputs. Sent before the decision
+    /// is made, which on a big Cargo workspace can take a while — so the
+    /// step shows it is being worked on rather than sitting at "not started".
+    /// Ends with its `StepSkipped`, `StepRestoring` or `StepStarted`.
+    StepProcessing {
+        workflow: String,
+        step: String,
+    },
     /// A step's outputs are being fetched from the remote cache: sent when
     /// the lookup starts, and then as the download progresses. Ends with the
     /// step's `StepSkipped` (restored) or `StepStarted` (not there after all,

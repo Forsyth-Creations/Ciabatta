@@ -559,6 +559,12 @@ async fn run_dag(
                 let mut pending = None;
                 if let Some(session) = cache.as_deref_mut() {
                     session.report_to(tx.clone(), workflow);
+                    let _ = tx
+                        .send(ProgressUpdate::StepProcessing {
+                            workflow: workflow.to_string(),
+                            step: step.name.clone(),
+                        })
+                        .await;
                     let decided = session.before(step, step_env).await;
                     // Whatever was decided, the run view gets the details —
                     // that's what puts the cache icon on the node, and what

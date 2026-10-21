@@ -2244,6 +2244,9 @@ async fn run_plain(
             // Already said by the step's skip line; the report itself is for
             // the web app's inspector.
             ProgressUpdate::StepCache { .. } => {}
+            // The web app shows it as a bar; a terminal hears about the step
+            // once it is skipped or starts.
+            ProgressUpdate::StepProcessing { .. } => {}
             // One line as the download starts — a terminal can't redraw a
             // progress bar between other steps' output, and a line per chunk
             // would bury them. The skip line that follows says it landed.

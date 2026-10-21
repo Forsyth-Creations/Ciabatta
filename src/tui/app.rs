@@ -215,6 +215,7 @@ impl App {
             // The skip line already says a step was served from the cache;
             // the full report is for the web app's inspector.
             ProgressUpdate::StepCache { .. } => {}
+            ProgressUpdate::StepProcessing { .. } => {}
             ProgressUpdate::StepRestoring {
                 workflow,
                 step,

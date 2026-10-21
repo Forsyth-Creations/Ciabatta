@@ -551,7 +551,10 @@ pub fn resolve_with(
         outputs: Vec::new(),
         dep_info: Vec::new(),
         build_dirs: out_dirs.iter().map(|d| join(d, "build")).collect(),
-        toolchain: toolchain(manifest.parent().unwrap_or(&root))?,
+        toolchain: toolchain(&toolchain_dir(
+            manifest.parent().unwrap_or(&root),
+            &workspace_root,
+        ))?,
     };
 
     if !spec.artifacts.is_empty() {
@@ -726,6 +729,27 @@ fn patch_dirs(root: &Path, workspace_root: &Path, manifest: &Path) -> Vec<(Strin
         }
     }
     found
+}
+
+/// Where to ask which toolchain builds `dir`'s package: the nearest directory
+/// up to the Cargo workspace root with a `rust-toolchain(.toml)` in it, or
+/// that root. Every crate of a workspace usually shares one answer, so asking
+/// once per answer rather than once per crate saves a `rustc` start per step.
+fn toolchain_dir(dir: &Path, workspace_root: &Path) -> PathBuf {
+    let mut at = dir;
+    loop {
+        if ["rust-toolchain", "rust-toolchain.toml"]
+            .iter()
+            .any(|f| at.join(f).is_file())
+            || at == workspace_root
+        {
+            return at.to_path_buf();
+        }
+        match at.parent() {
+            Some(parent) if parent.starts_with(workspace_root) => at = parent,
+            _ => return workspace_root.to_path_buf(),
+        }
+    }
 }
 
 /// `rustc -vV`, run where Cargo would run it — so a `rust-toolchain.toml`
@@ -1278,14 +1302,26 @@ fn metadata(manifest: &Path) -> Result<Metadata> {
         let s = stamp(&p);
         (p, s)
     });
+    let stamps: Vec<_> = stamps.collect();
     if let Ok(mut memo) = memo().lock() {
-        memo.insert(
-            key,
-            Memo {
-                stamps: stamps.collect(),
-                metadata: metadata.clone(),
-            },
-        );
+        // `--no-deps` answers the same for every member of the workspace, so
+        // one read serves them all: a monorepo of eighty crates, each its own
+        // step, runs Cargo once rather than eighty times. Their manifests are
+        // all among the stamps already.
+        let members = metadata
+            .packages
+            .iter()
+            .map(|p| canonical(&p.manifest_path))
+            .filter(|m| m.starts_with(canonical(&metadata.workspace_root)));
+        for member in members.chain(std::iter::once(key)) {
+            memo.insert(
+                member,
+                Memo {
+                    stamps: stamps.clone(),
+                    metadata: metadata.clone(),
+                },
+            );
+        }
     }
     Ok(metadata)
 }
@@ -1377,6 +1413,53 @@ mod tests {
         assert_eq!(resolved.outputs, vec![format!("target/release/{exe}")]);
         assert_eq!(resolved.dep_info, vec!["target/release/api.d"]);
 
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// One `cargo metadata` read answers for every member of the workspace,
+    /// so a monorepo whose crates are each a step runs Cargo once — and an
+    /// edited member manifest is still noticed.
+    #[test]
+    fn one_metadata_read_serves_every_member() {
+        let root = workspace("sharedmeta");
+        let manifest = |name: &str| canonical(&root.join(format!("crates/{name}/Cargo.toml")));
+        metadata(&manifest("api")).unwrap();
+        let cached = |name: &str| {
+            memo()
+                .lock()
+                .unwrap()
+                .get(&manifest(name))
+                .is_some_and(|entry| entry.stamps.iter().all(|(p, was)| stamp(p) == *was))
+        };
+        assert!(
+            cached("cli"),
+            "a sibling member is answered from the same read"
+        );
+        assert!(cached("core"));
+
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        write(
+            &root,
+            "crates/cli/Cargo.toml",
+            &package("cli", "[features]\nx = []\n"),
+        );
+        assert!(!cached("cli"), "an edited manifest makes the read stale");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `rustc -vV` is asked where the toolchain is decided: the nearest
+    /// `rust-toolchain` file up to the workspace root, or the root itself.
+    #[test]
+    fn the_toolchain_is_asked_once_per_toolchain_file() {
+        let root = workspace("toolchaindir");
+        let api = root.join("crates/api");
+        assert_eq!(toolchain_dir(&api, &root), root);
+        write(
+            &root,
+            "crates/rust-toolchain.toml",
+            "[toolchain]\nchannel = \"stable\"\n",
+        );
+        assert_eq!(toolchain_dir(&api, &root), root.join("crates"));
         let _ = std::fs::remove_dir_all(&root);
     }
 

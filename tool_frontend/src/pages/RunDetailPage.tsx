@@ -1026,6 +1026,7 @@ function StepInspector({
           earlier={workflow.steps.filter((s) => upstream.includes(s.name))}
         />
       )}
+      {step.status === "processing" && <ProcessingPanel />}
       {step.restoring && <RestoringPanel step={step} />}
       <StepCacheSection project={project} step={step} inspect={inspect} />
     </Stack>
@@ -1068,6 +1069,35 @@ function PickFilesButton({
           onClose={() => setOpen(false)}
         />
       )}
+    </Box>
+  );
+}
+
+/**
+ * A step the cache is still deciding about, said where its details are. On a
+ * big Cargo workspace that takes a moment — the closure is resolved and every
+ * input hashed — and a step sitting at "not started" through it reads as a
+ * run that hung.
+ */
+function ProcessingPanel() {
+  return (
+    <Alert severity="info" sx={{ py: 0.5, "& .MuiAlert-message": { width: "100%" } }}>
+      <Typography variant="caption" sx={{ display: "block" }}>
+        Processing — working out whether this step can be reused: hashing its inputs, resolving
+        its Cargo closure, checking its outputs…
+      </Typography>
+      <LinearProgress sx={{ mt: 0.75, borderRadius: 1 }} />
+    </Alert>
+  );
+}
+
+/** The node's detail line while the cache decides: a word and a bar, in the
+ *  one line the node has for it. */
+function ProcessingLine() {
+  return (
+    <Box component="span" sx={{ display: "flex", alignItems: "center", gap: 0.75, minWidth: 0 }}>
+      processing…
+      <LinearProgress color="info" sx={{ flexGrow: 1, height: 3, borderRadius: 1, minWidth: 24 }} />
     </Box>
   );
 }
@@ -1336,7 +1366,9 @@ function NodeLabel({
       detail={
         // A step served from the cache is "skipped" to the engine, but that
         // word belongs to steps a condition left out.
-        step.restoring
+        step.status === "processing"
+          ? <ProcessingLine />
+          : step.restoring
           ? restoringLine(step.restoring, humanizeBytes)
           : wasReused(step.cache)
           ? `from cache${step.finished_at ? ` · ${clockTime(step.finished_at)}` : ""}`
@@ -2247,7 +2279,7 @@ function workflowStacks(
     for (const name of names) stacks.of.set(name, key);
     const top =
       [selected, chosen[key]].find((name) => name && names.includes(name)) ??
-      steps.find((s) => s.status === "running" || s.status === "restoring")?.name ??
+      steps.find((s) => ["running", "processing", "restoring"].includes(s.status))?.name ??
       steps.find((s) => s.status === "failed")?.name ??
       steps.find((s) => s.status === "pending")?.name ??
       names[names.length - 1];
@@ -2261,7 +2293,7 @@ function workflowStacks(
  * step underneath must not hide behind a successful one on top.
  */
 function stackStatus(steps: StepView[], top: StepView): StepStatus {
-  for (const status of ["failed", "running", "restoring", "stopped"] as StepStatus[]) {
+  for (const status of ["failed", "running", "processing", "restoring", "stopped"] as StepStatus[]) {
     if (steps.some((s) => s.status === status)) return status;
   }
   return top.status;

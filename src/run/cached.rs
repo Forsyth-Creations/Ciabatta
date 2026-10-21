@@ -582,7 +582,8 @@ impl Session {
         // the two (a remote hit restores outputs, which never are), so they
         // share what they learn. See `crate::cache::scope`.
         let mut remembered = crate::cache::scope::Remembered::default();
-        let mut decision = remembered.run(|| crate::cache::plan(&target, &env_map, &self.store))?;
+        let mut decision =
+            blocking(|| remembered.run(|| crate::cache::plan(&target, &env_map, &self.store)))?;
 
         // A step behind one that ran unaccounted has to run as well: its key
         // matching only means the key cannot see what happened upstream. This
@@ -696,15 +697,17 @@ impl Session {
             }
         }
 
-        let (inputs, outputs_in_inputs) = remembered.run(|| {
-            (
-                config.hash_inputs(&dir, member.as_deref()),
-                // Best-effort: a listing that fails costs a warning, not the
-                // decision.
-                config
-                    .outputs_in_inputs(&dir, member.as_deref())
-                    .unwrap_or_default(),
-            )
+        let (inputs, outputs_in_inputs) = blocking(|| {
+            remembered.run(|| {
+                (
+                    config.hash_inputs(&dir, member.as_deref()),
+                    // Best-effort: a listing that fails costs a warning, not
+                    // the decision.
+                    config
+                        .outputs_in_inputs(&dir, member.as_deref())
+                        .unwrap_or_default(),
+                )
+            })
         });
         let inputs = inputs?;
         drop(remembered);
@@ -892,7 +895,11 @@ impl Session {
             upstream,
         } = *pending;
 
-        let outputs = match config.hash_outputs(&dir) {
+        // The step has finished, so nothing moves under what follows: hashing
+        // its outputs and checking what rustc and its build scripts read all
+        // share one memory of the cargo closure and the checkout.
+        let mut remembered = crate::cache::scope::Remembered::default();
+        let outputs = match blocking(|| remembered.run(|| config.hash_outputs(&dir))) {
             Ok(outputs) => outputs,
             Err(e) => {
                 eprintln!(
@@ -919,14 +926,21 @@ impl Session {
         // The compiler's own account of what it read, checked against what the
         // step declared — the moment it's freshest, and worth a line in the log
         // because it is the stale hit of six weeks from now, caught today.
-        if config.cargo.is_some()
-            && let Ok(undeclared) = config.undeclared_reads(
-                &dir,
-                config.home.as_deref(),
-                &self.produced.upstream_of(&step.needs),
-            )
-            && !undeclared.is_empty()
-        {
+        let upstream_outputs = self.produced.upstream_of(&step.needs);
+        let (undeclared_reads, undeclared_env) = blocking(|| {
+            remembered.run(|| {
+                let reads = match config.cargo.is_some() {
+                    true => config
+                        .undeclared_reads(&dir, config.home.as_deref(), &upstream_outputs)
+                        .unwrap_or_default(),
+                    false => Vec::new(),
+                };
+                (reads, config.undeclared_build_env(&dir).unwrap_or_default())
+            })
+        });
+        drop(remembered);
+        if !undeclared_reads.is_empty() {
+            let undeclared = undeclared_reads;
             eprintln!(
                 "warning: rustc reports {} reading {} file(s) outside its cache inputs — \
                  changing them won't rebuild it: {}",
@@ -937,9 +951,8 @@ impl Session {
         }
 
         // The same for what its build scripts read from the environment.
-        if let Ok(undeclared) = config.undeclared_build_env(&dir)
-            && !undeclared.is_empty()
-        {
+        if !undeclared_env.is_empty() {
+            let undeclared = undeclared_env;
             eprintln!(
                 "warning: a build script of {} asks to be rerun when {} changes, but the \
                  cache doesn't key on it — list it in the workflow's `env:`",
@@ -984,7 +997,7 @@ impl Session {
             duration_ms,
         };
 
-        let entry = match self.store.put(&key, &dir, build) {
+        let entry = match blocking(|| self.store.put(&key, &dir, build)) {
             Ok(entry) => entry,
             Err(e) => {
                 eprintln!("note: couldn't cache {} ({e:#})", step.name);
@@ -1211,6 +1224,25 @@ impl Session {
 }
 
 /// What to do about a step the cache isn't looking at.
+/// Run disk-bound work — hashing, walking, resolving a Cargo closure — without
+/// holding up the runtime it is called from.
+///
+/// Deciding about a step on a big workspace takes seconds, and done inline it
+/// blocks its worker thread: the progress sent just before it (the step
+/// showing as processing) sits queued on that thread until it is over, and so
+/// does everything else waiting there. On a multi-threaded runtime the work
+/// is moved off it; anywhere else (tests, a single-threaded runtime) it runs
+/// where it is.
+fn blocking<T>(work: impl FnOnce() -> T) -> T {
+    use tokio::runtime::{Handle, RuntimeFlavor};
+    match Handle::try_current() {
+        Ok(handle) if handle.runtime_flavor() == RuntimeFlavor::MultiThread => {
+            tokio::task::block_in_place(work)
+        }
+        _ => work(),
+    }
+}
+
 fn uncached_hints(config: &CacheConfig) -> Vec<String> {
     let mut hints = Vec::new();
     if !config.is_on() {

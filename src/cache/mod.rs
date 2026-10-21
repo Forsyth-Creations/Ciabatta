@@ -1813,15 +1813,16 @@ mod tests {
     #[test]
     fn exclude_patterns_match_as_paths_globs_and_absolute_paths() {
         let dir = Path::new("/work");
-        let exclude = Excluder::new(
-            dir,
-            &[
-                "dist".to_string(),
-                "gen/".to_string(),
-                "**/*.log".to_string(),
-                "/work/vendor/*".to_string(),
-            ],
-        );
+        let mut patterns = vec![
+            "dist".to_string(),
+            "gen/".to_string(),
+            "**/*.log".to_string(),
+        ];
+        // `/work` is only absolute where paths start at `/`.
+        if cfg!(unix) {
+            patterns.push("/work/vendor/*".to_string());
+        }
+        let exclude = Excluder::new(dir, &patterns);
         for (rel, excluded) in [
             ("dist", true),
             ("dist/app.js", true),
@@ -1829,7 +1830,7 @@ mod tests {
             ("gen/a.rs", true),
             ("src/debug.log", true),
             ("src/main.rs", false),
-            ("vendor/lib", true),
+            ("vendor/lib", cfg!(unix)),
         ] {
             assert_eq!(exclude.matches(rel), excluded, "{rel}");
         }

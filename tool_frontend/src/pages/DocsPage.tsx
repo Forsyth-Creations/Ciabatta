@@ -1692,6 +1692,14 @@ cache:
           seconds to 5, and a <C>dry-run</C> from 21 to 2.
         </P>
         <P>
+          While it decides, the step says so: on the <Link to="/run">Run page</Link> its node shows{" "}
+          <strong>processing…</strong> with a moving bar, and its details a panel saying what is
+          being worked out — instead of sitting at &ldquo;not started yet&rdquo; through what can
+          be seconds on a workspace with a lot of inputs. The rest of the run keeps updating
+          meanwhile: other steps&apos; logs and progress no longer wait for one step&apos;s
+          hashing to finish.
+        </P>
+        <P>
           ciabatta&apos;s own state — <C>.ciabatta/cache/</C> (the local store) and{" "}
           <C>.ciabatta/history/</C>, in any sub-workspace — is never read as an input or walked,
           whether or not your <C>.gitignore</C> lists it. Before, a project that didn&apos;t list

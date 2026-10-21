@@ -794,6 +794,9 @@ fn trace(run: u64, update: &runner::ProgressUpdate) {
         } => {
             tracing::debug!(run, %workflow, %step, outcome = %report.outcome, "{}", report.summary)
         }
+        P::StepProcessing { workflow, step } => {
+            tracing::debug!(run, %workflow, %step, "deciding whether the cache has it")
+        }
         P::StepRestoring {
             workflow,
             step,

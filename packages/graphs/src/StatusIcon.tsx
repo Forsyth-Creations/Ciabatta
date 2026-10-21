@@ -15,6 +15,7 @@ import ErrorIcon from "@mui/icons-material/Error";
 import WarningIcon from "@mui/icons-material/Warning";
 import AutorenewIcon from "@mui/icons-material/Autorenew";
 import CloudDownloadIcon from "@mui/icons-material/CloudDownload";
+import HourglassTopIcon from "@mui/icons-material/HourglassTop";
 import RemoveCircleOutlineIcon from "@mui/icons-material/RemoveCircleOutline";
 import RadioButtonUncheckedIcon from "@mui/icons-material/RadioButtonUnchecked";
 import PauseCircleOutlineIcon from "@mui/icons-material/PauseCircleOutline";
@@ -26,6 +27,7 @@ import type { Theme } from "@mui/material/styles";
 export type StepStatus =
   | "pending"
   | "running"
+  | "processing"
   | "restoring"
   | "success"
   | "failed"
@@ -51,6 +53,15 @@ const LOOKS: Record<RunStatus, Look> = {
     colour: (theme) => theme.palette.warning.main,
     label: "running",
     spins: true,
+  },
+  // The cache is deciding whether it can be reused — hashing its inputs,
+  // resolving its Cargo closure. Work, but not the step's own: info-coloured
+  // like a restore, so a long wait doesn't read as a long build.
+  processing: {
+    Icon: HourglassTopIcon,
+    colour: (theme) => theme.palette.info.main,
+    label: "processing",
+    pulses: true,
   },
   // Its outputs are coming down from the remote cache: in motion, like
   // running, but nothing is being built — drawn in the info colour so a long

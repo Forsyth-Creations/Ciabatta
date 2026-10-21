@@ -577,7 +577,12 @@ impl Session {
             upstream: upstream.clone(),
         };
 
-        let mut decision = crate::cache::plan(&target, &env_map, &self.store)?;
+        // Deciding and then reporting both read the inputs, the cargo closure
+        // and the checkout's ignore rules; nothing changes the inputs between
+        // the two (a remote hit restores outputs, which never are), so they
+        // share what they learn. See `crate::cache::scope`.
+        let mut remembered = crate::cache::scope::Remembered::default();
+        let mut decision = remembered.run(|| crate::cache::plan(&target, &env_map, &self.store))?;
 
         // A step behind one that ran unaccounted has to run as well: its key
         // matching only means the key cannot see what happened upstream. This
@@ -691,7 +696,18 @@ impl Session {
             }
         }
 
-        let inputs = config.hash_inputs(&dir, member.as_deref())?;
+        let (inputs, outputs_in_inputs) = remembered.run(|| {
+            (
+                config.hash_inputs(&dir, member.as_deref()),
+                // Best-effort: a listing that fails costs a warning, not the
+                // decision.
+                config
+                    .outputs_in_inputs(&dir, member.as_deref())
+                    .unwrap_or_default(),
+            )
+        });
+        let inputs = inputs?;
+        drop(remembered);
         let env_declared = crate::cache::graph::declared_env(&config, &env_map);
 
         // What the run view's file list reads, for a step still building or
@@ -780,10 +796,7 @@ impl Session {
             }
             Decision::Uncached { .. } => {}
         }
-        // Best-effort: a listing that fails costs a warning, not the decision.
-        report.outputs_in_inputs = config
-            .outputs_in_inputs(&dir, member.as_deref())
-            .unwrap_or_default();
+        report.outputs_in_inputs = outputs_in_inputs;
         if !report.outputs_in_inputs.is_empty() {
             report.hints.insert(
                 0,

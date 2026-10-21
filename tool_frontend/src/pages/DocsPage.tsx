@@ -1680,6 +1680,25 @@ cache:
           applies to inputs only: outputs live in ignored directories almost by definition. Off
           unless set, because turning it on changes every existing key.
         </P>
+
+        <SubHeading>How long deciding takes</SubHeading>
+        <P>
+          Before a cached step runs, ciabatta works out its key: it resolves the{" "}
+          <C>cache.cargo</C> closure, walks the checkout for what git ignores, and hashes the
+          inputs. Since 0.7.3 that work is shared. One <C>cargo metadata</C> and one{" "}
+          <C>rustc -vV</C> answer for every crate of a Cargo workspace, and a plan
+          (<C>dry-run</C>, the run page&apos;s graph) walks and hashes each file once, not once
+          per step. On an 80-crate monorepo, a run where every step is reused went from about 32
+          seconds to 5, and a <C>dry-run</C> from 21 to 2.
+        </P>
+        <P>
+          ciabatta&apos;s own state — <C>.ciabatta/cache/</C> (the local store) and{" "}
+          <C>.ciabatta/history/</C>, in any sub-workspace — is never read as an input or walked,
+          whether or not your <C>.gitignore</C> lists it. Before, a project that didn&apos;t list
+          them had every step walk the store, which got slower with every build, and a step
+          reading the whole tree (<C>inputs: [.]</C>) keyed on its own cache and never hit. Still
+          add them to <C>.gitignore</C>, so they aren&apos;t committed.
+        </P>
       </>
     ),
   },

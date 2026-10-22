@@ -50,7 +50,7 @@ async fn main() -> Result<()> {
         && !matches!(cli.command, Commands::Workflow(_) | Commands::External(_))
     {
         bail!(
-            "Arguments after `...` are passed to a workflow run (as CIABATTA_ARG_* variables), \
+            "Arguments after `...` are passed to a workflow run (as environment variables), \
              and this command isn't one."
         );
     }
@@ -429,9 +429,14 @@ async fn cmd_workflow(
         args.only.push(member.name.clone());
     }
 
+    // What this command sets for the run counts toward `required_env` from
+    // the start, exactly as a variable exported in the shell would.
+    let mut provided: Vec<String> = cli::parse_custom_args(custom_args)?.into_keys().collect();
+    provided.extend(cli::parse_env_flags(&args.env)?.into_keys());
     let selection = workspace::graph::Selection {
         only: args.only.clone(),
         isolated: args.isolated,
+        provided,
     };
     let (ws, mut graph) = workspace::graph::prepare_many(&cwd, &workflows, &selection).map_err(
         |err| match bare_name {
@@ -514,7 +519,7 @@ async fn cmd_workflow(
     let mut vars = build_env_vars(&cfg, &args.env, args.local, &ws.root, announce)?;
     source_ciabatta_vars(&mut vars, &ws.root, announce);
     // Custom arguments last: they were typed for this run, so they win.
-    vars.extend(cli::parse_custom_args(custom_args)?);
+    cli::apply_custom_args(&mut vars, custom_args)?;
     // Where the profile came from travels with it, so the report can say why
     // it's the one in use. A marker inherited from an outer run says nothing
     // about this one.

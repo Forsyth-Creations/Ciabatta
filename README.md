@@ -811,12 +811,16 @@ graph is validated up front (missing edges, non-recovery `on_error` targets, and
 cycles are rejected before anything runs).
 
 **Custom arguments.** Everything after a bare `...` belongs to the workflow, not
-to ciabatta, and each becomes a `CIABATTA_ARG_<NAME>` variable for the steps:
+to ciabatta, and each becomes an environment variable for the steps, its name
+upper-cased with `-` and `.` turned into `_`:
 
 ```bash
 ciabatta deploy --force ... --target=arm64 --region eu --verbose
-#   CIABATTA_ARG_TARGET=arm64  CIABATTA_ARG_REGION=eu  CIABATTA_ARG_VERBOSE=true
+#   TARGET=arm64  REGION=eu  VERBOSE=true
 ```
+
+An argument is just a variable set from the terminal, so it counts toward
+`required_env` and overrides the same name from the shell or a `.env` file.
 
 They're listed apart, in yellow, in the environment summary before the run, in
 the TUI log, and on the run's page — with a nudge to move them into an env

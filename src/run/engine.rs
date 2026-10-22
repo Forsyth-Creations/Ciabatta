@@ -185,10 +185,11 @@ pub async fn execute(
             format!("env profile: {profile_reason}"),
         ))
         .await;
+    let arguments = crate::cli::custom_arg_names(&prepared.env);
     let mut custom: Vec<(&String, &String)> = prepared
         .env
         .iter()
-        .filter(|(key, _)| key.starts_with(crate::cli::CUSTOM_ARG_PREFIX))
+        .filter(|(key, _)| arguments.contains(&key.as_str()))
         .collect();
     custom.sort();
     for (key, value) in &custom {

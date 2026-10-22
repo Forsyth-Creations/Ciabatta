@@ -94,6 +94,7 @@ pub fn lint(root: &Path) -> Result<Report> {
     let selection = |unit: &UnitId, isolated: bool| Selection {
         only: vec![unit.member.clone()],
         isolated,
+        ..Default::default()
     };
 
     // Pass 1: each unit on its own. Pass 2: what it names — a sub-workspace's

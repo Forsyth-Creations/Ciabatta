@@ -352,8 +352,8 @@ pub struct CreatePayload {
     /// Ignore the cache and run every step. Results are still stored.
     #[serde(default)]
     force: bool,
-    /// Custom arguments, as typed after `...` — each becomes a
-    /// `CIABATTA_ARG_*` variable. Kept with the run (unlike `env`), so
+    /// Custom arguments, as typed after `...` — each becomes an
+    /// environment variable of its own name. Kept with the run (unlike `env`), so
     /// "run again" passes them again.
     #[serde(default)]
     args: Vec<String>,
@@ -509,6 +509,7 @@ async fn start(state: AppState, payload: CreatePayload) -> RouteResult<Json<Valu
         let selection = crate::workspace::graph::Selection {
             only: payload.only.clone(),
             isolated: payload.isolated,
+            provided: provided(&payload)?,
         };
         let (workspace, mut graph) =
             crate::workspace::graph::prepare_many(&project_root, &workflows, &selection)
@@ -541,7 +542,7 @@ async fn start(state: AppState, payload: CreatePayload) -> RouteResult<Json<Valu
     let mut env = state.runs.environment_for(&root, &payload);
     // Custom arguments and the profile after everything else: they were asked
     // for, for this run.
-    env.extend(crate::cli::parse_custom_args(&payload.args).map_err(RouteError::bad_request)?);
+    crate::cli::apply_custom_args(&mut env, &payload.args).map_err(RouteError::bad_request)?;
     if let Some(profile) = payload.env_profile.as_deref().filter(|p| !p.is_empty()) {
         crate::environment::profiles::require(&root, profile).map_err(RouteError::bad_request)?;
         env.insert(
@@ -866,6 +867,19 @@ fn missing_env(
     Ok(missing)
 }
 
+/// The variables a request sets for its run — the values it carries and its
+/// custom arguments — which count toward `required_env` when the graph is
+/// compiled, as they do once it runs.
+fn provided(payload: &CreatePayload) -> Result<Vec<String>, RouteError> {
+    let args = crate::cli::parse_custom_args(&payload.args).map_err(RouteError::bad_request)?;
+    Ok(payload
+        .env
+        .keys()
+        .cloned()
+        .chain(args.into_keys())
+        .collect())
+}
+
 /// What a run would still need, without starting it — so the launcher can put
 /// the prompt in front of the operator instead of behind a failed run.
 async fn preflight(
@@ -889,6 +903,7 @@ async fn preflight(
     let selection = crate::workspace::graph::Selection {
         only: payload.only.clone(),
         isolated: payload.isolated,
+        provided: provided(&payload)?,
     };
     let (workspace, graph) =
         crate::workspace::graph::prepare_many(&project_root, &workflows, &selection)
@@ -899,6 +914,7 @@ async fn preflight(
 
     let mut env: HashMap<String, String> = std::env::vars().collect();
     env.extend(payload.env.clone());
+    crate::cli::apply_custom_args(&mut env, &payload.args).map_err(RouteError::bad_request)?;
 
     Ok(Json(
         json!({ "missing_env": missing_env(&workspace.root, &runs, &env)? }),

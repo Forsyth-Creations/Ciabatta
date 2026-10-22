@@ -34,8 +34,8 @@ pub enum Origin {
     Default,
     /// A declared `[env]` table: a sub-workspace's, a workflow's, or a step's.
     Config,
-    /// A custom argument given after `...` on the command line, which became a
-    /// `CIABATTA_ARG_*` variable for this run only.
+    /// A custom argument given after `...` on the command line, which set the
+    /// variable for this run only.
     Argument,
     /// Nothing supplies it. Steps reading it will see an empty string.
     Unset,
@@ -518,11 +518,8 @@ pub fn collect(
     keys.extend(users.keys().cloned());
     // Custom arguments are reported whether or not a step reads them: they
     // were typed for this run, and one nothing reads is probably misspelled.
-    keys.extend(
-        base.keys()
-            .filter(|k| k.starts_with(crate::cli::CUSTOM_ARG_PREFIX))
-            .cloned(),
-    );
+    let arguments = crate::cli::custom_arg_names(base);
+    keys.extend(arguments.iter().map(|k| k.to_string()));
     // The `{VAR}` placeholders that decide *which* `.env` file gets sourced are
     // a dependency of the run before any step exists.
     for path in &resolved.env_files {
@@ -549,7 +546,7 @@ pub fn collect(
                     values.iter().next().cloned().filter(|v| !v.is_empty()),
                     false,
                 ),
-                None if terminal && key.starts_with(crate::cli::CUSTOM_ARG_PREFIX) => {
+                None if terminal && arguments.contains(&key.as_str()) => {
                     (Origin::Argument, None, value, false)
                 }
                 None if terminal => {
@@ -926,6 +923,23 @@ mod tests {
         assert_eq!(report.missing, vec!["STAGE".to_string()]);
         // Required variables lead the list.
         assert_eq!(report.vars[0].key, "STAGE");
+    }
+
+    #[test]
+    fn a_custom_argument_satisfies_required_env() {
+        let resolved = ResolvedRun {
+            required_env: vec!["STAGE".to_string()],
+            steps: vec![step("build", "true")],
+            ..Default::default()
+        };
+        let mut base = env(&[]);
+        crate::cli::apply_custom_args(&mut base, &["--stage=prod".to_string()]).unwrap();
+        let report = collect(&resolved, Path::new("."), &base, None);
+
+        let stage = find(&report, "STAGE");
+        assert_eq!(stage.origin, Origin::Argument);
+        assert_eq!(stage.value.as_deref(), Some("prod"));
+        assert!(report.missing.is_empty());
     }
 
     #[test]

@@ -1241,8 +1241,10 @@ pub enum ConfigureCommand {
 /// ciabatta's: `ciabatta build --force ... --target=arm64 region=eu`.
 pub const CUSTOM_ARGS_MARKER: &str = "...";
 
-/// What every custom argument's variable name starts with.
-pub const CUSTOM_ARG_PREFIX: &str = "CIABATTA_ARG_";
+/// The names a run's custom arguments set, comma-separated, so the reports
+/// can tell an argument from the same variable set any other way. Set by
+/// [`apply_custom_args`] alone; an inherited one says nothing about this run.
+pub const CUSTOM_ARGS_VAR: &str = "CIABATTA_ARGS";
 
 /// Split argv at the first `...`: ciabatta's own arguments before it, the
 /// workflow's custom arguments after.
@@ -1272,14 +1274,15 @@ where
 /// Turn custom arguments into the variables steps see.
 ///
 /// ```text
-/// --target=arm64   CIABATTA_ARG_TARGET=arm64
-/// --target arm64   CIABATTA_ARG_TARGET=arm64
-/// --verbose        CIABATTA_ARG_VERBOSE=true
-/// region=eu        CIABATTA_ARG_REGION=eu
+/// --target=arm64   TARGET=arm64
+/// --target arm64   TARGET=arm64
+/// --verbose        VERBOSE=true
+/// region=eu        REGION=eu
 /// ```
 ///
 /// Names are upper-cased, with `-` and `.` becoming `_`, so `--dry-deploy`
-/// arrives as `$CIABATTA_ARG_DRY_DEPLOY`. A bare word with no name is refused
+/// arrives as `$DRY_DEPLOY`. An argument is just a variable set from the
+/// command line, so it satisfies `required_env` like any other. A bare word with no name is refused
 /// rather than guessed at: positional meaning is exactly what a variable can't
 /// carry.
 pub fn parse_custom_args(
@@ -1307,7 +1310,7 @@ pub fn parse_custom_args(
             anyhow::bail!(
                 "Custom argument '{arg}' has no name. After `...`, write `--name=value`, \
                  `--name value`, `--flag`, or `name=value` — each becomes \
-                 {CUSTOM_ARG_PREFIX}<NAME> for the workflow's steps."
+                 the variable <NAME> for the workflow's steps."
             );
         };
         out.insert(custom_arg_var(&name)?, value);
@@ -1316,7 +1319,31 @@ pub fn parse_custom_args(
     Ok(out)
 }
 
-/// `dry-deploy` → `CIABATTA_ARG_DRY_DEPLOY`.
+/// Layer a run's custom arguments over its environment: they were typed for
+/// this run, so they win. Records their names in [`CUSTOM_ARGS_VAR`], and
+/// drops any such record inherited from an outer run.
+pub fn apply_custom_args(
+    env: &mut std::collections::HashMap<String, String>,
+    args: &[String],
+) -> anyhow::Result<()> {
+    let vars = parse_custom_args(args)?;
+    env.remove(CUSTOM_ARGS_VAR);
+    if !vars.is_empty() {
+        let names: Vec<&str> = vars.keys().map(String::as_str).collect();
+        env.insert(CUSTOM_ARGS_VAR.to_string(), names.join(","));
+    }
+    env.extend(vars);
+    Ok(())
+}
+
+/// The names in `env` that a custom argument set.
+pub fn custom_arg_names(env: &std::collections::HashMap<String, String>) -> Vec<&str> {
+    env.get(CUSTOM_ARGS_VAR)
+        .map(|names| names.split(',').filter(|n| !n.is_empty()).collect())
+        .unwrap_or_default()
+}
+
+/// `dry-deploy` → `DRY_DEPLOY`.
 pub fn custom_arg_var(name: &str) -> anyhow::Result<String> {
     let normalized: String = name
         .trim()
@@ -1333,7 +1360,7 @@ pub fn custom_arg_var(name: &str) -> anyhow::Result<String> {
                 .all(|c| c.is_ascii_alphanumeric() || c == '_'),
         "'{name}' can't be a custom argument name — use letters, digits, '-' and '_'."
     );
-    Ok(format!("{CUSTOM_ARG_PREFIX}{normalized}"))
+    Ok(normalized)
 }
 
 pub fn parse_env_flags(
@@ -1361,7 +1388,7 @@ mod tests {
     }
 
     #[test]
-    fn custom_arguments_after_the_marker_become_prefixed_variables() {
+    fn custom_arguments_after_the_marker_become_variables() {
         let argv = [
             "ciabatta",
             "build",
@@ -1381,11 +1408,26 @@ mod tests {
         );
 
         let vars = parse_custom_args(&custom).unwrap();
-        assert_eq!(vars["CIABATTA_ARG_TARGET"], "arm64");
-        assert_eq!(vars["CIABATTA_ARG_REGION"], "eu");
-        assert_eq!(vars["CIABATTA_ARG_VERBOSE"], "true");
-        assert_eq!(vars["CIABATTA_ARG_DRY_DEPLOY"], "1");
+        assert_eq!(vars["TARGET"], "arm64");
+        assert_eq!(vars["REGION"], "eu");
+        assert_eq!(vars["VERBOSE"], "true");
+        assert_eq!(vars["DRY_DEPLOY"], "1");
         assert_eq!(vars.len(), 4);
+
+        // They override what was there, and only they are named as arguments
+        // — an inherited record of an outer run's arguments is dropped.
+        let mut env = std::collections::HashMap::from([
+            ("TARGET".to_string(), "x86".to_string()),
+            (CUSTOM_ARGS_VAR.to_string(), "OUTER".to_string()),
+        ]);
+        apply_custom_args(&mut env, &custom).unwrap();
+        assert_eq!(env["TARGET"], "arm64");
+        assert_eq!(
+            custom_arg_names(&env),
+            ["DRY_DEPLOY", "REGION", "TARGET", "VERBOSE"]
+        );
+        apply_custom_args(&mut env, &[]).unwrap();
+        assert!(custom_arg_names(&env).is_empty());
 
         assert!(parse_custom_args(&["positional".to_string()]).is_err());
         assert!(parse_custom_args(&["--bad$name".to_string()]).is_err());

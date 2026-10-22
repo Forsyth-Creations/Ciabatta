@@ -369,7 +369,7 @@ const COMMANDS: CommandGroup[] = [
           ["-j, --jobs N", "How many steps may run at once. Defaults to CIABATTA_JOBS, then the CPU count; -j 1 runs them one at a time."],
           ["--env-profile NAME", "Copy each workspace's .ciabatta/.env.NAME into its .env first (backing up a hand-written .env). Also spelled --env_profile."],
           ["-e KEY=VALUE", "Set a variable for every step. Beats .env and CI."],
-          ["... ARGS", "Everything after a bare ... is the workflow's: --name=value, --name value, --flag or name=value, each becoming $CIABATTA_ARG_<NAME>."],
+          ["... ARGS", "Everything after a bare ... is the workflow's: --name=value, --name value, --flag or name=value, each becoming the variable $<NAME>."],
           ["--gui", "Watch it live in this app."],
           ["--tui", "Watch it in the terminal UI. Runs print plain text by default."],
           ["--authoritative", "Run each step against only the files it declared — the way to find an incomplete inputs list."],
@@ -377,7 +377,7 @@ const COMMANDS: CommandGroup[] = [
       },
       {
         usage: "ciabatta build --env-profile staging ... --target=arm64 --verbose",
-        note: "A run under the staging profile, with two custom arguments its steps read as $CIABATTA_ARG_TARGET and $CIABATTA_ARG_VERBOSE. The arguments are listed apart, in yellow, before the run starts.",
+        note: "A run under the staging profile, with two custom arguments its steps read as $TARGET and $VERBOSE. The arguments are listed apart, in yellow, before the run starts.",
       },
       {
         usage: "ciabatta env list",
@@ -1921,12 +1921,18 @@ ciabatta build --env-profile dev        # the same copy, then the run (also --en
         <P>
           Everything after a bare <C>...</C> on a workflow run belongs to the workflow, not to
           ciabatta — so a custom <C>--force</C> there is yours, never mistaken for the real one.
-          Each becomes a variable prefixed <C>CIABATTA_ARG_</C>, upper-cased, with <C>-</C> and{" "}
+          Each becomes an environment variable of its own name, upper-cased, with <C>-</C> and{" "}
           <C>.</C> turned into <C>_</C>:
         </P>
         <Pre>{`ciabatta build ... --target=arm64 --region eu --verbose dry-deploy=1
-#   CIABATTA_ARG_TARGET=arm64   CIABATTA_ARG_REGION=eu
-#   CIABATTA_ARG_VERBOSE=true   CIABATTA_ARG_DRY_DEPLOY=1`}</Pre>
+#   TARGET=arm64   REGION=eu
+#   VERBOSE=true   DRY_DEPLOY=1`}</Pre>
+        <P>
+          An argument is a variable set from the terminal like any other: it satisfies{" "}
+          <C>required_env</C>, so a workflow that requires <C>TARGET</C> runs with{" "}
+          <C>... --target=arm64</C> alone, and it overrides the same name from your shell or a{" "}
+          <C>.env</C> file.
+        </P>
         <P>
           They are listed apart from the rest of the environment, in yellow — in the summary
           printed before a run, in the terminal UI&apos;s log, and on the run&apos;s page — because

@@ -165,6 +165,8 @@ pub fn expects_env(required_env: &[String], meta: &WorkspaceMeta) -> bool {
 /// * it is set, and non-empty, in the environment this process is running in —
 ///   which is how CI supplies secrets, and how a developer overrides one for a
 ///   single command;
+/// * it is in `provided`: set for this run by a `-e` flag or a custom argument
+///   after `...`, which are the terminal's environment by other means;
 /// * it is named in an env file some enclosing workspace sources;
 /// * it is listed in some enclosing workspace's checked-in template, which is
 ///   what makes a fresh checkout — where the gitignored `.env` does not exist
@@ -174,7 +176,11 @@ pub fn expects_env(required_env: &[String], meta: &WorkspaceMeta) -> bool {
 /// and that nothing, anywhere, provides. That is worth refusing over: the
 /// alternative is failing several minutes into a build on a variable nobody
 /// mentioned.
-pub fn unaccounted_for<'a>(layers: &[Layer<'_>], required: &'a [String]) -> Vec<&'a str> {
+pub fn unaccounted_for<'a>(
+    layers: &[Layer<'_>],
+    required: &'a [String],
+    provided: &[String],
+) -> Vec<&'a str> {
     let mut known: BTreeSet<String> = BTreeSet::new();
 
     for layer in layers {
@@ -204,7 +210,7 @@ pub fn unaccounted_for<'a>(layers: &[Layer<'_>], required: &'a [String]) -> Vec<
         .iter()
         .map(String::as_str)
         .filter(|name| {
-            if known.contains(*name) {
+            if known.contains(*name) || provided.iter().any(|p| p == name) {
                 return false;
             }
             // Set and non-empty. An empty value is the same as unset for a
@@ -387,6 +393,17 @@ fn header(template: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_variable_the_run_sets_is_accounted_for() {
+        let required = vec!["CIABATTA_TEST_UNSET_TARGET".to_string()];
+        assert_eq!(
+            unaccounted_for(&[], &required, &[]),
+            ["CIABATTA_TEST_UNSET_TARGET"]
+        );
+        // Set by `-e` or an argument after `...`: as good as the shell.
+        assert!(unaccounted_for(&[], &required, &required).is_empty());
+    }
 
     fn scratch(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("ciab_envfiles_{name}_{}", std::process::id()));

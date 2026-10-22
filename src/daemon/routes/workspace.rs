@@ -191,6 +191,7 @@ async fn graph(
             .map(str::to_string)
             .collect(),
         isolated: query.isolated,
+        ..Default::default()
     };
 
     let (workspace, compiled) = workspace::graph::prepare(&root, &query.workflow, &selection)

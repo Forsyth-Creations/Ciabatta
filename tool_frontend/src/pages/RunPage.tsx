@@ -228,7 +228,7 @@ function Launcher({ project }: { project: string }) {
               </TextField>
             </Tooltip>
 
-            <Tooltip title="What you'd type after `...` on the command line: --name=value, --name value, --flag, or name=value. Each becomes $CIABATTA_ARG_<NAME> for the steps.">
+            <Tooltip title="What you'd type after `...` on the command line: --name=value, --name value, --flag, or name=value. Each becomes the variable $<NAME> for the steps.">
               <TextField
                 size="small"
                 label="Custom arguments"

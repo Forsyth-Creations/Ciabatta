@@ -478,7 +478,7 @@ export interface StartRunBody {
   isolated?: boolean;
   /** With `workflow`: run only the steps these terms select (CLI `--filter`). */
   filter?: string[];
-  /** Custom arguments, as after `...` on the CLI: each becomes CIABATTA_ARG_*. */
+  /** Custom arguments, as after `...` on the CLI: each becomes a variable of its own name. */
   args?: string[];
   /** Run under this env profile (`--env-profile`). */
   env_profile?: string;

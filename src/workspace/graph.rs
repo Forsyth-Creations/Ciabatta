@@ -513,6 +513,10 @@ pub struct Selection {
     /// Don't follow dependencies into other sub-workspaces — run just what was
     /// selected, for when you know the rest is already built.
     pub isolated: bool,
+    /// Variables this run sets beyond the environment ciabatta runs in — its
+    /// `-e` flags and custom arguments — which satisfy a `required_env` like
+    /// any other.
+    pub provided: Vec<String>,
 }
 
 /// Compile `workflow` across the monorepo into one graph.
@@ -609,7 +613,14 @@ pub fn build_many(
     }
 
     let order = topological_order(&deps)?;
-    let mut graph = compile(workspace, workflows, &order, &background, &deps)?;
+    let mut graph = compile(
+        workspace,
+        workflows,
+        &order,
+        &background,
+        &deps,
+        &selection.provided,
+    )?;
     resolve_inputs_from(&mut graph.steps, selection.isolated)?;
     Ok(graph)
 }
@@ -885,6 +896,7 @@ fn compile(
     order: &[UnitId],
     background: &[UnitId],
     deps: &BTreeMap<UnitId, Vec<UnitId>>,
+    provided: &[String],
 ) -> Result<WorkflowGraph> {
     // A member usually contributes one workflow, and `api:compile` reads far
     // better than `api:build:compile`. Only disambiguate where it's needed.
@@ -1077,6 +1089,7 @@ fn compile(
             let missing = crate::environment::files::unaccounted_for(
                 &env_layers(workspace, member),
                 &workflow.required_env,
+                provided,
             );
             if !missing.is_empty() {
                 bail!(
@@ -1527,6 +1540,7 @@ mod tests {
             &Selection {
                 only: vec!["api".into()],
                 isolated: true,
+                ..Default::default()
             },
         )
         .unwrap();

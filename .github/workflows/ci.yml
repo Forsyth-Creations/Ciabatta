@@ -188,7 +188,7 @@ jobs:
       # The public website is a member of the same graph, so `ciabatta build`
       # above already built it. Only *publishing* waits for a tag. The Python
       # wheel goes on it too, under python/, with an index page so
-      # `pip install ciabatta --find-links <site>/python/` works.
+      # `pip install ciabatta-py --find-links <site>/python/` works.
       - name: Put the Python wheel on the website
         if: matrix.os == 'ubuntu-latest' && startsWith(github.ref, 'refs/tags/')
         shell: bash
@@ -359,12 +359,23 @@ jobs:
             cargo build --release --target ${{ matrix.target }}
           fi
 
+      # The Python library rides along in every archive. It is one
+      # pure-Python wheel for every OS, so rather than run each leg's binary
+      # (the cross-compiled ones can't run here) the legs take the copy the
+      # ubuntu test leg wrote and tried.
+      - name: Fetch the Python wheel
+        uses: actions/download-artifact@v4
+        with:
+          name: ciabatta-python-wheel
+          path: python-dist
+
       - name: Package (Unix)
         if: runner.os != 'Windows'
         run: |
           cp target/${{ matrix.target }}/release/${{ matrix.artifact }} .
           cp install/install.sh .
-          tar czf ${{ matrix.archive }} ${{ matrix.artifact }} install.sh
+          cp python-dist/*.whl .
+          tar czf ${{ matrix.archive }} ${{ matrix.artifact }} install.sh *.whl
 
       - name: Package (Windows)
         if: runner.os == 'Windows'
@@ -372,7 +383,9 @@ jobs:
         run: |
           Copy-Item target/${{ matrix.target }}/release/${{ matrix.artifact }} .
           Copy-Item install\install.ps1 .
-          Compress-Archive -Path ${{ matrix.artifact }}, install.ps1 -DestinationPath ${{ matrix.archive }}
+          Copy-Item python-dist\*.whl .
+          $wheel = (Get-ChildItem *.whl).Name
+          Compress-Archive -Path ${{ matrix.artifact }}, install.ps1, $wheel -DestinationPath ${{ matrix.archive }}
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -411,7 +424,10 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
-          files: artifacts/ciabatta-*
+          # The wheel is `ciabatta_py-*` (PEP 427 spelling of `ciabatta-py`).
+          files: |
+            artifacts/ciabatta-*
+            artifacts/ciabatta_py-*
 
   publish:
     name: Publish to crates.io

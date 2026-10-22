@@ -1416,8 +1416,9 @@ mod tests {
 
 #[derive(Subcommand, Debug)]
 pub enum PythonCommand {
-    /// Write the library as a wheel (`ciabatta-<version>-py3-none-any.whl`),
-    /// to install with pip yourself or publish to a package index.
+    /// Write the library as a wheel (`ciabatta_py-<version>-py3-none-any.whl`,
+    /// the `ciabatta-py` distribution), to install with pip yourself or
+    /// publish to a package index.
     Wheel {
         /// The directory to write it into.
         #[arg(short, long, value_name = "DIR", default_value = ".")]

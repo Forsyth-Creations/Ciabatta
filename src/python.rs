@@ -5,6 +5,9 @@
 //! writes it as a wheel, `ciabatta python install` pip-installs it. The wheel
 //! is pure Python (`py3-none-any`, standard library only, 3.9 and newer), so
 //! the one file installs on Linux, macOS and Windows alike.
+//!
+//! It is distributed as `ciabatta-py` — the name pip installs and uninstalls —
+//! and imported as `ciabatta`.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -19,9 +22,14 @@ const VERSION_PLACEHOLDER: &str = "__version__ = \"0.0.0\"";
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// The distribution's name as pip shows it, and as a wheel's file name and
+/// `.dist-info` spell it (PEP 427: `-` becomes `_`).
+const DIST_NAME: &str = "ciabatta-py";
+const DIST_FILE_NAME: &str = "ciabatta_py";
+
 /// The wheel's file name, as pip expects it.
 pub fn wheel_name() -> String {
-    format!("ciabatta-{VERSION}-py3-none-any.whl")
+    format!("{DIST_FILE_NAME}-{VERSION}-py3-none-any.whl")
 }
 
 /// The module with its version filled in.
@@ -37,10 +45,10 @@ fn module_source() -> String {
 /// `.dist-info` pip reads — `METADATA`, `WHEEL`, and a `RECORD` hashing the
 /// rest.
 pub fn wheel() -> Vec<u8> {
-    let info = format!("ciabatta-{VERSION}.dist-info");
+    let info = format!("{DIST_FILE_NAME}-{VERSION}.dist-info");
     let metadata = format!(
         "Metadata-Version: 2.1\n\
-         Name: ciabatta\n\
+         Name: {DIST_NAME}\n\
          Version: {VERSION}\n\
          Summary: Ask the person running a ciabatta workflow a question, from Python\n\
          Home-page: https://forsyth-creations.github.io/Ciabatta/\n\
@@ -215,12 +223,17 @@ mod tests {
         let text = String::from_utf8_lossy(&bytes);
         for name in [
             "ciabatta/__init__.py".to_string(),
-            format!("ciabatta-{VERSION}.dist-info/METADATA"),
-            format!("ciabatta-{VERSION}.dist-info/WHEEL"),
-            format!("ciabatta-{VERSION}.dist-info/RECORD"),
+            format!("ciabatta_py-{VERSION}.dist-info/METADATA"),
+            format!("ciabatta_py-{VERSION}.dist-info/WHEEL"),
+            format!("ciabatta_py-{VERSION}.dist-info/RECORD"),
         ] {
             assert!(text.contains(&name), "{name} missing");
         }
+        assert!(text.contains("Name: ciabatta-py\n"));
+        assert_eq!(
+            wheel_name(),
+            format!("ciabatta_py-{VERSION}-py3-none-any.whl")
+        );
         assert!(text.contains("Tag: py3-none-any"));
         // Ends with the end-of-central-directory record, no comment.
         assert_eq!(&bytes[bytes.len() - 22..bytes.len() - 18], b"PK\x05\x06");

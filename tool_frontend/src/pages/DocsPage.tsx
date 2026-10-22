@@ -574,7 +574,7 @@ const COMMANDS: CommandGroup[] = [
       },
       {
         usage: "ciabatta python <wheel|install>",
-        note: "The Python library for ciabatta input, carried in this binary: `wheel --out DIR` writes ciabatta-<version>-py3-none-any.whl, `install [--python PY] [-- PIP_ARGS]` pip-installs it. See \"Ask for a value mid-run\".",
+        note: "The Python library for ciabatta input, carried in this binary: `wheel --out DIR` writes ciabatta_py-<version>-py3-none-any.whl (the ciabatta-py distribution), `install [--python PY] [-- PIP_ARGS]` pip-installs it. See \"Ask for a value mid-run\".",
       },
       {
         usage: "ciabatta remote-cache upload <BINARY> [--apply]",
@@ -2419,10 +2419,19 @@ fi`}</Pre>
           A step written in Python asks with a function call. The library is built into the
           binary — <C>ciabatta python install</C> pip-installs it into <C>python3</C> (or{" "}
           <C>--python path/to/python</C>, and anything after <C>--</C> goes to pip), and{" "}
-          <C>ciabatta python wheel --out dist</C> writes the wheel to install yourself. It is
-          also on the website: <C>pip install ciabatta --find-links
-          https://forsyth-creations.github.io/Ciabatta/python/</C>. One pure-Python wheel, standard
-          library only, for Python 3.9 and newer on Linux, macOS and Windows.
+          <C>ciabatta python wheel --out dist</C> writes the wheel to install yourself. Every
+          release download (the <C>.tar.gz</C> and <C>.zip</C> archives) carries the same wheel
+          next to the binary, and it is on the website too:{" "}
+          <C>pip install ciabatta-py --find-links https://forsyth-creations.github.io/Ciabatta/python/</C>.
+          One pure-Python wheel, standard library only, for Python 3.9 and newer on Linux, macOS and
+          Windows.
+        </P>
+        <P>
+          The distribution is named <C>ciabatta-py</C> — that is what <C>pip install</C>,{" "}
+          <C>pip show</C> and <C>pip uninstall</C> take — and the module is still imported as{" "}
+          <C>import ciabatta</C>. Before 0.7.4 the distribution was called <C>ciabatta</C>; if an
+          older one is installed, <C>pip uninstall ciabatta</C> first so the two don&apos;t both
+          claim the module.
         </P>
         <Pre>{`import ciabatta
 

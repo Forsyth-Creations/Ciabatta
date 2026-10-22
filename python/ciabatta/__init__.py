@@ -83,6 +83,16 @@ def _ask(
         if value:
             return value
 
+    # Whatever the script printed before asking belongs before the question.
+    # Piped (as every step's output is), Python holds stdout back until a
+    # buffer fills — so without this the lead-in to a question turned up after
+    # it was answered, unless PYTHONUNBUFFERED was set.
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.flush()
+        except (AttributeError, OSError, ValueError):
+            pass
+
     addr = os.environ.get(ADDR_VAR)
     token = os.environ.get(TOKEN_VAR)
     if addr and token:
@@ -134,7 +144,15 @@ def _ask_broker(addr: str, request: dict) -> str:
 
 def _ask_binary(binary, prompt, details, default, env, secret, timeout, enter, yes_no) -> str:
     """Outside a run, with ciabatta installed: let it draw the prompt, so it
-    looks and behaves exactly like ``ciabatta input`` does."""
+    looks and behaves exactly like ``ciabatta input`` does.
+
+    It draws on stderr, so stderr is this process's own: captured, the prompt
+    went into a pipe and the question waited, unseen, for an answer. Only the
+    answer, on stdout, is captured.
+    """
+    if yes_no and not _knows_flag(binary, "--yes-no"):
+        # An older ciabatta (--yes-no arrived in 0.7.1): ask here instead.
+        return _ask_here(prompt, details, default, secret, enter, yes_no)
     command = [binary, "input", prompt]
     if details is not None:
         command += ["--details", details]
@@ -150,16 +168,24 @@ def _ask_binary(binary, prompt, details, default, env, secret, timeout, enter, y
         command.append("--enter")
     if yes_no:
         command.append("--yes-no")
-    done = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    if done.returncode == 2 and "unexpected argument" in done.stderr:
-        # An older ciabatta that doesn't know one of the flags (--yes-no
-        # arrived in 0.7.1): ask here instead.
-        return _ask_here(prompt, details, default, secret, enter, yes_no)
-    if done.stderr:
-        sys.stderr.write(done.stderr)
+    done = subprocess.run(command, stdout=subprocess.PIPE, text=True)
     if done.returncode != 0:
         raise InputError(f"'{prompt}' wasn't answered")
     return done.stdout.rstrip("\r\n")
+
+
+def _knows_flag(binary: str, flag: str) -> bool:
+    """Whether this ciabatta's ``input`` takes ``flag``."""
+    try:
+        done = subprocess.run(
+            [binary, "input", "--help"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+    except OSError:
+        return False
+    return flag in done.stdout
 
 
 def _ask_here(prompt, details, default, secret, enter, yes_no) -> str:

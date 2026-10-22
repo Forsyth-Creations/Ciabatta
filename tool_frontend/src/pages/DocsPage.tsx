@@ -2451,7 +2451,9 @@ ciabatta.pause("Flip the maintenance switch, then continue")`}</Pre>
         <P>
           Inside a run, the question goes wherever <C>ciabatta input</C>&apos;s would — this
           app&apos;s dialog or the terminal. Outside one it asks on the terminal. No answer and
-          no default raises <C>ciabatta.InputError</C>.
+          no default raises <C>ciabatta.InputError</C>. Each question flushes what the script
+          printed before it, so its lead-in comes first without <C>PYTHONUNBUFFERED</C>. (Before
+          0.7.5, outside a run, the prompt itself didn&apos;t show at all.)
         </P>
 
         <SubHeading>Answering from a variable</SubHeading>

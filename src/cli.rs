@@ -1246,6 +1246,11 @@ pub const CUSTOM_ARGS_MARKER: &str = "...";
 /// [`apply_custom_args`] alone; an inherited one says nothing about this run.
 pub const CUSTOM_ARGS_VAR: &str = "CIABATTA_ARGS";
 
+/// Those of [`CUSTOM_ARGS_VAR`] that replaced a value already set — in the
+/// shell, by `-e`, or by the launcher — so the report can say an argument beat
+/// the terminal. The terminal's value itself is gone by then.
+pub const CUSTOM_ARGS_OVERRODE_VAR: &str = "CIABATTA_ARGS_OVERRODE";
+
 /// Split argv at the first `...`: ciabatta's own arguments before it, the
 /// workflow's custom arguments after.
 ///
@@ -1320,17 +1325,30 @@ pub fn parse_custom_args(
 }
 
 /// Layer a run's custom arguments over its environment: they were typed for
-/// this run, so they win. Records their names in [`CUSTOM_ARGS_VAR`], and
-/// drops any such record inherited from an outer run.
+/// this run, so they beat everything, the terminal included. Records their
+/// names in [`CUSTOM_ARGS_VAR`] (and those that replaced a terminal value in
+/// [`CUSTOM_ARGS_OVERRODE_VAR`]), dropping any such record inherited from an
+/// outer run.
 pub fn apply_custom_args(
     env: &mut std::collections::HashMap<String, String>,
     args: &[String],
 ) -> anyhow::Result<()> {
     let vars = parse_custom_args(args)?;
     env.remove(CUSTOM_ARGS_VAR);
-    if !vars.is_empty() {
-        let names: Vec<&str> = vars.keys().map(String::as_str).collect();
-        env.insert(CUSTOM_ARGS_VAR.to_string(), names.join(","));
+    env.remove(CUSTOM_ARGS_OVERRODE_VAR);
+    let names: Vec<&str> = vars.keys().map(String::as_str).collect();
+    let overrode: Vec<&str> = names
+        .iter()
+        .copied()
+        .filter(|name| env.get(*name).is_some_and(|v| !v.trim().is_empty()))
+        .collect();
+    for (var, list) in [
+        (CUSTOM_ARGS_VAR, &names),
+        (CUSTOM_ARGS_OVERRODE_VAR, &overrode),
+    ] {
+        if !list.is_empty() {
+            env.insert(var.to_string(), list.join(","));
+        }
     }
     env.extend(vars);
     Ok(())
@@ -1338,7 +1356,16 @@ pub fn apply_custom_args(
 
 /// The names in `env` that a custom argument set.
 pub fn custom_arg_names(env: &std::collections::HashMap<String, String>) -> Vec<&str> {
-    env.get(CUSTOM_ARGS_VAR)
+    names_in(env, CUSTOM_ARGS_VAR)
+}
+
+/// The names in `env` that a custom argument set over a terminal value.
+pub fn custom_arg_overrides(env: &std::collections::HashMap<String, String>) -> Vec<&str> {
+    names_in(env, CUSTOM_ARGS_OVERRODE_VAR)
+}
+
+fn names_in<'a>(env: &'a std::collections::HashMap<String, String>, var: &str) -> Vec<&'a str> {
+    env.get(var)
         .map(|names| names.split(',').filter(|n| !n.is_empty()).collect())
         .unwrap_or_default()
 }
@@ -1422,12 +1449,14 @@ mod tests {
         ]);
         apply_custom_args(&mut env, &custom).unwrap();
         assert_eq!(env["TARGET"], "arm64");
+        assert_eq!(custom_arg_overrides(&env), ["TARGET"]);
         assert_eq!(
             custom_arg_names(&env),
             ["DRY_DEPLOY", "REGION", "TARGET", "VERBOSE"]
         );
         apply_custom_args(&mut env, &[]).unwrap();
         assert!(custom_arg_names(&env).is_empty());
+        assert!(custom_arg_overrides(&env).is_empty());
 
         assert!(parse_custom_args(&["positional".to_string()]).is_err());
         assert!(parse_custom_args(&["--bad$name".to_string()]).is_err());

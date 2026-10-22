@@ -159,7 +159,8 @@ export function CustomArguments({ report }: { report: EnvReport }) {
   return (
     <Alert severity="warning" icon={false} sx={{ my: 1, py: 0.5 }}>
       <Typography variant="caption" sx={{ display: "block", fontWeight: 600, mb: 0.5 }}>
-        ⚑ {args.length} custom argument{args.length === 1 ? "" : "s"}, for this run only
+        ⚑ {args.length} custom argument{args.length === 1 ? "" : "s"}, for this run only — they beat
+        the terminal and every env file
       </Typography>
       <Stack direction="row" spacing={0.75} flexWrap="wrap" useFlexGap>
         {args.map((variable) => (

@@ -186,6 +186,7 @@ pub async fn execute(
         ))
         .await;
     let arguments = crate::cli::custom_arg_names(&prepared.env);
+    let overrode = crate::cli::custom_arg_overrides(&prepared.env);
     let mut custom: Vec<(&String, &String)> = prepared
         .env
         .iter()
@@ -196,7 +197,12 @@ pub async fn execute(
         let _ = tx
             .send(ProgressUpdate::Log(
                 name.to_string(),
-                format!("⚑ custom argument {key}={value}"),
+                match overrode.contains(&key.as_str()) {
+                    true => {
+                        format!("⚑ custom argument {key}={value} (overrides the terminal's value)")
+                    }
+                    false => format!("⚑ custom argument {key}={value}"),
+                },
             ))
             .await;
     }

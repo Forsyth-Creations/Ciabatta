@@ -1930,8 +1930,10 @@ ciabatta build --env-profile dev        # the same copy, then the run (also --en
         <P>
           An argument is a variable set from the terminal like any other: it satisfies{" "}
           <C>required_env</C>, so a workflow that requires <C>TARGET</C> runs with{" "}
-          <C>... --target=arm64</C> alone, and it overrides the same name from your shell or a{" "}
-          <C>.env</C> file.
+          <C>... --target=arm64</C> alone. And it comes first: an argument beats the same name
+          set in your shell, by <C>-e</C>, or in any <C>.env</C> file. The report before the run
+          says so — its precedence line starts <C>arguments after ... &gt; terminal</C>, and an
+          argument that replaced a terminal value is marked <C>overrides the terminal</C>.
         </P>
         <P>
           They are listed apart from the rest of the environment, in yellow — in the summary

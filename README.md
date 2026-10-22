@@ -820,7 +820,10 @@ ciabatta deploy --force ... --target=arm64 --region eu --verbose
 ```
 
 An argument is just a variable set from the terminal, so it counts toward
-`required_env` and overrides the same name from the shell or a `.env` file.
+`required_env`. Arguments come first: one beats the same name set in the shell,
+by `-e`, or in any `.env` file, and the environment summary says so
+(`precedence: arguments after ... > terminal > …`, and `overrides the terminal`
+beside an argument that replaced a shell value).
 
 They're listed apart, in yellow, in the environment summary before the run, in
 the TUI log, and on the run's page — with a nudge to move them into an env

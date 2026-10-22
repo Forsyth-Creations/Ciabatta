@@ -138,10 +138,16 @@ impl EnvReport {
         }
         // The rule every value below was decided by, so the notes beside each
         // one read as an application of it rather than as trivia.
+        let arguments = match self.vars.iter().any(|v| v.origin == Origin::Argument) {
+            true => "arguments after ... > ",
+            false => "",
+        };
         match self.files.is_empty() {
-            true => out.push_str("  precedence: terminal only (no env files found)\n"),
+            true => out.push_str(&format!(
+                "  precedence: {arguments}terminal (no env files found)\n"
+            )),
             false => out.push_str(&format!(
-                "  precedence: terminal > {} (first to set it wins)\n",
+                "  precedence: {arguments}terminal > {} (first to set it wins)\n",
                 self.files.join(" > ")
             )),
         }
@@ -311,7 +317,7 @@ impl Group {
         match self {
             Group::Terminal => (
                 "terminal".into(),
-                "set in the terminal, which always wins".into(),
+                "set in the terminal, which beats every env file".into(),
             ),
             Group::Workflow => (
                 format!("{file} (workflow env_file)"),
@@ -375,13 +381,22 @@ impl EnvReport {
             return None;
         }
         let width = args.iter().map(|v| v.key.len()).max().unwrap_or(0);
-        let mut out = format!("⚑ Custom arguments ({}) — for this run only\n", args.len());
+        let mut out = format!(
+            "⚑ Custom arguments ({}) — for this run only, and they beat the terminal and every \
+             env file\n",
+            args.len()
+        );
         for var in &args {
-            let readers = if var.steps.is_empty() {
+            let mut notes = Vec::new();
+            if !var.overrides.is_empty() {
+                notes.push(format!("overrides {}", var.overrides.join(", ")));
+            }
+            notes.push(if var.steps.is_empty() {
                 "no step reads it".to_string()
             } else {
                 format!("used by {}", var.steps.join(", "))
-            };
+            });
+            let readers = notes.join(" · ");
             out.push_str(&format!(
                 "  {:width$}  {}  [{readers}]\n",
                 var.key,
@@ -519,6 +534,7 @@ pub fn collect(
     // Custom arguments are reported whether or not a step reads them: they
     // were typed for this run, and one nothing reads is probably misspelled.
     let arguments = crate::cli::custom_arg_names(base);
+    let overrode = crate::cli::custom_arg_overrides(base);
     keys.extend(arguments.iter().map(|k| k.to_string()));
     // The `{VAR}` placeholders that decide *which* `.env` file gets sourced are
     // a dependency of the run before any step exists.
@@ -547,6 +563,10 @@ pub fn collect(
                     false,
                 ),
                 None if terminal && arguments.contains(&key.as_str()) => {
+                    if overrode.contains(&key.as_str()) {
+                        overrides.push("the terminal".to_string());
+                    }
+                    overrides.extend(source.files.iter().cloned());
                     (Origin::Argument, None, value, false)
                 }
                 None if terminal => {
@@ -634,13 +654,16 @@ fn reason(
 ) -> Option<String> {
     let file = file.unwrap_or("an env file");
     let why = match origin {
-        Origin::Environment => "set in the terminal, which always wins".to_string(),
+        Origin::Environment => "set in the terminal, which beats every env file".to_string(),
         Origin::Config => {
             "set by value in its workspace's ciabatta.yaml (`workspace.env`, deprecated: move it \
              to the .env) — on top of the run's environment"
                 .to_string()
         }
-        Origin::Argument => return None,
+        Origin::Argument => {
+            "given after `...` for this run, which beats the terminal and every env file"
+                .to_string()
+        }
         Origin::Unset => {
             return Some(format!(
                 "not set in the terminal or in any of the {searched} env file(s) searched"
@@ -939,7 +962,39 @@ mod tests {
         let stage = find(&report, "STAGE");
         assert_eq!(stage.origin, Origin::Argument);
         assert_eq!(stage.value.as_deref(), Some("prod"));
+        assert!(stage.overrides.is_empty());
         assert!(report.missing.is_empty());
+    }
+
+    #[test]
+    fn a_custom_argument_beats_the_terminal_and_says_so() {
+        let resolved = ResolvedRun {
+            steps: vec![step("build", "true")],
+            ..Default::default()
+        };
+        let mut base = env(&[("STAGE", "dev")]);
+        crate::cli::apply_custom_args(&mut base, &["--stage=prod".to_string()]).unwrap();
+        let report = collect(&resolved, Path::new("."), &base, None);
+
+        let stage = find(&report, "STAGE");
+        assert_eq!(stage.origin, Origin::Argument);
+        assert_eq!(stage.value.as_deref(), Some("prod"));
+        assert_eq!(stage.overrides, ["the terminal"]);
+        assert!(
+            stage
+                .reason
+                .as_deref()
+                .unwrap()
+                .contains("beats the terminal")
+        );
+
+        let text = report.render("deploy", false).unwrap();
+        assert!(
+            text.contains("precedence: arguments after ... > terminal"),
+            "{text}"
+        );
+        let args = report.render_arguments().unwrap();
+        assert!(args.contains("overrides the terminal"), "{args}");
     }
 
     #[test]

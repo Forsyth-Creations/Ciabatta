@@ -220,33 +220,93 @@ pub fn unaccounted_for<'a>(
         .collect()
 }
 
-/// Explain a variable nothing in the chain provides.
-///
-/// The point of the message is *where to put it*: a variable one package needs
-/// belongs in that package, and one several packages need belongs in the
-/// workspace above them — which is the decision the reader actually has to
-/// make, and the one a bare "missing API_URL" leaves them to guess at.
-pub fn describe_unaccounted(workspace: &str, rel: &str, missing: &[&str]) -> String {
-    let list = missing.join(", ");
-    let plural = if missing.len() == 1 { "it" } else { "them" };
-    let own = format!("{rel}/.env");
-    // The two paths line up, whatever the package is called.
-    let width = own.chars().count().max(".env".len());
-    format!(
-        "'{workspace}' declares environment variable(s) its build can't run without, and \
-         nothing provides {plural}: {list}.\n\n\
-         Looked in this workspace and every one enclosing it — their `.env` files, their \
-         checked-in templates, and the environment this command is running in.\n\n\
-         Set {plural} in the environment, or write {plural} down where whoever needs \
-         {plural} will find {plural}:\n\n    \
-         {own:<width$}   just this package\n    \
-         {root:<width$}   every package under the root\n\n\
-         Commit a template beside it (conventionally `.env.default`, or name one with \
-         `workspace.env_default`) so a fresh checkout — where `.env` is gitignored and \
-         absent — knows what to fill in.",
-        root = ".env",
-    )
+/// Every way there is to set `vars` for a run of `workflow`, with the names
+/// filled in so the fix can be copied rather than worked out. `env_file` says
+/// which `.env` to put them in.
+pub fn how_to_set(workflow: &str, vars: &[String], env_file: &str) -> Vec<String> {
+    // A custom argument is the variable's name lower-cased, `_` as `-`: the
+    // inverse of how arguments after `...` become variables.
+    let arguments: Vec<String> = vars
+        .iter()
+        .map(|var| format!("--{}=…", var.to_lowercase().replace('_', "-")))
+        .collect();
+    let flags: Vec<String> = vars.iter().map(|var| format!("-e {var}=…")).collect();
+    let assignments: Vec<String> = vars.iter().map(|var| format!("{var}=…")).collect();
+    vec![
+        format!(
+            "  Set {} any one of these ways, then run it again:",
+            if vars.len() == 1 { "it" } else { "them" }
+        ),
+        format!(
+            "    • as custom arguments:  ciabatta {workflow} ... {}",
+            arguments.join(" ")
+        ),
+        format!(
+            "    • with -e:              ciabatta {workflow} {}",
+            flags.join(" ")
+        ),
+        format!(
+            "    • in a .env file:       {}, one per line, in {env_file}",
+            assignments.join(", ")
+        ),
+        format!(
+            "    • in your shell:        export {}",
+            assignments.join(" ")
+        ),
+    ]
 }
+
+/// A workflow's `required_env` that nothing in the chain provides.
+///
+/// The point of the message is *what to do*: which variables, and every way
+/// to set them, down to the line to paste. Which `.env` is the one real
+/// decision — a variable one package needs belongs in that package, one
+/// several need belongs in the workspace above them — so both are named.
+///
+/// A type of its own so the terminal can print it in yellow, where it can't
+/// be missed, while the daemon passes the same text on uncoloured.
+#[derive(Debug)]
+pub struct MissingEnv {
+    pub workflow: String,
+    pub workspace: String,
+    pub rel: String,
+    pub vars: Vec<String>,
+}
+
+impl std::fmt::Display for MissingEnv {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let count = self.vars.len();
+        writeln!(
+            f,
+            "✗ `{}` can't start: {count} variable{} it needs {} set anywhere:",
+            self.workflow,
+            if count == 1 { "" } else { "s" },
+            if count == 1 { "isn't" } else { "aren't" },
+        )?;
+        for var in &self.vars {
+            writeln!(f, "    {var}")?;
+        }
+        let env_file = match self.rel.as_str() {
+            "" | "." => ".env at the workspace root".to_string(),
+            rel => format!(
+                "{rel}/.env (just '{}') or .env at the root (every package)",
+                self.workspace
+            ),
+        };
+        for line in how_to_set(&self.workflow, &self.vars, &env_file) {
+            writeln!(f, "{line}")?;
+        }
+        write!(
+            f,
+            "\nLooked in this workspace and every one enclosing it — their `.env` files, their \
+             checked-in templates, and the environment this command is running in. Commit a \
+             template beside the .env (conventionally `.env.default`, or name one with \
+             `workspace.env_default`) so a fresh checkout knows what to fill in."
+        )
+    }
+}
+
+impl std::error::Error for MissingEnv {}
 
 /// Refuse a build that depends on environment variables from a workspace that
 /// never wrote down where they come from.

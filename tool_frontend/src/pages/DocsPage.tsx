@@ -366,6 +366,7 @@ const COMMANDS: CommandGroup[] = [
           ["--graph", "Print the resolved graph and run nothing."],
           ["--dry-run", "Walk every step, executing none of them."],
           ["--force", "Ignore the cache and run every step. Results are still stored, so the next run reuses them."],
+          ["--start-anyway", "Start now, even when the workspace already has as many runs going as workspace.max_concurrent_runs allows. The run takes no slot. Also works with --gui."],
           ["-j, --jobs N", "How many steps may run at once. Defaults to CIABATTA_JOBS, then the CPU count; -j 1 runs them one at a time."],
           ["--env-profile NAME", "Copy each workspace's .ciabatta/.env.NAME into its .env first (backing up a hand-written .env). Also spelled --env_profile."],
           ["-e KEY=VALUE", "Set a variable for every step. Beats .env and CI."],
@@ -1823,6 +1824,11 @@ required_env: [API_URL, DEPLOY_TOKEN] # must be set, or the run won't start`}</P
             <>
               <strong>Nothing found?</strong> The variable is unset, and a{" "}
               <C>required_env</C> variable that is unset stops the run before any step starts.
+              The terminal says so in yellow, names each missing variable, and lists every way
+              to set it with the names filled in — as a custom argument (
+              <C>ciabatta deploy ... --api-token=…</C>), with <C>-e API_TOKEN=…</C>, in which{" "}
+              <C>.env</C>, or exported in the shell — so the fix can be copied straight out of the
+              message.
             </>,
           ]}
         />
@@ -2510,6 +2516,11 @@ ciabatta.pause("Flip the maintenance switch, then continue")`}</Pre>
           soon as one finishes. Stopping a waiting run ends the wait. Dry runs don&apos;t take a
           slot, and a run started by another run&apos;s step — a script that calls{" "}
           <C>ciabatta test</C> — shares its parent&apos;s slot rather than waiting on it.
+        </P>
+        <P>
+          To start one run now regardless, pass <C>--start-anyway</C>: it skips the wait and
+          takes no slot, so it doesn&apos;t hold up anyone else either. The waiting message
+          suggests it.
         </P>
         <P>
           Slots are file locks under <C>~/.ciabatta/run-slots/</C>, which the operating system

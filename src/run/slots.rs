@@ -41,8 +41,8 @@ pub const DEFAULT_LIMIT: usize = 1;
 const POLL: Duration = Duration::from_millis(500);
 
 /// What a stuck run is told to do about it.
-pub const RESET_HINT: &str = "If you believe this is in error and a process is still running \
-     that shouldn't be, run `ciabatta self reset`";
+pub const RESET_HINT: &str = "Pass `--start-anyway` to start without waiting. If you believe \
+     this is in error and a process is still running that shouldn't be, run `ciabatta self reset`";
 
 /// A held slot. Dropping it frees the slot.
 #[derive(Debug)]

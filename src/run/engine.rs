@@ -218,38 +218,27 @@ pub async fn execute(
     }
 
     if !prepared.is_ready() {
-        let list = prepared.missing().join(", ");
+        let help = missing_env_help(name, &prepared);
         // Console: printed directly so it shows even in `--gui` mode, where
         // progress updates are folded into the browser view rather than stdout.
-        eprintln!("[{name}] ✗ run aborted — env variable(s) empty or unset: {list}");
-        // GUI: emit a log line per missing variable into the workflow's log panel.
-        let _ = tx
-            .send(ProgressUpdate::Log(
-                name.to_string(),
-                format!("✗ Run aborted before starting — missing env variable(s): {list}"),
-            ))
-            .await;
-        for var in &prepared.unresolved_paths {
-            let _ = tx
-                .send(ProgressUpdate::Log(
-                    name.to_string(),
-                    format!("  • {var} is unset, so the env_file to source can't be resolved"),
-                ))
-                .await;
+        // Yellow and on lines of its own, so it can't be lost in the summary
+        // printed above it.
+        {
+            use owo_colors::OwoColorize;
+            for line in &help {
+                eprintln!("{}", format!("[{name}] {line}").style(crate::color::warn()));
+            }
         }
-        for var in &prepared.missing_required {
-            let _ = tx
-                .send(ProgressUpdate::Log(
-                    name.to_string(),
-                    format!("  • {var} (required_env) is empty or unset"),
-                ))
-                .await;
+        // GUI: the same lines into the workflow's log panel.
+        for line in help {
+            let _ = tx.send(ProgressUpdate::Log(name.to_string(), line)).await;
         }
         // Returning Err becomes a `Failed` update (shown as the workflow's error in
         // the GUI, and on stderr by the plain runner).
         bail!(
-            "Run '{name}' cannot start: env variable(s) empty or unset: {list}. \
-             Set them (with -e {list}=…, or see required_env in the flowchart) and retry."
+            "Run '{name}' cannot start: required variable(s) not set: {} — see above for how to \
+             set them",
+            prepared.missing().join(", ")
         );
     }
     let env_vars = &prepared.env;
@@ -1707,6 +1696,33 @@ async fn run_step_action(
     res
 }
 
+/// What to tell someone whose run can't start for want of variables: which
+/// ones, why each is needed, and every way there is to set them — with the
+/// names filled in, so the fix can be copied rather than worked out.
+fn missing_env_help(workflow: &str, prepared: &super::PreparedEnv) -> Vec<String> {
+    let missing = prepared.missing();
+    let width = missing.iter().map(String::len).max().unwrap_or(0);
+    let mut lines = vec![format!(
+        "✗ This run can't start: {} variable{} it needs {} not set:",
+        missing.len(),
+        if missing.len() == 1 { "" } else { "s" },
+        if missing.len() == 1 { "is" } else { "are" },
+    )];
+    for var in &missing {
+        let why = match prepared.unresolved_paths.contains(var) {
+            true => "names the env_file to source",
+            false => "listed in required_env",
+        };
+        lines.push(format!("    {var:<width$}  ({why})"));
+    }
+    lines.extend(crate::environment::files::how_to_set(
+        workflow,
+        &missing,
+        "the workspace's .env (or .ciabatta/.env.<profile>, run with --env-profile <profile>)",
+    ));
+    lines
+}
+
 /// Run a step/option action from `cwd`: a bash `script` path or an inline `run`
 /// shell command. Exactly one is expected (validation enforces it for steps;
 /// recovery options may legitimately have neither, meaning "no-op").
@@ -1845,6 +1861,30 @@ mod tests {
     use super::*;
     use crate::run::RunStep;
 
+    #[test]
+    fn a_run_missing_variables_says_which_and_how_to_set_them() {
+        let prepared = crate::run::PreparedEnv {
+            unresolved_paths: vec!["STAGE".into()],
+            missing_required: vec!["API_TOKEN".into()],
+            ..Default::default()
+        };
+        let help = missing_env_help("deploy", &prepared).join("\n");
+        assert!(help.contains("2 variables it needs are not set"), "{help}");
+        assert!(
+            help.contains("STAGE      (names the env_file to source)"),
+            "{help}"
+        );
+        assert!(
+            help.contains("API_TOKEN  (listed in required_env)"),
+            "{help}"
+        );
+        assert!(
+            help.contains("ciabatta deploy ... --stage=… --api-token=…"),
+            "{help}"
+        );
+        assert!(help.contains("export STAGE=… API_TOKEN=…"), "{help}");
+    }
+
     /// Run a step DAG to completion, collecting every progress update.
     ///
     /// Non-interactive (no operator to answer a recovery prompt), which is the
@@ -1886,6 +1926,7 @@ mod tests {
             force: false,
             cancel,
             jobs,
+            start_anyway: false,
         };
         let env: HashMap<String, String> = std::env::vars().collect();
 

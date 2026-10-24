@@ -830,8 +830,11 @@ the TUI log, and on the run's page — with a nudge to move them into an env
 profile if the run needs them every time.
 
 **`required_env`** lists variables the workflow needs. Before anything runs,
-each is checked; if one is empty or unset the run is aborted — the missing
-names are printed to the console and shown in the `--gui` view, and no step runs.
+each is checked; if one is empty or unset the run is aborted and no step runs.
+The terminal says so in yellow, naming each missing variable and every way to
+set it with the names filled in — `ciabatta deploy ... --api-token=…`,
+`-e API_TOKEN=…`, a line in the right `.env`, or `export` — and the `--gui` view
+shows the same.
 
 Started from the **web app**, a missing variable isn't a failure — the launcher
 refuses to start the run and asks you for the values instead, then starts it with
@@ -936,7 +939,8 @@ workspace:
 terminal, the daemon, a second terminal — and is **1 unless set**. A run past
 the limit waits for a slot before its first step, says so, and starts as soon
 as one frees up, naming the run that holds the slot. A run started by a step
-of another run shares its slot. If a run waits on a slot that nothing should
+of another run shares its slot. `--start-anyway` starts a run now regardless,
+without taking a slot. If a run waits on a slot that nothing should
 be holding, `ciabatta self reset` stops the daemon and every run holding a
 slot, and clears `~/.ciabatta/run-slots`.
 

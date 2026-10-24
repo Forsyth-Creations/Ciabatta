@@ -352,6 +352,10 @@ pub struct CreatePayload {
     /// Ignore the cache and run every step. Results are still stored.
     #[serde(default)]
     force: bool,
+    /// `--start-anyway`: don't wait for a run slot. Not kept with the run, so
+    /// "run again" waits its turn like any other.
+    #[serde(default, skip_serializing)]
+    start_anyway: bool,
     /// Custom arguments, as typed after `...` — each becomes an
     /// environment variable of its own name. Kept with the run (unlike `env`), so
     /// "run again" passes them again.
@@ -687,6 +691,7 @@ async fn start(state: AppState, payload: CreatePayload) -> RouteResult<Json<Valu
         inputs: Some(input_tx),
         cancel: Some(cancel),
         force: payload.force,
+        start_anyway: payload.start_anyway,
         ..Default::default()
     };
     tokio::spawn(async move {

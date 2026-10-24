@@ -1092,14 +1092,13 @@ fn compile(
                 provided,
             );
             if !missing.is_empty() {
-                bail!(
-                    "{}",
-                    crate::environment::files::describe_unaccounted(
-                        &member.name,
-                        &member.rel,
-                        &missing,
-                    )
-                );
+                return Err(crate::environment::files::MissingEnv {
+                    workflow: unit.workflow.clone(),
+                    workspace: member.name.clone(),
+                    rel: member.rel.clone(),
+                    vars: missing.into_iter().map(String::from).collect(),
+                }
+                .into());
             }
         }
 
@@ -1952,10 +1951,18 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(
-            err.contains("'api' declares"),
-            "the error must name the member: {err}"
+            err.contains("packages/api/.env (just 'api')"),
+            "the error must name the member's .env: {err}"
         );
         assert!(err.contains("API_TOKEN"), "and the variables: {err}");
+        assert!(
+            err.contains("ciabatta build ... --api-token=…"),
+            "and how to pass them as arguments: {err}"
+        );
+        assert!(
+            err.contains("ciabatta build -e API_TOKEN=…"),
+            "or with -e: {err}"
+        );
         assert!(err.contains("env_default"), "and the fix: {err}");
 
         // A member with no required_env is asked for nothing.

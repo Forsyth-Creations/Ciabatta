@@ -375,7 +375,7 @@ pub async fn run_workflow_ctl(
                 } else {
                     let note_tx = inner_tx.clone();
                     let held =
-                        crate::run::slots::take(&dir, limit, ctl.cancel.as_deref(), |line| {
+                        crate::run::slots::take(&dir, limit, name, ctl.cancel.as_deref(), |line| {
                             let _ = note_tx.try_send(ProgressUpdate::Log(name.to_string(), line));
                         })
                         .await?;

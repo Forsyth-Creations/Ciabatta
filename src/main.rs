@@ -3026,6 +3026,26 @@ fn cmd_self_lint(json: bool) -> Result<()> {
     Ok(())
 }
 
+/// `ciabatta self reset`: stop what ciabatta has running and free the slots.
+async fn cmd_self_reset() -> Result<()> {
+    let report = run::reset::reset().await?;
+    match report.daemon {
+        Some(pid) => println!("Stopped the ciabatta daemon (pid {pid})."),
+        None => println!("The ciabatta daemon wasn't running."),
+    }
+    for holder in &report.runs {
+        println!(
+            "Killed `{}` (pid {}), which held a run slot since {}.",
+            holder.workflow, holder.pid, holder.since
+        );
+    }
+    if report.runs.is_empty() {
+        println!("No other run was holding a slot.");
+    }
+    println!("Cleared every run slot.");
+    Ok(())
+}
+
 /// Dispatch `ciabatta self update`.
 ///
 /// The binary comes from the cache the workspace already trusts for artifacts,
@@ -3035,6 +3055,7 @@ async fn cmd_self(subcommand: SelfCommand) -> Result<()> {
     let (from, check, force) = match subcommand {
         SelfCommand::Update { from, check, force } => (from, check, force),
         SelfCommand::Lint { json } => return cmd_self_lint(json),
+        SelfCommand::Reset => return cmd_self_reset().await,
     };
 
     let url = match from {

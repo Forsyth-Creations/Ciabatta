@@ -167,10 +167,24 @@ fn csi(s: &str) -> Option<Csi<'_>> {
     })
 }
 
+/// How long a command's output is still read after the command itself exits.
+///
+/// Long enough for whatever it wrote last to arrive; past it, whatever still
+/// holds the pipes open is something the command started in the background.
+const AFTER_EXIT: std::time::Duration = std::time::Duration::from_secs(1);
+
 /// Drive a spawned child to completion, streaming its stdout and stderr into
 /// `sink` line-by-line as they are produced. Reading both pipes concurrently
 /// avoids a deadlock where a child blocks writing to a full stderr pipe while we
 /// only drain stdout.
+///
+/// The command is over when the child exits, not when its pipes close. A step
+/// that starts something in the background — `server &`, `nohup … &` — leaves
+/// that process holding the pipes it inherited, and waiting for them to close
+/// would hold the step (and its run, and its run slot) open for as long as the
+/// background process lives. So once the child has exited, its output is read
+/// for [`AFTER_EXIT`] more and then left to a task that drains it, which keeps
+/// the background process from dying of a closed pipe the next time it writes.
 async fn stream_child_output(
     mut child: tokio::process::Child,
     sink: &mut LogSink<'_>,
@@ -179,8 +193,17 @@ async fn stream_child_output(
 
     let mut out = child.stdout.take().map(|s| BufReader::new(s).lines());
     let mut err = child.stderr.take().map(|s| BufReader::new(s).lines());
+    let mut status = None;
+    let after_exit = tokio::time::sleep(std::time::Duration::MAX);
+    tokio::pin!(after_exit);
 
     loop {
+        if out.is_none()
+            && err.is_none()
+            && let Some(status) = status
+        {
+            return Ok(status);
+        }
         tokio::select! {
             res = async { out.as_mut().unwrap().next_line().await }, if out.is_some() => {
                 match res? {
@@ -194,11 +217,33 @@ async fn stream_child_output(
                     None => err = None,
                 }
             }
-            else => break,
+            res = child.wait(), if status.is_none() => {
+                status = Some(res?);
+                after_exit
+                    .as_mut()
+                    .reset(tokio::time::Instant::now() + AFTER_EXIT);
+            }
+            () = &mut after_exit, if status.is_some() => break,
         }
     }
 
-    Ok(child.wait().await?)
+    sink.push(
+        "(a process this command started in the background is still running; \
+         not waiting for it)"
+            .to_string(),
+    );
+    drain(out.map(|lines| lines.into_inner()));
+    drain(err.map(|lines| lines.into_inner()));
+    Ok(status.expect("only reached once the child has exited"))
+}
+
+/// Read `pipe` to its end in the background, throwing the output away.
+fn drain(pipe: Option<impl tokio::io::AsyncRead + Unpin + Send + 'static>) {
+    if let Some(mut pipe) = pipe {
+        tokio::spawn(async move {
+            let _ = tokio::io::copy(&mut pipe, &mut tokio::io::sink()).await;
+        });
+    }
 }
 
 /// Shared options for a registry operation.
@@ -758,6 +803,33 @@ mod tests {
             "the first line arrived only {lead:?} before the command finished — it was \
              buffered until exit rather than streamed"
         );
+    }
+
+    #[tokio::test]
+    async fn a_command_ends_when_it_exits_not_when_its_background_jobs_do() {
+        // The background `sleep` inherits stdout and keeps it open. The step —
+        // and the run slot behind it — used to wait the full 30s for it.
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let mut lines = Vec::new();
+        let started = std::time::Instant::now();
+        {
+            let mut sink = LogSink::streaming(&mut lines, tx);
+            run_shell_command(
+                "sleep 30 & echo started",
+                Path::new("."),
+                &HashMap::new(),
+                &mut sink,
+            )
+            .await
+            .unwrap();
+        }
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(15),
+            "waited {:?} on a background job",
+            started.elapsed()
+        );
+        assert_eq!(lines[0], "started");
+        assert!(lines[1].contains("still running"), "{lines:?}");
     }
 
     #[test]

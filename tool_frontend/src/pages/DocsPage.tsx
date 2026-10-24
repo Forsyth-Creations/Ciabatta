@@ -573,6 +573,10 @@ const COMMANDS: CommandGroup[] = [
         note: "Update this binary from the remote cache serving it. If its directory needs sudo, see \"Handing out ciabatta itself\" under Remote cache.",
       },
       {
+        usage: "ciabatta self reset",
+        note: "Stop everything ciabatta has running on this machine and free every run slot: stops the daemon (and the runs and watch sessions it keeps), kills each run still holding a slot along with what it started, and clears ~/.ciabatta/run-slots. For a run stuck \"waiting for a run slot\" that nothing should be holding. See \"Limit how many runs go at once\".",
+      },
+      {
         usage: "ciabatta python <wheel|install>",
         note: "The Python library for ciabatta input, carried in this binary: `wheel --out DIR` writes ciabatta_py-<version>-py3-none-any.whl (the ciabatta-py distribution), `install [--python PY] [-- PIP_ARGS]` pip-installs it. See \"Ask for a value mid-run\".",
       },
@@ -2513,6 +2517,20 @@ ciabatta.pause("Flip the maintenance switch, then continue")`}</Pre>
           can&apos;t leave a slot taken. This is separate from <C>--jobs</C>, which limits how
           many steps one run executes side by side.
         </P>
+        <P>
+          The waiting message names the run holding the slot — its workflow, pid and when it took
+          it. A step is finished when its command exits, even if it started something in the
+          background (<C>server &amp;</C>): ciabatta reads that process&apos;s output for one more
+          second, notes{" "}
+          <C>a process this command started in the background is still running</C>, and moves
+          on, leaving it running.
+        </P>
+        <Alert severity="info" sx={{ my: 2 }}>
+          If a run is waiting on a slot that nothing should be holding, run{" "}
+          <C>ciabatta self reset</C>. It stops the daemon and every run that still holds a slot,
+          along with whatever they started, then clears the slot files. The daemon starts again
+          the next time something needs it.
+        </Alert>
       </>
     ),
   },

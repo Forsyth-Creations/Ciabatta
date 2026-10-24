@@ -869,6 +869,18 @@ pub enum SelfCommand {
         #[arg(long)]
         json: bool,
     },
+
+    /// Stop everything ciabatta has running on this machine and free every
+    /// run slot.
+    ///
+    /// For when a run waits for a slot that nothing should be holding. Stops
+    /// the daemon — and the runs and watch sessions it keeps — kills every run
+    /// that still holds a slot along with what it started, and clears
+    /// `~/.ciabatta/run-slots`. The daemon starts again the next time it's
+    /// needed.
+    ///
+    ///   ciabatta self reset
+    Reset,
 }
 
 /// Parses a bare `ciabatta <workflow> [flags]` invocation.

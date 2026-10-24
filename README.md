@@ -935,7 +935,10 @@ workspace:
 `max_concurrent_runs` counts every run of the workspace on the machine — the
 terminal, the daemon, a second terminal — and is **1 unless set**. A run past
 the limit waits for a slot before its first step, says so, and starts as soon
-as one frees up. A run started by a step of another run shares its slot.
+as one frees up, naming the run that holds the slot. A run started by a step
+of another run shares its slot. If a run waits on a slot that nothing should
+be holding, `ciabatta self reset` stops the daemon and every run holding a
+slot, and clears `~/.ciabatta/run-slots`.
 
 ### Watching and building runs in the browser
 

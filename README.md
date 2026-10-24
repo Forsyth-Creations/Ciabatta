@@ -955,6 +955,17 @@ ciabatta deploy --gui         # live view: graph + streaming logs + fix buttons
 per-step logs, and interactive recovery. The daemon owns the run, so it keeps
 going if you close the terminal.
 
+**Edit graph** on a run's page switches its graph into edit mode. Click a step
+to remove it (whatever needed it then needs what it needed), take away
+something it needs, or add a dependency from a searchable list. That can be
+another step of its workflow, or another sub-workspace's workflow, which the
+whole workflow then waits for (its `needs:`). Nothing is written until
+**Save**. Save writes each workflow file exactly as shown, touching only the
+lines that change and keeping comments. It checks every file reads back as
+shown, and if one doesn't, none are written. Workflows written inside a
+`ciabatta.yaml` rather than in `.ciabatta/workflows/<name>.yaml`, TOML
+workflows, and `[workspace] depends_on` are shown but can't be edited there.
+
 ## Caching
 
 Off until a workspace opts in. A cache that turns itself on is a cache that will

@@ -17,7 +17,12 @@ import { statusColour } from "./StatusIcon";
 import { STEP_LAYOUT, StepLine, StepNodeBody, stepNodeHeight, stepNodeStyle } from "./StepNode";
 
 export interface GraphStep {
+  /** Unique: what `needs` refer to it by. */
   name: string;
+  /** What the node shows, when that isn't the name. */
+  label?: string;
+  /** Drawn in the primary colour — the step a page has picked. */
+  highlight?: boolean;
   workspace?: string | null;
   status: string;
   /** Steps this one waits for. Names not in the list are ignored. */
@@ -66,7 +71,7 @@ export function StepGraph({
           status: s.status,
           label: (
             <StepNodeBody
-              name={s.name}
+              name={s.label ?? s.name}
               workspace={s.workspace}
               status={s.status}
               detail={s.detail ?? s.status}
@@ -85,7 +90,11 @@ export function StepGraph({
         style: stepNodeStyle({
           theme,
           height: heightOf(node.id),
-          border: s.reused ? theme.palette.success.main : statusColour(s.status, theme),
+          border: s.highlight
+            ? theme.palette.primary.main
+            : s.reused
+              ? theme.palette.success.main
+              : statusColour(s.status, theme),
           dashed: s.recover,
           opacity: s.status === "skipped" || s.status === "pending" ? 0.7 : 1,
         }),
@@ -117,7 +126,9 @@ export function StepGraph({
       height={height}
       onNodeClick={onNodeClick}
       minimap={minimap}
-      fitKey={steps.map((s) => s.name).join("\u0000")}
+      // Refit when the shape changes, not just the set of nodes: an edited
+      // graph that gains an edge can push a node off the canvas.
+      fitKey={steps.map((s) => `${s.name}<${(s.needs ?? []).join(",")}`).join("\u0000")}
       nodeColor={(node) => {
         const s = steps.find((x) => x.name === node.id);
         if (!s) return theme.palette.divider;

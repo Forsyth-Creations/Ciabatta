@@ -2355,6 +2355,46 @@ cd packages/api && ciabatta build           # same as --only api; --all for ever
           just made stale, immediately. The bin icon on a run deletes that one; a run still going
           has to be stopped first.
         </P>
+        <SubHeading>Edit the graph</SubHeading>
+        <P>
+          <strong>Edit graph</strong> in a run&apos;s header switches its graph into edit mode,
+          showing the workflows as their files declare them. Click a step, then:
+        </P>
+        <Bullets
+          items={[
+            <>
+              <strong>Remove step</strong> takes it out of its workflow. Whatever needed it now
+              needs what it needed, so the order around the gap holds. A step that another
+              step&apos;s <C>on_error</C> or <C>retry</C> routes to can&apos;t be removed on its
+              own.
+            </>,
+            <>
+              The <strong>×</strong> on a dependency drops it, from the step&apos;s{" "}
+              <C>needs</C> or from the workflow&apos;s own.
+            </>,
+            <>
+              <strong>Add a dependency</strong> searches every target there is: another step of
+              the same workflow (added to the step&apos;s <C>needs</C>), or another
+              sub-workspace&apos;s workflow, which the <em>whole</em> workflow then waits for
+              (added to the workflow&apos;s <C>needs</C>). Anything that would make a cycle
+              isn&apos;t offered.
+            </>,
+          ]}
+        />
+        <P>
+          Nothing is written until <strong>Save</strong>. The changes are listed beside the
+          graph until then, and <strong>Discard changes</strong> puts the graph back. Save
+          writes each workflow file exactly as shown, so a dependency you removed really is
+          gone. It touches only the lines that change, keeping comments and key order, and
+          checks every file reads back as shown before writing any of them. Run again to use the
+          new graph.
+        </P>
+        <Alert severity="info" sx={{ my: 2 }}>
+          Only <C>.ciabatta/workflows/&lt;name&gt;.yaml</C> files can be edited here. A workflow
+          written inside a <C>ciabatta.yaml</C>, or in TOML, is shown with the reason it&apos;s
+          locked, and <C>[workspace] depends_on</C> is shown but lives in the
+          sub-workspace&apos;s config.
+        </Alert>
       </>
     ),
   },

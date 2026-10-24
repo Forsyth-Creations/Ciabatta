@@ -23,6 +23,57 @@ pub fn router() -> Router<AppState> {
         .route("/api/workspace", get(catalogue))
         .route("/api/workspace/graph", get(graph))
         .route("/api/workspace/env-drift", get(env_drift))
+        .route("/api/workspace/declared", get(declared).post(save_declared))
+}
+
+#[derive(Deserialize)]
+pub struct DeclaredQuery {
+    project: String,
+    /// `<member>:<workflow>` units, comma-separated.
+    units: String,
+}
+
+/// What the workflow files say about the given workflows' graphs — their
+/// steps and what each needs — for the run page's graph editor, plus every
+/// workflow in the workspace a workflow may be made to need.
+async fn declared(
+    State(state): State<AppState>,
+    Query(query): Query<DeclaredQuery>,
+) -> RouteResult<Json<Value>> {
+    let root = state.project_root(&query.project)?;
+    let workspace = Workspace::discover(&root).map_err(RouteError::bad_request)?;
+    let units: Vec<String> = query
+        .units
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect();
+    let declared =
+        workspace::edit::declared(&workspace, &units).map_err(RouteError::bad_request)?;
+    Ok(Json(json!({
+        "units": declared,
+        "targets": workspace::edit::targets(&workspace),
+    })))
+}
+
+#[derive(Deserialize)]
+pub struct SaveDeclaredPayload {
+    project: String,
+    units: Vec<workspace::edit::UnitEdit>,
+}
+
+/// Save the graph editor's workflows back to their files: each one exactly
+/// as sent, all of them or none.
+async fn save_declared(
+    State(state): State<AppState>,
+    Json(payload): Json<SaveDeclaredPayload>,
+) -> RouteResult<Json<Value>> {
+    let root = state.project_root(&payload.project)?;
+    let workspace = Workspace::discover(&root).map_err(RouteError::bad_request)?;
+    let written =
+        workspace::edit::save(&workspace, &payload.units).map_err(RouteError::bad_request)?;
+    Ok(Json(json!({ "written": written })))
 }
 
 /// Which `.env` files have changed since ciabatta last ran here.

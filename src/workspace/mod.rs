@@ -15,6 +15,7 @@
 //! * [`graph`] compiles a named workflow into a single dependency graph.
 //! * [`render`] draws that graph, and lists what's available across the repo.
 
+pub mod edit;
 pub mod graph;
 pub mod lint;
 pub mod render;

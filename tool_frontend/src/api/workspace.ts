@@ -6,7 +6,7 @@
  * catalogue arrives in one request and searching happens in the browser.
  */
 
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { api } from "./client";
 import type { EnvReport } from "./types";
@@ -236,4 +236,63 @@ export function workflowMatches(
     ]),
   ];
   return haystack.some((value) => value.toLowerCase().includes(needle));
+}
+
+/** One workflow's graph as its file declares it, for the graph editor. */
+export interface DeclaredUnit {
+  member: string;
+  workflow: string;
+  /** The workflow file, relative to the workspace root, when it can be edited. */
+  file: string | null;
+  /** Why it can't be edited here, when it can't. */
+  locked: string | null;
+  /** The workflow's own `needs`: other sub-workspaces' workflows. */
+  needs: string[];
+  /** `[workspace] depends_on`: also orders it, but lives in the config. */
+  depends_on: string[];
+  steps: {
+    name: string;
+    needs: string[];
+    /** Where its `on_error` / `retry` route: those steps can't be pruned. */
+    routes: string[];
+    recover: boolean;
+    background: boolean;
+  }[];
+}
+
+export interface Declared {
+  units: DeclaredUnit[];
+  /** Every `<member>:<workflow>` in the workspace. */
+  targets: string[];
+}
+
+/** What the files say about `units` (`<member>:<workflow>` each). */
+export function useDeclared(project: string | undefined, units: string[]) {
+  const key = units.join(",");
+  return useQuery({
+    queryKey: ["workspace", "declared", project ?? "", key] as const,
+    queryFn: () =>
+      api.get<Declared>(
+        `/api/workspace/declared?project=${project}&units=${encodeURIComponent(key)}`,
+      ),
+    enabled: Boolean(project) && units.length > 0,
+  });
+}
+
+/** The graph as it should be saved: every step kept, with all it needs. */
+export interface UnitEdit {
+  member: string;
+  workflow: string;
+  needs: string[];
+  steps: { name: string; needs: string[] }[];
+}
+
+/** Write edited graphs back to their workflow files — all of them, or none. */
+export function useSaveDeclared() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (body: { project: string; units: UnitEdit[] }) =>
+      api.post<{ written: string[] }>("/api/workspace/declared", body),
+    onSuccess: () => client.invalidateQueries({ queryKey: ["workspace"] }),
+  });
 }

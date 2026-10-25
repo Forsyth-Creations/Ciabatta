@@ -366,6 +366,7 @@ const COMMANDS: CommandGroup[] = [
           ["--graph", "Print the resolved graph and run nothing."],
           ["--dry-run", "Walk every step, executing none of them."],
           ["--force", "Ignore the cache and run every step. Results are still stored, so the next run reuses them."],
+          ["--start-anyway", "Start now, even when the workspace already has as many runs going as workspace.max_concurrent_runs allows. The run takes no slot. Also works with --gui."],
           ["-j, --jobs N", "How many steps may run at once. Defaults to CIABATTA_JOBS, then the CPU count; -j 1 runs them one at a time."],
           ["--env-profile NAME", "Copy each workspace's .ciabatta/.env.NAME into its .env first (backing up a hand-written .env). Also spelled --env_profile."],
           ["-e KEY=VALUE", "Set a variable for every step. Beats .env and CI."],
@@ -571,6 +572,10 @@ const COMMANDS: CommandGroup[] = [
       {
         usage: "ciabatta self update",
         note: "Update this binary from the remote cache serving it. If its directory needs sudo, see \"Handing out ciabatta itself\" under Remote cache.",
+      },
+      {
+        usage: "ciabatta self reset",
+        note: "Stop everything ciabatta has running on this machine and free every run slot: stops the daemon (and the runs and watch sessions it keeps), kills each run still holding a slot along with what it started, and clears ~/.ciabatta/run-slots. For a run stuck \"waiting for a run slot\" that nothing should be holding. See \"Limit how many runs go at once\".",
       },
       {
         usage: "ciabatta python <wheel|install>",
@@ -1819,6 +1824,11 @@ required_env: [API_URL, DEPLOY_TOKEN] # must be set, or the run won't start`}</P
             <>
               <strong>Nothing found?</strong> The variable is unset, and a{" "}
               <C>required_env</C> variable that is unset stops the run before any step starts.
+              The terminal says so in yellow, names each missing variable, and lists every way
+              to set it with the names filled in — as a custom argument (
+              <C>ciabatta deploy ... --api-token=…</C>), with <C>-e API_TOKEN=…</C>, in which{" "}
+              <C>.env</C>, or exported in the shell — so the fix can be copied straight out of the
+              message.
             </>,
           ]}
         />
@@ -2345,6 +2355,51 @@ cd packages/api && ciabatta build           # same as --only api; --all for ever
           just made stale, immediately. The bin icon on a run deletes that one; a run still going
           has to be stopped first.
         </P>
+        <SubHeading>Edit the graph</SubHeading>
+        <P>
+          <strong>Edit graph</strong> in a run&apos;s header switches its graph into edit mode,
+          showing the workflows as their files declare them. Click a step, then:
+        </P>
+        <Bullets
+          items={[
+            <>
+              <strong>Remove step</strong> takes it out of its workflow. Whatever needed it now
+              needs what it needed, so the order around the gap holds. A step that another
+              step&apos;s <C>on_error</C> or <C>retry</C> routes to can&apos;t be removed on its
+              own.
+            </>,
+            <>
+              The <strong>×</strong> on a dependency drops it, from the step&apos;s{" "}
+              <C>needs</C> or from the workflow&apos;s own.
+            </>,
+            <>
+              <strong>Add a dependency</strong> searches every target there is: another step of
+              the same workflow (added to the step&apos;s <C>needs</C>), or another
+              sub-workspace&apos;s workflow, which the <em>whole</em> workflow then waits for
+              (added to the workflow&apos;s <C>needs</C>). Anything that would make a cycle
+              isn&apos;t offered.
+            </>,
+          ]}
+        />
+        <P>
+          Steps stay where they are while you edit. One only moves when it has to: to the right
+          when something it needs now comes level with it or later, or up or down to make room
+          for a new wire. The view pans only if a step that moved went off the edge.
+        </P>
+        <P>
+          Nothing is written until <strong>Save</strong>. The changes are listed beside the
+          graph until then, and <strong>Discard changes</strong> puts the graph back. Save
+          writes each workflow file exactly as shown, so a dependency you removed really is
+          gone. It touches only the lines that change, keeping comments and key order, and
+          checks every file reads back as shown before writing any of them. Run again to use the
+          new graph.
+        </P>
+        <Alert severity="info" sx={{ my: 2 }}>
+          Only <C>.ciabatta/workflows/&lt;name&gt;.yaml</C> files can be edited here. A workflow
+          written inside a <C>ciabatta.yaml</C>, or in TOML, is shown with the reason it&apos;s
+          locked, and <C>[workspace] depends_on</C> is shown but lives in the
+          sub-workspace&apos;s config.
+        </Alert>
       </>
     ),
   },
@@ -2508,11 +2563,30 @@ ciabatta.pause("Flip the maintenance switch, then continue")`}</Pre>
           <C>ciabatta test</C> — shares its parent&apos;s slot rather than waiting on it.
         </P>
         <P>
+          To start one run now regardless, pass <C>--start-anyway</C>: it skips the wait and
+          takes no slot, so it doesn&apos;t hold up anyone else either. The waiting message
+          suggests it.
+        </P>
+        <P>
           Slots are file locks under <C>~/.ciabatta/run-slots/</C>, which the operating system
           releases when their holder exits — so a run that was killed, or a daemon that crashed,
           can&apos;t leave a slot taken. This is separate from <C>--jobs</C>, which limits how
           many steps one run executes side by side.
         </P>
+        <P>
+          The waiting message names the run holding the slot — its workflow, pid and when it took
+          it. A step is finished when its command exits, even if it started something in the
+          background (<C>server &amp;</C>): ciabatta reads that process&apos;s output for one more
+          second, notes{" "}
+          <C>a process this command started in the background is still running</C>, and moves
+          on, leaving it running.
+        </P>
+        <Alert severity="info" sx={{ my: 2 }}>
+          If a run is waiting on a slot that nothing should be holding, run{" "}
+          <C>ciabatta self reset</C>. It stops the daemon and every run that still holds a slot,
+          along with whatever they started, then clears the slot files. The daemon starts again
+          the next time something needs it.
+        </Alert>
       </>
     ),
   },

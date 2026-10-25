@@ -869,6 +869,18 @@ pub enum SelfCommand {
         #[arg(long)]
         json: bool,
     },
+
+    /// Stop everything ciabatta has running on this machine and free every
+    /// run slot.
+    ///
+    /// For when a run waits for a slot that nothing should be holding. Stops
+    /// the daemon — and the runs and watch sessions it keeps — kills every run
+    /// that still holds a slot along with what it started, and clears
+    /// `~/.ciabatta/run-slots`. The daemon starts again the next time it's
+    /// needed.
+    ///
+    ///   ciabatta self reset
+    Reset,
 }
 
 /// Parses a bare `ciabatta <workflow> [flags]` invocation.
@@ -949,6 +961,12 @@ pub struct WorkflowArgs {
     /// refresh entries you don't trust.
     #[arg(long)]
     pub force: bool,
+
+    /// Start now, even when this workspace already has as many runs going on
+    /// this machine as `workspace.max_concurrent_runs` allows. The run takes
+    /// no slot, so it doesn't hold anyone else up either.
+    #[arg(long)]
+    pub start_anyway: bool,
 
     /// How many steps may run at once. Steps whose dependencies are met run
     /// side by side; `-j 1` runs them one at a time, as ciabatta used to.

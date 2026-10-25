@@ -87,7 +87,7 @@ async fn main() -> Result<()> {
         }
 
         Commands::Workflow(args) => {
-            cmd_workflow(args, false, &custom_args).await?;
+            plainly(cmd_workflow(args, false, &custom_args).await)?;
         }
 
         Commands::Input {
@@ -143,7 +143,7 @@ async fn main() -> Result<()> {
                 std::iter::once("ciabatta".to_string()).chain(argv),
             )
             .map_err(|e| anyhow::anyhow!(e.to_string()))?;
-            cmd_workflow(invocation.args, true, &custom_args).await?;
+            plainly(cmd_workflow(invocation.args, true, &custom_args).await)?;
         }
 
         Commands::List {
@@ -382,6 +382,24 @@ fn unknown_workflow(err: &anyhow::Error) -> bool {
 /// after `ciabatta workflow`. That's also how a mistyped command arrives here,
 /// so an unknown name gets an extra line pointing at `--help` — otherwise
 /// `ciabatta pusj` would only ever complain about workflows.
+/// Print an error that is already the whole explanation on its own, in yellow,
+/// rather than as `Error: …`, and exit; pass anything else through.
+fn plainly(result: Result<()>) -> Result<()> {
+    let Err(err) = result else {
+        return Ok(());
+    };
+    let Some(missing) = err.downcast_ref::<environment::files::MissingEnv>() else {
+        return Err(err);
+    };
+    use std::io::IsTerminal;
+    let style = color::paint(
+        color::for_stream(std::io::stderr().is_terminal()),
+        owo_colors::Style::new().yellow(),
+    );
+    eprintln!("{}", missing.style(style));
+    std::process::exit(1);
+}
+
 async fn cmd_workflow(
     mut args: cli::WorkflowArgs,
     bare_name: bool,
@@ -569,6 +587,7 @@ async fn cmd_workflow(
             sandbox_also: args.sandbox_also.clone(),
             force: args.force,
             jobs: args.jobs,
+            start_anyway: args.start_anyway,
             ..Default::default()
         },
     )
@@ -772,6 +791,7 @@ async fn cmd_workflow_gui(
             "env": vars,
             "dry_run": args.dry_run,
             "force": args.force,
+            "start_anyway": args.start_anyway,
             // Sent as typed, not only as the variables they became: the daemon
             // keeps them with the run, so "run again" repeats them.
             "args": custom_args,
@@ -3026,6 +3046,26 @@ fn cmd_self_lint(json: bool) -> Result<()> {
     Ok(())
 }
 
+/// `ciabatta self reset`: stop what ciabatta has running and free the slots.
+async fn cmd_self_reset() -> Result<()> {
+    let report = run::reset::reset().await?;
+    match report.daemon {
+        Some(pid) => println!("Stopped the ciabatta daemon (pid {pid})."),
+        None => println!("The ciabatta daemon wasn't running."),
+    }
+    for holder in &report.runs {
+        println!(
+            "Killed `{}` (pid {}), which held a run slot since {}.",
+            holder.workflow, holder.pid, holder.since
+        );
+    }
+    if report.runs.is_empty() {
+        println!("No other run was holding a slot.");
+    }
+    println!("Cleared every run slot.");
+    Ok(())
+}
+
 /// Dispatch `ciabatta self update`.
 ///
 /// The binary comes from the cache the workspace already trusts for artifacts,
@@ -3035,6 +3075,7 @@ async fn cmd_self(subcommand: SelfCommand) -> Result<()> {
     let (from, check, force) = match subcommand {
         SelfCommand::Update { from, check, force } => (from, check, force),
         SelfCommand::Lint { json } => return cmd_self_lint(json),
+        SelfCommand::Reset => return cmd_self_reset().await,
     };
 
     let url = match from {

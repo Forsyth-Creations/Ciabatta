@@ -43,6 +43,7 @@ import ReplayIcon from "@mui/icons-material/Replay";
 import TerminalIcon from "@mui/icons-material/Terminal";
 import TuneIcon from "@mui/icons-material/Tune";
 import ViewQuiltIcon from "@mui/icons-material/ViewQuilt";
+import EditIcon from "@mui/icons-material/AccountTree";
 import RequiredIcon from "@mui/icons-material/Emergency";
 import OptionalIcon from "@mui/icons-material/HelpOutline";
 import { IconButton } from "@mui/material";
@@ -83,6 +84,7 @@ import {
 } from "../components/BoxLayout";
 import { RecreateDrawer } from "../components/RecreateDrawer";
 import { EnvPrompt } from "../components/EnvPrompt";
+import { GraphEditor } from "../components/GraphEditor";
 import {
   EnvList,
   EnvVarChip,
@@ -326,6 +328,7 @@ export function RunDetailPage() {
   const [recreating, setRecreating] = useState(false);
   const rerun = useRerunRun();
   const [needsEnv, setNeedsEnv] = useState<string[] | null>(null);
+  const [editing, setEditing] = useState(false);
   // Held here rather than in the workflow panel, so the header can offer to
   // reset it — and so switching workflow tabs keeps the arrangement.
   const layout = useBoxLayout(RUN_LAYOUT_KEY, RUN_LAYOUT);
@@ -335,6 +338,17 @@ export function RunDetailPage() {
 
   const workflow = state.workflows[workflowIndex];
   const status = state.run.status ?? (state.done ? "success" : "running");
+  // The workflow files behind this run's steps, for the graph editor: each
+  // step's cache id is `<member>:<workflow>:<step>`.
+  const stepStatus: Record<string, string> = {};
+  for (const step of workflow?.steps ?? []) {
+    if (step.cache_id) stepStatus[step.cache_id] = step.status;
+  }
+  const units = [
+    ...new Set(
+      Object.keys(stepStatus).map((id) => id.slice(0, id.lastIndexOf(":"))),
+    ),
+  ];
   const timing = state.run.started_at ? state.run : null;
 
   const again = (env?: Record<string, string>) =>
@@ -411,6 +425,25 @@ export function RunDetailPage() {
           </Tooltip>
         )}
         <InspectToggle />
+        <Tooltip
+          title={
+            units.length
+              ? "Prune steps and change what they need, then save it to the workflow files."
+              : "This run's steps don't come from workflow files, so there's nothing to edit."
+          }
+        >
+          <Box component="span">
+            <Button
+              size="small"
+              startIcon={<EditIcon />}
+              variant={editing ? "contained" : "text"}
+              disabled={units.length === 0}
+              onClick={() => setEditing((on) => !on)}
+            >
+              Edit graph
+            </Button>
+          </Box>
+        </Tooltip>
         <Tooltip title="Show the exact commands this run executed, in order, with the directory each one runs from — and where it has got to.">
           <Button size="small" startIcon={<TerminalIcon />} onClick={() => setRecreating(true)}>
             Recreate
@@ -476,7 +509,16 @@ export function RunDetailPage() {
         </Tabs>
       )}
 
-      {workflow && (
+      {workflow && editing && (
+        <GraphEditor
+          project={state.run.project}
+          units={units}
+          status={stepStatus}
+          onClose={() => setEditing(false)}
+        />
+      )}
+
+      {workflow && !editing && (
         <WorkflowPanel
           runId={id}
           project={state.run.project}

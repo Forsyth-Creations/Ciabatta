@@ -830,8 +830,11 @@ the TUI log, and on the run's page — with a nudge to move them into an env
 profile if the run needs them every time.
 
 **`required_env`** lists variables the workflow needs. Before anything runs,
-each is checked; if one is empty or unset the run is aborted — the missing
-names are printed to the console and shown in the `--gui` view, and no step runs.
+each is checked; if one is empty or unset the run is aborted and no step runs.
+The terminal says so in yellow, naming each missing variable and every way to
+set it with the names filled in — `ciabatta deploy ... --api-token=…`,
+`-e API_TOKEN=…`, a line in the right `.env`, or `export` — and the `--gui` view
+shows the same.
 
 Started from the **web app**, a missing variable isn't a failure — the launcher
 refuses to start the run and asks you for the values instead, then starts it with
@@ -935,7 +938,11 @@ workspace:
 `max_concurrent_runs` counts every run of the workspace on the machine — the
 terminal, the daemon, a second terminal — and is **1 unless set**. A run past
 the limit waits for a slot before its first step, says so, and starts as soon
-as one frees up. A run started by a step of another run shares its slot.
+as one frees up, naming the run that holds the slot. A run started by a step
+of another run shares its slot. `--start-anyway` starts a run now regardless,
+without taking a slot. If a run waits on a slot that nothing should
+be holding, `ciabatta self reset` stops the daemon and every run holding a
+slot, and clears `~/.ciabatta/run-slots`.
 
 ### Watching and building runs in the browser
 
@@ -947,6 +954,17 @@ ciabatta deploy --gui         # live view: graph + streaming logs + fix buttons
 `http://127.0.0.1:8099/run/<id>` showing each step lighting up as it runs,
 per-step logs, and interactive recovery. The daemon owns the run, so it keeps
 going if you close the terminal.
+
+**Edit graph** on a run's page switches its graph into edit mode. Click a step
+to remove it (whatever needed it then needs what it needed), take away
+something it needs, or add a dependency from a searchable list. That can be
+another step of its workflow, or another sub-workspace's workflow, which the
+whole workflow then waits for (its `needs:`). Nothing is written until
+**Save**. Save writes each workflow file exactly as shown, touching only the
+lines that change and keeping comments. It checks every file reads back as
+shown, and if one doesn't, none are written. Workflows written inside a
+`ciabatta.yaml` rather than in `.ciabatta/workflows/<name>.yaml`, TOML
+workflows, and `[workspace] depends_on` are shown but can't be edited there.
 
 ## Caching
 

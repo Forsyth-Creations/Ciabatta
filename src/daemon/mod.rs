@@ -423,6 +423,9 @@ fn spawn_detached(port: u16) -> Result<()> {
         .arg("serve")
         .arg("--port")
         .arg(port.to_string())
+        // Started from inside a step, it would otherwise carry that run's slot
+        // for life and treat every run it is asked for as nested in it.
+        .env_remove(crate::run::slots::SLOT_VAR)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(errors)

@@ -274,6 +274,9 @@ pub struct RunCtl {
     /// How many steps may run at once (`--jobs`). `None` defers to
     /// `CIABATTA_JOBS`, then to the machine's CPU count — see [`Self::jobs`].
     pub jobs: Option<usize>,
+    /// `--start-anyway`: start now even when the workspace's run slots are
+    /// all taken (`workspace.max_concurrent_runs`), without taking one.
+    pub start_anyway: bool,
 }
 
 impl RunCtl {
@@ -307,6 +310,7 @@ impl Default for RunCtl {
             force: false,
             cancel: None,
             jobs: None,
+            start_anyway: false,
         }
     }
 }
@@ -367,15 +371,16 @@ pub async fn run_workflow_ctl(
         // `(slot, dir)`: the slot this run holds — none when it shares its
         // parent's — and the directory its steps are told about.
         let slot = match crate::run::slots::limit(&workspace) {
-            // A dry run does no work, so it takes no slot.
-            Some(limit) if !dry_run => {
+            // A dry run does no work, so it takes no slot; `--start-anyway`
+            // asked not to wait for one.
+            Some(limit) if !dry_run && !ctl.start_anyway => {
                 let dir = crate::run::slots::dir_for(root)?;
                 if crate::run::slots::inherited(&dir, env_vars) {
                     Some((None, dir))
                 } else {
                     let note_tx = inner_tx.clone();
                     let held =
-                        crate::run::slots::take(&dir, limit, ctl.cancel.as_deref(), |line| {
+                        crate::run::slots::take(&dir, limit, name, ctl.cancel.as_deref(), |line| {
                             let _ = note_tx.try_send(ProgressUpdate::Log(name.to_string(), line));
                         })
                         .await?;

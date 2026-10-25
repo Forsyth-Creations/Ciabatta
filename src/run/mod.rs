@@ -17,6 +17,7 @@ pub mod history;
 pub mod input;
 pub mod isolate;
 pub mod release;
+pub mod reset;
 pub mod slots;
 pub mod transfer;
 pub mod view;

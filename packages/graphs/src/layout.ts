@@ -146,10 +146,18 @@ export interface EdgeRoute {
 /** The key an edge's route is listed under. */
 export const routeKey = (source: string, target: string) => `${source}->${target}`;
 
+/** Where a node or lane was put: its column's depth, and its centre height. */
+export interface Placement {
+  depth: number;
+  y: number;
+}
+
 /** A laid-out graph: the nodes to draw, and the route each edge takes. */
 export interface LayeredGraph {
   nodes: Node[];
   routes: Map<string, EdgeRoute>;
+  /** Where everything went — hand it back as `previous` to hold it there. */
+  placement: Map<string, Placement>;
 }
 
 /**
@@ -248,6 +256,19 @@ export function layeredLayout(
      * label are lined up to start in the same column — see [`alignGroups`].
      */
     align?: (id: string) => { group: string; unit: string } | undefined;
+    /**
+     * The last layout's `placement`, for a graph being edited: everything that
+     * was drawn before stays where it was unless it has to move.
+     *
+     * Laying an edited graph out afresh answers "what's the tidiest picture of
+     * this?", and one changed edge can change that answer everywhere: columns
+     * reorder to cut a crossing, a whole column slides down to centre. Each
+     * edit then scatters the node you were looking at. So with this a node
+     * keeps its column unless something it needs is now level with or after
+     * it, keeps its height unless it would overlap, and only new nodes and
+     * wires are placed — beside what they connect to.
+     */
+    previous?: Map<string, Placement>;
   } = {},
 ): LayeredGraph {
   const columnWidth = options.columnWidth ?? 300;
@@ -265,8 +286,9 @@ export function layeredLayout(
   const layered = ids.filter((id) => !isBottom(id));
   const parked = ids.filter(isBottom);
 
+  const previous = options.previous;
   const ranked = edges.filter((edge) => edge.rank !== false);
-  const depth = computeDepths(layered, ranked);
+  const depth = computeDepths(layered, ranked, (id) => previous?.get(id)?.depth);
   if (options.align) alignGroups(layered, ranked, depth, options.align);
   if (options.pin) {
     for (const id of layered) {
@@ -324,10 +346,18 @@ export function layeredLayout(
   // Where each depth is drawn: by its place among the depths that have
   // anything in them, so a pinned column with nothing to show (variables on,
   // no file sets declared) doesn't leave a blank stripe across the canvas.
-  const columnOf = new Map(depths.map((d, index) => [d, index]));
+  // Except when holding a layout: there, a column that empties would slide
+  // everything after it left, so each depth keeps its own place.
+  const columnOf = new Map(depths.map((d, index) => [d, previous ? d : index]));
+  const columnFor = (d: number) => columnOf.get(d) ?? d;
 
-  reduceCrossings(order, inner);
-  const centres = assignRows(order, inner, distance);
+  let centres: Map<string, number>;
+  if (previous) {
+    centres = holdRows(order, inner, distance, previous, isLane);
+  } else {
+    reduceCrossings(order, inner);
+    centres = assignRows(order, inner, distance);
+  }
 
   const nodes: Node[] = [];
   order.forEach((column, index) => {
@@ -336,7 +366,7 @@ export function layeredLayout(
       nodes.push({
         id,
         data: data(id),
-        position: { x: index * columnWidth, y: centres.get(id)! - heightOf(id) / 2 },
+        position: { x: columnFor(depths[index]) * columnWidth, y: centres.get(id)! - heightOf(id) / 2 },
         type: "default",
         // The graph runs left to right, so edges must leave the right side and
         // arrive at the left. With react-flow's default top/bottom handles
@@ -389,7 +419,7 @@ export function layeredLayout(
   for (const [gap, segments] of gaps) {
     // A chain steps one depth at a time, and every depth it steps through
     // holds at least its lane, so the column after `gap` is always the next.
-    const column = columnOf.get(gap)!;
+    const column = columnFor(gap);
     const left = column * columnWidth + nodeWidth + GAP_MARGIN_LEFT;
     const right = (column + 1) * columnWidth - GAP_MARGIN_RIGHT;
     for (const [key, x] of assignTracks([...segments.values()], left, right)) {
@@ -425,7 +455,12 @@ export function layeredLayout(
     });
   }
 
-  return { nodes, routes };
+  const placement = new Map<string, Placement>();
+  order.forEach((column, index) => {
+    for (const id of column) placement.set(id, { depth: depths[index], y: centres.get(id)! });
+  });
+
+  return { nodes, routes, placement };
 }
 
 /**
@@ -825,6 +860,95 @@ function separate(
   column.forEach((id, index) => rows.set(id, placed[index] - drift));
 }
 
+/**
+ * Centre heights for a graph being edited: everything placed last time wants
+ * its old height, and the rest wants to be level with what feeds it.
+ *
+ * Each column is then sorted by the height it wants and pushed apart by the
+ * least total movement that makes room (`spread`), weighted so a node that was
+ * already on screen hardly moves, and a new wire threading past it moves
+ * instead.
+ */
+function holdRows(
+  order: string[][],
+  edges: { source: string; target: string }[],
+  distance: (above: string, below: string) => number,
+  previous: Map<string, Placement>,
+  isLane: (id: string) => boolean,
+): Map<string, number> {
+  const successors = new Map<string, string[]>();
+  const predecessors = new Map<string, string[]>();
+  for (const edge of edges) {
+    successors.set(edge.source, [...(successors.get(edge.source) ?? []), edge.target]);
+    predecessors.set(edge.target, [...(predecessors.get(edge.target) ?? []), edge.source]);
+  }
+
+  const rows = new Map<string, number>();
+  order.forEach((column, index) => {
+    const wanted = new Map<string, number>();
+    for (const id of column) {
+      const before = previous.get(id)?.y;
+      // Columns go left to right, so what feeds this one is already placed;
+      // what it feeds is only known if it was on screen before.
+      const near = [
+        ...(predecessors.get(id) ?? []).map((other) => rows.get(other)),
+        ...(successors.get(id) ?? []).map((other) => previous.get(other)?.y),
+      ].filter((y): y is number => y !== undefined);
+      if (before !== undefined) wanted.set(id, before);
+      else if (near.length > 0) wanted.set(id, mean(near));
+    }
+    // Connected to nothing on screen: under the rest of the column.
+    let lowest = Math.max(0, ...wanted.values());
+    for (const id of column) {
+      if (!wanted.has(id)) {
+        lowest += distance(column[0], id);
+        wanted.set(id, lowest);
+      }
+    }
+
+    // Stable, so a tie keeps the order the column was built in: nodes first.
+    const sorted = [...column].sort((a, b) => wanted.get(a)! - wanted.get(b)!);
+    order[index] = sorted;
+    const placed = spread(
+      sorted.map((id) => wanted.get(id)!),
+      sorted.map((id, i) => (i === 0 ? 0 : distance(sorted[i - 1], id))),
+      sorted.map((id) => (!previous.has(id) ? 1 : isLane(id) ? 10 : 1000)),
+    );
+    sorted.forEach((id, i) => rows.set(id, placed[i]));
+  });
+
+  return rows;
+}
+
+/**
+ * The heights nearest `wanted` (by weighted squared distance) that keep each
+ * entry at least `gaps[i]` below the one before it.
+ *
+ * Subtracting each entry's running total of gaps turns "at least this far
+ * apart" into "in order", and the nearest in-order sequence is an isotonic
+ * regression: pool adjacent entries that are out of order into their weighted
+ * mean until none are.
+ */
+function spread(wanted: number[], gaps: number[], weights: number[]): number[] {
+  const offsets: number[] = [];
+  let total = 0;
+  for (const gap of gaps) offsets.push((total += gap));
+
+  const blocks: { value: number; weight: number; count: number }[] = [];
+  wanted.forEach((y, i) => {
+    blocks.push({ value: y - offsets[i], weight: weights[i], count: 1 });
+    while (blocks.length > 1 && blocks[blocks.length - 2].value > blocks[blocks.length - 1].value) {
+      const last = blocks.pop()!;
+      const into = blocks[blocks.length - 1];
+      into.value = (into.value * into.weight + last.value * last.weight) / (into.weight + last.weight);
+      into.weight += last.weight;
+      into.count += last.count;
+    }
+  });
+
+  return blocks.flatMap((block) => Array<number>(block.count).fill(block.value)).map((v, i) => v + offsets[i]);
+}
+
 function mean(values: number[]): number {
   return values.reduce((total, value) => total + value, 0) / values.length;
 }
@@ -860,8 +984,13 @@ export function executionOrder(
  * still render something rather than throw. The pass count bounds the work if a
  * cycle is present.
  */
-function computeDepths(ids: string[], edges: { source: string; target: string }[]): Map<string, number> {
-  const depth = new Map<string, number>(ids.map((id) => [id, 0]));
+function computeDepths(
+  ids: string[],
+  edges: { source: string; target: string }[],
+  /** The earliest each node may go, when it already has a column to keep. */
+  floor: (id: string) => number | undefined = () => undefined,
+): Map<string, number> {
+  const depth = new Map<string, number>(ids.map((id) => [id, Math.max(0, floor(id) ?? 0)]));
 
   for (let pass = 0; pass < ids.length; pass++) {
     let changed = false;

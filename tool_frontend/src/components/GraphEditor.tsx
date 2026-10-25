@@ -257,6 +257,7 @@ export function GraphEditor({
           <StepGraph
             steps={steps}
             height={520}
+            holdLayout
             onStepClick={(name) => setSelected(name === selected ? null : name)}
           />
         </Box>

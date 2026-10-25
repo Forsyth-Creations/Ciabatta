@@ -59,6 +59,13 @@ interface GraphCanvasProps {
    * trade when what you're looking at has changed.
    */
   fitKey?: string | number;
+  /**
+   * Keep the view where the user left it when `fitKey` changes, and pan only
+   * as far as it takes to bring nodes that moved or appeared into view. For a
+   * graph being edited, where re-fitting on every change would jump the
+   * picture around under the cursor.
+   */
+  keepView?: boolean;
 }
 
 export function GraphCanvas({
@@ -70,6 +77,7 @@ export function GraphCanvas({
   nodeColor,
   minimap,
   fitKey,
+  keepView,
 }: GraphCanvasProps) {
   const theme = useTheme();
 
@@ -146,7 +154,7 @@ export function GraphCanvas({
       }}
     >
       <ReactFlow
-        key={fitKey}
+        key={keepView ? undefined : fitKey}
         nodes={sized}
         edges={edges}
         edgeTypes={EDGE_TYPES}
@@ -168,6 +176,7 @@ export function GraphCanvas({
       >
         <Background variant={BackgroundVariant.Dots} gap={18} size={1} />
         <ReadableFit />
+        {keepView && <KeepInView fitKey={fitKey} />}
         <Controls showInteractive={false} fitViewOptions={FIT} />
         {(minimap ?? (typeof height === "number" && height >= 400)) && (
           <MiniMap
@@ -233,6 +242,55 @@ function ReadableFit() {
       });
     });
   }, [initialized, flow, height]);
+
+  return null;
+}
+
+/** Room left between a node brought into view and the canvas edge, in pixels. */
+const VIEW_MARGIN = 24;
+
+/**
+ * When `fitKey` changes, pan — never zoom — just far enough that every node
+ * which moved or appeared is on screen. Nothing that stayed put is looked at,
+ * so a graph already wider than the canvas doesn't pan on every edit.
+ */
+function KeepInView({ fitKey }: { fitKey?: string | number }) {
+  const flow = useReactFlow();
+  const width = useStore((state) => state.width);
+  const height = useStore((state) => state.height);
+  const seen = useRef<Map<string, { x: number; y: number }> | null>(null);
+
+  useEffect(() => {
+    // After react-flow has taken the new nodes into its store.
+    const frame = requestAnimationFrame(() => {
+      const nodes = flow.getNodes();
+      const before = seen.current;
+      seen.current = new Map(nodes.map((node) => [node.id, node.position]));
+      if (!before) return;
+      const moved = nodes.filter((node) => {
+        const was = before.get(node.id);
+        return !was || was.x !== node.position.x || was.y !== node.position.y;
+      });
+      if (moved.length === 0) return;
+
+      const bounds = flow.getNodesBounds(moved);
+      const { x, y, zoom } = flow.getViewport();
+      const margin = VIEW_MARGIN / zoom;
+      const left = -x / zoom + margin;
+      const top = -y / zoom + margin;
+      const right = (width - x) / zoom - margin;
+      const bottom = (height - y) / zoom - margin;
+      // Whichever edge is out, by how much; the left and top win when the
+      // nodes are bigger than the view.
+      const dx =
+        bounds.x < left ? left - bounds.x : bounds.x + bounds.width > right ? right - (bounds.x + bounds.width) : 0;
+      const dy =
+        bounds.y < top ? top - bounds.y : bounds.y + bounds.height > bottom ? bottom - (bounds.y + bounds.height) : 0;
+      if (dx === 0 && dy === 0) return;
+      void flow.setViewport({ x: x + dx * zoom, y: y + dy * zoom, zoom }, { duration: 250 });
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [fitKey, flow, width, height]);
 
   return null;
 }

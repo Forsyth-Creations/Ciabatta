@@ -2382,6 +2382,11 @@ cd packages/api && ciabatta build           # same as --only api; --all for ever
           ]}
         />
         <P>
+          Steps stay where they are while you edit. One only moves when it has to: to the right
+          when something it needs now comes level with it or later, or up or down to make room
+          for a new wire. The view pans only if a step that moved went off the edge.
+        </P>
+        <P>
           Nothing is written until <strong>Save</strong>. The changes are listed beside the
           graph until then, and <strong>Discard changes</strong> puts the graph back. Save
           writes each workflow file exactly as shown, so a dependency you removed really is

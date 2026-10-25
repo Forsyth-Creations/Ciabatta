@@ -7,12 +7,12 @@
  * view — uses this, and gets the same canvas, layout, wires and nodes.
  */
 
-import { useMemo } from "react";
+import { useMemo, useRef } from "react";
 import { useTheme } from "@mui/material";
 import type { Edge, Node, NodeMouseHandler } from "@xyflow/react";
 
 import { GraphCanvas } from "./GraphCanvas";
-import { ROUTED_EDGE, layeredLayout, routeKey } from "./layout";
+import { ROUTED_EDGE, layeredLayout, routeKey, type Placement } from "./layout";
 import { statusColour } from "./StatusIcon";
 import { STEP_LAYOUT, StepLine, StepNodeBody, stepNodeHeight, stepNodeStyle } from "./StepNode";
 
@@ -44,13 +44,21 @@ export function StepGraph({
   height = 460,
   onStepClick,
   minimap,
+  holdLayout,
 }: {
   steps: GraphStep[];
   height?: number | string;
   onStepClick?: (name: string) => void;
   minimap?: boolean;
+  /**
+   * For a graph being edited: keep every node where it was, and the view where
+   * the user left it, rather than laying out and refitting from scratch on
+   * each change. Nodes move only when the change forces them to.
+   */
+  holdLayout?: boolean;
 }) {
   const theme = useTheme();
+  const placed = useRef<Map<string, Placement> | undefined>(undefined);
 
   const { nodes, edges } = useMemo(() => {
     const byName = new Map(steps.map((s) => [s.name, s]));
@@ -62,7 +70,11 @@ export function StepGraph({
       (s.needs ?? []).filter((n) => byName.has(n)).map((n) => ({ source: n, target: s.name })),
     );
 
-    const { nodes: positioned, routes } = layeredLayout(
+    const {
+      nodes: positioned,
+      routes,
+      placement,
+    } = layeredLayout(
       steps.map((s) => s.name),
       links.map((e) => ({ ...e, group: "needs", merge: true })),
       (id) => {
@@ -80,8 +92,14 @@ export function StepGraph({
           ),
         };
       },
-      { ...STEP_LAYOUT, heightOf, bottom: (id) => byName.get(id)?.background ?? false },
+      {
+        ...STEP_LAYOUT,
+        heightOf,
+        bottom: (id) => byName.get(id)?.background ?? false,
+        previous: holdLayout ? placed.current : undefined,
+      },
     );
+    if (holdLayout) placed.current = placement;
 
     const nodes: Node[] = positioned.map((node) => {
       const s = byName.get(node.id)!;
@@ -113,7 +131,7 @@ export function StepGraph({
     }));
 
     return { nodes, edges };
-  }, [steps, theme]);
+  }, [steps, theme, holdLayout]);
 
   const onNodeClick: NodeMouseHandler | undefined = onStepClick
     ? (_, node) => onStepClick(node.id)
@@ -126,6 +144,7 @@ export function StepGraph({
       height={height}
       onNodeClick={onNodeClick}
       minimap={minimap}
+      keepView={holdLayout}
       // Refit when the shape changes, not just the set of nodes: an edited
       // graph that gains an edge can push a node off the canvas.
       fitKey={steps.map((s) => `${s.name}<${(s.needs ?? []).join(",")}`).join("\u0000")}

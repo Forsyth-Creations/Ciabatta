@@ -1012,17 +1012,24 @@ pub struct WorkflowArgs {
     #[arg(long = "sandbox-also", value_name = "GLOB", requires = "authoritative")]
     pub sandbox_also: Vec<String>,
 
-    /// Run inside the live TUI instead of printing plain progress. A workflow
-    /// is an ordinary run, so it prints plain text unless you ask for the TUI.
+    /// How to show the run: `terminal` (plain progress), `tui` (a live view
+    /// of every step and its output) or `gui` (the web app). Defaults to
+    /// `CIABATTA_VIZ`, then to `terminal`.
+    #[arg(long, value_enum, value_name = "MODE", conflicts_with_all = ["tui", "gui", "no_tui"])]
+    pub viz: Option<Viz>,
+
+    /// Run inside the live TUI instead of printing plain progress. Shorthand
+    /// for `--viz tui`.
     #[arg(long)]
     pub tui: bool,
 
-    /// Accepted and ignored — plain output is the default. Kept so existing
-    /// scripts and CI jobs that pass it keep working.
-    #[arg(long, hide = true)]
+    /// Print plain progress, even when `CIABATTA_VIZ` asks for the TUI or the
+    /// web app. Shorthand for `--viz terminal`.
+    #[arg(long)]
     pub no_tui: bool,
 
-    /// Watch the run live in a browser instead of the terminal.
+    /// Watch the run live in a browser instead of the terminal. Shorthand for
+    /// `--viz gui`.
     #[arg(long)]
     pub gui: bool,
 
@@ -1035,13 +1042,70 @@ pub struct WorkflowArgs {
     pub port: Option<u16>,
 }
 
+/// Where a run is shown. Picked per run by `--viz`/`--tui`/`--gui`/`--no-tui`,
+/// or for every run by [`VIZ_VAR`].
+#[derive(clap::ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Viz {
+    /// Plain progress, line by line — what CI and pipes get.
+    Terminal,
+    /// The live TUI: every step down the left, its output on the right.
+    Tui,
+    /// The web app, through the daemon.
+    Gui,
+}
+
+/// The environment variable that sets how every run is shown by default.
+pub const VIZ_VAR: &str = "CIABATTA_VIZ";
+
+impl Viz {
+    /// Read a [`VIZ_VAR`] value. Blank means unset; anything else unknown is an
+    /// error rather than a silent fallback, so a typo doesn't look like the
+    /// setting being ignored.
+    pub fn from_env_value(raw: &str) -> anyhow::Result<Option<Viz>> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "" => Ok(None),
+            "terminal" | "plain" => Ok(Some(Viz::Terminal)),
+            "tui" => Ok(Some(Viz::Tui)),
+            "gui" | "web" => Ok(Some(Viz::Gui)),
+            other => anyhow::bail!(
+                "{VIZ_VAR}={other} isn't a way to show a run: use terminal, tui or gui."
+            ),
+        }
+    }
+}
+
 impl WorkflowArgs {
-    /// Whether this invocation takes over the terminal with the TUI.
+    /// How this invocation shows its run.
     ///
-    /// Opt-in, and `--no-tui` still wins if both are given — a script that
-    /// already asks for plain output must keep getting it.
-    pub fn use_tui(&self) -> bool {
-        self.tui && !self.no_tui
+    /// A flag typed for this run wins. Otherwise [`VIZ_VAR`] decides — but only
+    /// when someone is at the terminal: piped, in CI, or nested inside another
+    /// run's step, a TUI has no screen to draw on and a browser tab has nobody
+    /// to look at it, so the run prints plain progress instead.
+    pub fn viz(&self) -> anyhow::Result<Viz> {
+        use std::io::IsTerminal;
+        let interactive = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
+        self.viz_from(std::env::var(VIZ_VAR).ok().as_deref(), interactive)
+    }
+
+    fn viz_from(&self, env: Option<&str>, interactive: bool) -> anyhow::Result<Viz> {
+        if let Some(viz) = self.viz {
+            return Ok(viz);
+        }
+        // `--gui` beside `--no-tui` has always meant the browser: `--no-tui`
+        // only ever spoke for the terminal.
+        if self.gui {
+            return Ok(Viz::Gui);
+        }
+        if self.no_tui {
+            return Ok(Viz::Terminal);
+        }
+        if self.tui {
+            return Ok(Viz::Tui);
+        }
+        match env.map(Viz::from_env_value).transpose()?.flatten() {
+            Some(viz) if interactive => Ok(viz),
+            _ => Ok(Viz::Terminal),
+        }
     }
 }
 
@@ -1489,17 +1553,75 @@ mod tests {
     }
 
     #[test]
-    fn a_run_prints_plain_text_unless_the_tui_is_asked_for() {
-        assert!(!workflow_args(&["ciabatta", "workflow", "build"]).use_tui());
-        assert!(workflow_args(&["ciabatta", "workflow", "build", "--tui"]).use_tui());
+    fn a_run_prints_plain_text_unless_something_else_is_asked_for() {
+        let viz = |argv: &[&str], env| workflow_args(argv).viz_from(env, true).unwrap();
+        assert_eq!(viz(&["ciabatta", "workflow", "build"], None), Viz::Terminal);
+        assert_eq!(
+            viz(&["ciabatta", "workflow", "build", "--tui"], None),
+            Viz::Tui
+        );
+        assert_eq!(
+            viz(&["ciabatta", "workflow", "build", "--gui"], None),
+            Viz::Gui
+        );
+        assert_eq!(
+            viz(&["ciabatta", "workflow", "build", "--viz", "tui"], None),
+            Viz::Tui
+        );
     }
 
     #[test]
-    fn no_tui_is_still_accepted_and_still_means_plain() {
-        // Scripts and CI jobs that already pass it must keep working, and must
-        // keep getting plain output even alongside --tui.
-        assert!(!workflow_args(&["ciabatta", "workflow", "build", "--no-tui"]).use_tui());
-        assert!(!workflow_args(&["ciabatta", "workflow", "build", "--no-tui", "--tui"]).use_tui());
+    fn no_tui_still_means_plain() {
+        // Scripts and CI jobs that already pass it must keep getting plain
+        // output, alongside --tui and over CIABATTA_VIZ alike.
+        let viz = |argv: &[&str], env| workflow_args(argv).viz_from(env, true).unwrap();
+        assert_eq!(
+            viz(&["ciabatta", "workflow", "build", "--no-tui"], None),
+            Viz::Terminal
+        );
+        assert_eq!(
+            viz(
+                &["ciabatta", "workflow", "build", "--no-tui", "--tui"],
+                None
+            ),
+            Viz::Terminal
+        );
+        assert_eq!(
+            viz(&["ciabatta", "workflow", "build", "--no-tui"], Some("tui")),
+            Viz::Terminal
+        );
+    }
+
+    #[test]
+    fn ciabatta_viz_sets_the_default_and_a_flag_overrides_it() {
+        let args = workflow_args(&["ciabatta", "workflow", "build"]);
+        assert_eq!(args.viz_from(Some("tui"), true).unwrap(), Viz::Tui);
+        assert_eq!(args.viz_from(Some("GUI"), true).unwrap(), Viz::Gui);
+        assert_eq!(
+            args.viz_from(Some("terminal"), true).unwrap(),
+            Viz::Terminal
+        );
+        assert_eq!(args.viz_from(Some(""), true).unwrap(), Viz::Terminal);
+        let gui = workflow_args(&["ciabatta", "workflow", "build", "--gui"]);
+        assert_eq!(gui.viz_from(Some("tui"), true).unwrap(), Viz::Gui);
+    }
+
+    #[test]
+    fn ciabatta_viz_is_ignored_with_nobody_at_the_terminal() {
+        // CI, a pipe, or a run nested in another run's step.
+        let args = workflow_args(&["ciabatta", "workflow", "build"]);
+        assert_eq!(args.viz_from(Some("tui"), false).unwrap(), Viz::Terminal);
+        assert_eq!(args.viz_from(Some("gui"), false).unwrap(), Viz::Terminal);
+        // An explicit flag is still honoured: it was typed for this run.
+        let tui = workflow_args(&["ciabatta", "workflow", "build", "--tui"]);
+        assert_eq!(tui.viz_from(None, false).unwrap(), Viz::Tui);
+    }
+
+    #[test]
+    fn an_unknown_ciabatta_viz_is_an_error() {
+        let args = workflow_args(&["ciabatta", "workflow", "build"]);
+        let err = args.viz_from(Some("fancy"), true).unwrap_err();
+        assert!(err.to_string().contains("terminal, tui or gui"), "{err}");
     }
 }
 

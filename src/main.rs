@@ -482,7 +482,8 @@ async fn cmd_workflow(
 
     // The graph goes to stderr when a TUI is about to take the screen, so it
     // survives in the scrollback either way.
-    let takes_over_screen = args.use_tui() && !args.gui;
+    let viz = args.viz()?;
+    let takes_over_screen = viz == cli::Viz::Tui;
     if !(args.graph && takes_over_screen) {
         let drawing = workspace::render::graph(&ws, &graph);
         if takes_over_screen {
@@ -533,7 +534,7 @@ async fn cmd_workflow(
     // Resolved variables are echoed only when this terminal is going to keep
     // showing text: the TUI would be corrupted by it, and a --gui run reports
     // in the browser instead.
-    let announce = !args.use_tui() && !args.gui;
+    let announce = viz == cli::Viz::Terminal;
     let mut vars = build_env_vars(&cfg, &args.env, args.local, &ws.root, announce)?;
     source_ciabatta_vars(&mut vars, &ws.root, announce);
     // Custom arguments last: they were typed for this run, so they win.
@@ -567,7 +568,7 @@ async fn cmd_workflow(
         &cfg.workspace.clone().unwrap_or_default(),
     );
 
-    if args.gui {
+    if viz == cli::Viz::Gui {
         // The daemon owns the run, so it compiles the graph itself from the
         // same declarations rather than being handed our copy.
         report_run_dependencies(&resolved, &name, &ws.root, &vars, false);
@@ -581,7 +582,7 @@ async fn cmd_workflow(
         &ws.root,
         &vars,
         args.dry_run,
-        args.use_tui(),
+        viz == cli::Viz::Tui,
         runner::RunCtl {
             authoritative: args.authoritative,
             sandbox_also: args.sandbox_also.clone(),

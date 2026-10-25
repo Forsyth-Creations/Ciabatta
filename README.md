@@ -51,7 +51,9 @@ also just a step on the graph, so a build that ends in a push is one command.
   into publish paths.
 - **Parallel with live progress.** Independent branches of a graph run at once,
   scheduled against their real dependencies. Runs print plain text; add `--tui`
-  for the `ratatui` live view, or `--gui` for the browser.
+  for the `ratatui` live view (every step down the left, its output on the
+  right), or `--gui` for the browser — or set `CIABATTA_VIZ=tui|gui` to make
+  either the default.
 - **Push *and* pull.** Because Ciabatta knows where things live, it can fetch
   artifacts back down, not just upload them — and a pull step names the push it
   mirrors rather than repeating it.
@@ -240,10 +242,15 @@ Useful flags on any workflow (`ciabatta build`, `ciabatta release`, …):
 - `-e, --env KEY=VALUE` — set a variable for every step. Repeatable.
 - `--release VERSION` — the release a `kind: release-pull` step fetches (and a
   push publishes, unless the step names a version). Sets `CIABATTA_RELEASE`.
-- `--tui` — run inside the live terminal UI. **Runs print plain text by
-  default**, which is what CI wants and what you can pipe; the TUI is opt-in.
-  (`--no-tui` is still accepted and does nothing.)
-- `--gui` — watch the graph run live in a browser instead of the terminal.
+- `--viz terminal|tui|gui` — how to show the run. Defaults to `CIABATTA_VIZ`,
+  then to `terminal`. `CIABATTA_VIZ` only applies with someone at the terminal:
+  piped, in CI or nested in another run's step, runs print plain text.
+- `--tui` — run inside the live terminal UI (`--viz tui`): steps on the left
+  with a status emoji each, the selected one's output on the right. Arrow keys
+  pick a step, the mouse wheel scrolls its output, `s` sorts by name.
+- `--no-tui` — plain progress, whatever `CIABATTA_VIZ` says (`--viz terminal`).
+- `--gui` — watch the graph run live in a browser instead of the terminal
+  (`--viz gui`).
 
 Global flags (any command):
 

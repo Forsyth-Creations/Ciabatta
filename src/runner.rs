@@ -24,6 +24,7 @@ impl StageKind {
     ];
 
     /// Position in the pipeline (0..4).
+    #[cfg(test)]
     pub fn index(self) -> usize {
         match self {
             StageKind::Login => 0,
@@ -40,16 +41,6 @@ impl StageKind {
             StageKind::Pre => "pre-run",
             StageKind::Main => "run",
             StageKind::Post => "post-run",
-        }
-    }
-
-    /// Compact label for cramped UI.
-    pub fn short(self) -> &'static str {
-        match self {
-            StageKind::Login => "login",
-            StageKind::Pre => "pre",
-            StageKind::Main => "run",
-            StageKind::Post => "post",
         }
     }
 }
@@ -561,9 +552,5 @@ mod tests {
         assert_eq!(StageKind::Pre.label(), "pre-run");
         assert_eq!(StageKind::Main.label(), "run");
         assert_eq!(StageKind::Post.label(), "post-run");
-        // Compact forms for cramped UI.
-        assert_eq!(StageKind::Pre.short(), "pre");
-        assert_eq!(StageKind::Main.short(), "run");
-        assert_eq!(StageKind::Post.short(), "post");
     }
 }

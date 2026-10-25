@@ -371,8 +371,10 @@ const COMMANDS: CommandGroup[] = [
           ["--env-profile NAME", "Copy each workspace's .ciabatta/.env.NAME into its .env first (backing up a hand-written .env). Also spelled --env_profile."],
           ["-e KEY=VALUE", "Set a variable for every step. Beats .env and CI."],
           ["... ARGS", "Everything after a bare ... is the workflow's: --name=value, --name value, --flag or name=value, each becoming the variable $<NAME>."],
-          ["--gui", "Watch it live in this app."],
-          ["--tui", "Watch it in the terminal UI. Runs print plain text by default."],
+          ["--viz MODE", "How to show the run: terminal, tui or gui. Defaults to CIABATTA_VIZ, then terminal."],
+          ["--gui", "Watch it live in this app. Same as --viz gui."],
+          ["--tui", "Watch it in the terminal UI. Same as --viz tui."],
+          ["--no-tui", "Print plain progress, whatever CIABATTA_VIZ says. Same as --viz terminal."],
           ["--authoritative", "Run each step against only the files it declared — the way to find an incomplete inputs list."],
         ],
       },
@@ -2199,12 +2201,65 @@ ciabatta build test                  # both, as ONE graph — shared dependencie
 ciabatta build --graph               # the resolved graph; runs nothing
 ciabatta dry-run build --diff        # what would rebuild, and why
 ciabatta build --gui                 # watch it here
-ciabatta build --tui                 # watch it in the terminal`}</Pre>
+ciabatta build --tui                 # watch it in the terminal
+export CIABATTA_VIZ=tui              # …or make that the default for every run`}</Pre>
         <P>
           Any name that isn&apos;t one of ciabatta&apos;s own commands is a workflow name, which is
           why <C>ciabatta build</C> works. When a workflow&apos;s name collides with a command —{" "}
           <C>list</C>, <C>watch</C> — spell it <C>ciabatta workflow list</C>.
         </P>
+
+        <SubHeading>Choosing how a run is shown</SubHeading>
+        <P>
+          Every run is shown one of three ways: <C>terminal</C> (plain progress, line by line),{" "}
+          <C>tui</C> (the terminal UI below) or <C>gui</C> (this app). Set{" "}
+          <C>CIABATTA_VIZ</C> in your shell profile to pick the default for every workflow you
+          start; <C>--viz MODE</C>, <C>--tui</C>, <C>--gui</C> or <C>--no-tui</C> on one command
+          overrides it for that run. Without either, runs print plain text.
+        </P>
+        <P>
+          <C>CIABATTA_VIZ</C> only applies when someone is at the terminal. Piped, in CI, or
+          when a step runs ciabatta itself, there is no screen for a TUI and nobody to open a
+          browser for, so those runs print plain progress. An unknown value is an error rather
+          than being quietly ignored.
+        </P>
+
+        <SubHeading>The terminal UI</SubHeading>
+        <P>
+          <C>--tui</C> lists every step of the run down the left, each with an emoji for where
+          it has got to, and shows the selected step&apos;s output on the right. The top entry
+          is the run itself, whose pane has every step&apos;s output interleaved.
+        </P>
+        <Pre>{`⏳ waiting      🔍 checking the cache   📥 restoring     🏃 running
+❓ asking       ✅ done                  📦 cached        ⏩ skipped
+🟡 failed as a warning                   ❌ failed        ⛔ not run
+⚪ not needed (a recovery step nothing failed into)`}</Pre>
+        <Bullets
+          items={[
+            <>
+              <C>↑</C>/<C>↓</C> (or <C>k</C>/<C>j</C>) move between steps; <C>g</C>/<C>G</C> jump
+              to the top and bottom; <C>n</C> jumps to the next failed step, or with none, the
+              next one that&apos;s running.
+            </>,
+            <>
+              <strong>The mouse wheel scrolls the output.</strong> <C>End</C> (or <C>f</C>) goes
+              back to following new output; PgUp/PgDn page with the keyboard. The TUI takes the
+              mouse, so hold Shift to select text.
+            </>,
+            <>
+              <C>s</C> switches the list between run order and sorted by name.
+            </>,
+            <>
+              <C>q</C> while the run is going stops it, killing the steps in flight; press it
+              again to leave without waiting. A run that succeeds closes itself after ten seconds
+              unless you&apos;ve touched a key; one that fails stays open until you close it.
+            </>,
+            <>
+              When the TUI closes it prints a summary — each step&apos;s outcome, and the last
+              lines of any that failed — so it survives in your scrollback.
+            </>,
+          ]}
+        />
 
         <SubHeading>Narrowing it down</SubHeading>
         <Pre>{`ciabatta test --filter tag:fast              # only steps tagged fast

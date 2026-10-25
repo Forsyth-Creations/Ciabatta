@@ -1,240 +1,377 @@
 use ratatui::{
     Frame,
-    layout::{Constraint, Direction, Layout, Rect},
+    layout::{Constraint, Direction, Layout, Margin, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Gauge, List, ListItem, ListState, Paragraph},
+    widgets::{Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap},
 };
 
-use super::app::{App, StageStatus, WorkflowStatus};
+use super::app::{App, RunStatus, StepStatus};
 
-const LOGO: &str = r#"
-  ██████╗██╗ █████╗ ██████╗  █████╗ ████████╗████████╗ █████╗
- ██╔════╝██║██╔══██╗██╔══██╗██╔══██╗╚══██╔══╝╚══██╔══╝██╔══██╗
- ██║     ██║███████║██████╔╝███████║   ██║      ██║   ███████║
- ██║     ██║██╔══██║██╔══██╗██╔══██║   ██║      ██║   ██╔══██║
- ╚██████╗██║██║  ██║██████╔╝██║  ██║   ██║      ██║   ██║  ██║
-  ╚═════╝╚═╝╚═╝  ╚═╝╚═════╝ ╚═╝  ╚═╝  ╚═╝      ╚═╝   ╚═╝  ╚═╝
-         Artifact Publishing Made Easy  🍞
-"#;
+/// The narrowest and widest the step list is allowed to be, as columns and as
+/// a share of the screen: wide enough for a monorepo's `package#step` names,
+/// never so wide the output has no room.
+const LIST_MIN: u16 = 24;
+const LIST_MAX_PERCENT: u16 = 40;
 
-pub fn render(f: &mut Frame, app: &App) {
+pub fn render(f: &mut Frame, app: &mut App) {
     let area = f.area();
-
-    let logo_lines = LOGO.lines().count() as u16 + 1;
+    let banner_rows = app.banner.as_ref().map_or(0, |b| {
+        // Wrapped to the screen, plus its border.
+        let width = area.width.saturating_sub(4).max(1) as usize;
+        (b.chars().count().div_ceil(width) as u16).clamp(1, 4) + 2
+    });
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(logo_lines), // logo
-            Constraint::Min(8),             // workflow list + logs
-            Constraint::Length(1),          // help bar
+            Constraint::Length(1),           // header
+            Constraint::Length(banner_rows), // warning banner, if any
+            Constraint::Min(3),              // steps + output
+            Constraint::Length(1),           // help bar
         ])
         .split(area);
 
-    render_logo(f, chunks[0], app);
-    render_body(f, chunks[1], app);
-    render_help(f, chunks[2], app);
+    render_header(f, chunks[0], app);
+    if let Some(message) = &app.banner {
+        let banner = Paragraph::new(message.as_str())
+            .wrap(Wrap { trim: true })
+            .style(Style::default().fg(Color::Yellow))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(Color::Yellow)),
+            );
+        f.render_widget(banner, chunks[1]);
+    }
+    render_body(f, chunks[2], app);
+    render_help(f, chunks[3], app);
 }
 
-fn render_logo(f: &mut Frame, area: Rect, _app: &App) {
-    let logo = Paragraph::new(LOGO).style(
-        Style::default()
-            .fg(Color::Yellow)
-            .add_modifier(Modifier::BOLD),
-    );
-    f.render_widget(logo, area);
+fn render_header(f: &mut Frame, area: Rect, app: &App) {
+    let (word, color) = match (&app.run.status, app.finished) {
+        (RunStatus::Failed(_), _) => ("failed", Color::Red),
+        (RunStatus::Succeeded, _) if app.failed() => ("failed", Color::Red),
+        (RunStatus::Succeeded, _) => ("succeeded", Color::Green),
+        (RunStatus::Running, true) => ("stopped", Color::Red),
+        (RunStatus::Running, false) if app.stopping => ("stopping…", Color::Yellow),
+        (RunStatus::Running, false) => ("running", Color::Yellow),
+    };
+    let mut spans = vec![
+        Span::styled(
+            " 🍞 ciabatta ",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            app.run.name.clone(),
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("  "),
+        Span::styled(word, Style::default().fg(color)),
+        Span::styled(
+            format!(
+                "  ·  {}/{} steps  ·  {}",
+                app.settled(),
+                app.steps.len(),
+                crate::runner::elapsed(app.run.elapsed())
+            ),
+            Style::default().fg(Color::DarkGray),
+        ),
+    ];
+    if app.dry_run {
+        spans.push(Span::styled(
+            "  DRY-RUN",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+    f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
-fn render_body(f: &mut Frame, area: Rect, app: &App) {
+fn render_body(f: &mut Frame, area: Rect, app: &mut App) {
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
+        .constraints([
+            Constraint::Length(list_width(app, area.width)),
+            Constraint::Min(10),
+        ])
         .split(area);
 
-    render_recipe_list(f, chunks[0], app);
+    render_steps(f, chunks[0], app);
     render_logs(f, chunks[1], app);
 }
 
-fn render_recipe_list(f: &mut Frame, area: Rect, app: &App) {
+/// As wide as the longest name with its emoji and clock, within bounds.
+fn list_width(app: &App, screen: u16) -> u16 {
+    let longest = std::iter::once(app.run.name.chars().count())
+        .chain(app.steps.iter().map(|s| s.name.chars().count()))
+        .max()
+        .unwrap_or(0) as u16;
+    // Border, space, emoji, space, name, space, clock, scrollbar.
+    let wanted = longest.saturating_add(16);
+    let most = (screen * LIST_MAX_PERCENT / 100).max(LIST_MIN);
+    wanted.clamp(LIST_MIN, most)
+}
+
+fn render_steps(f: &mut Frame, area: Rect, app: &mut App) {
     let block = Block::default()
-        .title(" Workflows ")
+        .title(format!(" Steps · {} ", app.sort.word()))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Cyan));
-
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    // Each workflow takes 3 rows: name + status, progress bar, blank
-    let items_height = 3u16;
-    let visible = (inner.height / items_height) as usize;
-    let start = app.selected.saturating_sub(visible.saturating_sub(1));
+    let rows = inner.height as usize;
+    if rows == 0 {
+        return;
+    }
+    // Scroll the list only as far as it takes to keep the selection in view.
+    if app.selected < app.list_offset {
+        app.list_offset = app.selected;
+    } else if app.selected >= app.list_offset + rows {
+        app.list_offset = app.selected + 1 - rows;
+    }
+    app.list_offset = app.list_offset.min(app.entries().saturating_sub(rows));
 
-    let mut y = inner.y;
-    for (i, workflow) in app.workflows.iter().enumerate().skip(start) {
-        if y + items_height > inner.y + inner.height {
+    let width = inner.width.saturating_sub(1) as usize; // room for the scrollbar
+    for row in 0..rows {
+        let index = app.list_offset + row;
+        if index >= app.entries() {
             break;
         }
-
-        let selected = i == app.selected;
-        let (status_symbol, status_color) = status_style(&workflow.status);
-
-        let name_style = if selected {
-            Style::default()
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD | Modifier::REVERSED)
+        let line = if index == 0 {
+            entry_line(
+                run_emoji(app),
+                &app.run.name,
+                Some(app.run.elapsed()),
+                Style::default().add_modifier(Modifier::BOLD),
+                width,
+            )
         } else {
-            Style::default().fg(Color::White)
+            let step = app.listed(index - 1);
+            entry_line(
+                step.status.emoji(),
+                &step.name,
+                step.elapsed(),
+                name_style(step.status),
+                width,
+            )
         };
-
-        let title_line = Line::from(vec![
-            Span::styled(
-                format!(" {} ", status_symbol),
-                Style::default().fg(status_color),
-            ),
-            Span::styled(&workflow.name, name_style),
-        ]);
-        let title = Paragraph::new(title_line);
+        let line = if index == app.selected {
+            line.style(Style::default().bg(Color::DarkGray))
+        } else {
+            line
+        };
         f.render_widget(
-            title,
+            Paragraph::new(line),
             Rect {
                 x: inner.x,
-                y,
-                width: inner.width,
+                y: inner.y + row as u16,
+                width: inner.width.saturating_sub(1),
                 height: 1,
             },
         );
-
-        // Stage strip: login · pre · push · post, each with a status symbol.
-        let labels = app.stage_labels();
-        let mut spans: Vec<Span> = Vec::new();
-        for (idx, label) in labels.iter().enumerate() {
-            let (sym, color) = stage_style(workflow.stages[idx]);
-            if idx > 0 {
-                spans.push(Span::raw(" "));
-            }
-            spans.push(Span::styled(
-                format!("{sym}{label}"),
-                Style::default().fg(color),
-            ));
-            if let Some(time) = workflow.stage_times[idx].label() {
-                spans.push(Span::styled(
-                    format!(" {time}"),
-                    Style::default().fg(Color::DarkGray),
-                ));
-            }
-        }
-        let strip = Paragraph::new(Line::from(spans));
-        f.render_widget(
-            strip,
-            Rect {
-                x: inner.x + 2,
-                y: y + 1,
-                width: inner.width.saturating_sub(2),
-                height: 1,
-            },
-        );
-
-        let gauge_color = gauge_color_for(&workflow.status);
-        let ratio = workflow.progress();
-        // For multi-file workflows, label the bar with the file counter; otherwise
-        // fall back to the plain percentage.
-        let label = workflow
-            .transfer_label()
-            .unwrap_or_else(|| format!("{:.0}%", ratio * 100.0));
-        let gauge = Gauge::default()
-            .gauge_style(Style::default().fg(gauge_color).bg(Color::DarkGray))
-            .label(label)
-            .ratio(ratio);
-        f.render_widget(
-            gauge,
-            Rect {
-                x: inner.x + 2,
-                y: y + 2,
-                width: inner.width.saturating_sub(2),
-                height: 1,
-            },
-        );
-
-        y += items_height;
     }
 
-    // Scrollbar indicator
-    if app.workflows.len() > visible {
-        let indicator = format!(" {}/{} ", app.selected + 1, app.workflows.len());
-        let x = inner.x + inner.width.saturating_sub(indicator.len() as u16);
-        let p = Paragraph::new(indicator).style(Style::default().fg(Color::DarkGray));
-        f.render_widget(
-            p,
-            Rect {
-                x,
-                y: inner.y,
-                width: inner.width,
-                height: 1,
-            },
+    if app.entries() > rows {
+        scrollbar(
+            f,
+            area,
+            app.entries().saturating_sub(rows),
+            app.list_offset,
+            rows,
         );
     }
 }
 
-fn render_logs(f: &mut Frame, area: Rect, app: &App) {
-    let title = if let Some(r) = app.workflows.get(app.selected) {
-        format!(" Logs: {} ", r.name)
+/// A scrollbar down the right-hand border of `area`. ratatui panics on an
+/// empty track, which a small enough terminal produces, so that's skipped.
+fn scrollbar(f: &mut Frame, area: Rect, content: usize, position: usize, viewport: usize) {
+    let track = area.inner(Margin {
+        vertical: 1,
+        horizontal: 0,
+    });
+    if track.width == 0 || track.height == 0 {
+        return;
+    }
+    let mut state = ScrollbarState::new(content)
+        .position(position)
+        .viewport_content_length(viewport);
+    f.render_stateful_widget(
+        Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(None)
+            .end_symbol(None),
+        track,
+        &mut state,
+    );
+}
+
+/// One row of the list: emoji, name (cut short with … if it must be), and the
+/// clock right-aligned.
+fn entry_line(
+    emoji: &str,
+    name: &str,
+    elapsed: Option<std::time::Duration>,
+    style: Style,
+    width: usize,
+) -> Line<'static> {
+    let clock = elapsed.map(crate::runner::elapsed).unwrap_or_default();
+    // " " + emoji (2 columns) + " " before the name; " " + clock after it.
+    let fixed = 4 + if clock.is_empty() { 0 } else { clock.len() + 1 };
+    let room = width.saturating_sub(fixed);
+    let name = truncate(name, room);
+    let pad = room.saturating_sub(name.chars().count());
+    let mut spans = vec![
+        Span::raw(format!(" {emoji} ")),
+        Span::styled(name, style),
+        Span::raw(" ".repeat(pad)),
+    ];
+    if !clock.is_empty() {
+        spans.push(Span::styled(
+            format!(" {clock}"),
+            Style::default().fg(Color::DarkGray),
+        ));
+    }
+    Line::from(spans)
+}
+
+fn truncate(text: &str, width: usize) -> String {
+    if text.chars().count() <= width {
+        return text.to_string();
+    }
+    if width == 0 {
+        return String::new();
+    }
+    let mut cut: String = text.chars().take(width - 1).collect();
+    cut.push('…');
+    cut
+}
+
+fn run_emoji(app: &App) -> &'static str {
+    match &app.run.status {
+        RunStatus::Failed(_) => "❌",
+        RunStatus::Succeeded if app.failed() => "❌",
+        RunStatus::Succeeded => "✅",
+        RunStatus::Running if app.finished => "⛔",
+        RunStatus::Running => "🍞",
+    }
+}
+
+fn name_style(status: StepStatus) -> Style {
+    let color = match status {
+        StepStatus::Failed => Color::Red,
+        StepStatus::Warned | StepStatus::Asking => Color::Yellow,
+        s if s.is_active() => Color::White,
+        StepStatus::Pending | StepStatus::NotRun | StepStatus::NotNeeded => Color::DarkGray,
+        _ => Color::Gray,
+    };
+    let style = Style::default().fg(color);
+    if status.is_active() {
+        style.add_modifier(Modifier::BOLD)
     } else {
-        " Logs ".to_string()
+        style
+    }
+}
+
+fn render_logs(f: &mut Frame, area: Rect, app: &mut App) {
+    let mut title = match app.selected_step() {
+        Some(step) => {
+            let mut t = format!(
+                " {} {} · {}",
+                step.status.emoji(),
+                step.name,
+                step.status.word()
+            );
+            if let Some(d) = step.elapsed() {
+                t.push_str(&format!(" · {}", crate::runner::elapsed(d)));
+            }
+            t
+        }
+        None => format!(" {} {} · all output", run_emoji(app), app.run.name),
     };
 
-    let block = Block::default()
-        .title(title)
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan));
+    let inner_width = area.width.saturating_sub(3) as usize; // borders + scrollbar
+    let height = area.height.saturating_sub(2) as usize;
 
-    let logs = app.selected_logs();
-
-    // Width/height available inside the bordered block.
-    let inner_width = area.width.saturating_sub(2) as usize;
-    let inner_height = area.height.saturating_sub(2) as usize;
-
-    // Wrap each log line to the inner width so long file paths don't get
-    // cut off. Each wrapped segment becomes its own single-row ListItem,
-    // which keeps the "one item == one visual row" invariant the scroll
-    // logic below relies on.
-    let rows: Vec<ListItem> = logs
+    // Each wrapped segment is one row, so scrolling counts what's on screen.
+    let rows: Vec<Line> = app
+        .selected_logs()
         .iter()
         .flat_map(|l| {
-            let style = if l.starts_with("[stderr]")
-                || l.starts_with("✗")
-                || l.contains("error")
-                || l.contains("Error")
-            {
-                Style::default().fg(Color::Red)
-            } else if l.starts_with("[dry-run]") || l.starts_with('⚑') {
-                // ⚑ marks a custom argument from `...`: for this run only.
-                Style::default().fg(Color::Yellow)
-            } else if l.starts_with('+') || l.starts_with('$') {
-                Style::default().fg(Color::Cyan)
-            } else {
-                Style::default().fg(Color::Gray)
-            };
+            let style = log_style(l);
             wrap_line(l, inner_width)
                 .into_iter()
-                .map(move |seg| ListItem::new(seg).style(style))
+                .map(move |seg| Line::styled(seg, style))
         })
         .collect();
-
-    // Keep only the most recent rows that fit, so the newest output stays
-    // in view.
     let total = rows.len();
-    let start = total.saturating_sub(inner_height.max(1));
-    let items: Vec<ListItem> = rows.into_iter().skip(start).collect();
-
-    let list = List::new(items).block(block);
-
-    let mut state = ListState::default();
-    let visible = total - start;
-    if visible > 0 {
-        state.select(Some(visible - 1));
+    let most = total.saturating_sub(height);
+    // Scrolled further than there is to scroll: hold at the top.
+    if let Some(n) = app.scroll
+        && n > most
+    {
+        app.scroll = if most == 0 { None } else { Some(most) };
     }
-    f.render_stateful_widget(list, area, &mut state);
+    let back = app.scroll.unwrap_or(0);
+    let start = most - back;
+
+    if back > 0 {
+        title.push_str(&format!(" · ↑{back} (End to follow)"));
+    }
+    title.push(' ');
+
+    let empty = rows.is_empty();
+    let visible: Vec<Line> = rows.into_iter().skip(start).take(height).collect();
+    let body = if empty {
+        let note = match app.selected_step().map(|s| s.status) {
+            Some(StepStatus::Pending) => "Waiting for what it needs.",
+            Some(StepStatus::NotRun) => "Never started.",
+            Some(_) => "No output.",
+            None => "Starting…",
+        };
+        Paragraph::new(Line::styled(note, Style::default().fg(Color::DarkGray)))
+    } else {
+        Paragraph::new(visible)
+    };
+    f.render_widget(
+        body.block(
+            Block::default()
+                .title(title)
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Cyan)),
+        ),
+        area,
+    );
+
+    if total > height {
+        scrollbar(f, area, most, start, height);
+    }
+}
+
+fn log_style(line: &str) -> Style {
+    if line.starts_with("[stderr]")
+        || line.starts_with('✗')
+        || line.contains("error")
+        || line.contains("Error")
+    {
+        Style::default().fg(Color::Red)
+    } else if line.starts_with("[dry-run]") || line.starts_with('⚑') || line.starts_with('⚠') {
+        // ⚑ marks a custom argument from `...`: for this run only.
+        Style::default().fg(Color::Yellow)
+    } else if line.starts_with('▶') || line.starts_with('✓') {
+        Style::default().fg(Color::Green)
+    } else if line.starts_with('+') || line.starts_with('$') {
+        Style::default().fg(Color::Cyan)
+    } else if line.starts_with("cache:") || line.starts_with('⊘') {
+        Style::default().fg(Color::DarkGray)
+    } else {
+        Style::default().fg(Color::Gray)
+    }
 }
 
 /// Split `line` into segments no wider than `width` characters. Returns at
@@ -251,44 +388,53 @@ fn wrap_line(line: &str, width: usize) -> Vec<String> {
 }
 
 fn render_help(f: &mut Frame, area: Rect, app: &App) {
-    let mode = if app.dry_run { " DRY-RUN " } else { "" };
-    let status = if app.all_done && app.any_failed() {
-        "Failed — press [q] to close. "
-    } else if app.all_done {
-        "All done! "
+    let state = if app.stopping && !app.finished {
+        "Stopping the run — [q] again to leave now.  "
+    } else if app.finished && !app.succeeded() {
+        "Finished with failures — [q] to close.  "
+    } else if app.finished && !app.browsing {
+        "All done — closing shortly, any key to stay.  "
+    } else if app.finished {
+        "All done — [q] to close.  "
     } else {
-        "Running... "
+        ""
     };
-
-    let help = format!("{}{}  [↑/↓] select  [q] quit", mode, status);
-    let p = Paragraph::new(help).style(Style::default().fg(Color::DarkGray));
-    f.render_widget(p, area);
+    let help =
+        format!(" {state}↑↓ step · wheel scrolls · End follow · s sort · n next failure · q quit");
+    f.render_widget(
+        Paragraph::new(help).style(Style::default().fg(Color::DarkGray)),
+        area,
+    );
 }
 
-fn status_style(status: &WorkflowStatus) -> (&'static str, Color) {
-    match status {
-        WorkflowStatus::Pending => ("○", Color::DarkGray),
-        WorkflowStatus::Running => ("◑", Color::Yellow),
-        WorkflowStatus::Success => ("✓", Color::Green),
-        WorkflowStatus::Failed(_) => ("✗", Color::Red),
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn long_names_are_cut_with_an_ellipsis() {
+        assert_eq!(truncate("compile", 10), "compile");
+        assert_eq!(truncate("packages/api#compile", 8), "package…");
+        assert_eq!(truncate("x", 0), "");
     }
-}
 
-fn stage_style(status: StageStatus) -> (&'static str, Color) {
-    match status {
-        StageStatus::Pending => ("○", Color::DarkGray),
-        StageStatus::Running => ("◑", Color::Yellow),
-        StageStatus::Done => ("✓", Color::Green),
-        StageStatus::Skipped => ("·", Color::DarkGray),
-        StageStatus::Failed => ("✗", Color::Red),
+    #[test]
+    fn the_list_fits_its_names_within_bounds() {
+        let app = App::new("build", ["a"], false);
+        assert_eq!(list_width(&app, 200), LIST_MIN);
+        let long = "x".repeat(200);
+        let app = App::new("build", [long.as_str()], false);
+        assert_eq!(list_width(&app, 200), 80);
     }
-}
 
-fn gauge_color_for(status: &WorkflowStatus) -> Color {
-    match status {
-        WorkflowStatus::Pending => Color::DarkGray,
-        WorkflowStatus::Running => Color::Yellow,
-        WorkflowStatus::Success => Color::Green,
-        WorkflowStatus::Failed(_) => Color::Red,
+    #[test]
+    fn the_screen_draws_at_any_size() {
+        use ratatui::{Terminal, backend::TestBackend};
+        let mut app = App::new("build", ["compile", "test"], true);
+        app.banner = Some("ciabatta 0.7.6, remote cache 0.7.0".into());
+        for (w, h) in [(120, 40), (40, 10), (10, 4)] {
+            let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+            terminal.draw(|f| render(f, &mut app)).unwrap();
+        }
     }
 }

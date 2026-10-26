@@ -440,9 +440,10 @@ pub fn not_writable(exe: &Path, dir: &Path) -> String {
              Either update it with sudo — naming the cache, because sudo runs from \
              root's home and doesn't see your workspace's settings:\n\
              \n    sudo {exe} self update --from <URL>\n\n\
-             or move ciabatta somewhere you own, once, and never need sudo again:\n\
-             \n    curl -fsSL https://forsyth-creations.github.io/Ciabatta/install.sh | sh -s -- --dir ~/.local/bin\n\
-             \n(then remove {exe}, and make sure ~/.local/bin is on your PATH).",
+             or move ciabatta somewhere you own, once, and never need sudo again — the \
+             installer moves it into ~/.local/bin and removes {exe}:\n\
+             \n    curl -fsSL https://forsyth-creations.github.io/Ciabatta/install.sh | sh -s -- --move\n\
+             \n(then make sure ~/.local/bin is on your PATH).",
             dir = dir.display(),
             exe = exe.display(),
         )

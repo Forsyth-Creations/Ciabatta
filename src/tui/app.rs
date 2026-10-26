@@ -184,6 +184,10 @@ pub struct App {
     /// How far the log pane is scrolled up from its newest line. `None`
     /// follows the output as it arrives.
     pub scroll: Option<usize>,
+    /// How many rows the log pane held when it was last drawn, so output that
+    /// arrives while scrolled up pushes `scroll` back rather than the view.
+    /// `None` until the selected entry has been drawn once.
+    pub seen_rows: Option<usize>,
     /// The first entry the list is drawn from, kept between frames so moving
     /// the selection only scrolls the list once it reaches an edge.
     pub list_offset: usize,
@@ -214,6 +218,7 @@ impl App {
             sort: SortOrder::Run,
             order: Vec::new(),
             scroll: None,
+            seen_rows: None,
             list_offset: 0,
             banner: None,
             dry_run,
@@ -473,6 +478,7 @@ impl App {
             self.selected = index;
             // Another step's output starts at its newest line.
             self.scroll = None;
+            self.seen_rows = None;
         }
     }
 
@@ -526,6 +532,17 @@ impl App {
 
     pub fn follow(&mut self) {
         self.scroll = None;
+    }
+
+    /// The log pane now holds `rows` rows. Scrolled up, the rows that arrived
+    /// since the last frame are added to `scroll` so what's on screen stays put.
+    pub fn saw_rows(&mut self, rows: usize) {
+        if let (Some(n), Some(seen)) = (self.scroll, self.seen_rows)
+            && rows > seen
+        {
+            self.scroll = Some(n + (rows - seen));
+        }
+        self.seen_rows = Some(rows);
     }
 }
 
@@ -676,6 +693,27 @@ mod tests {
         assert_eq!(app.scroll, None);
         app.scroll_up(2);
         app.scroll_down(10);
+        assert_eq!(app.scroll, None);
+    }
+
+    #[test]
+    fn new_output_holds_a_scrolled_view_still() {
+        let mut app = app();
+        app.saw_rows(40);
+        // Following, new output just shows up at the bottom.
+        app.saw_rows(45);
+        assert_eq!(app.scroll, None);
+        app.scroll_up(3);
+        app.saw_rows(50);
+        assert_eq!(app.scroll, Some(8));
+        // Scrolling back to the bottom follows again, and so does `f`.
+        app.scroll_down(8);
+        assert_eq!(app.scroll, None);
+        app.saw_rows(60);
+        assert_eq!(app.scroll, None);
+        app.scroll_up(3);
+        app.saw_rows(70);
+        app.follow();
         assert_eq!(app.scroll, None);
     }
 

@@ -11,15 +11,21 @@
 #   curl -fsSL .../install.sh | sh -s -- --version 0.3.0
 #   curl -fsSL .../install.sh | sh -s -- --dir ~/bin
 #
+# It installs into ~/.local/bin, a directory you own, so `ciabatta self update`
+# can replace the binary later without sudo. An existing install somewhere you
+# can't write (say /usr/local/bin) is offered a move there.
+#
 # Options:
 #   -v, --version VERSION  install this version (e.g. 0.3.0, v0.3.0, or latest)
 #   -d, --dir DIR          where to install
+#   -m, --move             move an install you can't write to into ~/.local/bin
+#                          without asking
 #   -l, --list             list the available versions and exit
 #   -h, --help             show this and exit
 #
 # The equivalent environment variables still work, for callers that find them
 # easier to set; an explicit flag wins over them:
-#   CIABATTA_INSTALL_DIR   where to install (default: /usr/local/bin, else ~/.local/bin)
+#   CIABATTA_INSTALL_DIR   where to install (default: ~/.local/bin)
 #   CIABATTA_VERSION       pin a version (default: latest release)
 set -eu
 
@@ -40,7 +46,9 @@ Ciabatta installer
 
 Options:
   -v, --version VERSION  install this version (e.g. 0.3.0, v0.3.0, or latest)
-  -d, --dir DIR          where to install (default: /usr/local/bin, else ~/.local/bin)
+  -d, --dir DIR          where to install (default: ~/.local/bin)
+  -m, --move             move an install you can't write to into ~/.local/bin
+                         without asking
   -l, --list             list the available versions and exit
   -h, --help             show this and exit
 
@@ -53,6 +61,7 @@ EOF
 version="${CIABATTA_VERSION:-}"
 install_dir="${CIABATTA_INSTALL_DIR:-}"
 list_only=""
+move=""
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -64,6 +73,7 @@ while [ $# -gt 0 ]; do
             [ $# -ge 2 ] || err "--dir needs a value, e.g. --dir ~/bin"
             install_dir="$2"; shift 2 ;;
         --dir=*) install_dir="${1#*=}"; shift ;;
+        -m | --move) move=1; shift ;;
         -l | --list) list_only=1; shift ;;
         -h | --help) usage; exit 0 ;;
         # A bare version is what people try first; accept it rather than
@@ -168,8 +178,10 @@ tar -xzf "$tmp/$asset" -C "$tmp" || err "failed to extract $asset"
 chmod +x "$tmp/$BIN"
 
 # --- choose an install directory -------------------------------------------
-# Prefer a system dir on PATH; fall back to a per-user dir if we can't write
-# there (and can't sudo), so the install never needs to fail for permissions.
+# A directory you own by default: `ciabatta self update` replaces the binary
+# where it is, so one installed with sudo would need sudo for every update.
+user_dir="$HOME/.local/bin"
+
 install_to() {
     dir="$1"
     mkdir -p "$dir" 2>/dev/null || return 1
@@ -187,6 +199,31 @@ sudo_install_to() {
     sudo mkdir -p "$dir" && sudo mv -f "$tmp/$BIN" "$dir/$BIN" && sudo chmod 755 "$dir/$BIN"
 }
 
+# Yes or no from whoever is at the terminal. Piped into sh, stdin is this
+# script, so the answer comes from /dev/tty; with no terminal, it's no.
+ask() {
+    (exec </dev/tty) 2>/dev/null || return 1
+    printf '%s ' "$1"
+    read -r answer </dev/tty || return 1
+    case "$answer" in
+        "" | y | Y | yes | Yes | YES) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# Take the old copy, and its `oven` alias if it's ours, out of a directory
+# that needs sudo to write.
+remove_old() {
+    dir="$1"
+    say "removing the old copy from $dir (needs sudo) …"
+    old_link=""
+    if [ -L "$dir/$ALIAS" ] && [ "$(readlink "$dir/$ALIAS")" = "$BIN" ]; then
+        old_link="$dir/$ALIAS"
+    fi
+    sudo rm -f "$dir/$BIN" $old_link ||
+        say "note: couldn't remove $dir/$BIN — remove it yourself, or it may shadow the new one"
+}
+
 # If ciabatta is already installed on PATH, update that copy in place (unless
 # the user pinned a directory) so we don't leave a stale binary shadowing the
 # new one from a different location.
@@ -198,19 +235,28 @@ fi
 if [ -n "$install_dir" ]; then
     dest="$install_dir"
     install_to "$dest" || sudo_install_to "$dest" || err "cannot write to $dest"
-elif [ -n "$existing_dir" ]; then
+elif [ -n "$existing_dir" ] && [ -w "$existing_dir" ]; then
     dest="$existing_dir"
     say "updating existing install at $dest …"
-    install_to "$dest" || sudo_install_to "$dest" || err "cannot update $dest"
-else
-    dest="/usr/local/bin"
-    if install_to "$dest" || sudo_install_to "$dest"; then
-        :
-    else
-        dest="$HOME/.local/bin"
-        say "no access to /usr/local/bin — installing to $dest instead"
+    install_to "$dest" || err "cannot update $dest"
+elif [ -n "$existing_dir" ] && [ "$existing_dir" != "$user_dir" ]; then
+    # Installed somewhere only sudo can write: every `self update` would need
+    # sudo too. Moving it once ends that.
+    say "ciabatta is installed in $existing_dir, which you can't write to,"
+    say "so \`ciabatta self update\` would need sudo there every time."
+    if [ -n "$move" ] || ask "Move it to $user_dir instead? [Y/n]"; then
+        dest="$user_dir"
         install_to "$dest" || err "cannot write to $dest"
+        remove_old "$existing_dir"
+    else
+        dest="$existing_dir"
+        say "updating existing install at $dest …"
+        sudo_install_to "$dest" || err "cannot update $dest"
+        say "note: rerun with --move to put it in $user_dir later"
     fi
+else
+    dest="$user_dir"
+    install_to "$dest" || err "cannot write to $dest"
 fi
 
 say "installed: $dest/$BIN"

@@ -2242,9 +2242,10 @@ export CIABATTA_VIZ=tui              # …or make that the default for every run
               next one that&apos;s running.
             </>,
             <>
-              <strong>The mouse wheel scrolls the output.</strong> <C>End</C> (or <C>f</C>) goes
-              back to following new output; PgUp/PgDn page with the keyboard. The TUI takes the
-              mouse, so hold Shift to select text.
+              <strong>The mouse wheel scrolls the output.</strong> Scrolling up stops following:
+              new lines keep arriving below without moving what you&apos;re reading. Scroll back to
+              the bottom, or press <C>f</C> (or <C>End</C>), to follow new output again; PgUp/PgDn
+              page with the keyboard. The TUI takes the mouse, so hold Shift to select text.
             </>,
             <>
               <C>s</C> switches the list between run order and sorted by name.
@@ -3149,16 +3150,19 @@ ciabatta remote-cache upload ciabatta.exe --platform windows --version 0.7.1`}</
         <SubHeading>When self update needs sudo</SubHeading>
         <P>
           <C>ciabatta self update</C> replaces the binary where it is installed, so it needs
-          write access to that directory. Installed into <C>/usr/local/bin</C> with sudo, it
+          write access to that directory. The installers default to one you own
+          (<C>~/.local/bin</C>, or <C>%LOCALAPPDATA%\Programs\ciabatta</C> on Windows), so a
+          fresh install never hits this. An older one into <C>/usr/local/bin</C> with sudo
           won&apos;t have it, and it says so before downloading anything. Three ways through:
         </P>
         <Bullets
           items={[
             <>
-              <strong>Move it somewhere you own, once</strong> — the lasting fix. Reinstall into a
-              directory in your home, remove the old copy, and every later update needs no sudo:
-              <Pre>{`curl -fsSL https://forsyth-creations.github.io/Ciabatta/install.sh | sh -s -- --dir ~/.local/bin
-sudo rm /usr/local/bin/ciabatta
+              <strong>Move it somewhere you own, once</strong> — the lasting fix. Rerun the
+              installer: finding ciabatta somewhere you can&apos;t write, it offers to move it
+              into <C>~/.local/bin</C> and removes the old copy (with sudo, that one time).{" "}
+              <C>--move</C> says yes without asking. Every later update needs no sudo:
+              <Pre>{`curl -fsSL https://forsyth-creations.github.io/Ciabatta/install.sh | sh -s -- --move
 export PATH="$HOME/.local/bin:$PATH"     # in ~/.bashrc or ~/.zshrc, if it isn't already`}</Pre>
             </>,
             <>

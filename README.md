@@ -76,6 +76,13 @@ curl -fsSL https://forsyth-creations.github.io/Ciabatta/install.sh | sh
 irm https://forsyth-creations.github.io/Ciabatta/install.ps1 | iex
 ```
 
+Both install into a directory you own — `~/.local/bin`, or
+`%LOCALAPPDATA%\Programs\ciabatta` on Windows — so `ciabatta self update` can
+replace the binary later without sudo. Rerunning the installer updates an
+existing copy in place; if that copy is somewhere you can't write (an older
+install into `/usr/local/bin`, say), `install.sh` offers to move it into
+`~/.local/bin` and removes the old one. `--move` says yes without asking.
+
 To pin a version, `sh` needs `-s --` before the options — everything after that
 goes to the installer rather than to `sh`:
 
@@ -97,6 +104,7 @@ block so you can call it with arguments:
 | --- | --- |
 | `--version VERSION` / `-Version` | Install that release (`0.3.0`, `v0.3.0`, or `latest`). |
 | `--dir DIR` / `-Dir` | Install there instead of the default. |
+| `--move` | Move an install you can't write to into `~/.local/bin` without asking. |
 | `--list` / `-List` | Print the available versions and exit. |
 | `--help` | Usage. |
 
@@ -125,7 +133,7 @@ Each archive includes an install script that puts the binary on your `PATH`.
 **Linux / macOS**
 ```bash
 tar xzf ciabatta-linux-x86_64.tar.gz
-./install.sh                  # installs to /usr/local/bin (uses sudo if needed)
+./install.sh                  # installs to ~/.local/bin
 ./install.sh ~/.local/bin     # or pick your own directory
 ```
 
@@ -247,7 +255,8 @@ Useful flags on any workflow (`ciabatta build`, `ciabatta release`, …):
   piped, in CI or nested in another run's step, runs print plain text.
 - `--tui` — run inside the live terminal UI (`--viz tui`): steps on the left
   with a status emoji each, the selected one's output on the right. Arrow keys
-  pick a step, the mouse wheel scrolls its output, `s` sorts by name.
+  pick a step, the mouse wheel scrolls its output (scrolling up holds the view
+  still; scroll to the bottom or press `f` to follow again), `s` sorts by name.
 - `--no-tui` — plain progress, whatever `CIABATTA_VIZ` says (`--viz terminal`).
 - `--gui` — watch the graph run live in a browser instead of the terminal
   (`--viz gui`).

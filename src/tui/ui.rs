@@ -311,6 +311,7 @@ fn render_logs(f: &mut Frame, area: Rect, app: &mut App) {
         .collect();
     let total = rows.len();
     let most = total.saturating_sub(height);
+    app.saw_rows(total);
     // Scrolled further than there is to scroll: hold at the top.
     if let Some(n) = app.scroll
         && n > most
@@ -321,7 +322,7 @@ fn render_logs(f: &mut Frame, area: Rect, app: &mut App) {
     let start = most - back;
 
     if back > 0 {
-        title.push_str(&format!(" · ↑{back} (End to follow)"));
+        title.push_str(&format!(" · ↑{back} (f to follow)"));
     }
     title.push(' ');
 
@@ -400,7 +401,7 @@ fn render_help(f: &mut Frame, area: Rect, app: &App) {
         ""
     };
     let help =
-        format!(" {state}↑↓ step · wheel scrolls · End follow · s sort · n next failure · q quit");
+        format!(" {state}↑↓ step · wheel scrolls · f follow · s sort · n next failure · q quit");
     f.render_widget(
         Paragraph::new(help).style(Style::default().fg(Color::DarkGray)),
         area,

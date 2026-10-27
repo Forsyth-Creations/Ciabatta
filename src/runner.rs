@@ -617,7 +617,9 @@ async fn record_run(
         .map(|unit| history.record(&unit.workspace, &unit.workflow, outcome, duration_ms))
         .collect();
     if let Err(e) = history.save(root) {
-        eprintln!("note: couldn't record this run in the workflow history ({e:#})");
+        crate::tui::note(format!(
+            "note: couldn't record this run in the workflow history ({e:#})"
+        ));
     }
 
     crate::remote_cache::workflows::sync(config, root, &records).await;

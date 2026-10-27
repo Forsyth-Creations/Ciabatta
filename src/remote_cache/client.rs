@@ -811,13 +811,17 @@ pub async fn try_restore(
         {
             Ok(()) => Some(entry),
             Err(e) => {
-                eprintln!("note: the remote cache had this build but couldn't serve it ({e:#})");
+                crate::tui::note(format!(
+                    "note: the remote cache had this build but couldn't serve it ({e:#})"
+                ));
                 None
             }
         },
         Ok(None) => None,
         Err(e) => {
-            eprintln!("note: the remote cache is unavailable ({e:#}); building locally");
+            crate::tui::note(format!(
+                "note: the remote cache is unavailable ({e:#}); building locally"
+            ));
             None
         }
     }
@@ -862,7 +866,9 @@ pub async fn try_upload(
     match client.upload(project, key, entry, dir).await {
         Ok(()) => true,
         Err(e) => {
-            eprintln!("note: couldn't publish this build to the remote cache ({e:#})");
+            crate::tui::note(format!(
+                "note: couldn't publish this build to the remote cache ({e:#})"
+            ));
             false
         }
     }

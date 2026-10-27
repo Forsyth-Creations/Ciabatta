@@ -35,6 +35,14 @@ pub fn render(f: &mut Frame, app: &mut App) {
         .split(area);
 
     render_header(f, chunks[0], app);
+    if app.selecting {
+        // Just the text: a drag across the screen copies nothing else.
+        let body = chunks[1].union(chunks[2]);
+        render_logs(f, body, app);
+        render_help(f, chunks[3], app);
+        render_prompt(f, body, app);
+        return;
+    }
     if let Some(message) = &app.banner {
         let banner = Paragraph::new(message.as_str())
             .wrap(Wrap { trim: true })
@@ -420,8 +428,14 @@ fn render_logs(f: &mut Frame, area: Rect, app: &mut App) {
         None => format!(" {} {} · all output", run_emoji(app), app.run.name),
     };
 
-    let inner_width = area.width.saturating_sub(3) as usize; // borders + scrollbar
-    let height = area.height.saturating_sub(2) as usize;
+    // Borders and a scrollbar, unless the text is being selected.
+    let (inner_width, height) = match app.selecting {
+        true => (area.width as usize, area.height as usize),
+        false => (
+            area.width.saturating_sub(3) as usize,
+            area.height.saturating_sub(2) as usize,
+        ),
+    };
 
     // Each wrapped segment is one row, so scrolling counts what's on screen.
     let rows: Vec<Line> = app
@@ -464,6 +478,10 @@ fn render_logs(f: &mut Frame, area: Rect, app: &mut App) {
     } else {
         Paragraph::new(visible)
     };
+    if app.selecting {
+        f.render_widget(body, area);
+        return;
+    }
     f.render_widget(
         body.block(
             Block::default()
@@ -526,9 +544,15 @@ fn render_help(f: &mut Frame, area: Rect, app: &App) {
     };
     let help = match (app.prompts.is_empty(), app.pane) {
         (false, _) => format!(" {state}Answering a question · Esc stops the run"),
-        (true, Pane::Env) => format!(" {state}e back to output · wheel scrolls · q quit"),
+        (true, _) if app.selecting => {
+            " Selecting — drag to select, then copy as usual · ↑↓ scroll · c back".to_string()
+        }
+        (true, Pane::Env) => {
+            format!(" {state}e back to output · wheel scrolls · c select text · q quit")
+        }
         (true, Pane::Output) => format!(
-            " {state}↑↓ step · wheel scrolls · f follow · s sort · n next failure · e .env · q quit"
+            " {state}↑↓ step · wheel scrolls · c select text · f follow · s sort · \
+             n next failure · e .env · q quit"
         ),
     };
     f.render_widget(
@@ -572,5 +596,28 @@ mod tests {
             let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
             terminal.draw(|f| render(f, &mut app)).unwrap();
         }
+    }
+
+    #[test]
+    fn selecting_draws_the_text_alone() {
+        use ratatui::{Terminal, backend::TestBackend};
+        let mut app = App::new("build", ["compile"], false);
+        app.run.logs.push("copy me".into());
+        app.selecting = true;
+        let mut terminal = Terminal::new(TestBackend::new(60, 8)).unwrap();
+        terminal.draw(|f| render(f, &mut app)).unwrap();
+        let screen: Vec<String> = (0..8)
+            .map(|y| {
+                (0..60)
+                    .map(|x| terminal.backend().buffer()[(x, y)].symbol())
+                    .collect()
+            })
+            .collect();
+        // The line starts the row, with no border or step list beside it.
+        assert!(
+            screen.iter().any(|row| row.trim_end() == "copy me"),
+            "{screen:#?}"
+        );
+        assert!(!screen.concat().contains('│'), "{screen:#?}");
     }
 }

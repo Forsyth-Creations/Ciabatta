@@ -33,6 +33,32 @@ pub fn owns_screen() -> bool {
     OWNS_SCREEN.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// Notes raised while the TUI has the screen, waiting for it to show them.
+static NOTES: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// Tell whoever is watching something in passing — "the remote cache is
+/// unavailable". Printed to stderr, unless the TUI has the screen: written
+/// there it would land in the middle of the drawing, so the TUI puts it in the
+/// run's log instead.
+pub fn note(message: impl Into<String>) {
+    let message = message.into();
+    if owns_screen()
+        && let Ok(mut notes) = NOTES.lock()
+    {
+        notes.push(message);
+        return;
+    }
+    eprintln!("{message}");
+}
+
+/// The notes waiting to be shown, oldest first.
+fn take_notes() -> Vec<String> {
+    NOTES
+        .lock()
+        .map(|mut notes| std::mem::take(&mut *notes))
+        .unwrap_or_default()
+}
+
 /// Run a workflow inside the TUI. Returns whether it succeeded.
 ///
 /// Leaving the alternate screen takes everything on it along, so once it
@@ -50,8 +76,9 @@ pub async fn run(
 ) -> Result<bool> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    // The wheel scrolls the output pane, so the TUI takes the mouse. Most
-    // terminals still select text with Shift held.
+    // The wheel scrolls the output pane, so the TUI takes the mouse. `c`
+    // hands it back for selecting text; most terminals also select with Shift
+    // held.
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
@@ -97,6 +124,10 @@ pub async fn run(
     )?;
     terminal.show_cursor()?;
 
+    // Anything raised as the TUI was closing, too late for it to show.
+    for note in take_notes() {
+        app.note(note);
+    }
     eprint!("{}", summary(&app));
     result.map(|()| app.succeeded())
 }
@@ -134,6 +165,12 @@ fn summary(app: &App) -> String {
             step.name,
             step.status.word()
         );
+    }
+    if !app.notes.is_empty() {
+        out.push('\n');
+        for note in &app.notes {
+            let _ = writeln!(out, "{note}");
+        }
     }
     for step in app.steps.iter().filter(|s| s.status == StepStatus::Failed) {
         let _ = writeln!(out, "\n── {} (last {FAILED_TAIL} lines) ──", step.name);
@@ -202,6 +239,9 @@ async fn tui_loop(
     let mut open = true;
 
     loop {
+        for note in take_notes() {
+            app.note(note);
+        }
         terminal.draw(|f| ui::render(f, app))?;
 
         // A run that succeeded stays up long enough to be read, then closes;
@@ -226,6 +266,17 @@ async fn tui_loop(
                         // included — it may be part of the answer. Esc and
                         // Ctrl-C still stop the run.
                         let asking = !app.prompts.is_empty();
+                        // Selecting text: the keys that would leave the TUI
+                        // leave select mode instead, and take the mouse back.
+                        if app.selecting
+                            && !asking
+                            && !ctrl
+                            && matches!(key.code, KeyCode::Char('c' | 'q') | KeyCode::Esc)
+                        {
+                            app.selecting = false;
+                            execute!(terminal.backend_mut(), EnableMouseCapture)?;
+                            continue;
+                        }
                         let quit = (!asking && key.code == KeyCode::Char('q'))
                             || key.code == KeyCode::Esc
                             || (ctrl && key.code == KeyCode::Char('c'));
@@ -251,6 +302,18 @@ async fn tui_loop(
                             continue;
                         }
                         match key.code {
+                            // The pane is all there is on screen, so the arrows
+                            // scroll it — and a terminal that turns the wheel
+                            // into arrows once it has the mouse back scrolls
+                            // it too.
+                            KeyCode::Down | KeyCode::Char('j') if app.selecting => {
+                                app.scroll_down(1)
+                            }
+                            KeyCode::Up | KeyCode::Char('k') if app.selecting => app.scroll_up(1),
+                            KeyCode::Char('c') => {
+                                app.selecting = true;
+                                execute!(terminal.backend_mut(), DisableMouseCapture)?;
+                            }
                             KeyCode::Down | KeyCode::Char('j') => app.select_next(),
                             KeyCode::Up | KeyCode::Char('k') => app.select_prev(),
                             KeyCode::Home | KeyCode::Char('g') => app.select_first(),

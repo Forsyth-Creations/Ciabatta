@@ -2245,7 +2245,18 @@ export CIABATTA_VIZ=tui              # …or make that the default for every run
               <strong>The mouse wheel scrolls the output.</strong> Scrolling up stops following:
               new lines keep arriving below without moving what you&apos;re reading. Scroll back to
               the bottom, or press <C>f</C> (or <C>End</C>), to follow new output again; PgUp/PgDn
-              page with the keyboard. The TUI takes the mouse, so hold Shift to select text.
+              page with the keyboard.
+            </>,
+            <>
+              <strong>
+                <C>c</C> selects text.
+              </strong>{" "}
+              The TUI takes the mouse for the wheel, so a drag would otherwise select nothing.{" "}
+              <C>c</C> hands the mouse back to your terminal and draws the output on its own —
+              no borders, no step list beside it — so a drag picks up exactly the lines you want
+              and copies as usual. <C>↑</C>/<C>↓</C> scroll it meanwhile; <C>c</C>, <C>q</C> or Esc
+              goes back. Holding Shift while dragging still works in most terminals, but takes
+              the step list along.
             </>,
             <>
               <C>s</C> switches the list between run order and sorted by name.
@@ -2272,8 +2283,14 @@ export CIABATTA_VIZ=tui              # …or make that the default for every run
               unless you&apos;ve touched a key; one that fails stays open until you close it.
             </>,
             <>
-              When the TUI closes it prints a summary — each step&apos;s outcome, and the last
-              lines of any that failed — so it survives in your scrollback.
+              <strong>Notes land in the output, not over the screen.</strong> Something ciabatta
+              says in passing — the remote cache being unreachable, a build it couldn&apos;t cache
+              — goes into the run&apos;s output pane (once, however many steps run into it), rather
+              than being printed across the TUI&apos;s drawing.
+            </>,
+            <>
+              When the TUI closes it prints a summary — each step&apos;s outcome, any notes, and
+              the last lines of any that failed — so it survives in your scrollback.
             </>,
           ]}
         />

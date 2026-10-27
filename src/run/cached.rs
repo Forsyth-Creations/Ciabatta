@@ -442,7 +442,9 @@ impl Session {
         let client = match Client::new(&remote.url, remote.tls_verify) {
             Ok(client) => client,
             Err(e) => {
-                eprintln!("note: the configured remote cache is unusable ({e:#})");
+                crate::tui::note(format!(
+                    "note: the configured remote cache is unusable ({e:#})"
+                ));
                 self.remote_failed(format!("{e:#}"));
                 return;
             }
@@ -467,11 +469,11 @@ impl Session {
                 if remote.project.as_deref() != Some(project.id.as_str())
                     && let Err(e) = record_project_id(&self.root, &project.id)
                 {
-                    eprintln!(
+                    crate::tui::note(format!(
                         "note: couldn't record the remote cache project id ({e:#}); \
                          add `project: {}` under cache.remote by hand",
                         project.id
-                    );
+                    ));
                 }
 
                 self.remote = Some(Remote {
@@ -484,7 +486,9 @@ impl Session {
                 }
             }
             Err(e) => {
-                eprintln!("note: the remote cache is unavailable ({e:#}); using the local one");
+                crate::tui::note(format!(
+                    "note: the remote cache is unavailable ({e:#}); using the local one"
+                ));
                 self.remote_failed(format!("{e:#}"));
             }
         }
@@ -902,10 +906,10 @@ impl Session {
         let outputs = match blocking(|| remembered.run(|| config.hash_outputs(&dir))) {
             Ok(outputs) => outputs,
             Err(e) => {
-                eprintln!(
+                crate::tui::note(format!(
                     "note: couldn't collect {}'s outputs to cache ({e:#})",
                     step.name
-                );
+                ));
                 // Nothing was recorded about what it produced, so its
                 // dependents have nothing to check: they rerun behind it.
                 self.unaccounted.insert(step.name.clone());
@@ -941,24 +945,24 @@ impl Session {
         drop(remembered);
         if !undeclared_reads.is_empty() {
             let undeclared = undeclared_reads;
-            eprintln!(
+            crate::tui::note(format!(
                 "warning: rustc reports {} reading {} file(s) outside its cache inputs — \
                  changing them won't rebuild it: {}",
                 step.name,
                 undeclared.len(),
                 undeclared.join(", "),
-            );
+            ));
         }
 
         // The same for what its build scripts read from the environment.
         if !undeclared_env.is_empty() {
             let undeclared = undeclared_env;
-            eprintln!(
+            crate::tui::note(format!(
                 "warning: a build script of {} asks to be rerun when {} changes, but the \
                  cache doesn't key on it — list it in the workflow's `env:`",
                 step.name,
                 undeclared.join(", "),
-            );
+            ));
         }
 
         // Whatever it produced is what its dependents key against, cached or not.
@@ -1000,7 +1004,7 @@ impl Session {
         let entry = match blocking(|| self.store.put(&key, &dir, build)) {
             Ok(entry) => entry,
             Err(e) => {
-                eprintln!("note: couldn't cache {} ({e:#})", step.name);
+                crate::tui::note(format!("note: couldn't cache {} ({e:#})", step.name));
                 self.stored(
                     &step.name,
                     StoredInfo {
@@ -1097,7 +1101,7 @@ impl Session {
         if stray.is_empty() {
             return;
         }
-        eprintln!(
+        crate::tui::note(format!(
             "note: {} declares `cache.remote`, but the remote cache is configured \
              per project, not per sub-workspace. Move it to {}'s config \
              (`ciabatta cache init --remote <URL>` at the repository root).",
@@ -1107,7 +1111,7 @@ impl Session {
                 .file_name()
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_else(|| workspace.root.display().to_string()),
-        );
+        ));
     }
 
     /// Note that a step which is about to run can't say what it produced, so

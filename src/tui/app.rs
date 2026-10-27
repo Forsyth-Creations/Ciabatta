@@ -244,6 +244,12 @@ pub struct App {
     pub env: Vec<String>,
     /// Questions waiting on an answer, oldest first. The first is on screen.
     pub prompts: std::collections::VecDeque<Prompt>,
+    /// What was raised in passing through [`super::note`], each once — shown
+    /// in the run's log, and repeated in the summary left behind.
+    pub notes: Vec<String>,
+    /// The mouse is handed back to the terminal and the pane is drawn alone,
+    /// without borders, so a drag selects its text and nothing else.
+    pub selecting: bool,
 }
 
 impl App {
@@ -270,6 +276,8 @@ impl App {
             browsing: false,
             pane: Pane::Output,
             env: Vec::new(),
+            notes: Vec::new(),
+            selecting: false,
             prompts: Default::default(),
         }
         .sorted()
@@ -465,6 +473,16 @@ impl App {
                 self.run.took = Some(self.run.started.elapsed());
             }
         }
+    }
+
+    /// A note raised outside the run's own updates. One already seen isn't
+    /// repeated: the same remote cache failing for every step is one fact.
+    pub fn note(&mut self, note: String) {
+        if self.notes.contains(&note) {
+            return;
+        }
+        self.run.logs.push(note.clone());
+        self.notes.push(note);
     }
 
     /// The run's channel closed: nothing more is coming. Whatever never
@@ -729,6 +747,16 @@ fn clock() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_note_is_logged_once() {
+        let mut app = App::new("build", ["compile"], false);
+        let note = "note: the remote cache is unavailable; building locally";
+        app.note(note.into());
+        app.note(note.into());
+        assert_eq!(app.notes, [note]);
+        assert_eq!(app.run.logs.iter().filter(|l| *l == note).count(), 1);
+    }
 
     fn app() -> App {
         App::new("build", ["compile", "test", "lint"], false)

@@ -2251,6 +2251,22 @@ export CIABATTA_VIZ=tui              # …or make that the default for every run
               <C>s</C> switches the list between run order and sorted by name.
             </>,
             <>
+              <C>e</C> (or <C>Tab</C>) swaps the output pane for the <strong>.env tab</strong>:
+              the environment the run resolved — every variable it depends on, its value, and
+              where that value came from (your terminal, which <C>.env</C> file, a defaults file),
+              in the order the search consults them. Secrets are masked. It is the same report
+              the plain view prints before a run; press <C>e</C> again, or pick a step, to go back
+              to the output.
+            </>,
+            <>
+              <strong>Questions are answered right there.</strong> When a step runs{" "}
+              <C>ciabatta input</C>, or a recovery node wants a fix chosen, a box opens over the
+              output: type the answer and press Enter (an empty line takes the default),{" "}
+              <C>y</C>/<C>n</C> for a yes-or-no question, or <C>↑</C>/<C>↓</C> and Enter to pick a
+              recovery option. While a question is up it has the keyboard — <C>q</C> included —
+              and Esc or Ctrl-C stops the run. Several questions queue, oldest first.
+            </>,
+            <>
               <C>q</C> while the run is going stops it, killing the steps in flight; press it
               again to leave without waiting. A run that succeeds closes itself after ten seconds
               unless you&apos;ve touched a key; one that fails stays open until you close it.
@@ -2504,7 +2520,13 @@ echo "deploying to $region"`}</Pre>
               asking step is killed and nothing further starts.
             </>,
             <>
-              <strong>Nobody</strong> (CI, piped output, <C>--tui</C>): the question settles
+              <strong>The terminal UI</strong> (<C>ciabatta deploy --tui</C>): a box opens over the
+              output with the question, its details and the countdown. Type the answer and press
+              Enter; <C>y</C> or <C>n</C> answers a yes-or-no question on the key. While it is up
+              it has the keyboard; Esc stops the run.
+            </>,
+            <>
+              <strong>Nobody</strong> (CI, piped output): the question settles
               immediately on its <C>--default</C>. Without one, the step fails with a message
               naming the variable to set.
             </>,
@@ -2745,6 +2767,50 @@ ciabatta.pause("Flip the maintenance switch, then continue")`}</Pre>
               </strong> They are what{" "}
               <C>ciabatta list -s payments</C> searches, and the difference between a workflow
               somebody can delete safely and one nobody dares touch.
+            </>,
+            <>
+              <strong>
+                A step can&apos;t read your keyboard.
+              </strong> Each step runs in a process group
+              of its own (so stopping it stops everything it started), and its stdin is empty. A
+              command that stops to ask — <C>read</C>, <C>apt install</C> without <C>-y</C>, a
+              login that wants a password — gets end-of-file at once and fails or takes its
+              default, rather than freezing the run. Pass the flag that makes it non-interactive,
+              or ask with <C>ciabatta input</C>, which works in every view. A prompt it prints
+              without a newline still shows up in the log.
+            </>,
+            <>
+              <strong>Output arrives late, in bursts?</strong> A step&apos;s output is a pipe, not
+              a terminal, and some programs buffer a pipe in big blocks. Ciabatta sets{" "}
+              <C>PYTHONUNBUFFERED=1</C> for Python; for a C program, run it as{" "}
+              <C>stdbuf -oL cmd</C>. Many tools also have a flag of their own (<C>grep
+              --line-buffered</C>).
+            </>,
+            <>
+              <strong>
+                <C>stderr</C> isn&apos;t an error.
+              </strong> Lines a step writes to stderr are
+              tagged with a quiet <C>stderr</C> marker in the logs here (<C>[stderr]</C> in the
+              terminal), because that is the stream they came from — not because anything went
+              wrong. Compilers, bundlers, <C>git</C> and most loggers (Python&apos;s{" "}
+              <C>logging</C>, Node&apos;s <C>console.error</C>) write progress and warnings
+              there as a matter of course. Whether a step failed is its exit status, shown on the
+              step itself.
+            </>,
+            <>
+              <strong>
+                Hanging? Run it with <C>CIABATTA_DEBUG=1</C>
+              </strong>{" "}
+              (or <C>--debug</C>). Every
+              step&apos;s start, exit and cache decision is logged, and every 30 seconds the log
+              says which steps are still going and for how long. A command that prints nothing
+              for 30 seconds gets its whole process tree written down — each process&apos;s
+              state, what the kernel says it is blocked in, and its command line — which tells a
+              slow build from one waiting on something. It all goes to stderr and is appended to{" "}
+              <C>~/.ciabatta/debug.log</C>, which survives the Ctrl-C that usually ends a hang
+              (with <C>--tui</C>, only the file: the screen is the TUI&apos;s). A daemon started
+              with it set logs at debug level to <C>~/.ciabatta/daemon.log</C>.{" "}
+              <C>CIABATTA_LOG=ciabatta=trace</C> overrides the level outright.
             </>,
             <>
               <strong>Stuck? Ask it.</strong> <C>ciabatta why &lt;target&gt;</C> for one step,{" "}

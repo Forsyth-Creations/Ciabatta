@@ -22,7 +22,16 @@ use tokio::sync::mpsc;
 
 use crate::config::CiabattaConfig;
 use crate::runner::{self, ProgressUpdate};
-use app::{App, StepStatus};
+use app::{App, Reply, StepStatus};
+
+/// Set while the TUI has the screen. A log line written to stderr then would
+/// land in the middle of its drawing, so the CLI's logger holds off.
+static OWNS_SCREEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Whether the TUI is drawing on the terminal right now.
+pub fn owns_screen() -> bool {
+    OWNS_SCREEN.load(std::sync::atomic::Ordering::Relaxed)
+}
 
 /// Run a workflow inside the TUI. Returns whether it succeeded.
 ///
@@ -49,12 +58,23 @@ pub async fn run(
     // ratatui only draws what differs from the last frame, and its first
     // "last frame" is blank — so start from a screen that really is.
     terminal.clear()?;
+    OWNS_SCREEN.store(true, std::sync::atomic::Ordering::Relaxed);
 
     let mut app = App::new(
         name,
         resolved.steps.iter().map(|s| s.name.as_str()),
         dry_run,
     );
+    // The `.env` tab: the same report `--viz plain` prints before a run.
+    let report = crate::run::envdeps::collect(resolved, root, env_vars, Some(config));
+    app.env = match report.render(name, false) {
+        Some(text) => text.lines().map(str::to_string).collect(),
+        None => vec!["This run depends on no environment variables.".to_string()],
+    };
+    if let Some(text) = report.render_arguments() {
+        app.env.push(String::new());
+        app.env.extend(text.lines().map(str::to_string));
+    }
     let result = tui_loop(
         &mut terminal,
         &mut app,
@@ -68,6 +88,7 @@ pub async fn run(
     )
     .await;
 
+    OWNS_SCREEN.store(false, std::sync::atomic::Ordering::Relaxed);
     disable_raw_mode()?;
     execute!(
         terminal.backend_mut(),
@@ -147,6 +168,13 @@ async fn tui_loop(
     // Quitting mid-run asks the engine to stop, so the steps it started are
     // killed rather than orphaned.
     let cancel = ctl.cancel.get_or_insert_with(Default::default).clone();
+    // Somebody is at the keyboard: `ciabatta input` questions and recovery
+    // choices are put to them rather than settled on their defaults.
+    let inputs = tokio::sync::broadcast::channel::<crate::run::input::Answer>(16).0;
+    let choices = tokio::sync::broadcast::channel::<runner::StepChoice>(16).0;
+    ctl.inputs = Some(inputs.clone());
+    ctl.choices = Some(choices.clone());
+    ctl.interactive = true;
 
     let name_clone = name.to_string();
     let resolved_clone = resolved.clone();
@@ -194,7 +222,12 @@ async fn tui_loop(
                 match maybe_event {
                     Some(Ok(Event::Key(key))) if key.kind == KeyEventKind::Press => {
                         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-                        let quit = matches!(key.code, KeyCode::Char('q') | KeyCode::Esc)
+                        // A question on screen takes the keyboard, `q`
+                        // included — it may be part of the answer. Esc and
+                        // Ctrl-C still stop the run.
+                        let asking = !app.prompts.is_empty();
+                        let quit = (!asking && key.code == KeyCode::Char('q'))
+                            || key.code == KeyCode::Esc
                             || (ctrl && key.code == KeyCode::Char('c'));
                         if quit {
                             if app.finished || app.stopping {
@@ -205,6 +238,18 @@ async fn tui_loop(
                             continue;
                         }
                         app.browsing = true;
+                        if asking {
+                            match app.prompt_key(key.code) {
+                                Some(Reply::Input(answer)) => {
+                                    let _ = inputs.send(answer);
+                                }
+                                Some(Reply::Choice(choice)) => {
+                                    let _ = choices.send(choice);
+                                }
+                                None => {}
+                            }
+                            continue;
+                        }
                         match key.code {
                             KeyCode::Down | KeyCode::Char('j') => app.select_next(),
                             KeyCode::Up | KeyCode::Char('k') => app.select_prev(),
@@ -217,6 +262,7 @@ async fn tui_loop(
                             KeyCode::Char('u') if ctrl => app.scroll_up(page),
                             KeyCode::Char('d') if ctrl => app.scroll_down(page),
                             KeyCode::End | KeyCode::Char('f') => app.follow(),
+                            KeyCode::Char('e') | KeyCode::Tab => app.toggle_env(),
                             _ => {}
                         }
                     }

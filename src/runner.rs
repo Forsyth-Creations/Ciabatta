@@ -174,6 +174,104 @@ pub struct StepChoice {
     pub option: usize,
 }
 
+/// How often a debug run says what is still in progress.
+const HEARTBEAT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// A debug run's record of what each step is doing and since when — what the
+/// heartbeat reports, so a hang reads as "deploy has been waiting for input for
+/// 4m" rather than as silence.
+#[derive(Default)]
+struct Flight {
+    /// Step → what it's doing, and since when.
+    active: std::collections::BTreeMap<String, (&'static str, std::time::Instant)>,
+}
+
+impl Flight {
+    fn set(&mut self, step: &str, doing: Option<&'static str>) {
+        match doing {
+            Some(doing) => {
+                self.active
+                    .insert(step.to_string(), (doing, std::time::Instant::now()));
+            }
+            None => {
+                self.active.remove(step);
+            }
+        }
+    }
+
+    fn observe(&mut self, update: &ProgressUpdate) {
+        match update {
+            ProgressUpdate::StepProcessing { step, .. } => {
+                self.set(step, Some("checking the cache"))
+            }
+            ProgressUpdate::StepRestoring { step, .. } => {
+                if !self
+                    .active
+                    .get(step)
+                    .is_some_and(|(d, _)| *d == "restoring")
+                {
+                    self.set(step, Some("restoring"));
+                    tracing::debug!("{step}: restoring from the remote cache");
+                }
+            }
+            ProgressUpdate::StepStarted { step, .. } => {
+                self.set(step, Some("running"));
+                tracing::debug!("{step}: started");
+            }
+            ProgressUpdate::StepFinished { step, ok, .. } => {
+                self.set(step, None);
+                tracing::debug!("{step}: {}", if *ok { "finished" } else { "failed" });
+            }
+            ProgressUpdate::StepWarned { step, .. } => self.set(step, None),
+            ProgressUpdate::StepSkipped { step, reason, .. } => {
+                self.set(step, None);
+                tracing::debug!("{step}: skipped ({reason})");
+            }
+            ProgressUpdate::StepCache { step, report, .. } => {
+                tracing::debug!("{step}: cache {}: {}", report.outcome, report.summary);
+            }
+            ProgressUpdate::StepNeedsChoice { step, .. } => {
+                self.set(step, Some("waiting for a recovery choice"));
+                tracing::debug!("{step}: waiting for a recovery choice");
+            }
+            ProgressUpdate::InputRequested { step, input, .. } => {
+                self.set(step, Some("waiting for input"));
+                tracing::debug!("{step}: asking \"{}\"", input.prompt);
+            }
+            ProgressUpdate::InputResolved { step, outcome, .. } => {
+                self.set(step, Some("running"));
+                tracing::debug!("{step}: question settled ({})", outcome.label());
+            }
+            ProgressUpdate::StageStarted { workflow, stage } => {
+                tracing::debug!("{workflow}: {} started", stage.label());
+            }
+            ProgressUpdate::Log(workflow, line) => tracing::debug!("{workflow}: {line}"),
+            ProgressUpdate::Warning { message, .. } => tracing::debug!("warning: {message}"),
+            ProgressUpdate::Completed(workflow) => tracing::debug!("{workflow}: completed"),
+            ProgressUpdate::Failed(workflow, error) => {
+                tracing::debug!("{workflow}: failed: {error}")
+            }
+            _ => {}
+        }
+    }
+
+    fn report(&self) {
+        if self.active.is_empty() {
+            tracing::debug!("still running; no step is in progress");
+            return;
+        }
+        let doing = self
+            .active
+            .iter()
+            .map(|(step, (doing, since))| {
+                format!("{step} {doing} for {}", elapsed(since.elapsed()))
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+        tracing::debug!("in progress: {doing}");
+    }
+}
+
 /// What a run reports when it was stopped rather than failed.
 ///
 /// A constant rather than a string written twice, because the view layer has to
@@ -348,9 +446,28 @@ pub async fn run_workflow_ctl(
     let outer = tx.clone();
     let tap = tokio::spawn(async move {
         let mut ledger = crate::remote_cache::builds::Ledger::default();
-        while let Some(update) = inner_rx.recv().await {
-            ledger.observe(&update);
-            let _ = outer.send(update).await;
+        // Under `--debug`, the same stream is narrated to the log, and every
+        // so often the log is told what is still going — so a run that hangs
+        // says where.
+        let mut flight = tracing::enabled!(tracing::Level::DEBUG).then(Flight::default);
+        let mut beat = tokio::time::interval(HEARTBEAT);
+        beat.tick().await;
+        loop {
+            tokio::select! {
+                update = inner_rx.recv() => {
+                    let Some(update) = update else { break };
+                    if let Some(flight) = flight.as_mut() {
+                        flight.observe(&update);
+                    }
+                    ledger.observe(&update);
+                    let _ = outer.send(update).await;
+                }
+                _ = beat.tick(), if flight.is_some() => {
+                    if let Some(flight) = &flight {
+                        flight.report();
+                    }
+                }
+            }
         }
         ledger
     });

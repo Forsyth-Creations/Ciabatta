@@ -83,6 +83,9 @@ interface LogViewProps {
   expandable?: boolean;
 }
 
+/** How the daemon marks a line the command wrote to stderr. */
+const STDERR = "[stderr] ";
+
 export function LogView({
   lines,
   dropped = 0,
@@ -92,9 +95,9 @@ export function LogView({
   expandable = true,
 }: LogViewProps) {
   const theme = useTheme();
-  // Resolved here rather than written as `"error.main"` per row: these are
+  // Resolved here rather than written as `"text.disabled"` per row: these are
   // inline styles, which take CSS colours and not theme tokens.
-  const stderrColor = theme.palette.error.main;
+  const stderrTagColor = theme.palette.text.disabled;
   const scroller = useRef<HTMLDivElement>(null);
   const [wrap, setWrap] = useState(false);
   // Whether new output scrolls into view. On by default — a running build is
@@ -380,9 +383,6 @@ export function LogView({
                 transform: `translateY(${item.start}px)`,
                 whiteSpace: wrap ? "pre-wrap" : "pre",
                 wordBreak: wrap ? "break-word" : undefined,
-                // stderr is marked by the daemon rather than inferred, so this
-                // is a fact about the line, not a guess from its contents.
-                color: lines[item.index].startsWith("[stderr]") ? stderrColor : undefined,
                 background:
                   item.index === currentLine
                     ? currentTint
@@ -395,7 +395,27 @@ export function LogView({
                     : undefined,
               }}
             >
-              <AnsiText text={lines[item.index]} />
+              {lines[item.index].startsWith(STDERR) ? (
+                <>
+                  {/*
+                    stderr is marked by the daemon rather than inferred, so
+                    this is a fact about the line — but not a verdict on it.
+                    Compilers, bundlers and loggers write progress and warnings
+                    there as a matter of course; whether anything went wrong is
+                    the step's outcome, not which stream a line used. So it's a
+                    quiet tag, not a red line.
+                  */}
+                  <span
+                    style={{ color: stderrTagColor, userSelect: "none" }}
+                    title="Written to stderr. Tools log progress and warnings there as a matter of course; it isn't an error unless the step fails."
+                  >
+                    stderr{" "}
+                  </span>
+                  <AnsiText text={lines[item.index].slice(STDERR.length)} />
+                </>
+              ) : (
+                <AnsiText text={lines[item.index]} />
+              )}
             </div>
           ))}
         </div>

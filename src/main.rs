@@ -1003,8 +1003,15 @@ fn init_daemon_logging() -> Result<()> {
         .open(&path)
         .with_context(|| format!("Failed to open {}", path.display()))?;
 
-    let directives = std::env::var("CIABATTA_LOG")
-        .unwrap_or_else(|_| "ciabatta=info,tower_http=warn".to_string());
+    // `CIABATTA_DEBUG` means the same here as it does for the CLI: a daemon
+    // started with it set logs what every run, step and request is doing.
+    let directives = std::env::var("CIABATTA_LOG").unwrap_or_else(|_| {
+        match debug_env() {
+            true => "ciabatta=debug,tower_http=info",
+            false => "ciabatta=info,tower_http=warn",
+        }
+        .to_string()
+    });
 
     // Run in the foreground and the terminal is where you are looking, so log
     // there as well. In the background stderr *is* this file (see
@@ -1634,6 +1641,17 @@ async fn tail_watch_session(
     }
 }
 
+/// Whether `CIABATTA_DEBUG` asks for debug logging: set to anything non-empty
+/// other than `0`/`false`.
+fn debug_env() -> bool {
+    env::var("CIABATTA_DEBUG")
+        .map(|v| {
+            let v = v.trim();
+            !v.is_empty() && v != "0" && !v.eq_ignore_ascii_case("false")
+        })
+        .unwrap_or(false)
+}
+
 /// Initialize the `tracing` subscriber for stderr logging.
 ///
 /// Debug logging turns on when the `--debug` flag is passed OR the
@@ -1642,19 +1660,18 @@ async fn tail_watch_session(
 /// variable is honored directly as a `tracing` env-filter (e.g.
 /// `CIABATTA_LOG=ciabatta=trace`), overriding the flag-derived default.
 ///
+/// A debug run also appends everything to `~/.ciabatta/debug.log`. A hang is
+/// usually ended with Ctrl-C, and the TUI keeps log lines off the screen while
+/// it is drawing (they would land in the middle of it) — the file is where the
+/// record survives both.
+///
 /// `verbose` raises the floor from `warn` to `info` for commands that exist to
 /// keep running and report — today that is `remote-cache start`, whose request
 /// log is the reason anyone runs it in a terminal.
 fn init_logging(debug_flag: bool, verbose: bool) {
     use tracing_subscriber::{EnvFilter, fmt};
 
-    let debug = debug_flag
-        || env::var("CIABATTA_DEBUG")
-            .map(|v| {
-                let v = v.trim();
-                !v.is_empty() && v != "0" && !v.eq_ignore_ascii_case("false")
-            })
-            .unwrap_or(false);
+    let debug = debug_flag || debug_env();
 
     let default_directive = match (debug, verbose) {
         (true, _) => "ciabatta=debug",
@@ -1664,12 +1681,65 @@ fn init_logging(debug_flag: bool, verbose: bool) {
     let filter = EnvFilter::try_from_env("CIABATTA_LOG")
         .unwrap_or_else(|_| EnvFilter::new(default_directive));
 
+    let file = debug
+        .then(|| {
+            let path = daemon::state_dir().ok()?.join("debug.log");
+            let file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)
+                .ok()?;
+            Some((path, std::sync::Arc::new(std::sync::Mutex::new(file))))
+        })
+        .flatten();
+    let path = file.as_ref().map(|(path, _)| path.clone());
+    let file = file.map(|(_, file)| file);
+
     // Best-effort: ignore the error if a subscriber is somehow already set.
     let _ = fmt()
         .with_env_filter(filter)
         .with_target(false)
-        .with_writer(std::io::stderr)
+        .with_ansi(false)
+        .with_writer(move || LogWriter { file: file.clone() })
         .try_init();
+    if let Some(path) = path {
+        tracing::debug!(
+            "ciabatta {} (pid {}): {}; also logging to {}",
+            env!("CARGO_PKG_VERSION"),
+            std::process::id(),
+            env::args().collect::<Vec<_>>().join(" "),
+            path.display()
+        );
+    }
+}
+
+/// Where a CLI log line goes: stderr, unless the TUI has the screen, and the
+/// debug log file when there is one.
+struct LogWriter {
+    file: Option<std::sync::Arc<std::sync::Mutex<std::fs::File>>>,
+}
+
+impl std::io::Write for LogWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if let Some(file) = &self.file
+            && let Ok(mut file) = file.lock()
+        {
+            let _ = file.write_all(buf);
+        }
+        if !tui::owns_screen() {
+            std::io::stderr().write_all(buf)?;
+        }
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        if let Some(file) = &self.file
+            && let Ok(mut file) = file.lock()
+        {
+            let _ = file.flush();
+        }
+        std::io::stderr().flush()
+    }
 }
 
 /// Turn a rejected remote-cache request into an answer somebody can act on.

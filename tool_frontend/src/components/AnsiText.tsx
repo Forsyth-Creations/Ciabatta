@@ -276,7 +276,7 @@ function toCss(color: AnsiColor, mode: "light" | "dark"): string {
  * Output text with its colours applied.
  *
  * `fallbackColor` is what unstyled text uses — the caller's own colour for the
- * line (stderr is red here), which an escape then overrides.
+ * line, which an escape then overrides.
  */
 export const AnsiText = memo(function AnsiText({
   text,

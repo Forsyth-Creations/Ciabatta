@@ -7,7 +7,7 @@
 
 use std::time::{Duration, Instant};
 
-use crate::runner::ProgressUpdate;
+use crate::runner::{ProgressUpdate, StepChoice};
 
 /// Where a step has got to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -154,6 +154,43 @@ pub enum RunStatus {
     Failed(String),
 }
 
+/// What the right-hand pane shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Pane {
+    /// The selected entry's output.
+    Output,
+    /// The environment the run resolved: every variable it depends on, its
+    /// value, and where that value came from.
+    Env,
+}
+
+/// Something the run is waiting for somebody here to answer.
+#[derive(Debug, Clone)]
+pub enum Prompt {
+    /// A step ran `ciabatta input`.
+    Input {
+        pending: crate::run::input::Pending,
+        /// What has been typed so far.
+        typed: String,
+    },
+    /// A recovery node wants one of its fix options picked.
+    Choice {
+        workflow: String,
+        step: String,
+        message: String,
+        options: Vec<String>,
+        /// The highlighted option.
+        selected: usize,
+    },
+}
+
+/// What answering a [`Prompt`] sends back to the run.
+#[derive(Debug, Clone)]
+pub enum Reply {
+    Input(crate::run::input::Answer),
+    Choice(StepChoice),
+}
+
 /// How the step list is ordered.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SortOrder {
@@ -201,6 +238,18 @@ pub struct App {
     /// Somebody has touched the keyboard since the run ended, so it shouldn't
     /// close on its own under them.
     pub browsing: bool,
+    /// What the right-hand pane is showing.
+    pub pane: Pane,
+    /// The resolved environment, as `ciabatta env` would print it.
+    pub env: Vec<String>,
+    /// Questions waiting on an answer, oldest first. The first is on screen.
+    pub prompts: std::collections::VecDeque<Prompt>,
+    /// What was raised in passing through [`super::note`], each once — shown
+    /// in the run's log, and repeated in the summary left behind.
+    pub notes: Vec<String>,
+    /// The mouse is handed back to the terminal and the pane is drawn alone,
+    /// without borders, so a drag selects its text and nothing else.
+    pub selecting: bool,
 }
 
 impl App {
@@ -225,6 +274,11 @@ impl App {
             finished: false,
             stopping: false,
             browsing: false,
+            pane: Pane::Output,
+            env: Vec::new(),
+            notes: Vec::new(),
+            selecting: false,
+            prompts: Default::default(),
         }
         .sorted()
     }
@@ -361,10 +415,10 @@ impl App {
                 }
             }
             ProgressUpdate::StepNeedsChoice {
+                workflow,
                 step,
                 message,
                 options,
-                ..
             } => {
                 if let Some(s) = self.step_mut(&step) {
                     s.status = StepStatus::Asking;
@@ -372,20 +426,33 @@ impl App {
                     for (i, opt) in options.iter().enumerate() {
                         s.logs.push(format!("    [{i}] {opt}"));
                     }
-                    s.logs.push("    (choose a fix with --viz gui)".to_string());
                 }
                 self.run.logs.push(format!("⚠ {step}: {message}"));
+                self.prompts.push_back(Prompt::Choice {
+                    workflow,
+                    step,
+                    message,
+                    options,
+                    selected: 0,
+                });
             }
-            // The TUI runs unattended (its `RunCtl` has no answer bus), so a
-            // question settles on its default; the step shows it's waiting
-            // until then, and the answer reaches its log as a step line.
+            // Put up for answering; the answer reaches the step's log as a
+            // line of its own once the step has it.
             ProgressUpdate::InputRequested { step, input, .. } => {
                 if let Some(s) = self.step_mut(&step) {
                     s.status = StepStatus::Asking;
                     s.logs.push(format!("? {}", input.prompt));
                 }
+                self.prompts.push_back(Prompt::Input {
+                    pending: *input,
+                    typed: String::new(),
+                });
             }
-            ProgressUpdate::InputResolved { step, .. } => {
+            // Answered here, or settled some other way — timed out, or its
+            // step went away: either way it comes down.
+            ProgressUpdate::InputResolved { step, id, .. } => {
+                self.prompts
+                    .retain(|p| !matches!(p, Prompt::Input { pending, .. } if pending.id == id));
                 if let Some(s) = self.step_mut(&step)
                     && s.status == StepStatus::Asking
                 {
@@ -408,6 +475,16 @@ impl App {
         }
     }
 
+    /// A note raised outside the run's own updates. One already seen isn't
+    /// repeated: the same remote cache failing for every step is one fact.
+    pub fn note(&mut self, note: String) {
+        if self.notes.contains(&note) {
+            return;
+        }
+        self.run.logs.push(note.clone());
+        self.notes.push(note);
+    }
+
     /// The run's channel closed: nothing more is coming. Whatever never
     /// started never will — and on a run that succeeded, wasn't needed to.
     pub fn finish(&mut self) {
@@ -426,6 +503,88 @@ impl App {
                 s.took = s.started.map(|t| t.elapsed());
             }
         }
+    }
+
+    /// Hand a key to the question on screen. Returns what to send the run
+    /// when the key answered it; the question then comes down.
+    pub fn prompt_key(&mut self, code: crossterm::event::KeyCode) -> Option<Reply> {
+        use crossterm::event::KeyCode;
+
+        let reply = match self.prompts.front_mut()? {
+            Prompt::Input { pending, typed } => {
+                let answer = |value: &str| {
+                    Some(Reply::Input(crate::run::input::Answer {
+                        id: pending.id,
+                        value: value.to_string(),
+                    }))
+                };
+                match code {
+                    KeyCode::Enter if pending.enter => answer(""),
+                    // Enter on an empty line takes the default, as it does at
+                    // the plain terminal's prompt.
+                    KeyCode::Enter if !pending.yes_no || pending.default.is_some() => {
+                        answer(typed.as_str())
+                    }
+                    KeyCode::Char(c) if pending.yes_no && matches!(c, 'y' | 'Y' | 'n' | 'N') => {
+                        answer(&c.to_ascii_lowercase().to_string())
+                    }
+                    KeyCode::Char(c) if !pending.enter && !pending.yes_no => {
+                        typed.push(c);
+                        None
+                    }
+                    KeyCode::Backspace => {
+                        typed.pop();
+                        None
+                    }
+                    _ => None,
+                }
+            }
+            Prompt::Choice {
+                workflow,
+                step,
+                options,
+                selected,
+                ..
+            } => match code {
+                KeyCode::Up | KeyCode::Char('k') => {
+                    *selected = selected.saturating_sub(1);
+                    None
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    *selected = (*selected + 1).min(options.len().saturating_sub(1));
+                    None
+                }
+                KeyCode::Char(c) if c.is_ascii_digit() => {
+                    let n = c.to_digit(10).unwrap_or(0) as usize;
+                    if n < options.len() {
+                        *selected = n;
+                    }
+                    None
+                }
+                KeyCode::Enter if !options.is_empty() => Some(Reply::Choice(StepChoice {
+                    workflow: workflow.clone(),
+                    step: step.clone(),
+                    option: *selected,
+                })),
+                _ => None,
+            },
+        };
+        // Down now rather than when the run confirms it, so a second Enter
+        // can't answer twice. A recovery choice has no confirmation to wait
+        // for, so its step's log says what was picked.
+        if reply.is_some()
+            && let Some(Prompt::Choice {
+                step,
+                options,
+                selected,
+                ..
+            }) = self.prompts.pop_front()
+            && let Some(s) = self.step_mut(&step)
+        {
+            s.logs.push(format!("→ chose: {}", options[selected]));
+            s.status = StepStatus::Running;
+        }
+        reply
     }
 
     fn set(&mut self, step: &str, status: StepStatus) {
@@ -461,10 +620,21 @@ impl App {
     }
 
     pub fn selected_logs(&self) -> &[String] {
-        match self.selected_step() {
-            Some(s) => &s.logs,
-            None => &self.run.logs,
+        match (self.pane, self.selected_step()) {
+            (Pane::Env, _) => &self.env,
+            (Pane::Output, Some(s)) => &s.logs,
+            (Pane::Output, None) => &self.run.logs,
         }
+    }
+
+    /// Switch the right-hand pane between output and the environment.
+    pub fn toggle_env(&mut self) {
+        self.pane = match self.pane {
+            Pane::Output => Pane::Env,
+            Pane::Env => Pane::Output,
+        };
+        self.scroll = None;
+        self.seen_rows = None;
     }
 
     /// Steps that have finished, for the header's count.
@@ -476,6 +646,8 @@ impl App {
         let index = index.min(self.entries() - 1);
         if index != self.selected {
             self.selected = index;
+            // Picking a step is asking to see what it printed.
+            self.pane = Pane::Output;
             // Another step's output starts at its newest line.
             self.scroll = None;
             self.seen_rows = None;
@@ -575,6 +747,16 @@ fn clock() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_note_is_logged_once() {
+        let mut app = App::new("build", ["compile"], false);
+        let note = "note: the remote cache is unavailable; building locally";
+        app.note(note.into());
+        app.note(note.into());
+        assert_eq!(app.notes, [note]);
+        assert_eq!(app.run.logs.iter().filter(|l| *l == note).count(), 1);
+    }
 
     fn app() -> App {
         App::new("build", ["compile", "test", "lint"], false)
@@ -754,5 +936,106 @@ mod tests {
         app.apply_update(finished("lint", true));
         app.select_next_interesting();
         assert_eq!(app.selected_step().unwrap().name, "compile");
+    }
+
+    fn asked(id: u64, yes_no: bool, default: Option<&str>) -> ProgressUpdate {
+        ProgressUpdate::InputRequested {
+            workflow: "build".into(),
+            step: "compile".into(),
+            input: Box::new(crate::run::input::Pending {
+                id,
+                step: "compile".into(),
+                prompt: "Which region?".into(),
+                details: None,
+                default: default.map(str::to_string),
+                secret: false,
+                env: None,
+                enter: false,
+                yes_no,
+                asked_at: String::new(),
+                deadline: None,
+            }),
+        }
+    }
+
+    #[test]
+    fn a_question_is_typed_into_and_answered_with_enter() {
+        use crossterm::event::KeyCode;
+        let mut app = app();
+        app.apply_update(asked(7, false, None));
+        assert_eq!(app.steps[0].status, StepStatus::Asking);
+        for c in "eu-west-2x".chars() {
+            assert!(app.prompt_key(KeyCode::Char(c)).is_none());
+        }
+        assert!(app.prompt_key(KeyCode::Backspace).is_none());
+        match app.prompt_key(KeyCode::Enter) {
+            Some(Reply::Input(answer)) => {
+                assert_eq!((answer.id, answer.value.as_str()), (7, "eu-west-2"))
+            }
+            other => panic!("expected an answer, got {other:?}"),
+        }
+        assert!(app.prompts.is_empty(), "answered, so it comes down");
+    }
+
+    #[test]
+    fn a_yes_no_question_answers_on_the_key_and_waits_without_a_default() {
+        use crossterm::event::KeyCode;
+        let mut app = app();
+        app.apply_update(asked(1, true, None));
+        assert!(
+            app.prompt_key(KeyCode::Enter).is_none(),
+            "no default to take"
+        );
+        assert!(app.prompt_key(KeyCode::Char('x')).is_none());
+        match app.prompt_key(KeyCode::Char('Y')) {
+            Some(Reply::Input(answer)) => assert_eq!(answer.value, "y"),
+            other => panic!("expected an answer, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_question_settled_elsewhere_comes_down() {
+        let mut app = app();
+        app.apply_update(asked(3, false, Some("us-east-1")));
+        app.apply_update(asked(4, false, None));
+        app.apply_update(ProgressUpdate::InputResolved {
+            workflow: "build".into(),
+            step: "compile".into(),
+            id: 3,
+            outcome: crate::run::input::Outcome::TimedOut,
+        });
+        assert_eq!(app.prompts.len(), 1);
+        assert!(matches!(&app.prompts[0], Prompt::Input { pending, .. } if pending.id == 4));
+    }
+
+    #[test]
+    fn a_recovery_choice_is_picked_and_logged() {
+        use crossterm::event::KeyCode;
+        let mut app = app();
+        app.apply_update(ProgressUpdate::StepNeedsChoice {
+            workflow: "build".into(),
+            step: "test".into(),
+            message: "tests failed".into(),
+            options: vec!["retry".into(), "skip".into()],
+        });
+        assert!(app.prompt_key(KeyCode::Down).is_none());
+        match app.prompt_key(KeyCode::Enter) {
+            Some(Reply::Choice(choice)) => {
+                assert_eq!((choice.step.as_str(), choice.option), ("test", 1))
+            }
+            other => panic!("expected a choice, got {other:?}"),
+        }
+        assert!(app.prompts.is_empty());
+        assert!(app.steps[1].logs.iter().any(|l| l == "→ chose: skip"));
+    }
+
+    #[test]
+    fn the_env_tab_swaps_the_pane_and_choosing_a_step_swaps_it_back() {
+        let mut app = app();
+        app.env = vec!["GREETING  hello".into()];
+        app.toggle_env();
+        assert_eq!(app.selected_logs(), ["GREETING  hello".to_string()]);
+        app.select_next();
+        assert_eq!(app.pane, Pane::Output);
     }
 }

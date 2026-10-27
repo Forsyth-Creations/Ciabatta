@@ -3,6 +3,7 @@ pub mod browse;
 pub mod docker;
 pub mod ecr;
 pub mod nexus;
+pub mod process;
 pub mod s3;
 
 use crate::color;
@@ -187,63 +188,90 @@ const AFTER_EXIT: std::time::Duration = std::time::Duration::from_secs(1);
 /// the background process from dying of a closed pipe the next time it writes.
 async fn stream_child_output(
     mut child: tokio::process::Child,
+    cmd: &str,
     sink: &mut LogSink<'_>,
 ) -> Result<std::process::ExitStatus> {
-    use tokio::io::{AsyncBufReadExt, BufReader};
+    use process::{Pipe, read_pipe};
 
-    let mut out = child.stdout.take().map(|s| BufReader::new(s).lines());
-    let mut err = child.stderr.take().map(|s| BufReader::new(s).lines());
+    // One reader per pipe, each forwarding lines as they complete — and an
+    // unfinished one, a prompt, once the command goes quiet. They keep reading
+    // after this returns, which is what drains a background process's output.
+    let (tx, mut lines) = tokio::sync::mpsc::unbounded_channel();
+    if let Some(out) = child.stdout.take() {
+        tokio::spawn(read_pipe(out, Pipe::Out, tx.clone()));
+    }
+    if let Some(err) = child.stderr.take() {
+        tokio::spawn(read_pipe(err, Pipe::Err, tx.clone()));
+    }
+    drop(tx);
+
+    let pid = child.id();
+    let started = std::time::Instant::now();
+    tracing::debug!(pid, "started `{cmd}`");
+
     let mut status = None;
+    let mut open = true;
     let after_exit = tokio::time::sleep(std::time::Duration::MAX);
     tokio::pin!(after_exit);
+    // Under `--debug`, a command that goes quiet is described — its processes,
+    // and what each is blocked on — so a hang leaves something to read.
+    let watching = tracing::enabled!(tracing::Level::DEBUG);
+    let quiet = tokio::time::sleep(process::QUIET_NOTE);
+    tokio::pin!(quiet);
+    let mut last_output = std::time::Instant::now();
 
     loop {
-        if out.is_none()
-            && err.is_none()
-            && let Some(status) = status
-        {
+        if !open && let Some(status) = status {
             return Ok(status);
         }
         tokio::select! {
-            res = async { out.as_mut().unwrap().next_line().await }, if out.is_some() => {
-                match res? {
-                    Some(line) => sink.push_raw(&line, ""),
-                    None => out = None,
+            line = lines.recv(), if open => match line {
+                Some((pipe, line)) => {
+                    last_output = std::time::Instant::now();
+                    if watching {
+                        quiet.as_mut().reset(tokio::time::Instant::now() + process::QUIET_NOTE);
+                    }
+                    let prefix = match pipe {
+                        Pipe::Out => "",
+                        Pipe::Err => "[stderr] ",
+                    };
+                    sink.push_raw(&line, prefix);
                 }
-            }
-            res = async { err.as_mut().unwrap().next_line().await }, if err.is_some() => {
-                match res? {
-                    Some(line) => sink.push_raw(&line, "[stderr] "),
-                    None => err = None,
-                }
-            }
+                None => open = false,
+            },
             res = child.wait(), if status.is_none() => {
-                status = Some(res?);
+                let done = res?;
+                tracing::debug!(
+                    pid,
+                    "`{cmd}` exited ({done}) after {}",
+                    crate::runner::elapsed(started.elapsed())
+                );
+                status = Some(done);
                 after_exit
                     .as_mut()
                     .reset(tokio::time::Instant::now() + AFTER_EXIT);
             }
             () = &mut after_exit, if status.is_some() => break,
+            () = &mut quiet, if watching && status.is_none() => {
+                tracing::debug!(
+                    "{}",
+                    process::describe_quiet(pid, last_output.elapsed(), cmd)
+                );
+                quiet.as_mut().reset(tokio::time::Instant::now() + process::QUIET_NOTE);
+            }
         }
     }
 
+    tracing::debug!(
+        pid,
+        "`{cmd}` left something running that still holds its output"
+    );
     sink.push(
         "(a process this command started in the background is still running; \
          not waiting for it)"
             .to_string(),
     );
-    drain(out.map(|lines| lines.into_inner()));
-    drain(err.map(|lines| lines.into_inner()));
     Ok(status.expect("only reached once the child has exited"))
-}
-
-/// Read `pipe` to its end in the background, throwing the output away.
-fn drain(pipe: Option<impl tokio::io::AsyncRead + Unpin + Send + 'static>) {
-    if let Some(mut pipe) = pipe {
-        tokio::spawn(async move {
-            let _ = tokio::io::copy(&mut pipe, &mut tokio::io::sink()).await;
-        });
-    }
 }
 
 /// Shared options for a registry operation.
@@ -603,11 +631,15 @@ pub async fn run_shell_command_opts(
     // turn colour off. Tell it otherwise — before `envs`, so a step that asked
     // for plain output keeps it.
     color::request(&mut command);
+    // Likewise a runtime that buffers a pipe in blocks: asked not to, so its
+    // lines arrive when they're printed. See [`process`].
+    process::unbuffer(&mut command);
     command
         .arg("-c")
         .arg(cmd)
         .current_dir(cwd)
         .envs(env_vars)
+        .stdin(process::stdin())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
@@ -631,7 +663,7 @@ pub async fn run_shell_command_opts(
         .with_context(|| format!("Failed to spawn shell for command: {cmd}"))?;
 
     let group = ProcessGroup::new(child.id(), kill_on_drop);
-    let status = stream_child_output(child, sink).await?;
+    let status = stream_child_output(child, cmd, sink).await?;
     // Reaped normally: the pid is free to be reused, so stop tracking it.
     group.disarm();
 
@@ -739,6 +771,7 @@ pub async fn run_command(
     let output = Command::new(program)
         .args(args)
         .envs(env_vars)
+        .stdin(process::stdin())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .output()

@@ -253,10 +253,10 @@ pub fn stale_after(config: &crate::config::CiabattaConfig) -> std::time::Duratio
     let seconds = match crate::cache::store::parse_duration(raw) {
         Ok(seconds) => seconds,
         Err(e) => {
-            eprintln!(
+            crate::tui::note(format!(
                 "note: workspace.stale_after ('{raw}') isn't a duration ({e}); \
                  using {DEFAULT_STALE_AFTER}"
-            );
+            ));
             crate::cache::store::parse_duration(DEFAULT_STALE_AFTER)
                 .expect("the default is a valid duration")
         }

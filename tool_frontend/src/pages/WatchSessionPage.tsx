@@ -350,7 +350,9 @@ export function WatchSessionPage() {
                     fontFamily: monoFontStack,
                     fontSize: 12.5,
                     whiteSpace: "pre",
-                    color: line.stream === "stderr" ? "error.main" : "text.primary",
+                    // stderr is where tools log as a matter of course, so it's
+                    // set apart quietly rather than painted as an error.
+                    color: line.stream === "stderr" ? "text.secondary" : "text.primary",
                     bgcolor: isCurrent
                       ? alpha(theme.palette.warning.main, 0.38)
                       : matched.has(line.seq)
@@ -370,7 +372,7 @@ export function WatchSessionPage() {
                       text={line.text}
                       fallbackColor={
                         line.stream === "stderr"
-                          ? theme.palette.error.main
+                          ? theme.palette.text.secondary
                           : theme.palette.text.primary
                       }
                     />

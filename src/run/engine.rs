@@ -223,7 +223,8 @@ pub async fn execute(
         // progress updates are folded into the browser view rather than stdout.
         // Yellow and on lines of its own, so it can't be lost in the summary
         // printed above it.
-        {
+        // Not while the TUI has the screen, though: it shows them from the log.
+        if !crate::tui::owns_screen() {
             use owo_colors::OwoColorize;
             for line in &help {
                 eprintln!("{}", format!("[{name}] {line}").style(crate::color::warn()));

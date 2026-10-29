@@ -73,6 +73,12 @@
       "items": { "type": "string" },
       "examples": [["mock-api:serve", "database"]]
     },
+    "after": {
+      "type": "array",
+      "description": "Workflows to run once this run is over, whichever way it went: the clean-up, the report, the notification. Named the same way `needs` names things. An after action starts once every other step has finished — succeeded, failed, or never got going — and is not held back by a failure the way a `needs` dependent is. It sees CIABATTA_RUN_OUTCOME (`succeeded` or `failed`), so one that only matters on a failure can say `when: env.CIABATTA_RUN_OUTCOME == failed`. Its own failure fails a run that had otherwise passed; a run that is stopped skips them.",
+      "items": { "$ref": "./common.schema.json#/$defs/workflowRef" },
+      "examples": [["db:teardown", "notify"]]
+    },
     "wave_grouping": {
       "type": "string",
       "description": "A label lining this workflow up with every other workflow that carries the same one, in the waves a graph is drawn in. Waves come from `needs` alone; workflows sharing a `wave_grouping` start in the same wave where they can — each moves later, as a whole, to where the latest of them starts, and whatever waits on it moves with it. A preference for reading the graph, never a rule: no step is drawn before a step it needs, and the order the engine runs things in doesn't change.",

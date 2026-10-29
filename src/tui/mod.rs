@@ -92,15 +92,22 @@ pub async fn run(
         resolved.steps.iter().map(|s| s.name.as_str()),
         dry_run,
     );
-    // The `.env` tab: the same report `--viz plain` prints before a run.
+    // The `.env` tab: the same report `--viz plain` prints before a run, in
+    // the same colours. The escapes are kept and turned into styles as the
+    // pane is drawn (see `ui::ansi_rows`), so there is one set of colours to
+    // keep in step rather than two.
     let report = crate::run::envdeps::collect(resolved, root, env_vars, Some(config));
-    app.env = match report.render(name, false) {
+    app.env = match report.render(name, true) {
         Some(text) => text.lines().map(str::to_string).collect(),
         None => vec!["This run depends on no environment variables.".to_string()],
     };
     if let Some(text) = report.render_arguments() {
+        use owo_colors::OwoColorize;
+        // Yellow, as in the terminal: these exist for this run only.
+        let warn = owo_colors::Style::new().yellow();
         app.env.push(String::new());
-        app.env.extend(text.lines().map(str::to_string));
+        app.env
+            .extend(text.lines().map(|line| line.style(warn).to_string()));
     }
     let result = tui_loop(
         &mut terminal,

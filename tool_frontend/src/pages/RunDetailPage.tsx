@@ -238,7 +238,7 @@ function nodeHeight(
   if (!step) return DEPENDENCY_HEIGHT;
   return stepNodeHeight(
     Boolean(step.workspace),
-    (step.background ? 1 : 0) +
+    (step.background || step.after ? 1 : 0) +
       // Inspect mode's cache line, there for every step whether or not the
       // cache has spoken yet — so the node doesn't grow when it does.
       (inspect && !step.recover ? 1 : 0),
@@ -1423,6 +1423,7 @@ function NodeLabel({
           {step.background && (
             <StepLine mono={false}>background · nothing waits for it</StepLine>
           )}
+          {step.after && <StepLine mono={false}>after · runs whichever way the run went</StepLine>}
           {inspect && !step.recover && <InspectLine step={step} />}
         </>
       }
@@ -1554,6 +1555,7 @@ function StepDetails({ step, env, now }: { step: StepView; env: EnvVar[]; now: n
   if (step.push) badges.push("push");
   else if (step.kind) badges.push(step.kind);
   if (step.background) badges.push("⚡ background");
+  else if (step.after) badges.push("↪ after");
   else if (step.persistent) badges.push("persistent");
   if (step.timeout) badges.push(`timeout ${step.timeout}`);
   if (step.requires.length > 0) badges.push(`needs ${step.requires.join(", ")}`);
@@ -2510,7 +2512,9 @@ function nodeStyle(
     const border =
       inspect && !top.recover
         ? cacheTone(top.cache, theme)
-        : statusColor(stackStatus(steps, top), theme);
+        : top.after
+          ? afterColor(stackStatus(steps, top), theme)
+          : statusColor(stackStatus(steps, top), theme);
     const base = stepNodeStyle({
       theme,
       height: common.height,
@@ -2567,10 +2571,12 @@ function nodeStyle(
         // the status is still the glyph beside the name.
         inspect && !step.recover
           ? cacheTone(step.cache, theme)
-          : // Reused is as good an outcome as ran-and-passed.
-            wasReused(step.cache)
-            ? theme.palette.success.main
-            : statusColor(step.status, theme),
+          : step.after
+            ? afterColor(step.status, theme)
+            : // Reused is as good an outcome as ran-and-passed.
+              wasReused(step.cache)
+              ? theme.palette.success.main
+              : statusColor(step.status, theme),
     });
   }
 
@@ -2990,6 +2996,17 @@ function EnvGroupNote({
 /** The colour a step's status is drawn in — the graph's borders, the minimap. */
 function statusColor(status: StepStatus | string, theme: Theme): string {
   return statusColour(status, theme);
+}
+
+/**
+ * An after action's border: blue, so the clean-up at the end of a run reads
+ * as its own kind of step — except while it runs or once it fails, which are
+ * worth the status colour's attention.
+ */
+function afterColor(status: StepStatus | string, theme: Theme): string {
+  return status === "running" || status === "failed"
+    ? statusColor(status, theme)
+    : theme.palette.info.main;
 }
 
 function stageColor(status: string): "success" | "error" | "warning" | "default" {

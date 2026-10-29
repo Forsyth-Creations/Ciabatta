@@ -189,7 +189,7 @@ fn in_workflow(cursor: &Cursor, member: Option<&str>, index: &Index, lines: &[&s
             .collect();
     }
 
-    if cursor.at(&["needs"]) || cursor.at(&["background"]) {
+    if cursor.at(&["needs"]) || cursor.at(&["background"]) || cursor.at(&["after"]) {
         return workflow_refs(index, member);
     }
     if cursor.ends_with(&["owner"]) {

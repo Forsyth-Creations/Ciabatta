@@ -218,9 +218,11 @@ pub fn apply(steps: &[RunStep], filters: &[Filter]) -> Result<(Vec<RunStep>, Out
         // An edge to a pruned node can't be waited on, so it's cut — and
         // reported, because "this step ran without its input" is exactly the
         // kind of thing that should never be silent.
+        // An after action's edges only place it at the end of the drawing, so
+        // losing one costs it nothing worth reporting.
         step.needs.retain(|dep| {
             let alive = keep.contains(dep.as_str());
-            if !alive {
+            if !alive && !step.after {
                 outcome.cut_edges.push((step.name.clone(), dep.clone()));
             }
             alive

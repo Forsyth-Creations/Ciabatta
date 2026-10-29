@@ -682,6 +682,67 @@ pub enum EnvCommand {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Show every variable a run would resolve, as if it were about to start —
+    /// its value, where it came from, and which steps read it — and run
+    /// nothing.
+    ///
+    /// Takes the flags a run takes that change its environment, so
+    /// `ciabatta env show build -e PROFILE=release --env-profile staging`
+    /// answers "what would `ciabatta build` see if I typed that?". Arguments
+    /// after `...` count too. With no workflow, it shows what the `.env`
+    /// search from here resolves on its own. Secret-looking values are masked.
+    Show(EnvShowArgs),
+}
+
+/// What `ciabatta env show` takes: the parts of a run that decide its
+/// environment, and none of the parts that decide how it is shown or run.
+#[derive(Args, Debug, Clone, Default)]
+pub struct EnvShowArgs {
+    /// The workflow whose run to show (`build`, `test`, …). Omit it for the
+    /// `.env` search on its own.
+    #[arg(name = "WORKFLOW")]
+    pub workflow: Option<String>,
+
+    /// Further workflows folded into the same run, as `ciabatta build test`.
+    #[arg(name = "ALSO")]
+    pub also: Vec<String>,
+
+    /// Start only from these sub-workspaces (repeatable), as a run's `--only`.
+    #[arg(long, value_name = "MEMBER")]
+    pub only: Vec<String>,
+
+    /// The whole monorepo's graph even from inside a sub-workspace.
+    #[arg(long, conflicts_with = "only")]
+    pub all: bool,
+
+    /// Only the steps matching this term (repeatable), as a run's `--filter`.
+    #[arg(short = 'f', long = "filter", value_name = "TERM")]
+    pub filter: Vec<String>,
+
+    /// Don't follow dependencies into other sub-workspaces.
+    #[arg(long)]
+    pub isolated: bool,
+
+    /// Set an environment variable (KEY=VALUE), as a run would.
+    #[arg(short = 'e', long = "env", value_name = "KEY=VALUE")]
+    pub env: Vec<String>,
+
+    /// The release the run would work with (`-e CIABATTA_RELEASE=<VERSION>`).
+    #[arg(long, value_name = "VERSION")]
+    pub release: Option<String>,
+
+    /// Resolve as a run with this env profile would. Nothing is copied: the
+    /// profile's values are read where they are.
+    #[arg(long = "env-profile", alias = "env_profile", value_name = "NAME")]
+    pub env_profile: Option<String>,
+
+    /// Derive CIABATTA_BRANCH/_COMMIT/_TAG/_BUILD_NUMBER from local git.
+    #[arg(long)]
+    pub local: bool,
+
+    /// Print the report as JSON instead.
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Subcommand, Debug)]

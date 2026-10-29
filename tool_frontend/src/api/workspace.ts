@@ -27,6 +27,8 @@ export interface WorkflowStep {
   persistent: boolean;
   /** From the workflow's `background:` array: started first, gates nothing, stopped when the run ends. */
   background: boolean;
+  /** From the workflow's `after:` array: runs once the rest of the run is over, whichever way it went. */
+  after?: boolean;
   continue_on_error: boolean;
   /** A failure is only a warning: dependents run, the run still succeeds. */
   warn_on_error?: boolean;

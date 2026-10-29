@@ -84,6 +84,8 @@ export interface StepView extends Timed {
   persistent: boolean;
   /** From the workflow's `background:` array: started first, gates nothing, stopped when the run ends. */
   background: boolean;
+  /** From the workflow's `after:` array: runs once the rest of the run is over, whichever way it went. */
+  after?: boolean;
   timeout: string | null;
   requires: string[];
 

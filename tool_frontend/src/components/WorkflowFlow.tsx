@@ -118,9 +118,11 @@ export function WorkflowFlow({
                     ? "on failure only"
                     : node.background
                       ? "background · nothing waits"
-                      : node.wave !== null
-                        ? `wave ${node.wave + 1}${node.owner ? ` · ${node.owner}` : ""}`
-                        : (node.owner ?? "")}
+                      : node.after
+                        ? "after · runs either way"
+                        : node.wave !== null
+                          ? `wave ${node.wave + 1}${node.owner ? ` · ${node.owner}` : ""}`
+                          : (node.owner ?? "")}
                 </Box>
                 {plan && (
                   <Box
@@ -173,7 +175,7 @@ export function WorkflowFlow({
       const picked = selected === node.id;
       const border = step.recover
         ? theme.palette.warning.main
-        : step.background
+        : step.background || step.after
           ? theme.palette.info.main
           : theme.palette.primary.main;
       return {

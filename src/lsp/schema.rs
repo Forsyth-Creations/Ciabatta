@@ -202,6 +202,7 @@ fn step() -> crate::run::RunStep {
         // Not a config key — `#[serde(skip)]`, set by the compiler on entries
         // of a workflow's `background:` array — so the schemas don't name it.
         background: false,
+        after: false,
         required_env: Vec::new(),
         declared_env: Vec::new(),
         cache_id: None,
@@ -233,6 +234,7 @@ fn workflow() -> crate::workspace::Workflow {
         cache: Some(cache()),
         steps: vec![step()],
         background: list(),
+        after: list(),
         wave_grouping: Some(one()),
     }
 }

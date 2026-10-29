@@ -128,6 +128,11 @@ export function ChessBoard({ view, orientation, canMove, onMove, size }: Props) 
 
   const onPointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
     if (event.button !== 0 || promotion) return;
+    // The pieces are text glyphs, so left alone the browser would start a
+    // text selection here — and then drag the selection (a whole rank of
+    // pawns, say) instead of the piece.
+    event.preventDefault();
+    window.getSelection()?.removeAllRanges();
     const sq = squareFromPoint(event.clientX, event.clientY);
     if (!sq) return;
 
@@ -208,6 +213,7 @@ export function ChessBoard({ view, orientation, canMove, onMove, size }: Props) 
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
         onPointerCancel={() => setDrag(null)}
+        onDragStart={(event) => event.preventDefault()}
         sx={{
           position: "relative",
           width: size,
@@ -216,6 +222,8 @@ export function ChessBoard({ view, orientation, canMove, onMove, size }: Props) 
           overflow: "hidden",
           boxShadow: 4,
           touchAction: "none",
+          userSelect: "none",
+          WebkitUserSelect: "none",
           cursor: drag?.moved ? "grabbing" : "default",
         }}
       >

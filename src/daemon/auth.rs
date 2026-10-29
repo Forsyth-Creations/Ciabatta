@@ -66,7 +66,7 @@ fn token_from_query(query: Option<&str>) -> Option<String> {
 /// Compare two tokens without leaking their common prefix length through
 /// timing. Both are hex strings of the same length in practice, but compare
 /// defensively anyway.
-fn constant_time_eq(a: &str, b: &str) -> bool {
+pub(crate) fn constant_time_eq(a: &str, b: &str) -> bool {
     if a.len() != b.len() {
         return false;
     }

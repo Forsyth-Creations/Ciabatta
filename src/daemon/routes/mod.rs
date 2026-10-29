@@ -7,6 +7,7 @@
 pub mod ai;
 pub mod analyze;
 pub mod cache;
+pub mod chess;
 pub mod projects;
 pub mod run;
 pub mod todo;
@@ -23,6 +24,7 @@ pub fn router() -> Router<AppState> {
         .merge(ai::router())
         .merge(analyze::router())
         .merge(cache::router())
+        .merge(chess::router())
         .merge(run::router())
         .merge(projects::router())
         .merge(todo::router())

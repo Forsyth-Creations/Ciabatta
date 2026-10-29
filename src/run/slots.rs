@@ -332,10 +332,22 @@ mod tests {
             "both taken"
         );
         drop(a);
-        assert!(
-            try_take(dir.as_path(), 2, "t").unwrap().is_some(),
-            "freed on drop"
-        );
+        // Retried briefly rather than checked once: a process another test
+        // spawns in parallel holds a copy of every open descriptor — this
+        // lock included — between its fork and its exec, so the lock can
+        // outlive the drop by a moment. Real runs poll for a slot anyway
+        // (see `POLL`); this flaked on macOS CI.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let freed = loop {
+            if let Some(slot) = try_take(dir.as_path(), 2, "t").unwrap() {
+                break Some(slot);
+            }
+            if std::time::Instant::now() >= deadline {
+                break None;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        assert!(freed.is_some(), "freed on drop");
     }
 
     #[tokio::test]

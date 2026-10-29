@@ -373,7 +373,7 @@ dependencies = [
 
 [[package]]
 name = "ciabatta"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -401,6 +401,7 @@ dependencies = [
  "serde_json",
  "serde_yaml_ng",
  "sha2",
+ "socket2",
  "tokio",
  "tokio-rustls",
  "tokio-stream",

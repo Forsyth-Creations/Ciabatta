@@ -1,6 +1,6 @@
 [package]
 name = "ciabatta"
-version = "0.8.0"
+version = "0.8.1"
 edition = "2024"
 description = "A command line tool for publishing artifacts to various registries"
 license = "MIT"
@@ -67,6 +67,10 @@ tokio-stream = { version = "0.1", features = ["sync"] }
 include_dir = "0.7"
 async-stream = "0.3"
 rand = "0.8"
+# The chess page's LAN discovery binds its UDP port with SO_REUSEADDR/
+# SO_REUSEPORT, so several daemons on one machine can all hear beacons. Already
+# in the tree via tokio.
+socket2 = { version = "0.6", features = ["all"] }
 serde_yaml_ng = "0.10"
 sha2 = "0.10"
 uuid = { version = "1", features = ["v4", "serde"] }

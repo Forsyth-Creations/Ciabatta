@@ -1,6 +1,7 @@
 mod ai;
 mod analyze;
 mod cache;
+mod chess;
 mod ci;
 mod cli;
 mod color;

@@ -13,6 +13,8 @@ import { createRootRoute, createRoute, createRouter, Outlet } from "@tanstack/re
 import { AppShell } from "./components/AppShell";
 import { AnalyzePage } from "./pages/AnalyzePage";
 import { CachePage } from "./pages/CachePage";
+import { ChessGamePage } from "./pages/ChessGamePage";
+import { ChessPage } from "./pages/ChessPage";
 import { AiPage } from "./pages/AiPage";
 import { LandingPage } from "./pages/LandingPage";
 import { ProjectDashboardPage } from "./pages/ProjectDashboardPage";
@@ -125,6 +127,19 @@ const docsRoute = createRoute({
   component: DocsPage,
 });
 
+// Unlisted on purpose: no nav entry, so it's found only by typing /chess.
+const chessRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/chess",
+  component: ChessPage,
+});
+
+const chessGameRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/chess/$gameId",
+  component: ChessGamePage,
+});
+
 const routeTree = rootRoute.addChildren([
   indexRoute,
   dashboardRoute,
@@ -140,6 +155,8 @@ const routeTree = rootRoute.addChildren([
   analyzeRoute,
   aiRoute,
   docsRoute,
+  chessRoute,
+  chessGameRoute,
 ]);
 
 export const router = createRouter({ routeTree });

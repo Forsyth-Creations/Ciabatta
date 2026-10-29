@@ -41,6 +41,9 @@ pub struct AppState {
     pub analyze: Arc<routes::analyze::Running>,
     /// Runs the daemon owns.
     pub runs: Arc<routes::run::Runs>,
+    /// Chess over the LAN, for the unlisted `/chess` page. Idle until that
+    /// page is used — see [`crate::chess::lan`].
+    pub chess: Arc<crate::chess::Lan>,
     /// Signalled by `POST /api/shutdown`.
     pub shutdown: Arc<Notify>,
 }
@@ -266,6 +269,7 @@ pub async fn serve(port: u16) -> Result<()> {
         watch: Arc::new(routes::watch::Sessions::new()),
         analyze: routes::analyze::Running::new(),
         runs: routes::run::Runs::new(),
+        chess: crate::chess::Lan::new(),
         shutdown: Arc::new(Notify::new()),
     };
 
@@ -287,6 +291,7 @@ pub async fn serve(port: u16) -> Result<()> {
 
     let signal = state.shutdown.clone();
     let watch = state.watch.clone();
+    let chess = state.chess.clone();
     let result = axum::serve(listener, router(state))
         .with_graceful_shutdown(async move {
             tokio::select! {
@@ -296,6 +301,7 @@ pub async fn serve(port: u16) -> Result<()> {
             }
             // Watched commands belong to the daemon, so they stop with it.
             watch.stop_all();
+            chess.close();
         })
         .await;
 
@@ -362,6 +368,7 @@ pub(crate) mod tests {
             watch: Arc::new(routes::watch::Sessions::new()),
             analyze: routes::analyze::Running::new(),
             runs: routes::run::Runs::new(),
+            chess: crate::chess::Lan::new(),
             shutdown: Arc::new(Notify::new()),
         }
     }

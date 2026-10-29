@@ -11,22 +11,12 @@
  */
 
 import { Box, ButtonBase, Paper, Stack } from "@mui/material";
-import { useTheme } from "@mui/material/styles";
 import { useRef, useState } from "react";
 import type { PointerEvent as ReactPointerEvent } from "react";
 
 import type { Color, GameView, Kind } from "../api/chess";
 import { brand } from "../theme";
-
-/** Filled glyphs for both sides, coloured in CSS; `︎` asks for text, not emoji. */
-const GLYPH: Record<string, string> = {
-  K: "♚︎",
-  Q: "♛︎",
-  R: "♜︎",
-  B: "♝︎",
-  N: "♞︎",
-  P: "♟︎",
-};
+import { type BoardTheme, Piece, PieceDefs } from "./ChessPieces";
 
 const PROMOTION_CHOICES: { kind: Kind; letter: string }[] = [
   { kind: "queen", letter: "Q" },
@@ -52,6 +42,7 @@ interface Props {
   canMove: boolean;
   onMove: (from: string, to: string, promotion?: Kind) => void;
   size: number;
+  colors: BoardTheme;
 }
 
 interface Drag {
@@ -66,9 +57,7 @@ interface Drag {
   wasSelected: boolean;
 }
 
-export function ChessBoard({ view, orientation, canMove, onMove, size }: Props) {
-  const theme = useTheme();
-  const dark = theme.palette.mode === "dark";
+export function ChessBoard({ view, orientation, canMove, onMove, size, colors }: Props) {
   const boardRef = useRef<HTMLDivElement>(null);
   const [selected, setSelected] = useState<string | null>(null);
   const [drag, setDragState] = useState<Drag | null>(null);
@@ -83,8 +72,8 @@ export function ChessBoard({ view, orientation, canMove, onMove, size }: Props) 
 
   const cell = size / 8;
   const you = view.you;
-  const lightSquare = dark ? "#B9C7D6" : "#E4ECF4";
-  const darkSquare = dark ? brand.steel : brand.sky;
+  const lightSquare = colors.light;
+  const darkSquare = colors.dark;
 
   const targetsFrom = (from: string | null) =>
     from ? view.legal.filter((m) => m.from === from) : [];
@@ -186,27 +175,11 @@ export function ChessBoard({ view, orientation, canMove, onMove, size }: Props) 
       : -1;
   const draggingFrom = drag?.moved ? drag.from : null;
 
-  const glyph = (code: string, px: number) => (
-    <Box
-      component="span"
-      sx={{
-        fontSize: px,
-        lineHeight: 1,
-        fontFamily: '"DejaVu Sans", "Segoe UI Symbol", "Noto Sans Symbols 2", "Apple Symbols", serif',
-        color: code[0] === "w" ? "#FAFAFA" : "#161616",
-        WebkitTextStroke: code[0] === "w" ? "1.2px #1E1E1E" : "0.6px #000",
-        textShadow:
-          code[0] === "w" ? "0 1px 2px rgba(0,0,0,0.45)" : "0 1px 1px rgba(255,255,255,0.25)",
-        userSelect: "none",
-        pointerEvents: "none",
-      }}
-    >
-      {GLYPH[code[1]]}
-    </Box>
-  );
+  const glyph = (code: string, px: number) => <Piece code={code} size={px} />;
 
   return (
     <Box sx={{ position: "relative", width: size, height: size, flexShrink: 0 }}>
+      <PieceDefs />
       <Box
         ref={boardRef}
         onPointerDown={onPointerDown}
@@ -302,11 +275,11 @@ export function ChessBoard({ view, orientation, canMove, onMove, size }: Props) 
                 </Box>
               )}
               {occupied && draggingFrom !== sq && (
-                <Box sx={{ position: "relative", display: "flex" }}>{glyph(code, cell * 0.8)}</Box>
+                <Box sx={{ position: "relative", display: "flex" }}>{glyph(code, cell * 0.96)}</Box>
               )}
               {occupied && draggingFrom === sq && (
                 <Box sx={{ position: "relative", display: "flex", opacity: 0.3 }}>
-                  {glyph(code, cell * 0.8)}
+                  {glyph(code, cell * 0.96)}
                 </Box>
               )}
               {isTarget &&
@@ -351,7 +324,7 @@ export function ChessBoard({ view, orientation, canMove, onMove, size }: Props) 
             transform: "scale(1.12)",
           }}
         >
-          {glyph(pieceAt(drag.from), cell * 0.8)}
+          {glyph(pieceAt(drag.from), cell * 0.96)}
         </Box>
       )}
 
@@ -386,7 +359,7 @@ export function ChessBoard({ view, orientation, canMove, onMove, size }: Props) 
                     "&:hover": { bgcolor: brand.gold },
                   }}
                 >
-                  {glyph(`${you?.[0] ?? "w"}${letter}`, cell * 0.8)}
+                  {glyph(`${you?.[0] ?? "w"}${letter}`, cell * 0.96)}
                 </ButtonBase>
               ))}
             </Stack>

@@ -8,12 +8,18 @@ import {
   Box,
   Button,
   Chip,
+  Dialog,
+  DialogActions,
+  DialogContent,
   Paper,
   Stack,
   Tooltip,
   Typography,
 } from "@mui/material";
 import ArrowBackIcon from "@mui/icons-material/ArrowBack";
+import BlockIcon from "@mui/icons-material/Block";
+import EmojiEventsIcon from "@mui/icons-material/EmojiEvents";
+import SentimentDissatisfiedIcon from "@mui/icons-material/SentimentDissatisfied";
 import FlagIcon from "@mui/icons-material/Flag";
 import HandshakeIcon from "@mui/icons-material/Handshake";
 import SwapVertIcon from "@mui/icons-material/SwapVert";
@@ -34,6 +40,7 @@ import {
   useLobby,
 } from "../api/chess";
 import { ChessBoard } from "../components/ChessBoard";
+import { BOARD_THEMES, type BoardTheme, useBoardTheme } from "../components/ChessPieces";
 import { ErrorNote, Loading } from "../components/Page";
 
 export function ChessGamePage() {
@@ -104,6 +111,7 @@ function Game({
   const lobby = useLobby();
   const size = useBoardSize();
   const [flipped, setFlipped] = useState(false);
+  const [boardTheme, setBoardTheme] = useBoardTheme();
   const [error, setError] = useState<unknown>(null);
   const movesEnd = useRef<HTMLDivElement>(null);
 
@@ -160,6 +168,12 @@ function Game({
 
   return (
     <Stack spacing={2}>
+      <GameOverDialog
+        view={view}
+        nameOf={nameOf}
+        act={act}
+        toLobby={() => void navigate({ to: "/chess" })}
+      />
       <Stack direction="row" alignItems="center" spacing={2} flexWrap="wrap" useFlexGap>
         <Button component={Link} to="/chess" size="small" startIcon={<ArrowBackIcon />}>
           Lobby
@@ -207,7 +221,14 @@ function Game({
             active={running === top || (playing && view.turn === top && !view.clock)}
             checks={view.rules.variant === "three_check" ? view.checks[top] : null}
           />
-          <ChessBoard view={view} orientation={orientation} canMove={canMove} onMove={onMove} size={size} />
+          <ChessBoard
+            view={view}
+            orientation={orientation}
+            canMove={canMove}
+            onMove={onMove}
+            size={size}
+            colors={boardTheme}
+          />
           <PlayerBar
             name={nameOf(bottom)}
             color={bottom}
@@ -260,6 +281,8 @@ function Game({
               You offered a rematch.
             </Typography>
           )}
+
+          <ThemePicker current={boardTheme} onChoose={setBoardTheme} />
 
           <Paper variant="outlined" sx={{ p: 1.5 }}>
             <Typography variant="overline" color="text.secondary">
@@ -381,6 +404,201 @@ function PlayerBar({
           {formatClock(clock)}
         </Paper>
       )}
+    </Stack>
+  );
+}
+
+/**
+ * The end of a game, impossible to miss: a large dialog naming the result and
+ * how it came about, with a rematch one click away. Dismissing it leaves the
+ * final position on the board to look at; it comes back for the next ending,
+ * including the end of a rematch.
+ */
+function GameOverDialog({
+  view,
+  nameOf,
+  act,
+  toLobby,
+}: {
+  view: GameView;
+  nameOf: (color: Color) => string;
+  act: (action: Action) => Promise<void>;
+  toLobby: () => void;
+}) {
+  const finished = view.status === "finished";
+  // Which ending this is, so dismissing one doesn't hide the next.
+  const ending = finished
+    ? `${view.id}:${view.host_color}:${view.moves.length}:${view.reason}:${view.result}`
+    : null;
+  const [dismissed, setDismissed] = useState<string | null>(null);
+  // A new game (a rematch) forgets the last dismissal, so an ending that
+  // happens to look identical to a dismissed one still gets its dialog.
+  useEffect(() => {
+    if (!finished) setDismissed(null);
+  }, [finished]);
+  if (!finished || ending === dismissed) return null;
+
+  const you = view.you;
+  const opponent: Color | null = you ? (you === "white" ? "black" : "white") : null;
+  const winner = view.winner;
+  const loser: Color | null = winner ? (winner === "white" ? "black" : "white") : null;
+  const won = !!you && winner === you;
+  const lost = !!you && !!winner && winner !== you;
+  const aborted = view.reason === "aborted";
+
+  const title = aborted
+    ? "Game aborted"
+    : winner === null
+      ? "Draw"
+      : won
+        ? "You won!"
+        : lost
+          ? "You lost"
+          : `${nameOf(winner)} wins`;
+
+  let how = view.reason ? REASON_LABEL[view.reason] : "";
+  if (loser && view.reason === "resignation") how = `${nameOf(loser)} resigned`;
+  if (loser && view.reason === "timeout") how = `${nameOf(loser)} ran out of time`;
+  if (view.reason === "checkmate" && winner) how = `Checkmate by ${nameOf(winner)}`;
+  if (view.reason === "king_of_the_hill" && winner) how = `${nameOf(winner)}'s king reached the hill`;
+  if (view.reason === "three_checks" && winner) how = `${nameOf(winner)} gave three checks`;
+
+  const accent = won ? "success.main" : lost ? "error.main" : aborted ? "text.secondary" : "info.main";
+  const Icon = won ? EmojiEventsIcon : lost ? SentimentDissatisfiedIcon : aborted ? BlockIcon : HandshakeIcon;
+
+  const theyOffered = !!opponent && view.offers.rematch === opponent;
+  const youOffered = !!you && view.offers.rematch === you;
+  const canRematch = !!you && !view.closed;
+
+  return (
+    <Dialog
+      open
+      onClose={() => setDismissed(ending)}
+      maxWidth="sm"
+      fullWidth
+      PaperProps={{ sx: { borderTop: 8, borderColor: accent, overflow: "hidden" } }}
+    >
+      <DialogContent sx={{ textAlign: "center", pt: 5, pb: 3 }}>
+        <Icon sx={{ fontSize: 96, color: accent }} />
+        <Typography
+          variant="h1"
+          sx={{ fontSize: { xs: 44, sm: 64 }, lineHeight: 1.05, mt: 1, color: accent }}
+        >
+          {title}
+        </Typography>
+        <Typography variant="h3" sx={{ mt: 2, fontWeight: 500 }}>
+          {how}
+        </Typography>
+        {view.result && !aborted && (
+          <Typography
+            sx={{ mt: 2, fontFamily: "monospace", fontSize: 28, fontWeight: 600 }}
+            color="text.secondary"
+          >
+            {view.result}
+          </Typography>
+        )}
+        <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
+          {nameOf("white")} (white) vs {nameOf("black")} (black) · {view.moves.length} plies
+        </Typography>
+
+        {theyOffered && (
+          <Alert severity="info" sx={{ mt: 3, textAlign: "left" }}>
+            {opponent && nameOf(opponent)} wants a rematch.
+          </Alert>
+        )}
+        {youOffered && (
+          <Typography variant="body2" color="text.secondary" sx={{ mt: 3 }}>
+            Rematch offered — waiting for {opponent ? nameOf(opponent) : "your opponent"}…
+          </Typography>
+        )}
+        {view.closed && (
+          <Alert severity="warning" sx={{ mt: 3, textAlign: "left" }}>
+            {view.closed}
+          </Alert>
+        )}
+      </DialogContent>
+      <DialogActions sx={{ justifyContent: "center", gap: 1, pb: 3, flexWrap: "wrap" }}>
+        {canRematch && theyOffered && (
+          <>
+            <Button
+              size="large"
+              variant="contained"
+              startIcon={<ReplayIcon />}
+              onClick={() => void act({ type: "accept_rematch" })}
+            >
+              Accept rematch
+            </Button>
+            <Button size="large" onClick={() => void act({ type: "decline_rematch" })}>
+              Decline
+            </Button>
+          </>
+        )}
+        {canRematch && !theyOffered && (
+          <Button
+            size="large"
+            variant="contained"
+            startIcon={<ReplayIcon />}
+            disabled={youOffered}
+            onClick={() => void act({ type: "offer_rematch" })}
+          >
+            {youOffered ? "Rematch offered" : "Rematch"}
+          </Button>
+        )}
+        <Button size="large" variant="outlined" onClick={() => setDismissed(ending)}>
+          View board
+        </Button>
+        <Button size="large" color="inherit" onClick={toLobby}>
+          Back to lobby
+        </Button>
+      </DialogActions>
+    </Dialog>
+  );
+}
+
+/** Swatches for the board colours; the choice is remembered in this browser. */
+function ThemePicker({
+  current,
+  onChoose,
+}: {
+  current: BoardTheme;
+  onChoose: (id: string) => void;
+}) {
+  return (
+    <Stack direction="row" alignItems="center" spacing={1} flexWrap="wrap" useFlexGap>
+      <Typography variant="overline" color="text.secondary" sx={{ mr: 0.5 }}>
+        Board
+      </Typography>
+      {BOARD_THEMES.map((theme) => (
+        <Tooltip key={theme.id} title={theme.name}>
+          <Box
+            component="button"
+            type="button"
+            aria-label={`${theme.name} board`}
+            aria-pressed={theme.id === current.id}
+            onClick={() => onChoose(theme.id)}
+            sx={{
+              width: 30,
+              height: 30,
+              p: 0,
+              borderRadius: 1,
+              cursor: "pointer",
+              overflow: "hidden",
+              display: "grid",
+              gridTemplateColumns: "1fr 1fr",
+              gridTemplateRows: "1fr 1fr",
+              border: "2px solid",
+              borderColor: theme.id === current.id ? "primary.main" : "divider",
+              outline: theme.id === current.id ? "2px solid" : "none",
+              outlineColor: "primary.main",
+              outlineOffset: 1,
+            }}
+          >
+            {[theme.light, theme.dark, theme.dark, theme.light].map((c, i) => (
+              <Box key={i} sx={{ bgcolor: c }} />
+            ))}
+          </Box>
+        </Tooltip>
+      ))}
     </Stack>
   );
 }

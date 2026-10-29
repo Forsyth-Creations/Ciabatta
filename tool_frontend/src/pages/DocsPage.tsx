@@ -383,6 +383,10 @@ const COMMANDS: CommandGroup[] = [
         note: "A run under the staging profile, with two custom arguments its steps read as $TARGET and $VERBOSE. The arguments are listed apart, in yellow, before the run starts.",
       },
       {
+        usage: "ciabatta env show [WORKFLOW] [-e KEY=VALUE] [--env-profile NAME] [--json]",
+        note: "Every variable a run would resolve, as if it were about to start — its value, where it came from, and which steps read it — and nothing run. Takes the run's own -e, --env-profile, --local, --release, --only, --filter and arguments after `...`, so it answers \"what would this command see?\". With no workflow, the .env search from here on its own. Secrets are masked.",
+      },
+      {
         usage: "ciabatta env list",
         note: "The env profiles this workspace has — every .env.<name>, with how many variables each sets and where its files are — and the default .env files they overlay.",
       },
@@ -1913,7 +1917,8 @@ required_env: [API_URL, DATABASE_URL]`}</Pre>
           which profile it came from. Templates (<C>.env.example</C> and friends) and backups are
           never profiles.
         </P>
-        <Pre>{`ciabatta env list                       # the profiles here, and what each .env is now
+        <Pre>{`ciabatta env show build                 # what \`ciabatta build\` would see, nothing run
+ciabatta env list                       # the profiles here, and what each .env is now
 ciabatta env use dev                    # copy each .ciabatta/.env.dev into its .env
 ciabatta env use dev --dry-run          # say what would be copied, change nothing
 ciabatta build --env-profile dev        # the same copy, then the run (also --env_profile)`}</Pre>
@@ -2053,8 +2058,13 @@ required_env: [API_URL]
 needs: [proto:generate]
 
 # Started before the first wave and stopped when the run ends. Nothing waits
-# for these — they're the mock API the integration tests call.
+# for these — they're the mock API the integration tests call. Their output
+# is their node's log, like any other step's.
 background: [mock-api:serve]
+
+# Run once everything else is over, whichever way it went — they see
+# CIABATTA_RUN_OUTCOME (succeeded or failed). Clean-up and reporting go here.
+after: [db:teardown]
 
 cache:
   enabled: true
@@ -2107,7 +2117,8 @@ steps:
             ["tags", "Labels for search and --filter tag:<name>. Steps inherit them."],
             ["requires", "Executables that must be on PATH, checked before the run starts."],
             ["needs", "Workflows in OTHER packages that must finish first."],
-            ["background", "Workflows that must be RUNNING for this one to finish — a mock API, a database. Started first, gate nothing, stopped at the end."],
+            ["background", "Workflows that must be RUNNING for this one to finish — a mock API, a database. Started first, gate nothing, stopped at the end. What they print is their node's log, like any other step's."],
+            ["after", "Workflows to run once this run is over, whichever way it went — clean-up, reports, notifications. Never blocked by a failure upstream; they see CIABATTA_RUN_OUTCOME (succeeded or failed), so a step can say when: env.CIABATTA_RUN_OUTCOME == failed. Their own failure fails a run that had passed; a stopped run skips them. Drawn last, marked ↪ after."],
             ["required_env", "Variables that must be set and non-empty, or the run is refused up front."],
             ["env_file", ".env path(s) relative to the package, sourced before the graph runs."],
             ["env", "Variables applied to every step here."],
@@ -2143,7 +2154,8 @@ steps:
           want left running — <C>ciabatta dev</C> leaves you a server to work against, and you
           stop it with <C>ciabatta watch --stop &lt;id&gt;</C>. A workflow in the{" "}
           <C>background:</C> array exists only to get this run through, and is stopped when the
-          run ends.
+          run ends — it runs inside the run, so its output shows in its own node, where every
+          other step&apos;s does.
         </Alert>
 
         <SubHeading>Publishing is a step too</SubHeading>
@@ -2266,8 +2278,9 @@ export CIABATTA_VIZ=tui              # …or make that the default for every run
               the environment the run resolved — every variable it depends on, its value, and
               where that value came from (your terminal, which <C>.env</C> file, a defaults file),
               in the order the search consults them. Secrets are masked. It is the same report
-              the plain view prints before a run; press <C>e</C> again, or pick a step, to go back
-              to the output.
+              the plain view prints before a run, in the same colours — each source its own, a
+              missing required variable in red; press <C>e</C> again, or pick a step, to go back
+              to the output. <C>ciabatta env show</C> prints it without starting a run.
             </>,
             <>
               <strong>Questions are answered right there.</strong> When a step runs{" "}

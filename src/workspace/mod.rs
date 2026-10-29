@@ -271,6 +271,27 @@ pub struct Workflow {
     #[serde(default)]
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub background: Vec<String>,
+    /// Workflows to run once this run is over, whichever way it went: the
+    /// clean-up, the report, the notification.
+    ///
+    /// Named the same way [`needs`](Self::needs) and
+    /// [`background`](Self::background) name things.
+    ///
+    /// ```yaml
+    /// after:
+    ///   - db:teardown        # runs when the tests pass, and when they don't
+    /// ```
+    ///
+    /// An after action starts once every other step has finished — succeeded,
+    /// failed, or never got going — and is not held back by a failure the way
+    /// a `needs` dependent is. It sees `CIABATTA_RUN_OUTCOME`, `succeeded` or
+    /// `failed`, so one that only matters on a failure can say so with
+    /// `when: env.CIABATTA_RUN_OUTCOME == failed`. Its own failure fails a run
+    /// that had otherwise passed. A run that is *stopped* skips them: stopping
+    /// means start nothing further.
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub after: Vec<String>,
     /// A label lining this workflow up with others that carry the same one,
     /// in the waves a graph is drawn in.
     ///
@@ -347,6 +368,7 @@ impl Workflow {
         "cache",
         "steps",
         "background",
+        "after",
         "wave_grouping",
     ];
 }
@@ -1306,6 +1328,7 @@ mod tests {
             cache: Some(Default::default()),
             steps: vec![Default::default()],
             background: vec!["b".into()],
+            after: vec!["a".into()],
             wave_grouping: Some("g".into()),
         };
 

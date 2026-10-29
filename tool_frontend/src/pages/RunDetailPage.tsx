@@ -238,7 +238,7 @@ function nodeHeight(
   if (!step) return DEPENDENCY_HEIGHT;
   return stepNodeHeight(
     Boolean(step.workspace),
-    (step.background ? 1 : 0) +
+    (step.background || step.after ? 1 : 0) +
       // Inspect mode's cache line, there for every step whether or not the
       // cache has spoken yet — so the node doesn't grow when it does.
       (inspect && !step.recover ? 1 : 0),
@@ -1423,6 +1423,7 @@ function NodeLabel({
           {step.background && (
             <StepLine mono={false}>background · nothing waits for it</StepLine>
           )}
+          {step.after && <StepLine mono={false}>after · runs whichever way the run went</StepLine>}
           {inspect && !step.recover && <InspectLine step={step} />}
         </>
       }
@@ -1554,6 +1555,7 @@ function StepDetails({ step, env, now }: { step: StepView; env: EnvVar[]; now: n
   if (step.push) badges.push("push");
   else if (step.kind) badges.push(step.kind);
   if (step.background) badges.push("⚡ background");
+  else if (step.after) badges.push("↪ after");
   else if (step.persistent) badges.push("persistent");
   if (step.timeout) badges.push(`timeout ${step.timeout}`);
   if (step.requires.length > 0) badges.push(`needs ${step.requires.join(", ")}`);

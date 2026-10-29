@@ -168,6 +168,9 @@ pub struct StepView {
     /// From a workflow's `background:` array: started before the first wave,
     /// gates nothing, stopped when the run ends.
     background: bool,
+    /// From a workflow's `after:` array: runs once the rest of the run is over,
+    /// whichever way it went.
+    after: bool,
     /// Its wall-clock limit, as written.
     timeout: Option<String>,
     /// Tools it needs on `PATH`.
@@ -703,6 +706,7 @@ pub fn initial_state(
                 push: step.is_push(),
                 persistent: step.persistent,
                 background: step.background,
+                after: step.after,
                 timeout: step.timeout.clone(),
                 requires: step.requires.clone(),
                 env: step

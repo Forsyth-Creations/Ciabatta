@@ -438,14 +438,21 @@ fn render_logs(f: &mut Frame, area: Rect, app: &mut App) {
     };
 
     // Each wrapped segment is one row, so scrolling counts what's on screen.
+    // The env report arrives coloured, as the terminal shows it; step output
+    // is styled here, line by line.
+    let coloured = app.pane == Pane::Env;
     let rows: Vec<Line> = app
         .selected_logs()
         .iter()
-        .flat_map(|l| {
-            let style = log_style(l);
-            wrap_line(l, inner_width)
-                .into_iter()
-                .map(move |seg| Line::styled(seg, style))
+        .flat_map(|l| match coloured {
+            true => ansi_rows(l, inner_width),
+            false => {
+                let style = log_style(l);
+                wrap_line(l, inner_width)
+                    .into_iter()
+                    .map(move |seg| Line::styled(seg, style))
+                    .collect()
+            }
         })
         .collect();
     let total = rows.len();
@@ -514,6 +521,116 @@ fn log_style(line: &str) -> Style {
         Style::default().fg(Color::DarkGray)
     } else {
         Style::default().fg(Color::Gray)
+    }
+}
+
+/// A line carrying SGR colour escapes, as styled rows no wider than `width`.
+///
+/// Understands what the env report writes — the eight colours and their
+/// bright forms, bold, dim, and the resets — and drops any other escape rather
+/// than drawing it, since an escape on screen is garbage and also throws the
+/// wrapping off. Dim is drawn dark grey, as the TUI draws everything faint.
+pub(super) fn ansi_rows(line: &str, width: usize) -> Vec<Line<'static>> {
+    let plain = Style::default().fg(Color::Gray);
+    let mut style = plain;
+    let mut cells: Vec<(char, Style)> = Vec::new();
+    let mut chars = line.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\x1b' {
+            cells.push((c, style));
+            continue;
+        }
+        if chars.peek() != Some(&'[') {
+            continue;
+        }
+        chars.next();
+        let mut params = String::new();
+        let mut end = None;
+        for c in chars.by_ref() {
+            if c.is_ascii_digit() || c == ';' {
+                params.push(c);
+            } else {
+                end = Some(c);
+                break;
+            }
+        }
+        if end != Some('m') {
+            continue;
+        }
+        let codes: Vec<u16> = params.split(';').map(|p| p.parse().unwrap_or(0)).collect();
+        let mut codes = codes.into_iter();
+        while let Some(code) = codes.next() {
+            style = match code {
+                0 => plain,
+                1 => style.add_modifier(Modifier::BOLD),
+                2 => style.fg(Color::DarkGray),
+                22 => style
+                    .remove_modifier(Modifier::BOLD)
+                    .fg(plain.fg.unwrap_or(Color::Gray)),
+                30..=37 => style.fg(ansi_colour(code - 30, false)),
+                90..=97 => style.fg(ansi_colour(code - 90, true)),
+                39 => style.fg(Color::Gray),
+                // 256-colour and truecolour forms: skip their arguments.
+                38 => {
+                    match codes.next() {
+                        Some(5) => {
+                            codes.next();
+                        }
+                        Some(2) => {
+                            codes.nth(2);
+                        }
+                        _ => {}
+                    }
+                    style
+                }
+                _ => style,
+            };
+        }
+    }
+
+    let chunks: Vec<&[(char, Style)]> = match cells.is_empty() {
+        true => vec![&[]],
+        false => cells.chunks(width.max(1)).collect(),
+    };
+    chunks
+        .into_iter()
+        .map(|chunk| {
+            let mut spans: Vec<Span<'static>> = Vec::new();
+            let mut run = String::new();
+            let mut current = plain;
+            for &(c, s) in chunk {
+                if s != current && !run.is_empty() {
+                    spans.push(Span::styled(std::mem::take(&mut run), current));
+                }
+                current = s;
+                run.push(c);
+            }
+            if !run.is_empty() {
+                spans.push(Span::styled(run, current));
+            }
+            Line::from(spans)
+        })
+        .collect()
+}
+
+fn ansi_colour(index: u16, bright: bool) -> Color {
+    match (index, bright) {
+        (0, false) => Color::Black,
+        (1, false) => Color::Red,
+        (2, false) => Color::Green,
+        (3, false) => Color::Yellow,
+        (4, false) => Color::Blue,
+        (5, false) => Color::Magenta,
+        (6, false) => Color::Cyan,
+        (7, false) => Color::Gray,
+        (0, true) => Color::DarkGray,
+        (1, true) => Color::LightRed,
+        (2, true) => Color::LightGreen,
+        (3, true) => Color::LightYellow,
+        (4, true) => Color::LightBlue,
+        (5, true) => Color::LightMagenta,
+        (6, true) => Color::LightCyan,
+        _ => Color::White,
     }
 }
 
@@ -596,6 +713,36 @@ mod tests {
             let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
             terminal.draw(|f| render(f, &mut app)).unwrap();
         }
+    }
+
+    #[test]
+    fn the_env_report_keeps_its_colours_without_its_escapes() {
+        // A key and a faint note, as the env report writes its rows.
+        let line = format!(
+            "{}  {}",
+            owo_colors::OwoColorize::style(&"GREETING", owo_colors::Style::new().green().bold()),
+            owo_colors::OwoColorize::style(&"[env]", owo_colors::Style::new().dimmed()),
+        );
+        let rows = ansi_rows(&line, 80);
+        assert_eq!(rows.len(), 1);
+        let text: String = rows[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(text, "GREETING  [env]", "no escape survives");
+        let key = &rows[0].spans[0];
+        assert_eq!(key.content, "GREETING");
+        assert_eq!(key.style.fg, Some(Color::Green));
+        assert!(key.style.add_modifier.contains(Modifier::BOLD));
+        let note = rows[0].spans.last().unwrap();
+        assert_eq!(note.content, "[env]");
+        assert_eq!(note.style.fg, Some(Color::DarkGray));
+    }
+
+    #[test]
+    fn coloured_lines_wrap_by_what_is_visible() {
+        let line = format!("\x1b[31m{}\x1b[0m", "x".repeat(25));
+        let rows = ansi_rows(&line, 10);
+        assert_eq!(rows.len(), 3, "25 visible characters, 10 to a row");
+        assert!(rows.iter().all(|r| r.spans[0].style.fg == Some(Color::Red)));
+        assert_eq!(ansi_rows("", 10).len(), 1, "a blank line stays a row");
     }
 
     #[test]

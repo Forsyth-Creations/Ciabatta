@@ -182,6 +182,20 @@ pub struct RunStep {
     /// and a dev server should.
     #[serde(skip)]
     pub background: bool,
+    /// Set by the compiler on entries of a workflow's `after:` array.
+    ///
+    /// `#[serde(skip)]` for the same reason as `background`: it is declared on
+    /// the workflow, never on a step.
+    ///
+    /// An after action runs once every other step of the run has finished —
+    /// succeeded, failed, or been skipped — and runs whichever way the run
+    /// went, so it is where clean-up and reporting go. It sees
+    /// `CIABATTA_RUN_OUTCOME` (`succeeded` or `failed`) to tell the two apart.
+    /// The compiler wires its `needs` to the graph's last steps so every
+    /// drawing puts it at the end; the engine runs it in a pass of its own, so
+    /// a failure upstream doesn't leave it blocked.
+    #[serde(skip)]
+    pub after: bool,
     /// Set by the compiler from the workflow's `required_env`: the names this
     /// step's run refuses to start without, which also key its cache entry.
     /// `#[serde(skip)]` for the same reason as `background` — it's declared on

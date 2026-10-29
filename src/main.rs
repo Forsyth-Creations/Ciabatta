@@ -48,7 +48,14 @@ async fn main() -> Result<()> {
     let (argv, custom_args) = cli::split_custom_args(std::env::args_os());
     let cli = Cli::parse_from(argv);
     if !custom_args.is_empty()
-        && !matches!(cli.command, Commands::Workflow(_) | Commands::External(_))
+        && !matches!(
+            cli.command,
+            Commands::Workflow(_)
+                | Commands::External(_)
+                | Commands::Env {
+                    subcommand: EnvCommand::Show(_)
+                }
+        )
     {
         bail!(
             "Arguments after `...` are passed to a workflow run (as environment variables), \
@@ -134,6 +141,7 @@ async fn main() -> Result<()> {
         Commands::Env { subcommand } => match subcommand {
             EnvCommand::List => cmd_env_list()?,
             EnvCommand::Use { name, dry_run } => cmd_env_use(&name, dry_run)?,
+            EnvCommand::Show(args) => cmd_env_show(args, &custom_args)?,
         },
 
         // An unrecognized subcommand is a workflow name. Re-parse the raw argv
@@ -731,6 +739,95 @@ fn cmd_env_use(name: &str, dry_run: bool) -> Result<()> {
     }
     if dry_run {
         println!("\nNothing was changed (--dry-run).");
+    }
+    Ok(())
+}
+
+/// `ciabatta env show`: the environment a run would start with, resolved
+/// exactly as the run would resolve it, and nothing run.
+///
+/// The same steps as [`cmd_workflow`] up to the point a run starts — the graph
+/// compiled for the same selection, the terminal, CI or git, `-e`, custom
+/// arguments, the profile — and then the report a run prints before its first
+/// step, in place of the run.
+fn cmd_env_show(mut args: cli::EnvShowArgs, custom_args: &[String]) -> Result<()> {
+    let cwd = env::current_dir().context("Failed to get current directory")?;
+    if let Some(version) = args.release.take() {
+        args.env
+            .push(format!("{}={version}", run::release::RELEASE_VAR));
+    }
+
+    let (root, name, resolved) = match args.workflow.clone() {
+        // No workflow: the `.env` search on its own, from here up to the root.
+        None => (
+            env_root()?,
+            "the .env search".to_string(),
+            run::ResolvedRun::default(),
+        ),
+        Some(first) => {
+            let mut workflows = vec![first];
+            workflows.extend(args.also.iter().cloned());
+            // Inside a package, a run is that package — and so is this.
+            if args.only.is_empty()
+                && !args.all
+                && let Ok(ws) = workspace::Workspace::discover(&cwd)
+                && let Some(member) = ws.member_scope(&cwd, &workflows)
+            {
+                args.only.push(member.name.clone());
+            }
+            let mut provided: Vec<String> =
+                cli::parse_custom_args(custom_args)?.into_keys().collect();
+            provided.extend(cli::parse_env_flags(&args.env)?.into_keys());
+            let selection = workspace::graph::Selection {
+                only: args.only.clone(),
+                isolated: args.isolated,
+                provided,
+            };
+            let (ws, mut graph) = workspace::graph::prepare_many(&cwd, &workflows, &selection)?;
+            let filters = run::filter::parse_all(&args.filter)?;
+            graph.steps = run::filter::apply(&graph.steps, &filters)?.0;
+            let name = graph.label();
+            (ws.root, name, workspace::graph::into_run(graph)?)
+        }
+    };
+
+    let cfg = load_config(&root).unwrap_or_default();
+    let mut vars = build_env_vars(&cfg, &args.env, args.local, &root, false)?;
+    source_ciabatta_vars(&mut vars, &root, false);
+    cli::apply_custom_args(&mut vars, custom_args)?;
+    vars.remove(environment::profiles::PROFILE_FROM_VAR);
+    if let Some(profile) = &args.env_profile {
+        environment::profiles::require(&root, profile)?;
+        vars.insert(
+            environment::profiles::PROFILE_VAR.to_string(),
+            profile.clone(),
+        );
+        vars.insert(
+            environment::profiles::PROFILE_FROM_VAR.to_string(),
+            "flag".to_string(),
+        );
+    }
+    let resolved = run::with_env_levels(
+        resolved,
+        &root,
+        &cwd,
+        &cfg.workspace.clone().unwrap_or_default(),
+    );
+    let report = run::envdeps::collect(&resolved, &root, &vars, Some(&cfg));
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
+    color::decide(color::Consumer::Terminal);
+    match report.render(&name, color::enabled()) {
+        Some(text) => print!("{text}"),
+        None => println!("No variables: {name} depends on none, and no .env file sets any."),
+    }
+    if let Some(text) = report.render_arguments() {
+        for line in text.lines() {
+            println!("{}", line.style(color::warn()));
+        }
     }
     Ok(())
 }

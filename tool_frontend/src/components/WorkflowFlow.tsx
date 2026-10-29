@@ -118,9 +118,11 @@ export function WorkflowFlow({
                     ? "on failure only"
                     : node.background
                       ? "background · nothing waits"
-                      : node.wave !== null
-                        ? `wave ${node.wave + 1}${node.owner ? ` · ${node.owner}` : ""}`
-                        : (node.owner ?? "")}
+                      : node.after
+                        ? "after · runs either way"
+                        : node.wave !== null
+                          ? `wave ${node.wave + 1}${node.owner ? ` · ${node.owner}` : ""}`
+                          : (node.owner ?? "")}
                 </Box>
                 {plan && (
                   <Box

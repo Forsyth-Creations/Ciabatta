@@ -579,8 +579,24 @@ pub fn build_many(
     // edge. They are resolved after the closure so a unit reached both ways can
     // be caught rather than compiled twice under the same node ids.
     let mut background: Vec<UnitId> = Vec::new();
+    let mut after: Vec<UnitId> = Vec::new();
     for unit in deps.keys() {
         let (_, workflow) = resolve(workspace, unit)?;
+        // After actions resolve the same way, and as strictly: a clean-up that
+        // silently never ran is found out only once what it cleans has piled up.
+        for spec in &workflow.after {
+            let Some(target) = parse_dependency(workspace, unit, spec, true)? else {
+                continue;
+            };
+            if &target == unit {
+                bail!(
+                    "Workflow '{}' in sub-workspace '{}' lists itself as an after action.",
+                    unit.workflow,
+                    unit.member
+                );
+            }
+            push_unique(&mut after, target);
+        }
         for spec in &workflow.background {
             // Strict: naming a background target that doesn't exist is a typo,
             // and a silently absent mock API is a test run that fails for a
@@ -611,6 +627,16 @@ pub fn build_many(
             );
         }
     }
+    for unit in &after {
+        if deps.contains_key(unit) || background.contains(unit) {
+            bail!(
+                "'{unit}' is both an after action and part of the graph this run executes.\n\n\
+                 An after action runs once everything else is over, so it can't also be \
+                 something the run waits for or keeps running beside it.\n\n\
+                 Either drop it from `after:`, or run a workflow that doesn't include it."
+            );
+        }
+    }
 
     let order = topological_order(&deps)?;
     let mut graph = compile(
@@ -618,6 +644,7 @@ pub fn build_many(
         workflows,
         &order,
         &background,
+        &after,
         &deps,
         &selection.provided,
     )?;
@@ -895,13 +922,14 @@ fn compile(
     workflow_names: &[String],
     order: &[UnitId],
     background: &[UnitId],
+    after: &[UnitId],
     deps: &BTreeMap<UnitId, Vec<UnitId>>,
     provided: &[String],
 ) -> Result<WorkflowGraph> {
     // A member usually contributes one workflow, and `api:compile` reads far
     // better than `api:build:compile`. Only disambiguate where it's needed.
     let mut per_member: HashMap<&str, usize> = HashMap::new();
-    for unit in order.iter().chain(background.iter()) {
+    for unit in order.iter().chain(background).chain(after) {
         *per_member.entry(unit.member.as_str()).or_insert(0) += 1;
     }
 
@@ -1118,7 +1146,32 @@ fn compile(
     // ordering, and it is the referenced workflow's own business. What they
     // never get is an edge to or from the graph proper — nothing in the run
     // waits for any of them, which is the whole point.
-    for unit in background {
+    //
+    // After actions are compiled the same way, last of all. Their first steps
+    // are wired to the graph's last ones — the steps nothing else waits for —
+    // so every drawing of the graph puts them at the end, where they run. The
+    // engine runs them in a pass of their own once the rest is over (see
+    // `RunStep::after`), so those edges never hold one back after a failure.
+    let sinks: Vec<String> = {
+        let main: Vec<&RunStep> = graph
+            .steps
+            .iter()
+            .filter(|s| !s.recover && !s.background)
+            .collect();
+        main.iter()
+            .filter(|s| !main.iter().any(|o| o.needs.contains(&s.name)))
+            .map(|s| s.name.clone())
+            .collect()
+    };
+    let extras = background
+        .iter()
+        .map(|unit| (unit, false))
+        .chain(after.iter().map(|unit| (unit, true)));
+    for (unit, is_after) in extras {
+        let role = match is_after {
+            true => "an after action",
+            false => "a background target",
+        };
         let (member, workflow) = resolve(workspace, unit)?;
         // It took part, so it is a unit of this graph: that is what makes the
         // member count right, and what makes a background target used daily
@@ -1126,16 +1179,26 @@ fn compile(
         graph.units.push(unit.clone());
 
         if !workflow.needs.is_empty() {
-            bail!(
-                "'{unit}' is used as a background target, but declares `needs: {:?}`.\n\n\
-                 A background target is started before the first wave and waits for nothing, \
-                 so there is nowhere for its own dependencies to run. Either drop its `needs`, \
-                 or make it a `needs:` of the workflow that wants it instead of a `background:`.",
-                workflow.needs,
-            );
+            match is_after {
+                true => bail!(
+                    "'{unit}' is used as an after action, but declares `needs: {:?}`.\n\n\
+                     An after action runs once the rest of the run is over, whichever way it \
+                     went, so there is nowhere for its own dependencies to run. Drop its \
+                     `needs`, or make them part of the workflow that runs it.",
+                    workflow.needs,
+                ),
+                false => bail!(
+                    "'{unit}' is used as a background target, but declares `needs: {:?}`.\n\n\
+                     A background target is started before the first wave and waits for \
+                     nothing, so there is nowhere for its own dependencies to run. Either drop \
+                     its `needs`, or make it a `needs:` of the workflow that wants it instead \
+                     of a `background:`.",
+                    workflow.needs,
+                ),
+            }
         }
         if workflow.steps.is_empty() {
-            bail!("'{unit}' is used as a background target, but has no steps to run.");
+            bail!("'{unit}' is used as {role}, but has no steps to run.");
         }
 
         let own: HashSet<&str> = workflow.steps.iter().map(|s| s.name.as_str()).collect();
@@ -1147,11 +1210,13 @@ fn compile(
             compiled.wave_group = workflow.wave_grouping.clone();
             compiled.workspace = Some(member.name.clone());
             compiled.cwd = Some(member.rel.clone());
-            compiled.background = true;
+            compiled.background = !is_after;
+            compiled.after = is_after;
             // Started and never waited for, whatever it declared. A step that
             // exits on its own is allowed — a one-shot warm-up is a reasonable
-            // thing to want running alongside — it simply finishes early.
-            compiled.persistent = true;
+            // thing to want running alongside — it simply finishes early. An
+            // after action is the opposite: it runs, and is waited for, last.
+            compiled.persistent = !is_after;
             compiled.recover = false;
             compiled.on_error = None;
             compiled.retry = None;
@@ -1163,6 +1228,10 @@ fn compile(
                 .filter(|dep| own.contains(dep.as_str()))
                 .map(|dep| node_id(unit, dep))
                 .collect();
+            // An after action's first steps follow the graph's last ones.
+            if is_after && compiled.needs.is_empty() {
+                compiled.needs = sinks.clone();
+            }
 
             compiled.requires = merge_unique(
                 &member.meta.requires,
@@ -1193,7 +1262,7 @@ fn compile(
         }
 
         // A background target's own `required_env` is the run's too: it has to
-        // start, and it cannot start without them.
+        // start, and it cannot start without them. So is an after action's.
         for var in &workflow.required_env {
             if !graph.required_env.contains(var) {
                 graph.required_env.push(var.clone());
@@ -1330,6 +1399,73 @@ mod tests {
     /// A `background:` target is pulled into the graph but never ordered: it is
     /// named the way `needs` names things, and the only difference is that
     /// nothing waits for it.
+    /// An `after:` target is compiled last, drawn in the waves after
+    /// everything else, and marked so the engine runs it either way.
+    #[test]
+    fn an_after_target_follows_the_whole_graph() {
+        let root = scratch("after");
+        let db = member(&root, "packages/db", "[workspace]\nname = \"db\"\n");
+        workflow(
+            &db,
+            "teardown",
+            "[[steps]]\nname = \"drop\"\nrun = \"dropdb test\"\n\
+             [[steps]]\nname = \"report\"\nrun = \"echo done\"\nneeds = [\"drop\"]\n",
+        );
+        let web = member(&root, "packages/web", "[workspace]\nname = \"web\"\n");
+        workflow(
+            &web,
+            "test",
+            "after = [\"db:teardown\"]\n\
+             [[steps]]\nname = \"compile\"\nrun = \"yarn build\"\n\
+             [[steps]]\nname = \"unit\"\nrun = \"yarn unit\"\nneeds = [\"compile\"]\n\
+             [[steps]]\nname = \"lint\"\nrun = \"yarn lint\"\nneeds = [\"compile\"]\n",
+        );
+        let ws = Workspace::load(&root).unwrap();
+        let graph = build(&ws, "test", &Selection::default()).unwrap();
+
+        let drop = graph.steps.iter().find(|s| s.name == "db:drop").unwrap();
+        assert!(drop.after && !drop.background && !drop.persistent);
+        // Its first step follows the graph's last ones; its second keeps its own edge.
+        assert_eq!(drop.needs, ["web:unit", "web:lint"]);
+        let report = graph.steps.iter().find(|s| s.name == "db:report").unwrap();
+        assert_eq!(report.needs, ["db:drop"]);
+
+        let waves: Vec<Vec<&str>> = graph
+            .waves()
+            .iter()
+            .map(|w| w.iter().map(|s| s.name.as_str()).collect())
+            .collect();
+        assert_eq!(
+            waves,
+            vec![
+                vec!["web:compile"],
+                vec!["web:unit", "web:lint"],
+                vec!["db:drop"],
+                vec!["db:report"],
+            ]
+        );
+
+        // Something the run already includes can't also be what runs after it.
+        workflow(
+            &web,
+            "test",
+            "after = [\"web:build\"]\nneeds = [\"web:build\"]\n\
+             [[steps]]\nname = \"unit\"\nrun = \"yarn unit\"\n",
+        );
+        workflow(
+            &web,
+            "build",
+            "[[steps]]\nname = \"compile\"\nrun = \"yarn build\"\n",
+        );
+        let ws = Workspace::load(&root).unwrap();
+        let err = build(&ws, "test", &Selection::default())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("both an after action"), "{err}");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn a_background_target_is_pulled_in_but_never_ordered() {
         let root = scratch("background");

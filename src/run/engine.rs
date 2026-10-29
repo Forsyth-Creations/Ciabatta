@@ -66,10 +66,6 @@ struct StepFailure {
 /// A started `persistent` step or background task, and what now owns it.
 struct Persistent {
     step: String,
-    /// Whether it came from a workflow's `background:` array, which is what
-    /// decides whether it is stopped when the run ends. See
-    /// [`stop_persistent`].
-    background: bool,
     ownership: Ownership,
 }
 
@@ -330,7 +326,7 @@ pub async fn execute(
                     }
                 };
 
-                run_dag(
+                run_graph(
                     &resolved,
                     name,
                     config,
@@ -383,6 +379,133 @@ pub async fn execute(
 
 /// Run an optional phase hook (login/pre/post) as a shell command, forwarding its
 /// output as workflow log lines. Returns whether a command actually ran.
+/// The run's environment variable saying how the rest of the run went, as an
+/// after action sees it: `succeeded` or `failed`.
+pub const RUN_OUTCOME_VAR: &str = "CIABATTA_RUN_OUTCOME";
+
+/// Run the graph, then its after actions.
+///
+/// After actions are held out of the graph and run in a pass of their own once
+/// it is over, whichever way it went. The graph's own failure is the one worth
+/// reporting; an after action's counts only when the graph had passed.
+#[allow(clippy::too_many_arguments)]
+async fn run_graph(
+    resolved: &ResolvedRun,
+    workflow: &str,
+    config: &CiabattaConfig,
+    root: &Path,
+    env: &super::PreparedEnv,
+    dry_run: bool,
+    ctl: &RunCtl,
+    tx: &mpsc::Sender<ProgressUpdate>,
+    cache: Option<&mut super::cached::Session>,
+    isolation: Option<&mut super::isolate::Isolation>,
+) -> Result<()> {
+    let (main, after) = split_after(resolved);
+    let outcome = run_dag(
+        &main, workflow, config, root, env, dry_run, ctl, tx, cache, isolation,
+    )
+    .await;
+    let cleaned = run_after(
+        &after,
+        outcome.is_ok(),
+        workflow,
+        config,
+        root,
+        env,
+        dry_run,
+        ctl,
+        tx,
+    )
+    .await;
+    outcome.and(cleaned)
+}
+
+/// Split a run into its graph and its after actions.
+///
+/// The after actions keep only the edges among themselves: the ones the
+/// compiler drew to the graph's last steps are there for the drawing, and
+/// would leave an after action blocked forever behind a step that failed.
+fn split_after(resolved: &ResolvedRun) -> (ResolvedRun, ResolvedRun) {
+    let (after, steps): (Vec<RunStep>, Vec<RunStep>) =
+        resolved.steps.iter().cloned().partition(|s| s.after);
+    let names: std::collections::HashSet<String> = after.iter().map(|s| s.name.clone()).collect();
+    let after = after
+        .into_iter()
+        .map(|mut step| {
+            step.needs.retain(|dep| names.contains(dep));
+            step
+        })
+        .collect();
+    (
+        ResolvedRun {
+            steps,
+            ..resolved.clone()
+        },
+        ResolvedRun {
+            steps: after,
+            ..resolved.clone()
+        },
+    )
+}
+
+/// Run a workflow's after actions, once the rest of the run is over.
+///
+/// They run whether the graph passed or failed — that is what they are for —
+/// and see [`RUN_OUTCOME_VAR`] to tell which. A run that was asked to stop
+/// skips them, since stopping means "start nothing further". Never cached: a
+/// clean-up that was skipped because nothing changed would not have cleaned.
+#[allow(clippy::too_many_arguments)]
+async fn run_after(
+    after: &ResolvedRun,
+    succeeded: bool,
+    workflow: &str,
+    config: &CiabattaConfig,
+    root: &Path,
+    env: &super::PreparedEnv,
+    dry_run: bool,
+    ctl: &RunCtl,
+    tx: &mpsc::Sender<ProgressUpdate>,
+) -> Result<()> {
+    if after.steps.is_empty() {
+        return Ok(());
+    }
+    if ctl.cancel.as_ref().is_some_and(|c| c.is_stopped()) {
+        for step in &after.steps {
+            let _ = tx
+                .send(ProgressUpdate::StepSkipped {
+                    workflow: workflow.to_string(),
+                    step: step.name.clone(),
+                    reason: "not started — the run was stopped".to_string(),
+                })
+                .await;
+        }
+        return Ok(());
+    }
+    let outcome = match succeeded {
+        true => "succeeded",
+        false => "failed",
+    };
+    let _ = tx
+        .send(ProgressUpdate::Log(
+            workflow.to_string(),
+            format!(
+                "after: the run {outcome}; running {} after action step(s) \
+                 ({RUN_OUTCOME_VAR}={outcome})",
+                after.steps.len()
+            ),
+        ))
+        .await;
+    let mut env = env.clone();
+    env.env
+        .insert(RUN_OUTCOME_VAR.to_string(), outcome.to_string());
+    run_dag(
+        after, workflow, config, root, &env, dry_run, ctl, tx, None, None,
+    )
+    .await
+    .context("an after action failed")
+}
+
 async fn run_phase_hook(
     cmd: Option<&str>,
     workflow: &str,
@@ -877,7 +1000,7 @@ async fn run_dag(
                     .await;
             }
         }
-        stop_persistent(persistent, workflow, root, tx).await;
+        stop_persistent(persistent, workflow, tx).await;
         return Err(err);
     }
 
@@ -895,7 +1018,7 @@ async fn run_dag(
         }
     }
 
-    stop_persistent(persistent, workflow, root, tx).await;
+    stop_persistent(persistent, workflow, tx).await;
 
     // A stopped run is not a failed one. Somebody asked for this, they know why,
     // and reporting it as a broken build would send the next person looking for
@@ -1096,15 +1219,18 @@ async fn preflight_tools(
 
 /// Start a `persistent` step and return immediately, without waiting for it.
 ///
-/// The step is handed to the daemon as a watch session, which is what collects
-/// its output: the process runs beside the graph rather than inside a step's
-/// log, and can be tailed live with `ciabatta watch --attach <id>`. The run
-/// stops it again on the way out (see [`stop_persistent`]) — the session, and
-/// everything it captured, stays readable afterwards.
+/// A `persistent` step is handed to the daemon as a watch session, which is
+/// what collects its output: the process outlives the run, and can be tailed
+/// live with `ciabatta watch --attach <id>`.
 ///
-/// If no daemon can be reached, the step falls back to a background task inside
-/// this process. It behaves the same from the graph's point of view; the
-/// difference is that its output goes to this run's log and is gone with it.
+/// A background task is run here instead, beside the graph, with its output
+/// streamed into its own node like any other step's. It exists only for this
+/// run, so there is nothing for a watch session to outlive it for; the run
+/// stops it on the way out (see [`stop_persistent`]).
+///
+/// If no daemon can be reached, a persistent step falls back to running here
+/// too. It behaves the same from the graph's point of view; the difference is
+/// that it stops with this run.
 async fn start_persistent(
     step: &RunStep,
     workflow: &str,
@@ -1141,6 +1267,17 @@ async fn start_persistent(
         }
     };
 
+    // A background task lives and dies with this run, so it runs here, like
+    // any other step: its output is its node's log, read where every other
+    // step's is, rather than in a watch session somewhere else.
+    if step.background {
+        log(format!("$ {command}   (background — nothing waits for it)")).await;
+        return Ok(Persistent {
+            step: step.name.clone(),
+            ownership: Ownership::Local(spawn_locally(&command, &cwd, env, step, workflow, tx)),
+        });
+    }
+
     log(format!("$ {command}   (persistent — the graph continues)")).await;
 
     // `Err` here covers both "the caller doesn't want a daemon" and "we tried
@@ -1152,30 +1289,19 @@ async fn start_persistent(
 
     match handoff {
         Ok((session, url)) => {
-            log(match step.background {
-                true => format!(
-                    "handed to the ciabatta daemon as watch session #{session} — \
-                     it runs until this run finishes"
-                ),
-                false => format!(
-                    "handed to the ciabatta daemon as watch session #{session} — \
-                     it outlives this run"
-                ),
-            })
+            log(format!(
+                "handed to the ciabatta daemon as watch session #{session} — \
+                 it outlives this run"
+            ))
             .await;
             // Its output goes to the session from here on, not into this panel.
             // Saying so beats leaving an empty log to be puzzled over.
             log("its output is collected there, not below".to_string()).await;
             log(format!("follow it:  ciabatta watch --attach {session}")).await;
-            log(match step.background {
-                true => format!("stop it early:  ciabatta watch --stop {session}"),
-                false => format!("stop it:    ciabatta watch --stop {session}"),
-            })
-            .await;
+            log(format!("stop it:    ciabatta watch --stop {session}")).await;
             log(format!("live view:  {url}")).await;
             Ok(Persistent {
                 step: step.name.clone(),
-                background: step.background,
                 ownership: Ownership::Daemon { session, url },
             })
         }
@@ -1187,39 +1313,10 @@ async fn start_persistent(
             .await;
             Ok(Persistent {
                 step: step.name.clone(),
-                background: step.background,
                 ownership: Ownership::Local(spawn_locally(&command, &cwd, env, step, workflow, tx)),
             })
         }
     }
-}
-
-/// Ask the daemon to stop a watch session a persistent step left running.
-///
-/// The session itself is kept — only the process behind it ends. Its output
-/// stays readable at the same URL, which is what makes stopping the process
-/// safe to do automatically: nothing anybody might still want is thrown away.
-async fn stop_session(root: &Path, session_id: u64) -> Result<()> {
-    // `connect_at(root)`, matching `hand_to_daemon`: connecting registers a
-    // project, and it must be the run's root rather than wherever the operator
-    // happened to be standing.
-    let session = crate::daemon::connect_at(None, root).await?;
-    let response = session
-        .daemon
-        .client()?
-        .post(
-            session
-                .daemon
-                .url(&format!("/api/watch/sessions/{session_id}/stop")),
-        )
-        .send()
-        .await?;
-    anyhow::ensure!(
-        response.status().is_success(),
-        "the daemon refused: {}",
-        response.text().await.unwrap_or_default()
-    );
-    Ok(())
 }
 
 /// Register the run's project with the daemon and start the step as a watch
@@ -1291,40 +1388,25 @@ fn spawn_locally(
 
 /// Close out everything the run started and left running.
 ///
-/// The two kinds part company here, and only here — starting them is identical.
-///
 /// A **background task** is scoped to this run: it was started so the steps
 /// could finish, they have, and leaving it up would hand the operator a process
-/// still holding its port for the next run to collide with. It is stopped. Its
-/// watch session survives, so what it logged is still readable afterwards.
+/// still holding its port for the next run to collide with. It runs here, so it
+/// is stopped, and what it logged stays in its node.
 ///
 /// A **`persistent` step** is the opposite promise: `ciabatta dev` exists to
 /// leave a dev server to work against, and killing it on the way out would make
 /// persistence pointless. The daemon owns it, it is left alone, and the id
 /// needed to reach it later is reported.
 ///
-/// A local fallback has no daemon to outlive this process, so it is stopped
-/// whichever kind it is — there is nothing left that could own it.
+/// Whatever runs here — a background task, or a persistent step whose daemon
+/// couldn't be reached — has nothing to outlive this process, so it is stopped.
 async fn stop_persistent(
     running: Vec<Persistent>,
     workflow: &str,
-    root: &Path,
     tx: &mpsc::Sender<ProgressUpdate>,
 ) {
     for job in running {
         let line = match job.ownership {
-            Ownership::Daemon { session, url } if job.background => {
-                Some(match stop_session(root, session).await {
-                    Ok(()) => format!("stopped (the run finished) — its output is kept at {url}"),
-                    // Worth saying precisely: the process is still up and still
-                    // holding whatever port it bound, and the operator now has to
-                    // deal with it.
-                    Err(err) => format!(
-                        "⚠ couldn't stop watch session #{session} ({err}); it is still running — \
-                     stop it with `ciabatta watch --stop {session}`  ({url})"
-                    ),
-                })
-            }
             // A `persistent` step is the opposite promise: `ciabatta dev`
             // exists to leave a dev server behind, and killing it on the way
             // out would make persistence pointless. Left alone, and reported
@@ -1943,7 +2025,7 @@ mod tests {
             env,
             ..Default::default()
         };
-        let result = run_dag(
+        let result = run_graph(
             &resolved,
             "test",
             &CiabattaConfig::default(),
@@ -2324,6 +2406,134 @@ mod tests {
             Some(&"mock-api"),
             "the background task has to be up first: {order:?}"
         );
+    }
+
+    /// A background task runs inside the run, so what it prints lands in its
+    /// own node like any other step's output — not in a watch session.
+    #[tokio::test]
+    async fn a_background_task_logs_into_its_own_node() {
+        let steps = vec![
+            RunStep {
+                persistent: true,
+                background: true,
+                ..step(
+                    "mock-api",
+                    "echo mock listening; while true; do sleep 1; done",
+                )
+            },
+            // Long enough for the task's first line to arrive.
+            step("compile", "sleep 0.5; echo built"),
+        ];
+        let (result, updates) = drive(steps, Path::new(".")).await;
+        assert!(result.is_ok(), "{:?}", result.err());
+
+        let mock: Vec<&str> = updates
+            .iter()
+            .filter_map(|u| match u {
+                ProgressUpdate::StepLog { step, line, .. } if step == "mock-api" => {
+                    Some(line.as_str())
+                }
+                _ => None,
+            })
+            .collect();
+        assert!(mock.contains(&"mock listening"), "{mock:?}");
+        assert!(
+            !mock.iter().any(|l| l.contains("watch session")),
+            "{mock:?}"
+        );
+        assert!(
+            !mock
+                .iter()
+                .any(|l| l.contains("couldn't hand this to the daemon")),
+            "a background task never goes to the daemon, so there is nothing to warn about: {mock:?}"
+        );
+    }
+
+    fn after(name: &str, command: &str, needs: &[&str]) -> RunStep {
+        RunStep {
+            after: true,
+            needs: needs.iter().map(|n| n.to_string()).collect(),
+            ..step(name, command)
+        }
+    }
+
+    /// An after action runs last, and is told the run went well.
+    #[tokio::test]
+    async fn an_after_action_runs_once_the_graph_is_done() {
+        let steps = vec![
+            step("compile", "echo built"),
+            after(
+                "teardown",
+                "echo \"outcome=$CIABATTA_RUN_OUTCOME\"",
+                &["compile"],
+            ),
+        ];
+        let (result, updates) = drive(steps, Path::new(".")).await;
+        assert!(result.is_ok(), "{:?}", result.err());
+        let order: Vec<String> = outcomes(&updates).into_iter().map(|(s, _)| s).collect();
+        assert_eq!(order, ["compile", "teardown"]);
+        assert!(step_logs(&updates).contains("outcome=succeeded"));
+    }
+
+    /// The point of an after action: a failure upstream doesn't leave it
+    /// blocked, and the run still fails for the step that broke.
+    #[tokio::test]
+    async fn an_after_action_runs_when_the_graph_fails() {
+        let steps = vec![
+            step("compile", "exit 3"),
+            step("package", "echo never"),
+            after(
+                "teardown",
+                "echo \"outcome=$CIABATTA_RUN_OUTCOME\"",
+                &["package"],
+            ),
+        ];
+        let steps = {
+            let mut steps = steps;
+            steps[1].needs = vec!["compile".into()];
+            steps
+        };
+        let (result, updates) = drive(steps, Path::new(".")).await;
+        let err = result.expect_err("the run still fails").to_string();
+        assert!(
+            err.contains("compile"),
+            "the graph's failure is reported: {err}"
+        );
+        assert!(outcomes(&updates).contains(&("teardown".to_string(), true)));
+        assert!(step_logs(&updates).contains("outcome=failed"));
+    }
+
+    /// An after action that fails fails a run that had otherwise passed.
+    #[tokio::test]
+    async fn a_failing_after_action_fails_the_run() {
+        let steps = vec![
+            step("compile", "echo built"),
+            after("teardown", "exit 1", &["compile"]),
+        ];
+        let (result, _) = drive(steps, Path::new(".")).await;
+        let err = format!("{:#}", result.expect_err("the after action failed"));
+        assert!(err.contains("after action"), "{err}");
+    }
+
+    /// Stopping means start nothing further, clean-up included.
+    #[tokio::test]
+    async fn a_stopped_run_skips_its_after_actions() {
+        let cancel = std::sync::Arc::new(crate::runner::Cancel::default());
+        cancel.stop();
+        let steps = vec![
+            step("compile", "echo built"),
+            after("teardown", "echo ran", &["compile"]),
+        ];
+        let (result, updates) = drive_with(steps, Path::new("."), Some(cancel)).await;
+        assert!(result.is_err());
+        assert!(
+            skipped(&updates)
+                .iter()
+                .any(|(s, why)| s == "teardown" && why.contains("stopped")),
+            "{:?}",
+            skipped(&updates)
+        );
+        assert!(!step_logs(&updates).contains("ran"));
     }
 
     /// Asking a run to stop ends it without running what was left.

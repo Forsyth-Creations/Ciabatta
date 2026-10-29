@@ -527,9 +527,56 @@ and nothing else:
 | `background:` entry | **Stopped.** It existed to get this run through; leaving it up would hand you a process still holding its port for the next run to collide with. |
 | step with `persistent = true` | **Left running.** The daemon owns it, so `ciabatta dev` leaves you a dev server to work against. Stop it with `ciabatta watch --stop <id>`. |
 
-Either way it runs as a watch session labelled with the node that started it, so
-its output is readable live and afterwards — a stopped background task leaves
-its session behind even though its process is gone.
+A background task runs inside the run, beside the graph, so **its output is its
+node's log** — in the terminal, the TUI and the run's page — exactly as any other
+step's is. (Before 0.8.2 it was handed to the daemon as a watch session, and its
+node said only where to look.) A `persistent` step is the one that becomes a
+watch session, because it has to outlive the run.
+
+### After actions
+
+Some things belong at the end of a run whichever way it went: dropping the test
+database, collecting the reports, posting to the team channel. They go in the
+workflow's `after:` array, named the way `needs` and `background` name things:
+
+```yaml
+# packages/web/.ciabatta/workflows/test.yaml
+background:
+  - db:serve           # running while the tests run
+after:
+  - db:teardown        # runs when the tests pass, and when they don't
+
+steps:
+  - name: integration
+    run: yarn test:integration
+```
+
+An after action starts once every other step has finished — succeeded,
+failed, or never got going because something upstream broke — so unlike a
+`needs` dependent, a failure never leaves it blocked. It sees
+`CIABATTA_RUN_OUTCOME`, `succeeded` or `failed`, so one that only matters when
+something broke can say so on its step:
+
+```yaml
+# packages/db/.ciabatta/workflows/teardown.yaml
+steps:
+  - name: drop
+    run: dropdb test
+  - name: page-someone
+    when: env.CIABATTA_RUN_OUTCOME == failed
+    run: ./notify.sh "the web tests failed"
+    needs: [drop]
+```
+
+- The run still fails for the step that broke; an after action's own failure
+  fails a run that had otherwise passed.
+- Its steps keep the order they declare among themselves, but the workflow may
+  not declare `needs` of its own — it runs once everything is over, so there is
+  nowhere for them to run.
+- It is never cached: a clean-up skipped because "nothing changed" would not
+  have cleaned.
+- A run that is **stopped** skips them: stopping means start nothing further.
+- The graph draws them in the last waves, marked `↪ after`.
 
 ### Persistent steps outlive the run
 
@@ -888,7 +935,25 @@ aborts on them.
 `*_KEY`, `*_PASS`, `*AUTH*`, …) are masked. This output goes into CI logs.
 
 The same list is served to the web app, where each variable is drawn as a node
-feeding into the steps that read it — click one to light up its dependents.
+feeding into the steps that read it — click one to light up its dependents. The
+TUI's `.env` tab (`e`) shows it in the same colours.
+
+**To see it without running anything**, `ciabatta env show` resolves the
+environment exactly as a run about to start would, prints the report, and
+stops. It takes the flags a run takes that change the environment — `-e`,
+`--env-profile`, `--local`, `--release`, `--only`, `--filter`, and arguments
+after `...` — so it answers "what would this command see?":
+
+```bash
+ciabatta env show build                          # what `ciabatta build` would see
+ciabatta env show build -e STAGE=prod --env-profile staging
+ciabatta env show deploy ... --target=arm64      # custom arguments count too
+ciabatta env show                                # the .env search from here, no workflow
+ciabatta env show build --json                   # the same report, as JSON
+```
+
+Nothing is copied for `--env-profile`: the profile's values are read where they
+are. Secret-looking values are masked here too.
 
 ### Build variables are auto-sourced
 
@@ -1742,6 +1807,7 @@ A profile is a whole `.env` for one situation, kept in a workspace's
 copies it into the `.env` of every workspace that has it:
 
 ```bash
+ciabatta env show build                  # what `ciabatta build` would see, and nothing run
 ciabatta env list                        # the profiles here, and what each .env is now
 ciabatta env use dev                     # copy each .ciabatta/.env.dev into its .env
 ciabatta env use dev --dry-run           # say what would be copied, change nothing

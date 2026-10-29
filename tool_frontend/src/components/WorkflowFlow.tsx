@@ -175,7 +175,7 @@ export function WorkflowFlow({
       const picked = selected === node.id;
       const border = step.recover
         ? theme.palette.warning.main
-        : step.background
+        : step.background || step.after
           ? theme.palette.info.main
           : theme.palette.primary.main;
       return {

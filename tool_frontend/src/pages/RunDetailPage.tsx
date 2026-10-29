@@ -2512,7 +2512,9 @@ function nodeStyle(
     const border =
       inspect && !top.recover
         ? cacheTone(top.cache, theme)
-        : statusColor(stackStatus(steps, top), theme);
+        : top.after
+          ? afterColor(stackStatus(steps, top), theme)
+          : statusColor(stackStatus(steps, top), theme);
     const base = stepNodeStyle({
       theme,
       height: common.height,
@@ -2569,10 +2571,12 @@ function nodeStyle(
         // the status is still the glyph beside the name.
         inspect && !step.recover
           ? cacheTone(step.cache, theme)
-          : // Reused is as good an outcome as ran-and-passed.
-            wasReused(step.cache)
-            ? theme.palette.success.main
-            : statusColor(step.status, theme),
+          : step.after
+            ? afterColor(step.status, theme)
+            : // Reused is as good an outcome as ran-and-passed.
+              wasReused(step.cache)
+              ? theme.palette.success.main
+              : statusColor(step.status, theme),
     });
   }
 
@@ -2992,6 +2996,17 @@ function EnvGroupNote({
 /** The colour a step's status is drawn in — the graph's borders, the minimap. */
 function statusColor(status: StepStatus | string, theme: Theme): string {
   return statusColour(status, theme);
+}
+
+/**
+ * An after action's border: blue, so the clean-up at the end of a run reads
+ * as its own kind of step — except while it runs or once it fails, which are
+ * worth the status colour's attention.
+ */
+function afterColor(status: StepStatus | string, theme: Theme): string {
+  return status === "running" || status === "failed"
+    ? statusColor(status, theme)
+    : theme.palette.info.main;
 }
 
 function stageColor(status: string): "success" | "error" | "warning" | "default" {

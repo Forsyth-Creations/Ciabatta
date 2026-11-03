@@ -29,7 +29,8 @@ pub fn router() -> Router<AppState> {
 #[derive(Deserialize)]
 pub struct DeclaredQuery {
     project: String,
-    /// `<member>:<workflow>` units, comma-separated.
+    /// `<member>:<workflow>` units, comma-separated, or `*` for every
+    /// workflow in the workspace.
     units: String,
 }
 
@@ -42,13 +43,17 @@ async fn declared(
 ) -> RouteResult<Json<Value>> {
     let root = state.project_root(&query.project)?;
     let workspace = Workspace::discover(&root).map_err(RouteError::bad_request)?;
-    let units: Vec<String> = query
-        .units
-        .split(',')
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
-        .collect();
+    let units: Vec<String> = if query.units.trim() == "*" {
+        workspace::edit::targets(&workspace)
+    } else {
+        query
+            .units
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .collect()
+    };
     let declared =
         workspace::edit::declared(&workspace, &units).map_err(RouteError::bad_request)?;
     Ok(Json(json!({

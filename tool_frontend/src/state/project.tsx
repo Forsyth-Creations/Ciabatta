@@ -29,9 +29,16 @@ const ProjectContext = createContext<ProjectContextValue | undefined>(undefined)
 
 export function ProjectProvider({ children }: { children: ReactNode }) {
   const { data: projects, isLoading } = useProjects();
-  const [selected, setSelected] = useState<string | undefined>(
-    () => localStorage.getItem(STORAGE_KEY) ?? undefined,
-  );
+  // A CLI command that opens a page names the checkout it was run in with
+  // `?project=`; that wins over whatever was picked last time.
+  const [selected, setSelected] = useState<string | undefined>(() => {
+    const fromUrl = new URLSearchParams(window.location.search).get("project");
+    if (fromUrl) {
+      localStorage.setItem(STORAGE_KEY, fromUrl);
+      return fromUrl;
+    }
+    return localStorage.getItem(STORAGE_KEY) ?? undefined;
+  });
 
   // Settle on a valid selection once the list arrives: keep the stored choice
   // if it still exists, otherwise fall back to the first project.

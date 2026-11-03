@@ -942,6 +942,33 @@ pub enum SelfCommand {
     ///
     ///   ciabatta self reset
     Reset,
+
+    /// Draw every workflow and step in the workspace as one graph, to find
+    /// the dangling ones.
+    ///
+    /// Prints which workflows nothing connects to — nothing needs them, they
+    /// need nothing, and no other sub-workspace shares their name — and which
+    /// steps their workflow leaves unordered, then opens the web app on the
+    /// whole-workspace graph. There, as on a run's graph, clicking a node lets
+    /// you connect it: add what it needs, or make another workflow wait for
+    /// it, and save the change to the workflow files.
+    ///
+    ///   ciabatta self graph
+    ///   ciabatta self graph --no-open
+    ///   ciabatta self graph --json
+    Graph {
+        /// Print the dangling report as JSON and don't open the web app.
+        #[arg(long)]
+        json: bool,
+
+        /// Print the report and the page's URL, but don't open a browser.
+        #[arg(long)]
+        no_open: bool,
+
+        /// The daemon's port, when it isn't the default.
+        #[arg(long, value_name = "PORT")]
+        port: Option<u16>,
+    },
 }
 
 /// Parses a bare `ciabatta <workflow> [flags]` invocation.

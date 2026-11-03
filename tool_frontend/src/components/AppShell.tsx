@@ -307,5 +307,7 @@ type NavItem = { to: string; label: string; icon: ReactNode };
  * sub-routes (`/watch/3`).
  */
 function isActive(pathname: string, to: string): boolean {
+  // The whole-workspace graph is reached from the Workspace page.
+  if (to === "/workspace" && pathname === "/graph") return true;
   return pathname === to || pathname.startsWith(`${to}/`);
 }

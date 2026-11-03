@@ -27,6 +27,7 @@ import { TodoPage } from "./pages/TodoPage";
 import { WatchPage } from "./pages/WatchPage";
 import { WatchSessionPage } from "./pages/WatchSessionPage";
 import { WorkspacePage } from "./pages/WorkspacePage";
+import { WorkspaceGraphPage } from "./pages/WorkspaceGraphPage";
 
 /**
  * The shell is the root route's component, not a wrapper around
@@ -81,6 +82,14 @@ const workspaceRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/workspace",
   component: WorkspacePage,
+});
+
+// Every workflow at once: `ciabatta self graph`, or the Workspace page's
+// "Whole graph" button.
+const graphRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/graph",
+  component: WorkspaceGraphPage,
 });
 
 const runRoute = createRoute({
@@ -148,6 +157,7 @@ const routeTree = rootRoute.addChildren([
   watchRoute,
   watchSessionRoute,
   workspaceRoute,
+  graphRoute,
   runRoute,
   runBuilderRoute,
   runDetailRoute,

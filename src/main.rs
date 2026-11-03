@@ -3215,6 +3215,34 @@ fn cmd_self_lint(json: bool) -> Result<()> {
     Ok(())
 }
 
+/// `ciabatta self graph`: report what dangles, then open the whole-workspace
+/// graph in the web app.
+async fn cmd_self_graph(json: bool, no_open: bool, port: Option<u16>) -> Result<()> {
+    let cwd = std::env::current_dir()?;
+    let root = workspace::find_workspace_root(&cwd).ok_or_else(|| {
+        anyhow::anyhow!(
+            "No ciabatta workspace found at or above '{}'.",
+            cwd.display()
+        )
+    })?;
+    let ws = workspace::Workspace::discover(&root)?;
+    let units = workspace::edit::declared(&ws, &workspace::edit::targets(&ws))?;
+    let report = workspace::dangling::find(&units);
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
+    print!("{}", workspace::dangling::render(&report));
+
+    let session = daemon::connect_at(port, &root).await?;
+    let url = session.page_url("/graph");
+    println!("Workspace graph: {url}");
+    if !no_open {
+        daemon::open_browser(&url);
+    }
+    Ok(())
+}
+
 /// `ciabatta self reset`: stop what ciabatta has running and free the slots.
 async fn cmd_self_reset() -> Result<()> {
     let report = run::reset::reset().await?;
@@ -3245,6 +3273,11 @@ async fn cmd_self(subcommand: SelfCommand) -> Result<()> {
         SelfCommand::Update { from, check, force } => (from, check, force),
         SelfCommand::Lint { json } => return cmd_self_lint(json),
         SelfCommand::Reset => return cmd_self_reset().await,
+        SelfCommand::Graph {
+            json,
+            no_open,
+            port,
+        } => return cmd_self_graph(json, no_open, port).await,
     };
 
     let url = match from {

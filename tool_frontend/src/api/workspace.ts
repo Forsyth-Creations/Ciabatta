@@ -252,6 +252,10 @@ export interface DeclaredUnit {
   needs: string[];
   /** `[workspace] depends_on`: also orders it, but lives in the config. */
   depends_on: string[];
+  /** Workflows it starts alongside itself. Shown, not edited here. */
+  background: string[];
+  /** Workflows it runs once it's over. Shown, not edited here. */
+  after: string[];
   steps: {
     name: string;
     needs: string[];
@@ -268,7 +272,8 @@ export interface Declared {
   targets: string[];
 }
 
-/** What the files say about `units` (`<member>:<workflow>` each). */
+/** What the files say about `units` (`<member>:<workflow>` each, or `["*"]`
+ *  for every workflow in the workspace). */
 export function useDeclared(project: string | undefined, units: string[]) {
   const key = units.join(",");
   return useQuery({

@@ -35,6 +35,10 @@ pub struct DeclaredUnit {
     /// `[workspace] depends_on`, which also orders this workflow after
     /// others' but lives in the sub-workspace's config: shown, not edited.
     pub depends_on: Vec<String>,
+    /// Workflows this one starts alongside itself. Shown, not edited here.
+    pub background: Vec<String>,
+    /// Workflows this one runs once it's over. Shown, not edited here.
+    pub after: Vec<String>,
     pub steps: Vec<DeclaredStep>,
 }
 
@@ -99,6 +103,8 @@ pub fn declared(workspace: &Workspace, units: &[String]) -> Result<Vec<DeclaredU
                 locked,
                 needs: workflow.needs.clone(),
                 depends_on: member.meta.depends_on.clone(),
+                background: workflow.background.clone(),
+                after: workflow.after.clone(),
                 steps: workflow
                     .steps
                     .iter()
@@ -165,8 +171,10 @@ pub fn save(workspace: &Workspace, edits: &[UnitEdit]) -> Result<Vec<String>> {
             bail!("{unit} would be left with no steps; a workflow needs at least one");
         }
         for need in &edit.needs {
-            let names_member = workspace.member(need).is_some();
-            if !names_member && !known.contains(need) {
+            // `self` names this workflow's own sub-workspace.
+            let resolved = super::dangling::resolve(need, &edit.member, &edit.workflow);
+            let names_member = workspace.member(need).is_some() || need.trim() == "self";
+            if !names_member && !known.contains(&resolved) {
                 bail!(
                     "{unit} would need '{need}', which is neither a sub-workspace nor a \
                      `<sub-workspace>:<workflow>` in this workspace"
@@ -598,6 +606,8 @@ steps:
         let err = save(&ws, &[edit(&[], &[("test", &["build"])])]).unwrap_err();
         assert!(err.to_string().contains("isn't a step"), "{err}");
         let err = save(&ws, &[edit(&["nowhere"], &[("fetch", &[])])]).unwrap_err();
+        assert!(err.to_string().contains("neither a sub-workspace"), "{err}");
+        let err = save(&ws, &[edit(&["self:nowhere"], &[("fetch", &[])])]).unwrap_err();
         assert!(err.to_string().contains("neither a sub-workspace"), "{err}");
         assert_eq!(
             std::fs::read_to_string(flows.join("build.yaml")).unwrap(),

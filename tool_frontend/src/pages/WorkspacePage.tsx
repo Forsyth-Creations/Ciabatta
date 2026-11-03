@@ -42,7 +42,8 @@ import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
 import PlayArrowIcon from "@mui/icons-material/PlayArrow";
 import PublishIcon from "@mui/icons-material/Publish";
 import SearchIcon from "@mui/icons-material/Search";
-import { useNavigate } from "@tanstack/react-router";
+import HubIcon from "@mui/icons-material/Hub";
+import { Link as RouterLink, useNavigate } from "@tanstack/react-router";
 
 import { useStartRun } from "../api/run";
 import type { EnvVar } from "../api/types";
@@ -76,6 +77,17 @@ export function WorkspacePage() {
       <PageHeader
         title="Workspace"
         description="Every workflow in the monorepo — what it does, who owns it, and what it needs first. Pick one to see the graph that would run, across all the packages that take part."
+        actions={
+          <Button
+            component={RouterLink}
+            to="/graph"
+            variant="outlined"
+            size="small"
+            startIcon={<HubIcon />}
+          >
+            Whole graph
+          </Button>
+        }
       />
       <RequireProject>{(project) => <Workspace project={project} />}</RequireProject>
     </>

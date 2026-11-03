@@ -6,6 +6,11 @@
  * filtered, and what gets saved is the workflow, not this run of it. Every
  * change is held in a draft until Save, which sends each workflow whole — a
  * set, not a patch — so what is on screen is exactly what lands on disk.
+ *
+ * The whole-workspace graph (`ciabatta self graph`, `/graph`) is this editor
+ * over every workflow at once, with `showDangling` marking what nothing
+ * connects to — worked out again on every edit, so connecting a node clears
+ * its mark before anything is saved.
  */
 
 import { useEffect, useMemo, useState } from "react";
@@ -34,6 +39,7 @@ import {
   useSaveDeclared,
 } from "../api/workspace";
 import { ErrorNote, Loading } from "./Page";
+import { findDangling, resolveNeed } from "./dangling";
 import { monoFontStack } from "../theme";
 
 /** A workflow being edited: what each kept step needs, and the workflow's own. */
@@ -100,13 +106,21 @@ export function GraphEditor({
   units,
   status,
   onClose,
+  title = "Editing the graph",
+  height = 520,
+  showDangling = false,
 }: {
   project: string;
-  /** The run's workflows, `<member>:<workflow>` each. */
+  /** The workflows to edit, `<member>:<workflow>` each, or `["*"]` for all. */
   units: string[];
   /** The run's status for each step, by cache id, to colour the nodes. */
   status: Record<string, string>;
-  onClose: () => void;
+  /** Shows a Done button that calls this. */
+  onClose?: () => void;
+  title?: string;
+  height?: number | string;
+  /** Mark dangling workflows and loose steps, and list them beside the graph. */
+  showDangling?: boolean;
 }) {
   const declared = useDeclared(project, units);
   const save = useSaveDeclared();
@@ -127,24 +141,38 @@ export function GraphEditor({
     [declared.data],
   );
 
+  const report = useMemo(
+    () => (showDangling && declared.data ? findDangling(declared.data.units, drafts) : null),
+    [showDangling, declared.data, drafts],
+  );
+
   const steps: GraphStep[] = useMemo(() => {
+    // A loaded workflow's exits: the steps nothing else in it waits on.
+    const exitsOf = (target: string) => {
+      const other = drafts[target];
+      const otherUnit = byKey.get(target);
+      if (!other || !otherUnit) return [];
+      const needed = new Set(other.steps.flatMap((s) => s.needs));
+      return other.steps
+        .filter((s) => !needed.has(s.name))
+        .filter((s) => !otherUnit.steps.find((d) => d.name === s.name)?.recover)
+        .map((s) => nodeId(target, s.name));
+    };
     const out: GraphStep[] = [];
     for (const [key, draft] of Object.entries(drafts)) {
       const unit = byKey.get(key);
       if (!unit) continue;
-      // Another loaded workflow this one waits for hands it its exits: the
-      // steps of that workflow nothing else in it waits on.
-      const upstream = [...draft.needs, ...unit.depends_on].flatMap((need) => {
-        const target = need.includes(":") ? need : `${need}:${unit.workflow}`;
-        const other = drafts[target];
-        const otherUnit = byKey.get(target);
-        if (!other || !otherUnit) return [];
-        const needed = new Set(other.steps.flatMap((s) => s.needs));
-        return other.steps
-          .filter((s) => !needed.has(s.name))
-          .filter((s) => !otherUnit.steps.find((d) => d.name === s.name)?.recover)
-          .map((s) => nodeId(target, s.name));
-      });
+      // Another loaded workflow this one waits for hands it its exits — and
+      // so does one that runs this one as an after action.
+      const runsAfter = [...byKey.entries()]
+        .filter(([, u]) => u.after.some((a) => resolveNeed(a, u.member, u.workflow) === key))
+        .map(([k]) => k);
+      const upstream = [
+        ...[...draft.needs, ...unit.depends_on].map((need) => resolveNeed(need, unit.member, unit.workflow)),
+        ...runsAfter,
+      ].flatMap(exitsOf);
+      const dangles = report?.dangling.has(key) ?? false;
+      const loose = report?.loose.get(key) ?? [];
       for (const step of draft.steps) {
         const id = nodeId(key, step.name);
         const info = unit.steps.find((s) => s.name === step.name)!;
@@ -152,7 +180,7 @@ export function GraphEditor({
           name: id,
           label: step.name,
           workspace: key,
-          status: status[id] ?? "pending",
+          status: dangles || loose.includes(step.name) ? "warning" : (status[id] ?? "pending"),
           needs: [
             ...step.needs.map((n) => nodeId(key, n)),
             ...(step.needs.length === 0 && !info.recover ? upstream : []),
@@ -161,11 +189,16 @@ export function GraphEditor({
           background: info.background,
           highlight: id === selected,
           detail: info.recover ? "recovery" : step.needs.length ? `needs ${step.needs.join(", ")}` : "",
+          note: dangles
+            ? "dangling: nothing connects to this workflow"
+            : loose.includes(step.name)
+              ? "loose: nothing orders this step"
+              : null,
         });
       }
     }
     return out;
-  }, [drafts, byKey, selected, status]);
+  }, [drafts, byKey, selected, status, report]);
 
   if (declared.error) return <ErrorNote error={declared.error} />;
   if (!declared.data) return <Loading label="Reading the workflow files…" />;
@@ -206,7 +239,7 @@ export function GraphEditor({
   return (
     <Stack spacing={1.5}>
       <Stack direction="row" alignItems="center" spacing={1} flexWrap="wrap" useFlexGap>
-        <Typography variant="subtitle2">Editing the graph</Typography>
+        <Typography variant="subtitle2">{title}</Typography>
         <Typography variant="caption" color="text.secondary">
           Click a step to prune it or change what it needs. Nothing is written until you save.
         </Typography>
@@ -233,9 +266,11 @@ export function GraphEditor({
         >
           Save {changes.length > 0 && `(${changes.length})`}
         </Button>
-        <Button size="small" onClick={onClose}>
-          Done
-        </Button>
+        {onClose && (
+          <Button size="small" onClick={onClose}>
+            Done
+          </Button>
+        )}
       </Stack>
 
       {save.error && <ErrorNote error={save.error} />}
@@ -256,7 +291,7 @@ export function GraphEditor({
         <Box sx={{ flex: 1, minWidth: 0 }}>
           <StepGraph
             steps={steps}
-            height={520}
+            height={height}
             holdLayout
             onStepClick={(name) => setSelected(name === selected ? null : name)}
           />
@@ -269,13 +304,27 @@ export function GraphEditor({
               draft={draft}
               step={step}
               targets={declared.data.targets}
+              drafts={drafts}
+              byKey={byKey}
               onChange={(change) => update(pick, change)}
+              onChangeOther={update}
               onRemoved={() => setSelected(null)}
             />
           ) : (
             <Typography variant="body2" color="text.secondary">
               Pick a step in the graph.
             </Typography>
+          )}
+          {report && (
+            <>
+              <Divider sx={{ my: 1.5 }} />
+              <DanglingList
+                dangling={[...report.dangling]}
+                loose={[...report.loose.entries()]}
+                firstStep={(key) => drafts[key]?.steps[0]?.name}
+                onPick={setSelected}
+              />
+            </>
           )}
           <Divider sx={{ my: 1.5 }} />
           <Typography variant="overline" color="text.secondary">
@@ -300,13 +349,115 @@ export function GraphEditor({
   );
 }
 
+/** What the whole-workspace graph found dangling, each a link to its node. */
+function DanglingList({
+  dangling,
+  loose,
+  firstStep,
+  onPick,
+}: {
+  dangling: string[];
+  loose: [string, string[]][];
+  firstStep: (key: string) => string | undefined;
+  onPick: (node: string) => void;
+}) {
+  if (dangling.length === 0 && loose.length === 0) {
+    return (
+      <Alert severity="success" variant="outlined">
+        Nothing dangles: every workflow is connected.
+      </Alert>
+    );
+  }
+  return (
+    <Stack spacing={1}>
+      {dangling.length > 0 && (
+        <Box>
+          <Typography variant="overline" color="text.secondary">
+            Dangling workflows ({dangling.length})
+          </Typography>
+          <Typography variant="caption" color="text.secondary" component="p" sx={{ mb: 0.5 }}>
+            Nothing needs them, they need nothing, and no other package shares their name. Connect
+            them, or remove them if they&apos;re no longer used.
+          </Typography>
+          <Stack direction="row" spacing={0.5} flexWrap="wrap" useFlexGap>
+            {dangling.map((key) => (
+              <Chip
+                key={key}
+                size="small"
+                color="warning"
+                variant="outlined"
+                label={key}
+                sx={{ fontFamily: monoFontStack }}
+                onClick={() => {
+                  const first = firstStep(key);
+                  if (first) onPick(nodeId(key, first));
+                }}
+              />
+            ))}
+          </Stack>
+        </Box>
+      )}
+      {loose.length > 0 && (
+        <Box>
+          <Typography variant="overline" color="text.secondary">
+            Loose steps
+          </Typography>
+          <Typography variant="caption" color="text.secondary" component="p" sx={{ mb: 0.5 }}>
+            Their workflow orders its other steps, but nothing orders these.
+          </Typography>
+          <Stack direction="row" spacing={0.5} flexWrap="wrap" useFlexGap>
+            {loose.flatMap(([key, names]) =>
+              names.map((name) => (
+                <Chip
+                  key={nodeId(key, name)}
+                  size="small"
+                  color="warning"
+                  variant="outlined"
+                  label={`${key} › ${name}`}
+                  sx={{ fontFamily: monoFontStack }}
+                  onClick={() => onPick(nodeId(key, name))}
+                />
+              )),
+            )}
+          </Stack>
+        </Box>
+      )}
+    </Stack>
+  );
+}
+
+/** Whether workflow `from` already waits — directly or not — on `on`. */
+function workflowWaitsOn(
+  drafts: Record<string, Draft>,
+  byKey: Map<string, DeclaredUnit>,
+  from: string,
+  on: string,
+): boolean {
+  const seen = new Set<string>();
+  const stack = [from];
+  while (stack.length) {
+    const at = stack.pop()!;
+    if (at === on) return true;
+    if (seen.has(at)) continue;
+    seen.add(at);
+    const unit = byKey.get(at);
+    if (!unit) continue;
+    const needs = [...(drafts[at]?.needs ?? unit.needs), ...unit.depends_on];
+    stack.push(...needs.map((n) => resolveNeed(n, unit.member, unit.workflow)));
+  }
+  return false;
+}
+
 function StepPanel({
   unitKey: key,
   unit,
   draft,
   step,
   targets,
+  drafts,
+  byKey,
   onChange,
+  onChangeOther,
   onRemoved,
 }: {
   unitKey: string;
@@ -314,10 +465,32 @@ function StepPanel({
   draft: Draft;
   step: { name: string; needs: string[] };
   targets: string[];
+  drafts: Record<string, Draft>;
+  byKey: Map<string, DeclaredUnit>;
   onChange: (change: (draft: Draft) => Draft) => void;
+  /** Change another loaded workflow's draft: making it wait for this one. */
+  onChangeOther: (key: string, change: (draft: Draft) => Draft) => void;
   onRemoved: () => void;
 }) {
   const [query, setQuery] = useState("");
+  const [dependentQuery, setDependentQuery] = useState("");
+  // Loaded workflows whose own `needs` name this one: those can be undone here.
+  const neededBy = Object.entries(drafts)
+    .filter(([k]) => k !== key && byKey.has(k))
+    .flatMap(([k, d]) =>
+      d.needs
+        .filter((n) => resolveNeed(n, k.split(":")[0], byKey.get(k)!.workflow) === key)
+        .map((n) => ({ key: k, need: n })),
+    );
+  const runsAfterOrBeside = [...byKey.entries()]
+    .filter(([k, u]) => k !== key && [...u.after, ...u.background].some((a) => resolveNeed(a, u.member, u.workflow) === key))
+    .map(([k]) => k);
+  // Loaded, editable workflows that could be made to wait for this one
+  // without a cycle.
+  const dependentOptions = Object.keys(drafts)
+    .filter((k) => k !== key && byKey.has(k) && !byKey.get(k)!.locked)
+    .filter((k) => !neededBy.some((n) => n.key === k))
+    .filter((k) => !workflowWaitsOn(drafts, byKey, key, k));
   const locked = Boolean(unit.locked);
   // A step another step routes to (on_error / retry) can't go on its own.
   const routedFrom = draft.steps
@@ -424,6 +597,52 @@ function StepPanel({
           ))}
         </Stack>
       </Box>
+
+      <Box>
+        <Typography variant="overline" color="text.secondary">
+          Waits for this workflow
+        </Typography>
+        <Stack direction="row" spacing={0.5} flexWrap="wrap" useFlexGap>
+          {neededBy.length === 0 && runsAfterOrBeside.length === 0 && (
+            <Typography variant="body2" color="text.secondary">
+              Nothing loaded here.
+            </Typography>
+          )}
+          {neededBy.map(({ key: other, need }) => (
+            <Chip
+              key={`${other}<${need}`}
+              size="small"
+              variant="outlined"
+              label={other}
+              disabled={Boolean(byKey.get(other)?.locked)}
+              onDelete={() =>
+                onChangeOther(other, (d) => ({ ...d, needs: d.needs.filter((x) => x !== need) }))
+              }
+            />
+          ))}
+          {runsAfterOrBeside.map((other) => (
+            <Tooltip key={other} title="Runs it as an after action or in the background — edit that in its workflow file.">
+              <Chip size="small" variant="outlined" label={`${other} (after/background)`} />
+            </Tooltip>
+          ))}
+        </Stack>
+      </Box>
+
+      <Autocomplete<string>
+        size="small"
+        options={dependentOptions}
+        inputValue={dependentQuery}
+        onInputChange={(_, value) => setDependentQuery(value)}
+        value={null}
+        onChange={(_, other) => {
+          if (!other) return;
+          setDependentQuery("");
+          onChangeOther(other, (d) => ({ ...d, needs: [...d.needs, key] }));
+        }}
+        renderInput={(params) => (
+          <TextField {...params} label="Make a workflow wait for this one" placeholder="Search workflows" />
+        )}
+      />
 
       <Autocomplete<Option>
         size="small"

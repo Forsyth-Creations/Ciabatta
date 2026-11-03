@@ -223,6 +223,7 @@ const ENDPOINTS: EndpointGroup[] = [
     endpoints: [
       { method: "GET", path: "/api/workspace", note: "The catalogue: members, their workflows, the toolchain." },
       { method: "GET", path: "/api/workspace/graph", note: "One workflow compiled across packages. Takes workflow=." },
+      { method: "GET", path: "/api/workspace/declared", note: "What the workflow files declare, for the graph editor. Takes project= and units= (member:workflow, comma-separated, or * for every workflow)." },
       { method: "GET", path: "/api/workspace/env-drift", note: "Which .env variables changed since ciabatta last ran here. A peek: it never acknowledges the drift." },
     ],
   },
@@ -590,6 +591,10 @@ const COMMANDS: CommandGroup[] = [
       {
         usage: "ciabatta remote-cache upload <BINARY> [--apply]",
         note: "Send a remote cache a new ciabatta to hand out (and with --apply, to run itself, restarting in place). Needs an admin login and the cache's update password. --platform and --version for another OS's build.",
+      },
+      {
+        usage: "ciabatta self graph [--no-open] [--json]",
+        note: "Find dangling processes. Prints every workflow nothing connects to (nothing needs it, it needs nothing, and no other package shares its name) and every loose step (its workflow orders the others, not it), then opens the Whole graph page with every workflow drawn together, to connect them or decide they can go. --no-open just prints the URL; --json prints the report alone. See \"Find what dangles\".",
       },
       {
         usage: "ciabatta self lint",
@@ -2475,6 +2480,11 @@ cd packages/api && ciabatta build           # same as --only api; --all for ever
               <C>needs</C> or from the workflow&apos;s own.
             </>,
             <>
+              <strong>Make a workflow wait for this one</strong> goes the other way: it adds this
+              workflow to another one&apos;s <C>needs</C>. <strong>Waits for this workflow</strong>{" "}
+              lists who already does, and its <strong>×</strong> undoes one.
+            </>,
+            <>
               <strong>Add a dependency</strong> searches every target there is: another step of
               the same workflow (added to the step&apos;s <C>needs</C>), or another
               sub-workspace&apos;s workflow, which the <em>whole</em> workflow then waits for
@@ -2495,6 +2505,38 @@ cd packages/api && ciabatta build           # same as --only api; --all for ever
           gone. It touches only the lines that change, keeping comments and key order, and
           checks every file reads back as shown before writing any of them. Run again to use the
           new graph.
+        </P>
+        <SubHeading>Find what dangles</SubHeading>
+        <P>
+          <C>ciabatta self graph</C> — or <strong>Whole graph</strong> on the{" "}
+          <Link to="/workspace">Workspace</Link> page — draws every workflow in the workspace
+          as one graph, in the same editor, to find the processes that may not be needed any
+          more. It prints what it finds and opens the <Link to="/graph">Whole graph</Link> page,
+          where those nodes are drawn in amber and listed beside the graph; click one to jump to
+          it.
+        </P>
+        <Bullets
+          items={[
+            <>
+              A <strong>dangling workflow</strong> is one nothing connects to: it names no other
+              workflow in <C>needs</C>, <C>background</C> or <C>after</C> (and its package&apos;s{" "}
+              <C>depends_on</C> brings none in), no other workflow names it, and no other package
+              has a workflow of the same name to run alongside under{" "}
+              <C>ciabatta &lt;name&gt;</C>.
+            </>,
+            <>
+              A <strong>loose step</strong> is one its workflow leaves unordered while ordering the
+              rest: it needs nothing and nothing needs it, and it isn&apos;t a recovery or
+              background step or part of an <C>on_error</C> / <C>retry</C> route. A workflow
+              whose steps are all independent isn&apos;t flagged.
+            </>,
+          ]}
+        />
+        <P>
+          Connect one the way you would on a run — add a dependency, or make another workflow
+          wait for it — and its mark clears straight away; Save writes the change as above.
+          Workflows run as an <C>after</C> action are drawn after the workflow that runs them.
+          <C>ciabatta self graph --json</C> prints the report without opening anything.
         </P>
         <Alert severity="info" sx={{ my: 2 }}>
           Only <C>.ciabatta/workflows/&lt;name&gt;.yaml</C> files can be edited here. A workflow
@@ -2916,6 +2958,14 @@ ciabatta.pause("Flip the maintenance switch, then continue")`}</Pre>
               would do at each step (or switch to List for every node&apos;s details at once). The
               visual answer to <C>ciabatta list</C>, and where a workflow nobody has run for a
               month is flagged as stale.
+            </>,
+            <>
+              <strong>
+                <Link to="/graph">Whole graph</Link>
+              </strong>{" "}
+              — the Workspace page&apos;s <strong>Whole graph</strong> button, or{" "}
+              <C>ciabatta self graph</C>: every workflow in one editable graph, with the dangling
+              ones marked. See <a href="#running">Find what dangles</a>.
             </>,
             <>
               <strong>

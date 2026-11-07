@@ -54,7 +54,7 @@ export function WatchPage() {
     <>
       <PageHeader
         title="Watch"
-        description="Live, searchable output from the commands the daemon is running. Sessions outlive the terminal that started them — including the ones a workflow's persistent steps leave behind. Start one from a terminal with ciabatta watch <command>."
+        description="Live, searchable output from the commands the daemon is running. Sessions outlive the terminal that started them. Start one from a terminal with ciabatta watch <command>."
       />
       <RequireProject>{() => <SessionList />}</RequireProject>
     </>

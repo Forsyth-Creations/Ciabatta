@@ -47,9 +47,7 @@ export interface SessionSummary {
   project: string;
   command: string;
   /**
-   * What this session is, when its command line doesn't say. A `persistent`
-   * workflow step sets it to its graph node id, so the session it leaves
-   * running after a build is identifiable as that step.
+   * What this session is, when its command line doesn't say.
    */
   label: string | null;
   created_at: string;

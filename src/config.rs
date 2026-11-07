@@ -811,7 +811,6 @@ workflows:
         needs: [build]
         when:
           - env.RUN_ENV == prod
-        persistent: false
 "#,
         );
 

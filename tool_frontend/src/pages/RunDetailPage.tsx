@@ -40,6 +40,7 @@ import FolderOpenIcon from "@mui/icons-material/FolderOpen";
 import ManageSearchIcon from "@mui/icons-material/ManageSearch";
 import StopIcon from "@mui/icons-material/Stop";
 import ReplayIcon from "@mui/icons-material/Replay";
+import RedoIcon from "@mui/icons-material/Redo";
 import TerminalIcon from "@mui/icons-material/Terminal";
 import TuneIcon from "@mui/icons-material/Tune";
 import ViewQuiltIcon from "@mui/icons-material/ViewQuilt";
@@ -328,6 +329,9 @@ export function RunDetailPage() {
   const [recreating, setRecreating] = useState(false);
   const rerun = useRerunRun();
   const [needsEnv, setNeedsEnv] = useState<string[] | null>(null);
+  // Which button asked, so the variables typed into the prompt go to the same
+  // kind of re-run.
+  const [fromFailed, setFromFailed] = useState(false);
   const [editing, setEditing] = useState(false);
   // Held here rather than in the workflow panel, so the header can offer to
   // reset it — and so switching workflow tabs keeps the arrangement.
@@ -351,9 +355,9 @@ export function RunDetailPage() {
   ];
   const timing = state.run.started_at ? state.run : null;
 
-  const again = (env?: Record<string, string>) =>
+  const again = (env?: Record<string, string>, carry: boolean = fromFailed) =>
     rerun.mutate(
-      { id, env },
+      { id, env, fromFailed: carry },
       {
         onSuccess: (next) => {
           setNeedsEnv(null);
@@ -407,6 +411,7 @@ export function RunDetailPage() {
             {(state.run.filter ?? []).length > 0 &&
               ` · filtered: ${state.run.filter.join(" ")}`}
             {state.run.env_profile && ` · profile: ${state.run.env_profile}`}
+            {state.run.resumed_from && ` · carries on from ${state.run.resumed_from}`}
           </Typography>
         </Box>
         {workflow && <PhaseStrip workflow={workflow} />}
@@ -463,12 +468,33 @@ export function RunDetailPage() {
               size="small"
               startIcon={<ReplayIcon />}
               disabled={!state.done || rerun.isPending}
-              onClick={() => again()}
+              onClick={() => {
+                setFromFailed(false);
+                again(undefined, false);
+              }}
             >
               Run again
             </Button>
           </Box>
         </Tooltip>
+        {state.done && (status === "failed" || status === "stopped") && (
+          <Tooltip title="Start this run again without repeating the steps that passed. The steps that failed or never ran, and everything after them, run. The graph is compiled fresh, so a step whose command has changed runs again too.">
+            <Box component="span">
+              <Button
+                size="small"
+                color="warning"
+                startIcon={<RedoIcon />}
+                disabled={rerun.isPending}
+                onClick={() => {
+                  setFromFailed(true);
+                  again(undefined, true);
+                }}
+              >
+                Re-run from failed
+              </Button>
+            </Box>
+          </Tooltip>
+        )}
         {!state.done && <StopRunButton id={id} />}
         {layout.customised && (
           <Tooltip title="Put the graph, logs, details and environment back where they started.">
@@ -1414,6 +1440,8 @@ function NodeLabel({
           ? restoringLine(step.restoring, humanizeBytes)
           : wasReused(step.cache)
           ? `from cache${step.finished_at ? ` · ${clockTime(step.finished_at)}` : ""}`
+          : step.carried_from
+          ? `passed in ${step.carried_from}`
           : step.started_at && step.finished_at
             ? `${elapsedOf(step, 0)} · ${clockTime(step.finished_at)}`
             : statusLabel(step.status).toLowerCase()
@@ -1556,7 +1584,7 @@ function StepDetails({ step, env, now }: { step: StepView; env: EnvVar[]; now: n
   else if (step.kind) badges.push(step.kind);
   if (step.background) badges.push("⚡ background");
   else if (step.after) badges.push("↪ after");
-  else if (step.persistent) badges.push("persistent");
+  if (step.carried_from) badges.push(`passed in ${step.carried_from}, not run again`);
   if (step.timeout) badges.push(`timeout ${step.timeout}`);
   if (step.requires.length > 0) badges.push(`needs ${step.requires.join(", ")}`);
 

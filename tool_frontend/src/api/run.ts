@@ -81,11 +81,12 @@ export interface StepView extends Timed {
   kind: string | null;
   /** The special, identifiable publishing phase. */
   push: boolean;
-  persistent: boolean;
   /** From the workflow's `background:` array: started first, gates nothing, stopped when the run ends. */
   background: boolean;
   /** From the workflow's `after:` array: runs once the rest of the run is over, whichever way it went. */
   after?: boolean;
+  /** The earlier run it passed in, when "Re-run from failed" carried it over rather than ran it. */
+  carried_from?: string | null;
   timeout: string | null;
   requires: string[];
 
@@ -346,6 +347,8 @@ export interface RunSummary extends Timed {
   dry_run: boolean;
   /** Started with `--force`: the cache was ignored and every step ran. */
   force?: boolean;
+  /** The run this one carries on from, when it was re-run from a failure. */
+  resumed_from?: string | null;
   filter: string[];
   only: string[];
   isolated: boolean;
@@ -584,7 +587,8 @@ export function useStopRun() {
 }
 
 /**
- * Start a previous run again, exactly as it was started.
+ * Start a previous run again, exactly as it was started — or, with
+ * `fromFailed`, without repeating the steps that passed.
  *
  * The daemon re-runs from the request it stored rather than from anything the
  * page reconstructs, so the filters and the `--only` list come along. The one
@@ -595,8 +599,19 @@ export function useStopRun() {
 export function useRerunRun() {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: ({ id, env }: { id: number; env?: Record<string, string> }) =>
-      api.post<RunSummary>(`/api/run/runs/${id}/rerun`, env ? { env } : {}),
+    mutationFn: ({
+      id,
+      env,
+      fromFailed,
+    }: {
+      id: number;
+      env?: Record<string, string>;
+      fromFailed?: boolean;
+    }) =>
+      api.post<RunSummary>(`/api/run/runs/${id}/rerun`, {
+        ...(env ? { env } : {}),
+        ...(fromFailed ? { from_failed: true } : {}),
+      }),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: runKeys.runs }),
   });
 }

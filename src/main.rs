@@ -567,6 +567,22 @@ async fn cmd_workflow(
 
     let name = graph.label();
     let resolved = workspace::graph::into_run(graph)?;
+
+    let resume = if args.from_failed {
+        match run::resume::from_last_run(&ws.root, &name)? {
+            Some(resume) => Some(resume),
+            None => {
+                println!(
+                    "'{name}' passed last time, so there is no failure to re-run from. \
+                     Run it without --from-failed to run it again."
+                );
+                return Ok(());
+            }
+        }
+    } else {
+        None
+    };
+
     // The environment is searched from where the command was run, up to the
     // root: `cd packages/api && ciabatta build` reads `packages/api/.env`
     // first, and every step of the run then shares what that search found.
@@ -596,6 +612,7 @@ async fn cmd_workflow(
             authoritative: args.authoritative,
             sandbox_also: args.sandbox_also.clone(),
             force: args.force,
+            resume,
             jobs: args.jobs,
             start_anyway: args.start_anyway,
             ..Default::default()
@@ -890,6 +907,7 @@ async fn cmd_workflow_gui(
             "env": vars,
             "dry_run": args.dry_run,
             "force": args.force,
+            "from_failed": args.from_failed,
             "start_anyway": args.start_anyway,
             // Sent as typed, not only as the variables they became: the daemon
             // keeps them with the run, so "run again" repeats them.
@@ -1373,8 +1391,7 @@ async fn cmd_watch(
         return list_watch_sessions(&client, &session).await;
     }
 
-    // Attaching is how you follow a `persistent` workflow step: the run left it
-    // behind as a session and printed its id.
+    // Attaching follows a session the daemon already has, by id.
     if let Some(id) = attach {
         let url = format!("{}/watch/{id}", session.daemon.base_url);
         println!("Attaching to watch session {id}.");
@@ -1633,9 +1650,7 @@ fn print_watch_env(watch: &WatchEnv) {
 
 /// Print the watch sessions the daemon owns, newest first.
 ///
-/// The list matters more now that a `persistent` workflow step leaves one
-/// behind: after a build, this is how you find the dev server it started and
-/// the id to attach to.
+/// This is how you find a session again, and the id to attach to.
 async fn list_watch_sessions(client: &reqwest::Client, session: &daemon::Session) -> Result<()> {
     let sessions: Vec<serde_json::Value> = client
         .get(session.daemon.url("/api/watch/sessions"))
@@ -1655,8 +1670,8 @@ async fn list_watch_sessions(client: &reqwest::Client, session: &daemon::Session
     for entry in &sessions {
         let id = entry["id"].as_u64().unwrap_or_default();
         let running = entry["running"].as_bool().unwrap_or(false);
-        // A session left behind by a persistent step is named after its graph
-        // node, which identifies it far better than its command line does.
+        // A session started through the API with a label is named by it, which
+        // identifies it far better than its command line does.
         let what = entry["label"]
             .as_str()
             .map(|label| format!("{label}  ({})", entry["command"].as_str().unwrap_or("")))
@@ -2424,6 +2439,17 @@ async fn run_plain(
                     "⚠".style(color::warn())
                 )
             }
+            ProgressUpdate::StepCarried {
+                workflow,
+                step,
+                from,
+            } => {
+                println!(
+                    "{}   {} carried step: {step} (passed in {from}; not run again)",
+                    tag(&workflow),
+                    "✓".style(color::good())
+                )
+            }
             ProgressUpdate::StepSkipped {
                 workflow,
                 step,
@@ -2512,6 +2538,11 @@ async fn run_plain(
     }
 
     if any_failed {
+        if !dry_run {
+            eprintln!(
+                "To run again from the failure, without repeating what passed, add --from-failed."
+            );
+        }
         bail!("One or more workflows failed.");
     }
     Ok(())
@@ -4140,16 +4171,12 @@ steps:
     # retries: 1                      # extra attempts, for flaky steps
     # needs: [some-earlier-step]      # ordering within this workflow
 
-  # A long-running step — a dev server, a watcher — that the graph must not wait
-  # for. It starts, everything downstream is released, and the ciabatta daemon
-  # takes ownership of it as a watch session, so it keeps running after the run
-  # finishes. Follow it with `ciabatta watch --attach <ID>` (the run prints the
-  # id), or find it later with `ciabatta watch --list`.
+  # Something the run needs up while it works — a dev server, a mock API — goes
+  # in a workflow of its own, named at the top of this file. It starts before the
+  # first step, nothing waits for it, and it stops when the run ends:
   #
-  # - name: dev-server
-  #   description: Serve the app for the e2e steps
-  #   run: npm run dev
-  #   persistent: true
+  # background:
+  #   - self:serve
 
   # Publishing is just another node on the graph: a step whose kind is "push",
   # naming a workflow from this package's ciabatta.yaml.
@@ -4539,15 +4566,6 @@ workflow name. Small packages can write them inline under `workflows:` instead
                                             # everything it spawned) and marked
                                             # failed — and the graph keeps going.
       retries: 2                            # extra attempts, for flaky steps
-      persistent: true                      # a dev server that never exits:
-                                            # started, dependents released
-                                            # immediately, and handed to the
-                                            # daemon as a watch session, so it
-                                            # OUTLIVES the run. The run prints
-                                            # its id:
-                                            #   ciabatta watch --attach <ID>
-                                            #   ciabatta watch --stop   <ID>
-                                            #   ciabatta watch --list
       continue_on_error: true               # its failure skips dependents but
                                             # doesn't stop the run
       warn_on_error: true                   # or: its failure is only a
@@ -5211,15 +5229,6 @@ workflow name. Small packages can write them inline under `workflows:` instead
                                             # everything it spawned) and marked
                                             # failed — and the graph keeps going.
       retries: 2                            # extra attempts, for flaky steps
-      persistent: true                      # a dev server that never exits:
-                                            # started, dependents released
-                                            # immediately, and handed to the
-                                            # daemon as a watch session, so it
-                                            # OUTLIVES the run. The run prints
-                                            # its id:
-                                            #   ciabatta watch --attach <ID>
-                                            #   ciabatta watch --stop   <ID>
-                                            #   ciabatta watch --list
       continue_on_error: true               # its failure skips dependents but
                                             # doesn't stop the run
       warn_on_error: true                   # or: its failure is only a

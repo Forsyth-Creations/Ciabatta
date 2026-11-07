@@ -92,9 +92,8 @@ function SessionList() {
                   />
 
                   <Box sx={{ flexGrow: 1, minWidth: 0 }}>
-                    {/* A labelled session was left behind by a persistent
-                        workflow step; its node id identifies it far better
-                        than the command line it happens to run. */}
+                    {/* A label identifies a session far better than the
+                        command line it happens to run. */}
                     {session.label && (
                       <Typography variant="body2" sx={{ fontWeight: 600 }}>
                         {session.label}

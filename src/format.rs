@@ -478,7 +478,7 @@ pub fn indent(text: &str, prefix: &str) -> String {
 /// Whether a bool is `false` — a `skip_serializing_if` predicate.
 ///
 /// A config written back out should read like one somebody would type. Every
-/// `persistent: false` and `recover: false` serde emits by default is a line
+/// `continue_on_error: false` and `recover: false` serde emits by default is a line
 /// the reader has to skip past to find the two that matter.
 pub fn is_false(value: &bool) -> bool {
     !*value

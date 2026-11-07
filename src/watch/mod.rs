@@ -226,9 +226,8 @@ impl WatchState {
     /// the old per-invocation server did — the caller must say where.
     ///
     /// `env` is layered over the daemon's own environment. A session started by
-    /// hand needs nothing there, but a `persistent` workflow step does: it has
-    /// to see the same `CIABATTA_*` variables and per-package settings the rest
-    /// of its graph ran with, and the daemon's environment has neither.
+    /// hand usually needs nothing there, but one started through the API may name
+    /// variables the daemon's own environment doesn't have.
     pub fn spawn(
         self: &std::sync::Arc<Self>,
         command: &str,

@@ -18,6 +18,7 @@ pub mod input;
 pub mod isolate;
 pub mod release;
 pub mod reset;
+pub mod resume;
 pub mod slots;
 pub mod transfer;
 pub mod view;
@@ -95,6 +96,24 @@ where
     )))
 }
 
+/// Refuse `persistent: true` with directions. `persistent: false` asks for what
+/// every step now does, so it still loads.
+fn reject_persistent<'de, D>(deserializer: D) -> std::result::Result<(), D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    match serde_json::Value::deserialize(deserializer)? {
+        serde_json::Value::Bool(false) | serde_json::Value::Null => Ok(()),
+        _ => Err(serde::de::Error::custom(
+            "`persistent:` on a step was removed in 0.9.0. For something a run needs up while \
+             it works, move the step into a workflow of its own and name it in this workflow's \
+             `background:` list (`self:<workflow>`); it is stopped when the run ends. For a dev server you want to \
+             keep, make it an ordinary step (Ctrl-C ends the run), or start it with \
+             `ciabatta watch <command>`, which outlives the terminal.",
+        )),
+    }
+}
+
 /// A node in the run flowchart: either a normal step (runs an action once its
 /// `needs` succeed) or a recovery node (`recover = true`, entered only via some
 /// step's `on_error`, offering a choice of fix `options`).
@@ -152,20 +171,17 @@ pub struct RunStep {
     #[serde(default)]
     #[serde(skip_serializing_if = "crate::format::is_zero")]
     pub retries: u32,
-    /// A step that never exits on its own — a dev server, a log tailer, a
-    /// watcher. It is started, its dependents are released immediately, and it
-    /// keeps running for the rest of the graph rather than hanging it.
-    ///
-    /// It **outlives the run**: the daemon takes ownership as a watch session,
-    /// so `ciabatta dev` leaves you a dev server to work against rather than
-    /// killing it on the way out. Stop it with `ciabatta watch --stop <id>`.
-    /// For a server that exists only to get this run through and should go away
-    /// with it, use the workflow's [`background`] array instead.
-    ///
-    /// [`background`]: crate::workspace::Workflow::background
-    #[serde(default)]
-    #[serde(skip_serializing_if = "crate::format::is_false")]
-    pub persistent: bool,
+    /// `persistent:` was removed in 0.9.0. Kept only so a config that still sets
+    /// it hears how to move, rather than silently hanging on a step that used
+    /// to be stepped over.
+    #[allow(dead_code)]
+    #[serde(
+        rename = "persistent",
+        default,
+        deserialize_with = "reject_persistent",
+        skip_serializing
+    )]
+    pub removed_persistent: (),
     /// Set by the compiler on entries of a workflow's `background:` array.
     ///
     /// `#[serde(skip)]` on purpose: it is not a key anybody writes on a step,
@@ -174,12 +190,10 @@ pub struct RunStep {
     /// The API surfaces build their own JSON, so the flag still reaches the web
     /// app without living in the config format.
     ///
-    /// A background task is a persistent one scoped to a single run: it is
-    /// started before the first wave, gates nothing, and is stopped again once
-    /// every stage has succeeded or failed. The distinction from
-    /// [`Self::persistent`] is only ever *lifetime* — a mock API that exists to
-    /// get this run through should not still be holding its port afterwards,
-    /// and a dev server should.
+    /// A background task is started before the first wave, gates nothing, and
+    /// is stopped again once every stage has succeeded or failed: a mock API
+    /// that exists to get this run through should not still be holding its port
+    /// afterwards.
     #[serde(skip)]
     pub background: bool,
     /// Set by the compiler on entries of a workflow's `after:` array.
@@ -1387,7 +1401,7 @@ mod tests {
     use super::*;
 
     /// A step list on its own, the way a workflow file spells one.
-    #[derive(Deserialize)]
+    #[derive(Deserialize, Debug)]
     struct StepList {
         #[serde(default)]
         steps: Vec<RunStep>,
@@ -2022,9 +2036,8 @@ kind             = "build"
 cwd              = "packages/api"
 
 [[steps]]
-name       = "dev-server"
-run        = "npm run dev"
-persistent = true
+name = "dev-server"
+run  = "npm run dev"
 "#,
         );
         assert!(validate_flowchart(&steps, "web").is_ok());
@@ -2044,9 +2057,22 @@ persistent = true
         assert!(compile.continue_on_error);
         assert_eq!(compile.kind.as_deref(), Some("build"));
         assert_eq!(compile.cwd.as_deref(), Some("packages/api"));
-        assert!(!compile.persistent);
+    }
 
-        assert!(steps[1].persistent);
+    #[test]
+    fn persistent_true_is_refused_with_directions_and_false_still_loads() {
+        let yaml = "steps:\n  - name: dev\n    run: npm run dev\n    persistent: true\n";
+        let err =
+            crate::format::from_str::<StepList>(yaml, crate::format::Format::Yaml).unwrap_err();
+        let message = format!("{err:#}");
+        assert!(message.contains("removed in 0.9.0"), "{message}");
+        assert!(message.contains("background:"), "{message}");
+
+        let toml = "[[steps]]\nname = \"dev\"\nrun = \"npm run dev\"\npersistent = true\n";
+        assert!(crate::format::from_str::<StepList>(toml, crate::format::Format::Toml).is_err());
+
+        let yaml = "steps:\n  - name: dev\n    run: npm run dev\n    persistent: false\n";
+        crate::format::from_str::<StepList>(yaml, crate::format::Format::Yaml).unwrap();
     }
 
     #[test]

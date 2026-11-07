@@ -374,7 +374,24 @@ pub async fn run(
         env_vars = adjusted;
     }
 
-    let pairs = build_transfers(transfer, cwd, &env_vars)?;
+    // Pulling from Nexus starts from what's in the registry, not from what's
+    // already on disk: a folder here is where the artifact lands, not a list of
+    // files to fetch.
+    let pulls_whole = transfer.direction == Direction::Pull
+        && matches!(
+            crate::config::infer_registry_kind(registry_name, registry_config),
+            crate::config::RegistryKind::Nexus | crate::config::RegistryKind::Generic
+        )
+        && !matches!(transfer.publish_path, Some(PublishPath::Many(_)));
+    let pairs = if pulls_whole {
+        let remote = match transfer.publish_path {
+            Some(PublishPath::Single(path)) => substitute_vars(path, &env_vars)?,
+            _ => String::new(),
+        };
+        vec![(cwd.join(transfer.artifact.unwrap_or(".")), remote)]
+    } else {
+        build_transfers(transfer, cwd, &env_vars)?
+    };
     let opts: Vec<RegistryOpOptions<'_>> = pairs
         .iter()
         .map(|(local, remote)| RegistryOpOptions {

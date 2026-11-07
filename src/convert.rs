@@ -309,7 +309,11 @@ pub fn to_workflow_yaml(name: &str, script_rel: &str, analysis: &Analysis) -> St
     }
     out.push_str(&format!("    script: {}\n", yaml_scalar(script_rel)));
     if analysis.persistent {
-        out.push_str("    persistent: true\n");
+        out.push_str(
+            "    # This looks like it never exits, so anything that `needs` it would wait\n    \
+             # forever. To run it beside other steps, keep it in this workflow and name\n    \
+             # the workflow in their `background:` list.\n",
+        );
     }
 
     // Written but off. The outputs are a decent guess from reading the script;
@@ -433,7 +437,7 @@ fn report(name: &str, script_rel: &str, analysis: &Analysis) {
         println!("  writes        {}", analysis.outputs.join(", "));
     }
     if analysis.persistent {
-        println!("  persistent    looks like it never exits");
+        println!("  never exits?  looks like it; see the note in the file");
     }
 
     println!(

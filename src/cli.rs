@@ -379,9 +379,8 @@ pub enum Commands {
 
         /// Tail an existing session by id instead of starting a command.
         ///
-        /// This is how you follow a `persistent` workflow step: the daemon owns
-        /// it as a watch session that outlives the run, and the run prints the
-        /// id to attach to. `ciabatta watch --list` shows what's running.
+        /// The daemon owns a session, so it outlives the terminal that started
+        /// it. `ciabatta watch --list` shows what's running.
         #[arg(
             long,
             visible_alias = "session",
@@ -1049,6 +1048,13 @@ pub struct WorkflowArgs {
     /// refresh entries you don't trust.
     #[arg(long)]
     pub force: bool,
+
+    /// Carry on from where the last run of this workflow failed: the steps that
+    /// passed are not run again, and the failed step and everything behind it
+    /// are. The graph is compiled fresh, so a step whose command has changed
+    /// runs again, and so does whatever follows it.
+    #[arg(long, conflicts_with = "force")]
+    pub from_failed: bool,
 
     /// Start now, even when this workspace already has as many runs going on
     /// this machine as `workspace.max_concurrent_runs` allows. The run takes

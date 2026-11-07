@@ -128,8 +128,6 @@ fn badges(step: &RunStep) -> Option<String> {
         tags.push("⚡ background".to_string());
     } else if step.after {
         tags.push("↪ after — runs whichever way the run went".to_string());
-    } else if step.persistent {
-        tags.push("persistent".to_string());
     }
     if let Some(timeout) = step.timeout.as_deref() {
         tags.push(format!("timeout {timeout}"));

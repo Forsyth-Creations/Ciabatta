@@ -40,9 +40,9 @@ also just a step on the graph, so a build that ends in a push is one command.
 - **Missing toolchains are named up front.** Declare what a step needs, and a
   missing `protoc` is reported before the build starts, with the install command
   your repo wrote down — not as "command not found" ten minutes in.
-- **Nothing hangs the graph.** Long-running steps get a `timeout`; genuinely
-  persistent ones (dev servers, watchers) are handed to the daemon and stepped
-  over, so they keep running after the build that started them is done.
+- **Nothing hangs the graph.** Long-running steps get a `timeout`; a process
+  the run only needs up (a dev server, a mock API) goes in `background:`, where
+  nothing waits for it and it stops when the run does.
 - **One config, many registries.** Describe your registries once in
   `.ciabatta/ciabatta.yaml`; a workflow step publishes to any of them.
 - **CI-aware.** Automatically resolves `CIABATTA_BRANCH`, `CIABATTA_COMMIT`,
@@ -413,7 +413,6 @@ Missing 1 build tool(s):
 | Setting | What it does |
 | --- | --- |
 | `timeout = "10m"` | Kills the step — and everything it spawned — past the limit, marks it failed, and **lets the rest of the graph carry on**. |
-| `persistent = true` | A dev server or watcher that never exits: it's started, its dependents are released immediately, and the daemon takes ownership of it as a **watch session that outlives the run** — see below. |
 | `retries = 2` | Extra attempts for a flaky step. A timeout isn't retried — it's stuck, not flaky. |
 | `continue_on_error = true` | Its failure skips its dependents but doesn't stop the run. |
 | `warn_on_error = true` | Its failure is reported as a **warning**: its dependents still run, and the run still succeeds. For a stage worth hearing about but not worth stopping for — a linter being phased in, an optional upload. |
@@ -488,7 +487,6 @@ workflow's `background:` array, beside `steps:` rather than inside it.
 steps:
   - name: api
     run: node mock.js
-    persistent: true
 
 # packages/web/.ciabatta/workflows/test.yaml — used by whoever needs it up
 needs:
@@ -519,19 +517,20 @@ Being started before wave 1 is not the same as being *ready* before wave 1. If
 a step would race the server it talks to, have that step wait for the port;
 ciabatta can't, because "ready" is a different question for every server.
 
-**Background vs. persistent** is a question of what happens when the run ends,
-and nothing else:
-
-| | When the run ends |
-| --- | --- |
-| `background:` entry | **Stopped.** It existed to get this run through; leaving it up would hand you a process still holding its port for the next run to collide with. |
-| step with `persistent = true` | **Left running.** The daemon owns it, so `ciabatta dev` leaves you a dev server to work against. Stop it with `ciabatta watch --stop <id>`. |
+**When the run ends, a background task is stopped.** It existed to get this run
+through; leaving it up would hand you a process still holding its port for the
+next run to collide with. To keep a dev server after a run, make it an ordinary
+step (Ctrl-C ends the run), or start it with `ciabatta watch <command>`, which
+the daemon owns and which outlives the terminal.
 
 A background task runs inside the run, beside the graph, so **its output is its
 node's log** — in the terminal, the TUI and the run's page — exactly as any other
 step's is. (Before 0.8.2 it was handed to the daemon as a watch session, and its
-node said only where to look.) A `persistent` step is the one that becomes a
-watch session, because it has to outlive the run.
+node said only where to look.)
+
+The `persistent:` step key was removed in 0.9.0, because background tasks do the
+job and are better scoped. A config that still sets `persistent: true` is refused
+with these directions rather than hanging on a step that used to be stepped over.
 
 ### After actions
 
@@ -578,34 +577,31 @@ steps:
 - A run that is **stopped** skips them: stopping means start nothing further.
 - The graph draws them in the last waves, marked `↪ after`.
 
-### Persistent steps outlive the run
+### Re-running from where it failed
 
-A dev server that dies with the build that started it isn't persistent at all,
-so ciabatta hands `persistent` steps to its daemon as watch sessions. The step
-runs in its own package's directory with the run's environment, its output is
-collected in full, and the run prints the id to reach it by:
+A run that fails in its last step has usually done a lot of work that is still
+good. `--from-failed` carries on from there: the steps that passed aren't run
+again, and the failed step and everything behind it are.
 
 ```console
-$ ciabatta dev
-[dev]   [api:server] $ npm run dev   (persistent — the graph continues)
-[dev]   [api:server] handed to the ciabatta daemon as watch session #4 — it outlives this run
-[dev]   [api:server] follow it:  ciabatta watch --attach 4
-[dev]   [api:server] stop it:    ciabatta watch --stop 4
-[dev] ✓ completed
+$ ciabatta build
+[build]   ✗ step test failed
+To run again from the failure, without repeating what passed, add --from-failed.
 
-$ ciabatta watch --list
-Watch sessions (1):
-  #4    running         812 lines   api:server  (npm run dev)
+$ ciabatta build --from-failed
+[build]   ✓ carried step: compile (passed in the last run; not run again)
+[build]   ▶ test
 ```
 
-`--attach` tails it in the terminal (Ctrl-C detaches; the session keeps going),
-and it shows up on the **Watch** page named after the step that left it behind.
-Sessions are owned by the daemon, so they end when you stop them or when the
-daemon does — `ciabatta daemon stop` takes them with it.
+On the web app, a run that failed or was stopped has a **Re-run from failed**
+button, which carries on from that run in particular.
 
-If no daemon can be reached, the step falls back to running inside the run: it
-still doesn't block the graph, but it stops when the run does, and the log says
-so rather than leaving you to find out.
+- The graph is compiled fresh, so fixing the workflow file works: a step whose
+  command changed runs again, and so does whatever follows it.
+- Background tasks start again and after actions run again, because this run needs
+  them too. A step a condition skipped asks its condition again.
+- It can't see a change on disk that an earlier step would have reacted to. When
+  those steps need repeating, run the workflow normally.
 
 ### Finding things
 
@@ -701,22 +697,28 @@ fields:
 - `repository` — the Nexus repo name (e.g. `raw-hosted`, `npm-hosted`). When set,
   `url` is the bare Nexus host and `/repository/<repository>` is appended for you.
   When omitted, `url` is used as the full repository URL (backwards compatible).
-- `format` — `raw` (default), `npm`, or `pypi`, selecting how the push happens.
+- `format` — `raw` (default), `npm`, or `pypi`, selecting how a push and a pull happen.
 - `base_path` — *raw only*: an optional prefix prepended to every step's
   `publish_path`, so raw artifacts land under a common folder.
 
-| `format` | How a push works | Requirements |
-| --- | --- | --- |
-| `raw` | HTTP `PUT` (pull is HTTP `GET`) | none |
-| `npm` | `npm publish <artifact> --registry <repo>` | `npm` on `PATH` |
-| `pypi` | `twine upload --repository-url <repo> <files>` | `twine` on `PATH` |
+| `format` | How a push works | How a pull works | Requirements |
+| --- | --- | --- | --- |
+| `raw` | HTTP `PUT` | HTTP `GET`, file by file for a folder | none |
+| `npm` | `npm publish <artifact> --registry <repo>` | `npm pack <package> --registry <repo>` | `npm` on `PATH` |
+| `pypi` | `twine upload --repository-url <repo> <files>` | `pip download <package> --no-deps` | `twine` to push, `pip` to pull, on `PATH` |
 
 For `npm` / `pypi`, a push step's `artifact` is the package tarball or the
 `dist/` directory to publish, and `publish_path` is not used (the package name and
 version determine where it lands). Both read credentials from
 `CIABATTA_<NAME>_USER` / `_PASS`; npm also accepts a `CIABATTA_<NAME>_TOKEN`
-bearer token. A `kind: pull` step supports only `raw` repositories — fetch
-npm/PyPI packages with their native clients.
+bearer token.
+
+A pull has no package to read that from, so it names one in `publish_path`:
+`"@acme/sdk@1.2.3"`, or `"my-package@1.2.3"` for PyPI (`{VAR}` substitution works,
+and a name with no version takes the newest). `artifact` is the folder the package
+lands in, or a `.tgz` file name for npm. It is downloaded, not installed, and its
+dependencies aren't fetched. In a raw repository `publish_path` can be a file or a
+folder: a directory pushed one file at a time comes back the same way.
 
 ```yaml
 # Publish an npm package straight to a Nexus npm repository.
@@ -734,6 +736,14 @@ workflows:
         kind: push
         registry: sdk
         artifact: packages/sdk   # tarball or package directory
+
+  fetch-sdk:
+    steps:
+      - name: fetch
+        kind: pull
+        registry: sdk
+        publish_path: "@acme/sdk@1.2.3"   # which package
+        artifact: vendor                  # where it lands
 ```
 
 ### S3
@@ -999,12 +1009,14 @@ ciabatta input "Flip the maintenance switch, then continue" --enter
 
 - In a **terminal**, the prompt appears under the run with a live countdown;
   other steps' output waits until you answer. Ctrl-C stops the run.
-- With **`--gui`** (or a run started in the web app), a dialog opens on every
-  page of the app. It can't be dismissed, and it comes back after a reload,
-  until the question is answered, times out, or the run stops. `--enter` shows
-  a single Continue button.
-- With **nobody** to ask (CI, piped, `--tui`), the question takes its
-  `--default`, or fails the step and names the variable to set.
+- With **`--gui`** (or a run started in the web app), a banner appears at the
+  top of every page of the app, and the page stays usable behind it. Click it to
+  answer. It comes back after a reload, until the question is answered, times out,
+  or the run stops. `--enter` shows a single Continue button.
+- With **`--tui`**, the same banner sits above the steps: press `a` or click it to
+  answer, and Esc to come back to it later.
+- With **nobody** to ask (CI, piped), the question takes its `--default`, or fails
+  the step and names the variable to set.
 
 `--env VAR` answers from `VAR` without asking whenever it's set. `--secret`
 masks the answer. How long a question waits is unlimited unless the root
@@ -1910,9 +1922,10 @@ CIABATTA_<REGISTRY>_USER    CIABATTA_<REGISTRY>_PASS
 uses `CIABATTA_NEXUS_USER` / `CIABATTA_NEXUS_PASS`. They're applied per type:
 
 - **Nexus (raw) / Artifactory** — sent as HTTP basic auth on the upload/download.
-- **Nexus (npm)** — written to a throwaway npmrc for `npm publish`; prefers a
-  `CIABATTA_<REGISTRY>_TOKEN`, otherwise basic auth from `_USER` / `_PASS`.
-- **Nexus (PyPI)** — passed to `twine upload` as `-u` / `-p`.
+- **Nexus (npm)** — written to a throwaway npmrc for `npm publish` and `npm pack`;
+  prefers a `CIABATTA_<REGISTRY>_TOKEN`, otherwise basic auth from `_USER` / `_PASS`.
+- **Nexus (PyPI)** — passed through the environment to `twine upload` and
+  `pip download`, so they stay out of the logged command line.
 - **Docker** — `docker login <host> -u $USER --password-stdin`.
 - **ECR** — auto-login via `aws ecr get-login-password` (no credentials needed).
 - **S3** — uses the standard AWS credential chain (`AWS_ACCESS_KEY_ID`, …).
@@ -2024,11 +2037,6 @@ ciabatta watch --list            # every session the daemon is running
 ciabatta watch --attach 3        # tail session 3 (Ctrl-C only detaches)
 ciabatta watch --stop 3          # stop session 3
 ```
-
-Sessions also arrive here from workflows: a step marked `persistent = true` is
-handed to the daemon as one, so it keeps running after its build finishes. Those
-sessions are named after the graph node that left them behind — see
-[Persistent steps outlive the run](#persistent-steps-outlive-the-run).
 
 The command runs through your shell, so pipes, `&&`, and redirects work — quote
 the whole command when you use them. The view opens in your browser at

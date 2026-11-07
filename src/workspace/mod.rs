@@ -262,13 +262,9 @@ pub struct Workflow {
     /// nothing**, so no mistake in one can hold a build up, and they are
     /// started in their own declared order before the first wave.
     ///
-    /// They are stopped again once every stage has succeeded or failed — that
-    /// is the whole difference from a [`persistent`] step, which the daemon
-    /// keeps alive on purpose so a `dev` workflow leaves you something to work
-    /// against. A mock API that outlived the test run it was started for would
-    /// be holding its port when the next one began.
-    ///
-    /// [`persistent`]: crate::run::RunStep::persistent
+    /// They are stopped again once every stage has succeeded or failed. A mock
+    /// API that outlived the test run it was started for would be holding its
+    /// port when the next one began.
     #[serde(default)]
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub background: Vec<String>,

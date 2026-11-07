@@ -24,6 +24,8 @@ pub enum StepStatus {
     Succeeded,
     /// Up to date, or restored, without running.
     Cached,
+    /// Passed in the run this one carries on from (`--from-failed`).
+    Carried,
     /// Its `when`/`skip_if` said not to run it.
     Skipped,
     /// Failed, but it declared `warn_on_error`, so the run carried on.
@@ -49,6 +51,7 @@ impl StepStatus {
             StepStatus::Asking => "❓",
             StepStatus::Succeeded => "✅",
             StepStatus::Cached => "📦",
+            StepStatus::Carried => "📌",
             StepStatus::Skipped => "⏩",
             StepStatus::Warned => "🟡",
             StepStatus::Failed => "❌",
@@ -68,6 +71,7 @@ impl StepStatus {
             StepStatus::Asking => "waiting for input",
             StepStatus::Succeeded => "done",
             StepStatus::Cached => "cached",
+            StepStatus::Carried => "passed earlier",
             StepStatus::Skipped => "skipped",
             StepStatus::Warned => "failed (warning)",
             StepStatus::Failed => "failed",
@@ -82,6 +86,7 @@ impl StepStatus {
             self,
             StepStatus::Succeeded
                 | StepStatus::Cached
+                | StepStatus::Carried
                 | StepStatus::Skipped
                 | StepStatus::Warned
                 | StepStatus::Failed
@@ -242,8 +247,14 @@ pub struct App {
     pub pane: Pane,
     /// The resolved environment, as `ciabatta env` would print it.
     pub env: Vec<String>,
-    /// Questions waiting on an answer, oldest first. The first is on screen.
+    /// Questions waiting on an answer, oldest first. The first is the banner
+    /// above the steps.
     pub prompts: std::collections::VecDeque<Prompt>,
+    /// The banner has been opened to answer it, so the keyboard goes to the
+    /// question. Until then the rest of the screen works as usual.
+    pub prompt_open: bool,
+    /// Where the banner was last drawn, so a click can land on it.
+    pub prompt_area: ratatui::layout::Rect,
     /// What was raised in passing through [`super::note`], each once — shown
     /// in the run's log, and repeated in the summary left behind.
     pub notes: Vec<String>,
@@ -279,6 +290,8 @@ impl App {
             notes: Vec::new(),
             selecting: false,
             prompts: Default::default(),
+            prompt_open: false,
+            prompt_area: Default::default(),
         }
         .sorted()
     }
@@ -401,6 +414,14 @@ impl App {
                     s.logs.push(line.to_string());
                 }
             }
+            ProgressUpdate::StepCarried { step, from, .. } => {
+                let line = format!("passed in {from}; not run again");
+                self.run.logs.push(format!("📌 {step} ({line})"));
+                if let Some(s) = self.step_mut(&step) {
+                    s.status = StepStatus::Carried;
+                    s.logs.push(format!("📌 {line}"));
+                }
+            }
             ProgressUpdate::StepSkipped { step, reason, .. } => {
                 self.run.logs.push(format!("⊘ {step} (skipped: {reason})"));
                 if let Some(s) = self.step_mut(&step) {
@@ -451,8 +472,16 @@ impl App {
             // Answered here, or settled some other way — timed out, or its
             // step went away: either way it comes down.
             ProgressUpdate::InputResolved { step, id, .. } => {
+                let answering = matches!(
+                    self.prompts.front(),
+                    Some(Prompt::Input { pending, .. }) if pending.id == id
+                );
                 self.prompts
                     .retain(|p| !matches!(p, Prompt::Input { pending, .. } if pending.id == id));
+                // Whatever was being typed was for that question, not the next.
+                if answering {
+                    self.prompt_open = false;
+                }
                 if let Some(s) = self.step_mut(&step)
                     && s.status == StepStatus::Asking
                 {
@@ -503,6 +532,19 @@ impl App {
                 s.took = s.started.map(|t| t.elapsed());
             }
         }
+    }
+
+    /// Open the banner to answer the question in it, if there is one.
+    pub fn open_prompt(&mut self) {
+        self.prompt_open = !self.prompts.is_empty();
+    }
+
+    /// Whether a click at this cell landed on the banner.
+    pub fn prompt_hit(&self, column: u16, row: u16) -> bool {
+        !self.prompts.is_empty()
+            && self
+                .prompt_area
+                .contains(ratatui::layout::Position::new(column, row))
     }
 
     /// Hand a key to the question on screen. Returns what to send the run
@@ -569,6 +611,11 @@ impl App {
                 _ => None,
             },
         };
+        // Answered, so the keyboard goes back to the screen. The next question
+        // waits in the banner until somebody opens it.
+        if reply.is_some() {
+            self.prompt_open = false;
+        }
         // Down now rather than when the run confirms it, so a second Enter
         // can't answer twice. A recovery choice has no confirmation to wait
         // for, so its step's log says what was picked.
@@ -1006,6 +1053,47 @@ mod tests {
         });
         assert_eq!(app.prompts.len(), 1);
         assert!(matches!(&app.prompts[0], Prompt::Input { pending, .. } if pending.id == 4));
+    }
+
+    #[test]
+    fn a_question_waits_in_the_banner_until_it_is_opened() {
+        let mut app = app();
+        app.apply_update(asked(3, false, None));
+        assert!(!app.prompt_open, "asking must not take the keyboard");
+
+        app.open_prompt();
+        assert!(app.prompt_open);
+
+        // Settled elsewhere while open: the next one starts in the banner.
+        app.apply_update(asked(4, false, None));
+        app.apply_update(ProgressUpdate::InputResolved {
+            workflow: "build".into(),
+            step: "compile".into(),
+            id: 3,
+            outcome: crate::run::input::Outcome::TimedOut,
+        });
+        assert!(!app.prompt_open);
+        assert_eq!(app.prompts.len(), 1);
+    }
+
+    #[test]
+    fn answering_gives_the_keyboard_back() {
+        use crossterm::event::KeyCode;
+        let mut app = app();
+        app.apply_update(asked(3, false, Some("eu")));
+        app.open_prompt();
+        assert!(app.prompt_key(KeyCode::Enter).is_some());
+        assert!(!app.prompt_open);
+    }
+
+    #[test]
+    fn a_click_only_counts_on_the_banner_of_a_waiting_question() {
+        let mut app = app();
+        app.prompt_area = ratatui::layout::Rect::new(0, 1, 80, 1);
+        assert!(!app.prompt_hit(5, 1), "nothing is waiting");
+        app.apply_update(asked(3, false, None));
+        assert!(app.prompt_hit(5, 1));
+        assert!(!app.prompt_hit(5, 2));
     }
 
     #[test]

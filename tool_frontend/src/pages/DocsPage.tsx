@@ -240,6 +240,7 @@ const ENDPOINTS: EndpointGroup[] = [
       { method: "GET", path: "/api/run/runs/{id}/stream", note: "SSE. Step transitions and log lines as they happen." },
       { method: "POST", path: "/api/run/runs/{id}/choose", note: "Answer a step that is waiting on a decision." },
       { method: "POST", path: "/api/run/runs/{id}/input", note: "Answer a step's `ciabatta input` question: { id, value }." },
+      { method: "POST", path: "/api/run/runs/{id}/rerun", note: "Start a finished run again: { env?, from_failed? }. With from_failed, the steps that passed are carried over." },
       { method: "GET", path: "/api/run/inputs", note: "Every `ciabatta input` question waiting on an answer, across all runs." },
     ],
   },
@@ -367,6 +368,7 @@ const COMMANDS: CommandGroup[] = [
           ["--graph", "Print the resolved graph and run nothing."],
           ["--dry-run", "Walk every step, executing none of them."],
           ["--force", "Ignore the cache and run every step. Results are still stored, so the next run reuses them."],
+          ["--from-failed", "Carry on from where this workflow's last run failed: what passed isn't run again; the failed step and everything after it are. Also works with --gui. See Run again, below."],
           ["--start-anyway", "Start now, even when the workspace already has as many runs going as workspace.max_concurrent_runs allows. The run takes no slot. Also works with --gui."],
           ["-j, --jobs N", "How many steps may run at once. Defaults to CIABATTA_JOBS, then the CPU count; -j 1 runs them one at a time."],
           ["--env-profile NAME", "Copy each workspace's .ciabatta/.env.NAME into its .env first (backing up a hand-written .env). Also spelled --env_profile."],
@@ -544,7 +546,7 @@ const COMMANDS: CommandGroup[] = [
         flags: [
           ["-t PHRASE", "Notify when an output line contains this. Repeatable."],
           ["--list", "List the sessions the daemon is running."],
-          ["--attach ID", "Follow an existing session — how you tail a persistent step."],
+          ["--attach ID", "Follow an existing session by id."],
           ["--stop ID", "Actually stop one."],
           ["--env-profile NAME", "Elect this env profile first, as a run's --env-profile does. Without it the watch uses the active profile, and the env files from the workspace you're in up to the root."],
         ],
@@ -2146,7 +2148,6 @@ steps:
             ["continue_on_error", "Don't fail the run: skip this step's dependents, carry on elsewhere, report at the end."],
             ["warn_on_error", "Treat a failure as a warning: the step counts as done, its dependents run, and the run still succeeds."],
             ["on_error", "Jump to this recovery node instead of aborting."],
-            ["persistent", "A process that never exits — a dev server. Its dependents are released immediately and it OUTLIVES the run, as a watch session."],
             ["tags / owner", "Labels and ownership for this step alone."],
             ["kind", "The phase this belongs to. Cosmetic, except push and pull, which select the registry action."],
             ["cache", "Cache settings for this step alone, layered over the workflow's field by field."],
@@ -2154,13 +2155,13 @@ steps:
         />
         <Alert severity="info" sx={{ my: 2, maxWidth: "78ch" }}>
           <strong>
-            <C>persistent</C> or <C>background</C>?
-          </strong> A <C>persistent: true</C> step is one you
-          want left running — <C>ciabatta dev</C> leaves you a server to work against, and you
-          stop it with <C>ciabatta watch --stop &lt;id&gt;</C>. A workflow in the{" "}
-          <C>background:</C> array exists only to get this run through, and is stopped when the
-          run ends — it runs inside the run, so its output shows in its own node, where every
-          other step&apos;s does.
+            A process that never exits?
+          </strong>{" "}
+          Put it in a workflow of its own and name it in the <C>background:</C> array. It starts
+          before the first step, nothing waits for it, and it stops when the run ends; its output
+          shows in its own node. To keep a dev server after that, start it with{" "}
+          <C>ciabatta watch &lt;command&gt;</C>. The <C>persistent:</C> key was removed in 0.9.0,
+          and a config still setting it to <C>true</C> is refused with these directions.
         </Alert>
 
         <SubHeading>Publishing is a step too</SubHeading>
@@ -2175,6 +2176,24 @@ steps:
     artifact: dist/api.tgz
     publish_path: "team/api/{CIABATTA_COMMIT}/api.tgz"
     needs: [package]`}</Pre>
+        <P>
+          <C>kind: pull</C> is the same thing the other way. Every Nexus format can do both. A{" "}
+          <C>raw</C> repository uses plain HTTP, and <C>publish_path</C> can be a file or a whole
+          folder. For <C>npm</C> and <C>pypi</C> a push reads the package from what it publishes,
+          so a pull names it in <C>publish_path</C>; <C>artifact</C> is where it lands, and it is
+          downloaded rather than installed, without its dependencies:
+        </P>
+        <Pre>{`  - name: fetch-sdk
+    kind: pull
+    registry: sdk                       # format: npm  (runs npm pack)
+    publish_path: "@acme/sdk@1.2.3"
+    artifact: vendor                    # or vendor/sdk.tgz
+
+  - name: fetch-tool
+    kind: pull
+    registry: tools                     # format: pypi  (runs pip download)
+    publish_path: "my-tool@{TOOL_VERSION}"
+    artifact: vendor`}</Pre>
 
         <SubHeading>Lining waves up: wave_grouping</SubHeading>
         <P>
@@ -2289,11 +2308,13 @@ export CIABATTA_VIZ=tui              # …or make that the default for every run
             </>,
             <>
               <strong>Questions are answered right there.</strong> When a step runs{" "}
-              <C>ciabatta input</C>, or a recovery node wants a fix chosen, a box opens over the
-              output: type the answer and press Enter (an empty line takes the default),{" "}
-              <C>y</C>/<C>n</C> for a yes-or-no question, or <C>↑</C>/<C>↓</C> and Enter to pick a
-              recovery option. While a question is up it has the keyboard — <C>q</C> included —
-              and Esc or Ctrl-C stops the run. Several questions queue, oldest first.
+              <C>ciabatta input</C>, or a recovery node wants a fix chosen, a banner appears above
+              the steps, and everything else keeps working: you can read the logs before you
+              answer. Press <C>a</C> or Enter, or click it, to open it. Then type the answer and
+              press Enter (an empty line takes the default), <C>y</C>/<C>n</C> for a yes-or-no
+              question, or <C>↑</C>/<C>↓</C> and Enter to pick a recovery option. While it is open
+              it has the keyboard, <C>q</C> included: Esc puts it back in the banner, and Ctrl-C
+              stops the run. Several questions queue, oldest first.
             </>,
             <>
               <C>q</C> while the run is going stops it, killing the steps in flight; press it
@@ -2444,6 +2465,17 @@ cd packages/api && ciabatta build           # same as --only api; --all for ever
               stored, so it may ask for those again.
             </>,
             <>
+              <strong>Re-run from failed</strong> appears on a run that failed or was stopped. It
+              starts the run again without repeating the steps that passed: they are carried over
+              and marked <em>passed in run #N</em>, and the failed step and everything after it
+              run. Background tasks start again and after actions run again, because this run needs
+              them too. The graph is compiled fresh, so fixing the workflow file works: a step
+              whose command changed runs again, and so does whatever follows it. A change on disk
+              that an earlier step would have reacted to can&apos;t be seen; use Run again when
+              those steps need repeating. In a terminal, add <C>--from-failed</C> to the same
+              command.
+            </>,
+            <>
               <strong>Full screen</strong> on the log pane gives the output the whole window —
               Escape comes back. Wrapping and follow-the-tail are next to it.
             </>,
@@ -2584,11 +2616,13 @@ echo "deploying to $region"`}</Pre>
             </>,
             <>
               <strong>This app</strong> (<C>ciabatta deploy --gui</C>, or a run started from the
-              Run page): a dialog opens on whatever page you&apos;re on, showing the question, its
-              details, which step and run are asking, and the countdown. Clicking away doesn&apos;t
-              close it — the step is blocked on it — and because the question lives in the
-              daemon, reloading the page brings it straight back. Several questions queue, oldest
-              first. <strong>Cancel</strong>, after a confirmation, stops the whole run: the
+              Run page): a banner appears at the top of whatever page you&apos;re on, with the
+              question and the countdown, and stays there as you scroll and move around. It
+              doesn&apos;t take the page away, so you can read the logs first. Click it to answer,
+              which shows its details and which step and run are asking; click again or press
+              Escape to come back to it later, with what you typed kept. Because the question
+              lives in the daemon, reloading the page brings it straight back. Several questions
+              queue, oldest first. <strong>Cancel</strong>, after a confirmation, stops the whole run: the
               asking step is killed and nothing further starts.
             </>,
             <>
@@ -2981,7 +3015,7 @@ ciabatta.pause("Flip the maintenance switch, then continue")`}</Pre>
                 <Link to="/watch">Watch</Link>
               </strong>{" "}
               — <C>ciabatta watch &lt;command&gt;</C> streams any long-running command here, so
-              Ctrl-C detaches instead of killing it. Persistent steps end up here too.
+              Ctrl-C detaches instead of killing it.
             </>,
             <>
               <strong>

@@ -165,6 +165,11 @@ impl Ledger {
                 entry.status = "warning".to_string();
                 entry.note = Some(detail.clone());
             }
+            ProgressUpdate::StepCarried { step, from, .. } => {
+                let entry = self.step(step);
+                entry.status = "success".to_string();
+                entry.note = Some(format!("passed in {from}; not run again"));
+            }
             ProgressUpdate::StepSkipped { step, reason, .. } => {
                 let entry = self.step(step);
                 // The cache skipping a step is a reuse, not a condition.
@@ -197,6 +202,22 @@ impl Ledger {
                 status: "not run".to_string(),
                 ..Default::default()
             })
+    }
+
+    /// What each step of the graph did, for a later `--from-failed`.
+    pub fn prior(&self, graph: &[crate::run::RunStep]) -> Vec<crate::run::resume::PriorStep> {
+        graph
+            .iter()
+            .map(|node| crate::run::resume::PriorStep {
+                name: node.name.clone(),
+                status: self
+                    .steps
+                    .get(&node.name)
+                    .map_or("not run", |s| s.status.as_str())
+                    .to_string(),
+                shell: crate::run::engine::shell_form(node.script.as_deref(), node.run.as_deref()),
+            })
+            .collect()
     }
 
     /// The flow, in the graph's own order, with what each step did.

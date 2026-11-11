@@ -127,11 +127,27 @@ jobs:
       # every leg installs it into both supported ends of the range — 3.9 and
       # 3.12 — and asks it a question, with the binary just built first on
       # PATH so it answers as a released one would.
+      #
+      # 3.9 is past end of life and actions/setup-python has no build of it
+      # for newer runner images (ubuntu-latest is 26.04), so it comes from
+      # uv's standalone builds, which still cover every OS here.
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
       - name: Set up Python 3.9
         id: py39
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.9"
+        shell: bash
+        run: |
+          # uv marks its own installs externally managed (PEP 668), so pip
+          # won't touch them; a seeded venv on top has pip and is fair game.
+          uv venv --python 3.9 --managed-python --seed "$RUNNER_TEMP/py39"
+          if [ -x "$RUNNER_TEMP/py39/bin/python" ]; then
+            py="$RUNNER_TEMP/py39/bin/python"
+          else
+            py="$RUNNER_TEMP/py39/Scripts/python.exe"
+          fi
+          "$py" --version
+          "$py" -m pip --version
+          echo "python-path=$py" >> "$GITHUB_OUTPUT"
       - name: Set up Python 3.12
         id: py312
         uses: actions/setup-python@v5

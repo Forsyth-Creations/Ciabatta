@@ -2164,6 +2164,7 @@ steps:
             ["on_error", "Jump to this recovery node instead of aborting."],
             ["tags / owner", "Labels and ownership for this step alone."],
             ["kind", "The phase this belongs to. Cosmetic, except push and pull, which select the registry action."],
+            ["registry / publish_path / artifact", "For push and pull: the registry, what moves where. A pull can list several with artifacts — see Pulling from Nexus."],
             ["cache", "Cache settings for this step alone, layered over the workflow's field by field."],
           ]}
         />
@@ -2265,6 +2266,7 @@ steps:
             ["registry", "A registries: entry from the root config: the Nexus host, its repository and its format."],
             ["publish_path", "What to fetch. For raw, a path in the repository — a file, or a folder pulled file by file. For npm and pypi, a package spec: \"@acme/sdk@1.2.3\", \"my-tool@1.2.3\" (no version takes the newest). {VAR} substitution works in all three."],
             ["artifact", "Where it lands, relative to the step's directory (default: the directory itself). For npm, a .tgz file name works too."],
+            ["artifacts", "Several things to fetch from the one registry, in place of publish_path and artifact: a list of entries, each with its own publish_path and artifact. See Several artifacts from one node, below."],
             ["from", "The push step this pull mirrors, as <workflow>:<step> or a bare <step>. Its registry, publish_path and artifact are copied in, so the two can't drift apart; anything the pull sets itself wins."],
           ]}
         />
@@ -2287,6 +2289,57 @@ steps:
   - name: compile
     run: cargo build
     needs: [vendor]`}</Pre>
+
+        <SubHeading>Several artifacts from one node: artifacts</SubHeading>
+        <P>
+          One pull node can fetch several things from the same registry. Instead of{" "}
+          <C>publish_path</C> and <C>artifact</C>, give it an <C>artifacts:</C> list; each entry
+          has its own <C>publish_path</C> (what to fetch, exactly as above — a raw file or folder,
+          or an npm/PyPI package spec) and <C>artifact</C> (where it lands, defaulting to the
+          step&apos;s directory):
+        </P>
+        <Pre>{`  - name: vendor
+    kind: pull
+    registry: nexus
+    artifacts:
+      - publish_path: "shared/proto/{CIABATTA_BRANCH}/{CIABATTA_COMMIT}/proto"
+        artifact: vendor/proto
+      - publish_path: "tools/protoc-gen/{PROTOC_GEN_VERSION}/protoc-gen"
+        artifact: bin/protoc-gen
+      - publish_path: "web/{CIABATTA_BRANCH}/{CIABATTA_COMMIT}/dist"
+        artifact: vendor/web
+
+  - name: compile
+    run: cargo build
+    needs: [vendor]          # everything in the list is there`}</Pre>
+        <P>
+          It logs in once and downloads the entries side by side, and the node fails if any of
+          them does — so whatever <C>needs</C> it can count on all of them being there. Each entry
+          goes through the pull cache on its own, so <C>--fetch-only</C>, <C>--prefetch</C> and
+          working off the network treat it exactly like a node of its own; off the network,
+          every entry the cache has is used, each with its own warning.
+        </P>
+        <Bullets
+          items={[
+            <>
+              <strong>Pulling by branch</strong> probes the first entry whose{" "}
+              <C>publish_path</C> names <C>{"{CIABATTA_COMMIT}"}</C>, and the commit it settles on
+              is used for every entry — a list is usually what one push published at one commit.
+            </>,
+            <>
+              <strong>
+                With <C>from:</C>
+              </strong>
+              , only the registry is taken from the push; the list says what to fetch.
+            </>,
+            <>
+              The list replaces <C>publish_path</C> and <C>artifact</C> rather than adding to them,
+              so a step with both is refused. It is for pulls from Nexus, Artifactory, S3 and
+              generic endpoints; a push publishes several files with a list of globs in{" "}
+              <C>publish_path</C>, and Docker or ECR images each need a step of their own.
+            </>,
+          ]}
+        />
 
         <SubHeading>How each format pulls</SubHeading>
         <FieldTable

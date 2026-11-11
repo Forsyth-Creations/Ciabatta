@@ -385,6 +385,7 @@ fn step_json(step: &crate::run::RunStep) -> Value {
         "registry": step.registry,
         "artifact": step.artifact,
         "publish_path": step.publish_path,
+        "artifacts": step.artifacts,
         "push": step.is_push(),
         "needs": step.needs,
         "requires": step.requires,

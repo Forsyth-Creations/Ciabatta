@@ -182,8 +182,12 @@ export function BoxLayout({
   layouts,
   onChange,
   onFit,
+  resizable = true,
 }: {
   boxes: BoxItem[];
+  /** Whether the boxes show their resize grips and can be resized. A page
+   *  that's mostly for reading hides them until somebody asks to customize. */
+  resizable?: boolean;
   layouts: Layouts;
   onChange: (current: Layout[], all: Layouts) => void;
   /** Told the rows a `fit` box needs; `useBoxLayout().fit`. */
@@ -198,6 +202,7 @@ export function BoxLayout({
       margin={[MARGIN, MARGIN]}
       containerPadding={[0, 0]}
       draggableHandle=".box-drag"
+      isResizable={resizable}
       // Buttons, switches and fields in a title bar are for clicking, not
       // for picking the box up.
       draggableCancel=".box-actions"

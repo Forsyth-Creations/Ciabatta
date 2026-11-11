@@ -720,6 +720,32 @@ lands in, or a `.tgz` file name for npm. It is downloaded, not installed, and it
 dependencies aren't fetched. In a raw repository `publish_path` can be a file or a
 folder: a directory pushed one file at a time comes back the same way.
 
+**Several artifacts from one pull node.** In place of `publish_path` and
+`artifact`, a pull can list `artifacts:`, each entry with its own
+`publish_path` (what to fetch, as above) and `artifact` (where it lands;
+defaults to the step's directory). It logs in once, downloads them side by
+side, and fails if any of them does, so a step that `needs` it can count on
+all of them. Each entry goes through the pull cache on its own, so
+`--fetch-only`, `--prefetch` and working offline treat it like a node of its
+own. A pull by branch probes the first entry that names `{CIABATTA_COMMIT}`
+and uses that commit for all of them; with `from:`, only the registry comes
+from the push. Setting both the list and `publish_path`/`artifact` is refused,
+and it isn't for pushes (use a glob list) or Docker/ECR images.
+
+```yaml
+  - name: vendor
+    kind: pull
+    registry: nexus
+    artifacts:
+      - publish_path: "shared/proto/{CIABATTA_BRANCH}/{CIABATTA_COMMIT}/proto"
+        artifact: vendor/proto
+      - publish_path: "tools/protoc-gen/{PROTOC_GEN_VERSION}/protoc-gen"
+        artifact: bin/protoc-gen
+```
+
+On an `npm` or `pypi` registry the entries are package specs instead
+(`"@acme/sdk@1.2.3"`), one list per registry.
+
 ```yaml
 # Publish an npm package straight to a Nexus npm repository.
 registries:

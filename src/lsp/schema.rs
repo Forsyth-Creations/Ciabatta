@@ -176,6 +176,10 @@ fn step() -> crate::run::RunStep {
         local_image: Some(one()),
         publish_path: Some(crate::config::PublishPath::Single(one())),
         strip_prefix: Some(one()),
+        artifacts: vec![crate::run::PullArtifact {
+            publish_path: one(),
+            artifact: Some(one()),
+        }],
         from: Some(one()),
         cwd: Some(one()),
         workspace: Some(one()),

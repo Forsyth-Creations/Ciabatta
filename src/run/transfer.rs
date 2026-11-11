@@ -80,12 +80,7 @@ pub async fn resolve_pull_commit(
         .get("CIABATTA_COMMIT")
         .filter(|v| !v.is_empty())?
         .clone();
-    let Some(PublishPath::Single(template)) = transfer.publish_path else {
-        return None;
-    };
-    if !template.contains("{CIABATTA_COMMIT}") {
-        return None;
-    }
+    let template = commit_template(transfer)?;
 
     let candidates = branch_candidates(root, branch, &exact);
     for commit in &candidates {
@@ -177,6 +172,22 @@ pub fn set_commit(vars: &mut HashMap<String, String>, commit: &str) {
     {
         vars.insert("CIABATTA_PATH".to_string(), format!("/{branch}/{commit}"));
     }
+}
+
+/// The path a pull by branch probes for each candidate commit: the single
+/// `publish_path`, or — for an `artifacts:` list — the first entry's that
+/// names `{CIABATTA_COMMIT}`. A list is usually what one push published at one
+/// commit, so the commit that has that entry is taken for all of them.
+fn commit_template<'a>(transfer: &Transfer<'a>) -> Option<&'a str> {
+    let template = match transfer.publish_path {
+        Some(PublishPath::Single(path)) => Some(path.as_str()),
+        _ => transfer
+            .artifacts
+            .iter()
+            .map(|a| a.publish_path.as_str())
+            .find(|p| p.contains("{CIABATTA_COMMIT}")),
+    }?;
+    template.contains("{CIABATTA_COMMIT}").then_some(template)
 }
 
 /// First 8 characters of a commit SHA (or the whole thing if shorter).
@@ -406,6 +417,18 @@ async fn prepare<'a>(
     if let Some(PublishPath::Single(path)) = transfer.publish_path {
         validate_publish_path(path, &env_vars)?;
     }
+    for entry in transfer.artifacts {
+        validate_publish_path(&entry.publish_path, &env_vars)?;
+    }
+    if !transfer.artifacts.is_empty()
+        && !crate::cache::pulls::cacheable(registry_name, registry_config)
+    {
+        bail!(
+            "Step '{}' lists `artifacts:` from '{registry_name}', an image registry. Pull each \
+             image in a step of its own.",
+            step.name
+        );
+    }
 
     let container_cmd = config
         .system
@@ -438,7 +461,19 @@ async fn prepare<'a>(
             crate::config::RegistryKind::Nexus | crate::config::RegistryKind::Generic
         )
         && !matches!(transfer.publish_path, Some(PublishPath::Many(_)));
-    let pairs = if pulls_whole {
+    let pairs = if !transfer.artifacts.is_empty() {
+        // An `artifacts:` list: one pull per entry, each landing where it says.
+        transfer
+            .artifacts
+            .iter()
+            .map(|entry| {
+                Ok((
+                    cwd.join(entry.artifact.as_deref().unwrap_or(".")),
+                    substitute_vars(&entry.publish_path, &env_vars)?,
+                ))
+            })
+            .collect::<Result<Vec<_>>>()?
+    } else if pulls_whole {
         let remote = match transfer.publish_path {
             Some(PublishPath::Single(path)) => substitute_vars(path, &env_vars)?,
             _ => String::new(),
@@ -723,7 +758,42 @@ mod tests {
             local_image,
             publish_path,
             strip_prefix,
+            artifacts: &[],
         }
+    }
+
+    #[test]
+    fn a_pull_list_finds_its_commit_from_the_first_entry_that_names_one() {
+        let artifacts = vec![
+            crate::run::PullArtifact {
+                publish_path: "tools/{TOOL_VERSION}/tool".into(),
+                artifact: Some("bin".into()),
+            },
+            crate::run::PullArtifact {
+                publish_path: "proto/{CIABATTA_COMMIT}/proto".into(),
+                artifact: None,
+            },
+            crate::run::PullArtifact {
+                publish_path: "web/{CIABATTA_COMMIT}/dist".into(),
+                artifact: None,
+            },
+        ];
+        let transfer = Transfer {
+            direction: Direction::Pull,
+            registry: Some("nexus"),
+            artifact: None,
+            local_image: None,
+            publish_path: None,
+            strip_prefix: None,
+            artifacts: &artifacts,
+        };
+        assert_eq!(commit_template(&transfer), Some("proto/{CIABATTA_COMMIT}/proto"));
+
+        let none = Transfer {
+            artifacts: &artifacts[..1],
+            ..transfer
+        };
+        assert_eq!(commit_template(&none), None);
     }
 
     #[test]

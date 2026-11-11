@@ -44,6 +44,7 @@ import RedoIcon from "@mui/icons-material/Redo";
 import TerminalIcon from "@mui/icons-material/Terminal";
 import TuneIcon from "@mui/icons-material/Tune";
 import ViewQuiltIcon from "@mui/icons-material/ViewQuilt";
+import CustomizeIcon from "@mui/icons-material/DashboardCustomize";
 import EditIcon from "@mui/icons-material/AccountTree";
 import RequiredIcon from "@mui/icons-material/Emergency";
 import OptionalIcon from "@mui/icons-material/HelpOutline";
@@ -336,6 +337,10 @@ export function RunDetailPage() {
   // Held here rather than in the workflow panel, so the header can offer to
   // reset it — and so switching workflow tabs keeps the arrangement.
   const layout = useBoxLayout(RUN_LAYOUT_KEY, RUN_LAYOUT);
+  // Off by default: the resize grips sit on the boxes' edges, and the page is
+  // for reading a run, not for rearranging it. Not remembered — it's a thing
+  // you do for a minute, then put away.
+  const [customizing, setCustomizing] = useState(false);
 
   if (error) return <ErrorNote error={new Error(error)} />;
   if (!state) return <Loading label="Connecting to the run…" />;
@@ -429,80 +434,83 @@ export function RunDetailPage() {
             />
           </Tooltip>
         )}
-        <InspectToggle />
-        <Tooltip
-          title={
-            units.length
-              ? "Prune steps and change what they need, then save it to the workflow files."
-              : "This run's steps don't come from workflow files, so there's nothing to edit."
-          }
-        >
-          <Box component="span">
-            <Button
-              size="small"
-              startIcon={<EditIcon />}
-              variant={editing ? "contained" : "text"}
-              disabled={units.length === 0}
-              onClick={() => setEditing((on) => !on)}
-            >
-              Edit graph
-            </Button>
-          </Box>
-        </Tooltip>
-        <Tooltip title="Show the exact commands this run executed, in order, with the directory each one runs from — and where it has got to.">
-          <Button size="small" startIcon={<TerminalIcon />} onClick={() => setRecreating(true)}>
-            Recreate
-          </Button>
-        </Tooltip>
-        <Tooltip
-          title={
-            state.done
-              ? "Start this run again, with the same workflows, filters and flags. The graph is compiled fresh, so it picks up whatever has changed on disk."
-              : "Wait for this run to finish, or stop it, before starting it again."
-          }
-        >
-          {/* A disabled button swallows hover, so the tooltip needs a live
-              wrapper to hang off. */}
-          <Box component="span">
-            <Button
-              size="small"
-              startIcon={<ReplayIcon />}
-              disabled={!state.done || rerun.isPending}
+        {/* Icons rather than labelled buttons, so the row stays one row; each
+            tooltip says what the button is before what it does. */}
+        <Stack direction="row" alignItems="center" spacing={0.25}>
+          <InspectToggle />
+          <ToolIcon
+            label={editing ? "Close the graph editor" : "Edit graph"}
+            hint={
+              units.length
+                ? "Prune steps and change what they need, then save it to the workflow files."
+                : "This run's steps don't come from workflow files, so there's nothing to edit."
+            }
+            pressed={editing}
+            disabled={units.length === 0}
+            onClick={() => setEditing((on) => !on)}
+          >
+            <EditIcon fontSize="small" />
+          </ToolIcon>
+          <ToolIcon
+            label="Recreate"
+            hint="Show the exact commands this run executed, in order, with the directory each one runs from — and where it has got to."
+            onClick={() => setRecreating(true)}
+          >
+            <TerminalIcon fontSize="small" />
+          </ToolIcon>
+          <ToolIcon
+            label="Run again"
+            hint={
+              state.done
+                ? "Start this run again, with the same workflows, filters and flags. The graph is compiled fresh, so it picks up whatever has changed on disk."
+                : "Wait for this run to finish, or stop it, before starting it again."
+            }
+            disabled={!state.done || rerun.isPending}
+            onClick={() => {
+              setFromFailed(false);
+              again(undefined, false);
+            }}
+          >
+            <ReplayIcon fontSize="small" />
+          </ToolIcon>
+          {state.done && (status === "failed" || status === "stopped") && (
+            <ToolIcon
+              label="Re-run from failed"
+              hint="Start this run again without repeating the steps that passed. The steps that failed or never ran, and everything after them, run. The graph is compiled fresh, so a step whose command has changed runs again too."
+              color="warning"
+              disabled={rerun.isPending}
               onClick={() => {
-                setFromFailed(false);
-                again(undefined, false);
+                setFromFailed(true);
+                again(undefined, true);
               }}
             >
-              Run again
-            </Button>
-          </Box>
-        </Tooltip>
-        {state.done && (status === "failed" || status === "stopped") && (
-          <Tooltip title="Start this run again without repeating the steps that passed. The steps that failed or never ran, and everything after them, run. The graph is compiled fresh, so a step whose command has changed runs again too.">
-            <Box component="span">
-              <Button
-                size="small"
-                color="warning"
-                startIcon={<RedoIcon />}
-                disabled={rerun.isPending}
-                onClick={() => {
-                  setFromFailed(true);
-                  again(undefined, true);
-                }}
-              >
-                Re-run from failed
-              </Button>
-            </Box>
-          </Tooltip>
-        )}
-        {!state.done && <StopRunButton id={id} />}
-        {layout.customised && (
-          <Tooltip title="Put the graph, logs, details and environment back where they started.">
-            <Button size="small" startIcon={<ViewQuiltIcon />} onClick={layout.reset}>
-              Reset layout
-            </Button>
-          </Tooltip>
-        )}
+              <RedoIcon fontSize="small" />
+            </ToolIcon>
+          )}
+          <ToolIcon
+            label={customizing ? "Done customizing" : "Customize"}
+            hint={
+              customizing
+                ? "The grips on each box's edges resize it. Click to put them away."
+                : "Show the grips on each box's edges, to resize the graph, logs, details and environment. Drag a box by its title bar to move it."
+            }
+            pressed={customizing}
+            disabled={editing}
+            onClick={() => setCustomizing((on) => !on)}
+          >
+            <CustomizeIcon fontSize="small" />
+          </ToolIcon>
+          {layout.customised && (
+            <ToolIcon
+              label="Reset layout"
+              hint="Put the graph, logs, details and environment back where they started."
+              onClick={layout.reset}
+            >
+              <ViewQuiltIcon fontSize="small" />
+            </ToolIcon>
+          )}
+          {!state.done && <StopRunButton id={id} />}
+        </Stack>
       </Stack>
 
       {rerun.error && !needsEnv && <ErrorNote error={rerun.error} />}
@@ -552,6 +560,7 @@ export function RunDetailPage() {
           selectedStep={selectedStep}
           onSelectStep={setSelectedStep}
           layout={layout}
+          customizing={customizing}
         />
       )}
     </>
@@ -565,6 +574,7 @@ function WorkflowPanel({
   selectedStep,
   onSelectStep,
   layout,
+  customizing,
 }: {
   runId: number;
   project: string;
@@ -572,6 +582,8 @@ function WorkflowPanel({
   selectedStep: string | null;
   onSelectStep: (name: string | null) => void;
   layout: ReturnType<typeof useBoxLayout>;
+  /** Whether the boxes' resize grips are showing. */
+  customizing: boolean;
 }) {
   const theme = useTheme();
   const choose = useChoose(runId);
@@ -706,6 +718,7 @@ function WorkflowPanel({
         they are — so the log you were reading doesn't jump to make room.
       */}
       <BoxLayout
+        resizable={customizing}
         layouts={layout.layouts}
         onChange={layout.onChange}
         onFit={layout.fit}
@@ -1493,23 +1506,75 @@ function InspectLine({ step }: { step: StepView }) {
 function InspectToggle() {
   const inspect = useInspectMode();
   return (
+    <ToolIcon
+      label={inspect.on ? "Inspect cache: on" : "Inspect cache"}
+      hint={
+        inspect.on
+          ? "Every step says what the cache decided and why. Click to turn it off."
+          : "Show what the cache decided for every step, and why a step that should have been reused wasn't."
+      }
+      pressed={inspect.on}
+      color={inspect.on ? "warning" : undefined}
+      onClick={inspect.toggle}
+    >
+      <ManageSearchIcon fontSize="small" />
+    </ToolIcon>
+  );
+}
+
+/**
+ * One of the run header's actions: an icon, with a tooltip that names the
+ * action and then says what it does. The name is the button's accessible
+ * label too, since there's no text beside the icon to read.
+ *
+ * `pressed` is for a toggle: it's drawn filled while it's on. A disabled
+ * button swallows hover, so the tooltip hangs off a wrapper that doesn't.
+ */
+function ToolIcon({
+  label,
+  hint,
+  pressed,
+  color,
+  disabled,
+  onClick,
+  children,
+}: {
+  label: string;
+  hint: string;
+  pressed?: boolean;
+  color?: "warning" | "error";
+  disabled?: boolean;
+  onClick: () => void;
+  children: React.ReactNode;
+}) {
+  return (
     <Tooltip
       title={
-        inspect.on
-          ? "Cache inspect mode is on — every step says what the cache decided and why. Click to turn it off."
-          : "Cache inspect mode: show what the cache decided for every step, and why a step that should have been reused wasn't."
+        <>
+          <Box component="strong" sx={{ display: "block", mb: 0.25 }}>
+            {label}
+          </Box>
+          {hint}
+        </>
       }
     >
-      <Button
-        size="small"
-        startIcon={<ManageSearchIcon />}
-        onClick={inspect.toggle}
-        aria-pressed={inspect.on}
-        color={inspect.on ? "warning" : "primary"}
-        variant={inspect.on ? "outlined" : "text"}
-      >
-        Inspect cache
-      </Button>
+      <Box component="span" sx={{ display: "inline-flex" }}>
+        <IconButton
+          size="small"
+          aria-label={label}
+          aria-pressed={pressed}
+          color={color ?? (pressed ? "primary" : "default")}
+          disabled={disabled}
+          onClick={onClick}
+          sx={
+            pressed
+              ? { bgcolor: "action.selected", "&:hover": { bgcolor: "action.focus" } }
+              : undefined
+          }
+        >
+          {children}
+        </IconButton>
+      </Box>
     </Tooltip>
   );
 }
@@ -1529,20 +1594,15 @@ function StopRunButton({ id }: { id: number }) {
 
   return (
     <>
-      <Tooltip title="Stop this run">
-        <span>
-          <Button
-            size="small"
-            color="error"
-            variant="outlined"
-            startIcon={<StopIcon />}
-            onClick={() => setAsking(true)}
-            disabled={stop.isPending}
-          >
-            Stop
-          </Button>
-        </span>
-      </Tooltip>
+      <ToolIcon
+        label="Stop"
+        hint="Stop this run: the step running now is killed and nothing further starts. You'll be asked first."
+        color="error"
+        disabled={stop.isPending}
+        onClick={() => setAsking(true)}
+      >
+        <StopIcon fontSize="small" />
+      </ToolIcon>
 
       <Dialog open={asking} onClose={() => setAsking(false)}>
         <DialogTitle>Stop run #{id}?</DialogTitle>

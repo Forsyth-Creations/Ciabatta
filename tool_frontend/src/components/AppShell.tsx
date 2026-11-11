@@ -198,8 +198,6 @@ export function AppShell({ children }: { children: ReactNode }) {
 
   return (
     <Box sx={{ display: "flex", minHeight: "100vh" }}>
-      {/* A step asking a question reaches the operator on every page. */}
-      <InputPrompt />
       <AppBar position="fixed" sx={{ zIndex: (t) => t.zIndex.drawer + 1 }}>
         <Toolbar sx={{ gap: { xs: 1, sm: 2 } }}>
           <Tooltip
@@ -294,6 +292,9 @@ export function AppShell({ children }: { children: ReactNode }) {
         }}
       >
         <Toolbar />
+        {/* A step asking a question reaches the operator on every page, without
+            taking the page away from them. */}
+        <InputPrompt />
         {children}
       </Box>
     </Box>

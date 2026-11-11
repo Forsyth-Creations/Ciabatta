@@ -31,9 +31,8 @@ enum StepState {
     /// A `when`/`skip_if` condition excluded the step — satisfied so downstream
     /// steps proceed, but nothing ran.
     Skipped,
-    /// A `persistent` step was started and left running in the background. Its
-    /// dependents are released immediately: waiting for a dev server to exit is
-    /// exactly the hang persistence exists to avoid.
+    /// A background task was started and left running beside the graph. Nothing
+    /// is held up by it: waiting for a mock API to exit would be waiting forever.
     Started,
     /// Its action is in flight. Not satisfied: its dependents wait for it.
     Running,
@@ -63,22 +62,10 @@ struct StepFailure {
     detail: String,
 }
 
-/// A started `persistent` step or background task, and what now owns it.
-struct Persistent {
+/// A started background task. It runs in this process and stops with the run.
+struct BackgroundTask {
     step: String,
-    ownership: Ownership,
-}
-
-/// Who is keeping a `persistent` step alive.
-enum Ownership {
-    /// The daemon, as a watch session. This is the normal case and the point of
-    /// persistence: the process outlives the run that started it, keeps
-    /// collecting output, and can be tailed or stopped later by id.
-    Daemon { session: u64, url: String },
-    /// This process, as a background task — the fallback for when no daemon
-    /// could be reached. The step still doesn't block the graph, but it can't
-    /// outlive the run either, so it's stopped at the end and said so.
-    Local(JoinHandle<()>),
+    handle: JoinHandle<()>,
 }
 
 /// Entry point for a run: drives an already-compiled workflow graph through the
@@ -564,7 +551,13 @@ async fn run_dag(
     // Failures that didn't abort the run (`continue_on_error`, or a `timeout`
     // that expired), reported together once the rest of the graph has drained.
     let mut tolerated: Vec<StepFailure> = Vec::new();
-    let mut persistent: Vec<Persistent> = Vec::new();
+    let mut background: Vec<BackgroundTask> = Vec::new();
+    // `--from-failed`: what passed in the earlier run stands, and isn't repeated.
+    let carried = ctl
+        .resume
+        .as_ref()
+        .map(|resume| super::resume::carried(&resolved.steps, &resume.prior))
+        .unwrap_or_default();
 
     // Background tasks go up before the first wave, not when the scheduler
     // happens to reach them. They exist so the steps can finish, so "started
@@ -574,7 +567,7 @@ async fn run_dag(
     if !dry_run {
         for step in resolved.steps.iter().filter(|s| s.background) {
             let step_env = &env.env;
-            persistent.push(start_persistent(step, workflow, root, step_env, ctl, tx).await?);
+            background.push(start_background(step, workflow, root, step_env, tx).await?);
             state.insert(step.name.as_str(), StepState::Started);
         }
     }
@@ -640,6 +633,26 @@ async fn run_dag(
                     break;
                 }
 
+                if carried.contains(step.name.as_str())
+                    && let Some(resume) = ctl.resume.as_ref()
+                {
+                    state.insert(step.name.as_str(), StepState::Succeeded);
+                    progressed = true;
+                    // Nothing was measured about what it produced, so whatever
+                    // runs behind it can't be served from the cache on its say.
+                    if let Some(session) = cache.as_deref_mut() {
+                        session.mark_unaccounted(&step.name);
+                    }
+                    let _ = tx
+                        .send(ProgressUpdate::StepCarried {
+                            workflow: workflow.to_string(),
+                            step: step.name.clone(),
+                            from: resume.from.clone(),
+                        })
+                        .await;
+                    continue;
+                }
+
                 // A `when`/`skip_if` condition can exclude the step; if so,
                 // mark it satisfied (so dependents proceed) and move on
                 // without running it. Every one of these reads the step's
@@ -658,18 +671,6 @@ async fn run_dag(
                             reason,
                         })
                         .await;
-                    continue;
-                }
-
-                // A persistent step is started and left running: the graph
-                // moves on without it, so a dev server can't hang everything
-                // behind it. Background tasks never reach here — they were
-                // started before the first wave and are already `Started`.
-                if step.persistent && !dry_run {
-                    persistent
-                        .push(start_persistent(step, workflow, root, step_env, ctl, tx).await?);
-                    state.insert(step.name.as_str(), StepState::Started);
-                    progressed = true;
                     continue;
                 }
 
@@ -1000,7 +1001,7 @@ async fn run_dag(
                     .await;
             }
         }
-        stop_persistent(persistent, workflow, tx).await;
+        stop_background(background, workflow, tx).await;
         return Err(err);
     }
 
@@ -1018,7 +1019,7 @@ async fn run_dag(
         }
     }
 
-    stop_persistent(persistent, workflow, tx).await;
+    stop_background(background, workflow, tx).await;
 
     // A stopped run is not a failed one. Somebody asked for this, they know why,
     // and reporting it as a broken build would send the next person looking for
@@ -1217,28 +1218,18 @@ async fn preflight_tools(
     );
 }
 
-/// Start a `persistent` step and return immediately, without waiting for it.
+/// Start a background task and return immediately, without waiting for it.
 ///
-/// A `persistent` step is handed to the daemon as a watch session, which is
-/// what collects its output: the process outlives the run, and can be tailed
-/// live with `ciabatta watch --attach <id>`.
-///
-/// A background task is run here instead, beside the graph, with its output
-/// streamed into its own node like any other step's. It exists only for this
-/// run, so there is nothing for a watch session to outlive it for; the run
-/// stops it on the way out (see [`stop_persistent`]).
-///
-/// If no daemon can be reached, a persistent step falls back to running here
-/// too. It behaves the same from the graph's point of view; the difference is
-/// that it stops with this run.
-async fn start_persistent(
+/// It runs here, beside the graph, with its output streamed into its own node
+/// like any other step's. It exists only for this run, and the run stops it on
+/// the way out (see [`stop_background`]).
+async fn start_background(
     step: &RunStep,
     workflow: &str,
     root: &Path,
     env_vars: &HashMap<String, String>,
-    ctl: &RunCtl,
     tx: &mpsc::Sender<ProgressUpdate>,
-) -> Result<Persistent> {
+) -> Result<BackgroundTask> {
     let _ = tx
         .send(ProgressUpdate::StepStarted {
             workflow: workflow.to_string(),
@@ -1249,117 +1240,25 @@ async fn start_persistent(
     let cwd = step_cwd(step, root);
     let (script, run) = step.action();
     let command = shell_form(script, run.as_deref())
-        .ok_or_else(|| anyhow::anyhow!("persistent step '{}' has no action", step.name))?;
+        .ok_or_else(|| anyhow::anyhow!("background step '{}' has no action", step.name))?;
     let env = step_env(step, env_vars);
 
-    let log = |line: String| {
-        let tx = tx.clone();
-        let workflow = workflow.to_string();
-        let name = step.name.clone();
-        async move {
-            let _ = tx
-                .send(ProgressUpdate::StepLog {
-                    workflow,
-                    step: name,
-                    line,
-                })
-                .await;
-        }
-    };
-
-    // A background task lives and dies with this run, so it runs here, like
-    // any other step: its output is its node's log, read where every other
-    // step's is, rather than in a watch session somewhere else.
-    if step.background {
-        log(format!("$ {command}   (background — nothing waits for it)")).await;
-        return Ok(Persistent {
+    let _ = tx
+        .send(ProgressUpdate::StepLog {
+            workflow: workflow.to_string(),
             step: step.name.clone(),
-            ownership: Ownership::Local(spawn_locally(&command, &cwd, env, step, workflow, tx)),
-        });
-    }
+            line: format!("$ {command}   (background — nothing waits for it)"),
+        })
+        .await;
 
-    log(format!("$ {command}   (persistent — the graph continues)")).await;
-
-    // `Err` here covers both "the caller doesn't want a daemon" and "we tried
-    // and couldn't", because the fallback is the same either way.
-    let handoff = match ctl.persist_via_daemon {
-        true => hand_to_daemon(step, root, &command, &env).await,
-        false => Err(anyhow::anyhow!("daemon handoff is disabled for this run")),
-    };
-
-    match handoff {
-        Ok((session, url)) => {
-            log(format!(
-                "handed to the ciabatta daemon as watch session #{session} — \
-                 it outlives this run"
-            ))
-            .await;
-            // Its output goes to the session from here on, not into this panel.
-            // Saying so beats leaving an empty log to be puzzled over.
-            log("its output is collected there, not below".to_string()).await;
-            log(format!("follow it:  ciabatta watch --attach {session}")).await;
-            log(format!("stop it:    ciabatta watch --stop {session}")).await;
-            log(format!("live view:  {url}")).await;
-            Ok(Persistent {
-                step: step.name.clone(),
-                ownership: Ownership::Daemon { session, url },
-            })
-        }
-        Err(err) => {
-            log(format!(
-                "⚠ couldn't hand this to the daemon ({err}); running it here instead, \
-                 so it stops with this run and its output is not kept"
-            ))
-            .await;
-            Ok(Persistent {
-                step: step.name.clone(),
-                ownership: Ownership::Local(spawn_locally(&command, &cwd, env, step, workflow, tx)),
-            })
-        }
-    }
+    Ok(BackgroundTask {
+        step: step.name.clone(),
+        handle: spawn_locally(&command, &cwd, env, step, workflow, tx),
+    })
 }
 
-/// Register the run's project with the daemon and start the step as a watch
-/// session in its own sub-workspace, returning the session id and its page URL.
-async fn hand_to_daemon(
-    step: &RunStep,
-    root: &Path,
-    command: &str,
-    env: &HashMap<String, String>,
-) -> Result<(u64, String)> {
-    // The project is the run's root, not the operator's cwd: for a monorepo
-    // workflow those differ, and the session has to be scoped to the workspace
-    // whose directories its `cwd` is relative to.
-    let session = crate::daemon::connect_at(None, root).await?;
-
-    let created: serde_json::Value = session
-        .daemon
-        .client()?
-        .post(session.daemon.url("/api/watch/sessions"))
-        .json(&serde_json::json!({
-            "project": session.project.id,
-            "command": command,
-            // Named after the graph node, so a session found later is
-            // identifiable as the step that left it behind.
-            "label": step.name,
-            "cwd": step.cwd,
-            "env": env,
-        }))
-        .send()
-        .await?
-        .error_for_status()?
-        .json()
-        .await?;
-
-    let id = created["id"]
-        .as_u64()
-        .context("the daemon returned no session id")?;
-    Ok((id, format!("{}/watch/{id}", session.daemon.base_url)))
-}
-
-/// Run a persistent step here, in a background task, when the daemon isn't
-/// available. Spawned with `kill_on_drop` so aborting the task takes the
-/// subprocess with it rather than orphaning it.
+/// Run a background task in a task of its own. Spawned with `kill_on_drop` so
+/// aborting the task takes the subprocess with it rather than orphaning it.
 fn spawn_locally(
     command: &str,
     cwd: &Path,
@@ -1379,55 +1278,32 @@ fn spawn_locally(
             if let Err(err) =
                 registry::run_shell_command_opts(&command, &cwd, &env, true, &mut sink).await
             {
-                sink.push(format!("persistent step '{name}' ended: {err}"));
+                sink.push(format!("background step '{name}' ended: {err}"));
             }
         }
         let _ = forwarder.await;
     })
 }
 
-/// Close out everything the run started and left running.
+/// Stop every background task the run started.
 ///
-/// A **background task** is scoped to this run: it was started so the steps
-/// could finish, they have, and leaving it up would hand the operator a process
-/// still holding its port for the next run to collide with. It runs here, so it
-/// is stopped, and what it logged stays in its node.
-///
-/// A **`persistent` step** is the opposite promise: `ciabatta dev` exists to
-/// leave a dev server to work against, and killing it on the way out would make
-/// persistence pointless. The daemon owns it, it is left alone, and the id
-/// needed to reach it later is reported.
-///
-/// Whatever runs here — a background task, or a persistent step whose daemon
-/// couldn't be reached — has nothing to outlive this process, so it is stopped.
-async fn stop_persistent(
-    running: Vec<Persistent>,
+/// It was started so the steps could finish, and they have. Leaving it up would
+/// hand the operator a process still holding its port for the next run to
+/// collide with. What it logged stays in its node.
+async fn stop_background(
+    running: Vec<BackgroundTask>,
     workflow: &str,
     tx: &mpsc::Sender<ProgressUpdate>,
 ) {
     for job in running {
-        let line = match job.ownership {
-            // A `persistent` step is the opposite promise: `ciabatta dev`
-            // exists to leave a dev server behind, and killing it on the way
-            // out would make persistence pointless. Left alone, and reported
-            // with the id needed to reach it later.
-            Ownership::Daemon { session, url } => Some(format!(
-                "still running as watch session #{session} — {url}  \
-                 (stop it with `ciabatta watch --stop {session}`)"
-            )),
-            Ownership::Local(handle) => {
-                let was_running = !handle.is_finished();
-                handle.abort();
-                was_running.then(|| "stopped (the run finished)".to_string())
-            }
-        };
-
-        if let Some(line) = line {
+        let was_running = !job.handle.is_finished();
+        job.handle.abort();
+        if was_running {
             let _ = tx
                 .send(ProgressUpdate::StepLog {
                     workflow: workflow.to_string(),
                     step: job.step.clone(),
-                    line,
+                    line: "stopped (the run finished)".to_string(),
                 })
                 .await;
         }
@@ -1982,7 +1858,15 @@ mod tests {
         root: &Path,
         cancel: Option<std::sync::Arc<crate::runner::Cancel>>,
     ) -> (Result<()>, Vec<ProgressUpdate>) {
-        drive_jobs(steps, root, cancel, None).await
+        drive_jobs(steps, root, cancel, None, None).await
+    }
+
+    /// [`drive`], carrying on from an earlier run.
+    async fn drive_resuming(
+        steps: Vec<RunStep>,
+        resume: crate::run::resume::Resume,
+    ) -> (Result<()>, Vec<ProgressUpdate>) {
+        drive_jobs(steps, Path::new("."), None, None, Some(resume)).await
     }
 
     /// [`drive_with`], with a limit on how many steps run at once.
@@ -1991,6 +1875,7 @@ mod tests {
         root: &Path,
         cancel: Option<std::sync::Arc<crate::runner::Cancel>>,
         jobs: Option<usize>,
+        resume: Option<crate::run::resume::Resume>,
     ) -> (Result<()>, Vec<ProgressUpdate>) {
         let resolved = ResolvedRun {
             steps,
@@ -2001,11 +1886,9 @@ mod tests {
             interactive: false,
             choices: None,
             inputs: None,
-            // Tests must not reach for — let alone start — a real daemon, so
-            // persistent steps take the in-process path here.
-            persist_via_daemon: false,
             authoritative: false,
             sandbox_also: Vec::new(),
+            resume,
             force: false,
             cancel,
             jobs,
@@ -2103,6 +1986,7 @@ mod tests {
             &root,
             None,
             Some(4),
+            None,
         )
         .await;
         assert!(result.is_ok(), "{result:?}");
@@ -2136,6 +2020,7 @@ mod tests {
             &root,
             None,
             Some(1),
+            None,
         )
         .await;
         assert!(result.is_ok());
@@ -2167,6 +2052,7 @@ mod tests {
             &root,
             None,
             Some(4),
+            None,
         )
         .await;
 
@@ -2302,79 +2188,55 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_persistent_step_releases_its_dependents_instead_of_hanging_them() {
+    async fn from_failed_carries_what_passed_and_runs_the_failure_and_what_follows() {
         let steps = vec![
+            step("build", "echo built"),
             RunStep {
-                persistent: true,
-                ..step("server", "while true; do sleep 1; done")
+                needs: vec!["build".into()],
+                ..step("test", "echo tested")
             },
             RunStep {
-                needs: vec!["server".into()],
-                ..step("probe", "echo talked-to-it")
+                needs: vec!["test".into()],
+                ..step("deploy", "echo deployed")
             },
         ];
-
-        let started = std::time::Instant::now();
-        let (result, updates) = drive(steps, Path::new(".")).await;
-
-        assert!(result.is_ok(), "{:?}", result.err());
-        // Nothing waited for a loop that never ends.
-        assert!(started.elapsed() < std::time::Duration::from_secs(10));
-        assert!(outcomes(&updates).contains(&("probe".to_string(), true)));
-        // The persistent step is closed out rather than left spinning.
-        assert!(outcomes(&updates).contains(&("server".to_string(), true)));
-    }
-
-    #[tokio::test]
-    async fn without_a_daemon_a_persistent_step_says_it_cannot_outlive_the_run() {
-        // A `persistent` step is meant to outlive the run, and the fallback
-        // cannot deliver that: there is no daemon to hand ownership to, so it
-        // dies with this process. Silently doing that would be worse than not
-        // persisting at all.
-        let steps = vec![RunStep {
-            persistent: true,
-            ..step("server", "while true; do sleep 1; done")
-        }];
-        let (result, updates) = drive(steps, Path::new(".")).await;
+        let prior = |name: &str, status: &str| crate::run::resume::PriorStep {
+            name: name.to_string(),
+            status: status.to_string(),
+            shell: Some(format!(
+                "echo {}",
+                match name {
+                    "build" => "built",
+                    "test" => "tested",
+                    _ => "deployed",
+                }
+            )),
+        };
+        let resume = crate::run::resume::Resume {
+            from: "run #7".to_string(),
+            prior: vec![
+                prior("build", "success"),
+                prior("test", "failed"),
+                prior("deploy", "skipped"),
+            ],
+        };
+        let (result, updates) = drive_resuming(steps, resume).await;
         assert!(result.is_ok(), "{:?}", result.err());
 
-        let logs = step_logs(&updates);
-        assert!(logs.contains("couldn't hand this to the daemon"), "{logs}");
-        assert!(logs.contains("stops with this run"), "{logs}");
-        assert!(logs.contains("stopped (the run finished)"), "{logs}");
-        // And nothing is left behind.
-        assert!(!logs.contains("watch session"), "{logs}");
-    }
-
-    /// The lifetime split, which is the whole point of the two kinds existing.
-    ///
-    /// Both take the local fallback here (no daemon in tests), and the fallback
-    /// stops everything — so what this pins is the *reporting*: the background
-    /// task is stopped because it is a background task, and the persistent step
-    /// is stopped only because there was no daemon to hand it to.
-    #[tokio::test]
-    async fn a_background_task_and_a_persistent_step_say_different_things() {
-        let steps = vec![
-            RunStep {
-                persistent: true,
-                background: true,
-                ..step("mock-api", "while true; do sleep 1; done")
-            },
-            RunStep {
-                persistent: true,
-                ..step("dev-server", "while true; do sleep 1; done")
-            },
-            step("compile", "echo built"),
-        ];
-        let (result, updates) = drive(steps, Path::new(".")).await;
-        assert!(result.is_ok(), "{:?}", result.err());
-
-        let logs = step_logs(&updates);
-        // The persistent step is told it can't outlive this run, because
-        // without a daemon it can't. The background task is never promised
-        // that in the first place.
-        assert!(logs.contains("stops with this run"), "{logs}");
-        assert!(outcomes(&updates).contains(&("compile".to_string(), true)));
+        let carried: Vec<(&str, &str)> = updates
+            .iter()
+            .filter_map(|u| match u {
+                ProgressUpdate::StepCarried { step, from, .. } => {
+                    Some((step.as_str(), from.as_str()))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(carried, [("build", "run #7")]);
+        let ran = outcomes(&updates);
+        assert!(!ran.iter().any(|(name, _)| name == "build"), "{ran:?}");
+        assert!(ran.contains(&("test".to_string(), true)), "{ran:?}");
+        assert!(ran.contains(&("deploy".to_string(), true)), "{ran:?}");
     }
 
     /// A background task is up before anything else runs — not merely somewhere
@@ -2386,7 +2248,6 @@ mod tests {
         let steps = vec![
             step("compile", "echo built"),
             RunStep {
-                persistent: true,
                 background: true,
                 ..step("mock-api", "while true; do sleep 1; done")
             },
@@ -2414,7 +2275,6 @@ mod tests {
     async fn a_background_task_logs_into_its_own_node() {
         let steps = vec![
             RunStep {
-                persistent: true,
                 background: true,
                 ..step(
                     "mock-api",
@@ -2563,7 +2423,6 @@ mod tests {
         let cancel = std::sync::Arc::new(crate::runner::Cancel::default());
         let steps = vec![
             RunStep {
-                persistent: true,
                 background: true,
                 ..step("mock-api", "while true; do sleep 1; done")
             },
@@ -2600,7 +2459,7 @@ mod tests {
         // killed it rather than fail.
         let steps = vec![
             RunStep {
-                persistent: true,
+                background: true,
                 ..step("server", "while true; do sleep 1; done")
             },
             RunStep {

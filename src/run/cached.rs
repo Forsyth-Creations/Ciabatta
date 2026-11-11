@@ -196,7 +196,7 @@ impl From<&crate::cache::store::Entry> for EntryInfo {
 pub struct UpstreamInfo {
     pub step: String,
     /// The first characters of its output fingerprint, or `None` when it
-    /// contributed none (skipped, persistent, or not yet recorded).
+    /// contributed none (skipped, or not yet recorded).
     #[serde(default)]
     pub fingerprint: Option<String>,
     /// Whether it ran without being able to say what it produced.

@@ -163,14 +163,16 @@ pub struct StepView {
     kind: Option<String>,
     /// Whether it publishes — the special, identifiable push phase.
     push: bool,
-    /// Whether it is started and left running rather than waited for.
-    persistent: bool,
     /// From a workflow's `background:` array: started before the first wave,
     /// gates nothing, stopped when the run ends.
     background: bool,
     /// From a workflow's `after:` array: runs once the rest of the run is over,
     /// whichever way it went.
     after: bool,
+    /// The earlier run it passed in, when `--from-failed` carried it over rather
+    /// than running it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    carried_from: Option<String>,
     /// Its wall-clock limit, as written.
     timeout: Option<String>,
     /// Tools it needs on `PATH`.
@@ -315,6 +317,23 @@ impl GuiState {
                             "⚠ failed, but marked warn_on_error — the run carries on: {detail}"
                         ),
                     );
+                }
+            }
+            ProgressUpdate::StepCarried {
+                workflow,
+                step,
+                from,
+            } => {
+                if let Some(r) = self.recipe_mut(&workflow) {
+                    let line = format!("✓ passed in {from}; not run again");
+                    if let Some(s) = r.step_mut(&step) {
+                        s.status = "success".into();
+                        s.finished_at = Some(now());
+                        s.carried_from = Some(from);
+                        push_log(&mut s.logs, &mut s.dropped_logs, line.clone());
+                    }
+                    let line = format!("[{step}] {line}");
+                    push_log(&mut r.logs, &mut r.dropped_logs, line);
                 }
             }
             ProgressUpdate::StepSkipped {
@@ -526,6 +545,28 @@ impl GuiState {
             .collect()
     }
 
+    /// What each step of this run did, for a re-run from where it failed.
+    pub fn prior_steps(&self) -> Vec<crate::run::resume::PriorStep> {
+        self.workflows
+            .iter()
+            .flat_map(|w| &w.steps)
+            .map(|s| {
+                let reused = s
+                    .cache
+                    .as_ref()
+                    .is_some_and(|c| matches!(c.outcome.as_str(), "fresh" | "hit"));
+                crate::run::resume::PriorStep {
+                    name: s.name.clone(),
+                    status: match s.status.as_str() {
+                        "skipped" if reused => crate::run::resume::REUSED.to_string(),
+                        other => other.to_string(),
+                    },
+                    shell: s.shell.clone(),
+                }
+            })
+            .collect()
+    }
+
     /// Whether question `id` is still waiting.
     pub fn input_pending(&self, id: u64) -> bool {
         self.workflows
@@ -704,9 +745,9 @@ pub fn initial_state(
                 owner: step.owner.clone(),
                 kind: step.kind.clone(),
                 push: step.is_push(),
-                persistent: step.persistent,
                 background: step.background,
                 after: step.after,
+                carried_from: None,
                 timeout: step.timeout.clone(),
                 requires: step.requires.clone(),
                 env: step

@@ -3,9 +3,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Margin, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{
-        Block, Borders, Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap,
-    },
+    widgets::{Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap},
 };
 
 use super::app::{App, Pane, Prompt, RunStatus, StepStatus};
@@ -23,11 +21,15 @@ pub fn render(f: &mut Frame, app: &mut App) {
         let width = area.width.saturating_sub(4).max(1) as usize;
         (b.chars().count().div_ceil(width) as u16).clamp(1, 4) + 2
     });
+    // What's left for the steps never drops below a few rows, however long the
+    // question: that it stays usable is the point of a banner.
+    let prompt_rows = prompt_rows(app, area).min(area.height.saturating_sub(5));
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(1),           // header
+            Constraint::Length(prompt_rows), // a waiting question, if any
             Constraint::Length(banner_rows), // warning banner, if any
             Constraint::Min(3),              // steps + output
             Constraint::Length(1),           // help bar
@@ -35,12 +37,12 @@ pub fn render(f: &mut Frame, app: &mut App) {
         .split(area);
 
     render_header(f, chunks[0], app);
+    render_prompt(f, chunks[1], app);
     if app.selecting {
         // Just the text: a drag across the screen copies nothing else.
-        let body = chunks[1].union(chunks[2]);
+        let body = chunks[2].union(chunks[3]);
         render_logs(f, body, app);
-        render_help(f, chunks[3], app);
-        render_prompt(f, body, app);
+        render_help(f, chunks[4], app);
         return;
     }
     if let Some(message) = &app.banner {
@@ -52,30 +54,108 @@ pub fn render(f: &mut Frame, app: &mut App) {
                     .borders(Borders::ALL)
                     .border_style(Style::default().fg(Color::Yellow)),
             );
-        f.render_widget(banner, chunks[1]);
+        f.render_widget(banner, chunks[2]);
     }
-    render_body(f, chunks[2], app);
-    render_help(f, chunks[3], app);
-    render_prompt(f, chunks[2], app);
+    render_body(f, chunks[3], app);
+    render_help(f, chunks[4], app);
 }
 
-/// The question at the front of the queue, in a box over the body.
-fn render_prompt(f: &mut Frame, area: Rect, app: &App) {
+/// How many rows the question takes: one until it is opened, and enough for the
+/// whole of it after.
+fn prompt_rows(app: &App, area: Rect) -> u16 {
+    if app.prompts.is_empty() {
+        return 0;
+    }
+    if !app.prompt_open {
+        return 1;
+    }
+    let inner = area.width.saturating_sub(2).max(1) as usize;
+    let lines = prompt_lines(app);
+    lines
+        .iter()
+        .map(|l| l.width().max(1).div_ceil(inner) as u16)
+        .sum::<u16>()
+        + 2
+}
+
+/// The question waiting at the front of the queue, as one row of the screen. It
+/// doesn't take the keyboard until somebody opens it.
+fn prompt_summary(app: &App) -> String {
     let Some(prompt) = app.prompts.front() else {
+        return String::new();
+    };
+    let mut about: Vec<String> = Vec::new();
+    let question = match prompt {
+        Prompt::Input { pending, .. } => {
+            about.push(pending.step.clone());
+            if let Some(left) = remaining(pending.deadline.as_deref()) {
+                about.push(format!("{left} left"));
+            }
+            format!("❓ {}", pending.prompt)
+        }
+        Prompt::Choice { step, message, .. } => {
+            about.push(step.clone());
+            format!("⚠ {message}")
+        }
+    };
+    let waiting = app.prompts.len() - 1;
+    if waiting > 0 {
+        about.push(format!("{waiting} more"));
+    }
+    format!(
+        " {question}  ({})  ·  a or click to answer",
+        about.join(" · ")
+    )
+}
+
+/// The question in the banner: one row, or the whole of it once opened.
+fn render_prompt(f: &mut Frame, area: Rect, app: &mut App) {
+    app.prompt_area = area;
+    if app.prompts.is_empty() || area.height == 0 {
         return;
+    }
+    if !app.prompt_open {
+        let style = Style::default()
+            .fg(Color::Black)
+            .bg(Color::Yellow)
+            .add_modifier(Modifier::BOLD);
+        f.render_widget(Paragraph::new(prompt_summary(app)).style(style), area);
+        return;
+    }
+    let title = match app.prompts.front() {
+        Some(Prompt::Input { pending, .. }) => format!(" ❓ {} asks ", pending.step),
+        Some(Prompt::Choice { step, .. }) => format!(" ⚠ {step} needs a fix chosen "),
+        None => String::new(),
+    };
+    f.render_widget(
+        Paragraph::new(prompt_lines(app))
+            .wrap(Wrap { trim: false })
+            .block(
+                Block::default()
+                    .title(title)
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(Color::Yellow)),
+            ),
+        area,
+    );
+}
+
+/// The question at the front of the queue, in full.
+fn prompt_lines(app: &App) -> Vec<Line<'static>> {
+    let Some(prompt) = app.prompts.front() else {
+        return Vec::new();
     };
     let bold = Style::default()
         .fg(Color::White)
         .add_modifier(Modifier::BOLD);
     let faint = Style::default().fg(Color::DarkGray);
     let mut lines: Vec<Line> = Vec::new();
-    let title = match prompt {
+    match prompt {
         Prompt::Input { pending, typed } => {
             lines.push(Line::styled(pending.prompt.clone(), bold));
             if let Some(details) = &pending.details {
                 lines.extend(details.lines().map(|l| Line::styled(l.to_string(), faint)));
             }
-            lines.push(Line::raw(""));
             let shown = match (pending.enter, pending.yes_no, pending.secret) {
                 (true, _, _) => "⏎ continue".to_string(),
                 (false, true, _) => match pending.default.as_deref() {
@@ -107,20 +187,16 @@ fn render_prompt(f: &mut Frame, area: Rect, app: &App) {
             if let Some(var) = &pending.env {
                 hints.push(format!("set {var} to skip this"));
             }
-            if !hints.is_empty() {
-                lines.push(Line::styled(hints.join(" · "), faint));
-            }
-            format!(" ❓ {} asks ", pending.step)
+            hints.push("Esc to come back to it later".into());
+            lines.push(Line::styled(hints.join(" · "), faint));
         }
         Prompt::Choice {
-            step,
             message,
             options,
             selected,
             ..
         } => {
             lines.push(Line::styled(message.clone(), bold));
-            lines.push(Line::raw(""));
             for (i, option) in options.iter().enumerate() {
                 let style = match i == *selected {
                     true => Style::default().fg(Color::Black).bg(Color::Yellow),
@@ -129,12 +205,11 @@ fn render_prompt(f: &mut Frame, area: Rect, app: &App) {
                 lines.push(Line::styled(format!(" [{i}] {option} "), style));
             }
             lines.push(Line::styled(
-                "↑↓ or a number to pick · Enter to run it",
+                "↑↓ or a number to pick · Enter to run it · Esc to come back to it later",
                 faint,
             ));
-            format!(" ⚠ {step} needs a fix chosen ")
         }
-    };
+    }
     let waiting = app.prompts.len() - 1;
     if waiting > 0 {
         lines.push(Line::styled(
@@ -142,33 +217,7 @@ fn render_prompt(f: &mut Frame, area: Rect, app: &App) {
             faint,
         ));
     }
-
-    let width = area.width.saturating_sub(4).min(80);
-    let inner = width.saturating_sub(2).max(1) as usize;
-    let rows: u16 = lines
-        .iter()
-        .map(|l| (l.width().max(1).div_ceil(inner)) as u16)
-        .sum();
-    let height = (rows + 2).min(area.height);
-    if width < 4 || height < 3 {
-        return;
-    }
-    let rect = Rect {
-        x: area.x + (area.width - width) / 2,
-        y: area.y + (area.height - height) / 2,
-        width,
-        height,
-    };
-    f.render_widget(Clear, rect);
-    f.render_widget(
-        Paragraph::new(lines).wrap(Wrap { trim: false }).block(
-            Block::default()
-                .title(title)
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Yellow)),
-        ),
-        rect,
-    );
+    lines
 }
 
 /// How long until an RFC 3339 `deadline`, as the prompt's countdown shows it.
@@ -659,16 +708,20 @@ fn render_help(f: &mut Frame, area: Rect, app: &App) {
     } else {
         ""
     };
-    let help = match (app.prompts.is_empty(), app.pane) {
-        (false, _) => format!(" {state}Answering a question · Esc stops the run"),
-        (true, _) if app.selecting => {
-            " Selecting — drag to select, then copy as usual · ↑↓ scroll · c back".to_string()
+    let answer = match app.prompts.is_empty() {
+        true => "",
+        false => "a answer · ",
+    };
+    let help = match (app.prompt_open, app.pane) {
+        (true, _) => format!(" {state}Answering a question · Esc for later · Ctrl-C stops the run"),
+        (false, _) if app.selecting => {
+            format!(" {answer}Selecting — drag to select, then copy as usual · ↑↓ scroll · c back")
         }
-        (true, Pane::Env) => {
-            format!(" {state}e back to output · wheel scrolls · c select text · q quit")
+        (false, Pane::Env) => {
+            format!(" {state}{answer}e back to output · wheel scrolls · c select text · q quit")
         }
-        (true, Pane::Output) => format!(
-            " {state}↑↓ step · wheel scrolls · c select text · f follow · s sort · \
+        (false, Pane::Output) => format!(
+            " {state}{answer}↑↓ step · wheel scrolls · c select text · f follow · s sort · \
              n next failure · e .env · q quit"
         ),
     };

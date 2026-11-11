@@ -11,7 +11,7 @@ use anyhow::Result;
 use crossterm::{
     event::{
         DisableMouseCapture, EnableMouseCapture, Event, EventStream, KeyCode, KeyEventKind,
-        KeyModifiers, MouseEventKind,
+        KeyModifiers, MouseButton, MouseEventKind,
     },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
@@ -179,6 +179,12 @@ fn summary(app: &App) -> String {
             let _ = writeln!(out, "{note}");
         }
     }
+    if app.failed() && !app.dry_run {
+        let _ = writeln!(
+            out,
+            "\nTo run again from the failure, without repeating what passed, add --from-failed."
+        );
+    }
     for step in app.steps.iter().filter(|s| s.status == StepStatus::Failed) {
         let _ = writeln!(out, "\n── {} (last {FAILED_TAIL} lines) ──", step.name);
         let from = step.logs.len().saturating_sub(FAILED_TAIL);
@@ -269,10 +275,14 @@ async fn tui_loop(
                 match maybe_event {
                     Some(Ok(Event::Key(key))) if key.kind == KeyEventKind::Press => {
                         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-                        // A question on screen takes the keyboard, `q`
-                        // included — it may be part of the answer. Esc and
-                        // Ctrl-C still stop the run.
-                        let asking = !app.prompts.is_empty();
+                        // A question that has been opened takes the keyboard,
+                        // `q` included, since it may be part of the answer. Esc
+                        // puts it back in the banner; Ctrl-C still stops the run.
+                        let asking = app.prompt_open;
+                        if asking && key.code == KeyCode::Esc {
+                            app.prompt_open = false;
+                            continue;
+                        }
                         // Selecting text: the keys that would leave the TUI
                         // leave select mode instead, and take the mouse back.
                         if app.selecting
@@ -285,7 +295,7 @@ async fn tui_loop(
                             continue;
                         }
                         let quit = (!asking && key.code == KeyCode::Char('q'))
-                            || key.code == KeyCode::Esc
+                            || (!asking && key.code == KeyCode::Esc)
                             || (ctrl && key.code == KeyCode::Char('c'));
                         if quit {
                             if app.finished || app.stopping {
@@ -309,6 +319,9 @@ async fn tui_loop(
                             continue;
                         }
                         match key.code {
+                            KeyCode::Char('a') | KeyCode::Enter if !app.prompts.is_empty() => {
+                                app.open_prompt();
+                            }
                             // The pane is all there is on screen, so the arrows
                             // scroll it — and a terminal that turns the wheel
                             // into arrows once it has the mouse back scrolls
@@ -337,6 +350,12 @@ async fn tui_loop(
                         }
                     }
                     Some(Ok(Event::Mouse(mouse))) => match mouse.kind {
+                        MouseEventKind::Down(MouseButton::Left)
+                            if app.prompt_hit(mouse.column, mouse.row) =>
+                        {
+                            app.browsing = true;
+                            app.prompt_open = !app.prompt_open;
+                        }
                         MouseEventKind::ScrollUp => {
                             app.browsing = true;
                             app.scroll_up(WHEEL_ROWS);

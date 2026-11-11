@@ -271,10 +271,8 @@ pub async fn connect(port: Option<u16>) -> Result<Session> {
 
 /// [`connect`], for a directory other than the current one.
 ///
-/// The run engine needs this: a `persistent` step is handed to the daemon as a
-/// watch session, and it has to be registered against the project the *run* is
-/// in — which, for a monorepo workflow, is the workspace root rather than
-/// wherever the operator happened to be standing.
+/// For a caller working on a checkout it isn't standing in: the session has to
+/// be registered against that project, not the operator's current directory.
 pub async fn connect_at(port: Option<u16>, dir: &std::path::Path) -> Result<Session> {
     let daemon = ensure_running(port).await?;
     let cwd = dir.to_path_buf();

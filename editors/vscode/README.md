@@ -6,7 +6,7 @@ Completion, documentation and reference checking for `.ciabatta/` files.
 
 Inside `.ciabatta/ciabatta.yaml` and `.ciabatta/workflows/*.yaml`:
 
-- **Every field, with its documentation.** What `persistent:` means, why
+- **Every field, with its documentation.** What `background:` means, why
   `continue_on_error:` exists, what a `timeout:` accepts. From the JSON Schema,
   so it's the same text the format's own reference uses, rendered as markdown.
 - **Snippets for the common shapes.** A new entry under `steps:` offers a

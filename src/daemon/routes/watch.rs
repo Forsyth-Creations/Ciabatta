@@ -59,7 +59,7 @@ pub struct Session {
     pub project: String,
     pub command: String,
     /// What this session is, when the command line doesn't say it — the node id
-    /// of the `persistent` workflow step that left it behind.
+    /// the caller gave it.
     pub label: Option<String>,
     pub created_at: String,
     pub state: Arc<WatchState>,
@@ -143,12 +143,11 @@ pub struct CreatePayload {
     #[serde(default = "default_max_lines")]
     max_lines: usize,
     /// A human name for the session, when the command line alone doesn't say
-    /// what it is. A `persistent` workflow step sets it to its node id, so the
+    /// what it is. A caller that knows better than the command line sets it, so the
     /// session it leaves behind is identifiable as "that step from that run".
     #[serde(default)]
     label: Option<String>,
-    /// Where to run, relative to the project root. A persistent step runs from
-    /// its own sub-workspace, exactly as it would have inside the graph.
+    /// Where to run, relative to the project root.
     #[serde(default)]
     cwd: Option<String>,
     /// Environment variables layered over the daemon's own.

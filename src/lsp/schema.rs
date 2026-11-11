@@ -167,7 +167,7 @@ fn step() -> crate::run::RunStep {
         requires: list(),
         timeout: Some(one()),
         retries: 1,
-        persistent: true,
+        removed_persistent: (),
         continue_on_error: true,
         warn_on_error: true,
         kind: Some(one()),

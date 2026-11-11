@@ -328,9 +328,12 @@ pub async fn exists(opts: &RegistryOpOptions<'_>) -> Result<Option<bool>> {
         {
             Ok(None)
         }
-        RegistryKind::Nexus | RegistryKind::Artifactory | RegistryKind::Generic => {
-            Ok(Some(http_exists(opts).await?))
-        }
+        // A folder has no URL of its own in Nexus, so a directory artifact only
+        // shows up in its search.
+        RegistryKind::Nexus => Ok(Some(
+            http_exists(opts).await? || nexus::folder_exists(opts).await?,
+        )),
+        RegistryKind::Artifactory | RegistryKind::Generic => Ok(Some(http_exists(opts).await?)),
         _ => Ok(None),
     }
 }
@@ -612,8 +615,8 @@ pub async fn run_shell_command(
 /// the returned future is dropped.
 ///
 /// `kill_on_drop` matters for the two ways a run can walk away from a command
-/// that is still going: a step whose `timeout` expired, and a `persistent` step
-/// whose background task is aborted when the graph finishes. In both cases the
+/// that is still going: a step whose `timeout` expired, and a background task
+/// aborted when the graph finishes. In both cases the
 /// process tree has to go with it, so the command is spawned into its own
 /// process group and the whole group is signalled — see [`ProcessGroup`].
 pub async fn run_shell_command_opts(

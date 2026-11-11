@@ -373,6 +373,38 @@ fn resolve_transfer_refs(steps: &mut [RunStep]) -> Result<()> {
     Ok(())
 }
 
+/// Settle a `from:` that names a push in another workflow, which needn't be in
+/// this graph: fetching what `release` published shouldn't mean running `release`.
+///
+/// `<workflow>:<step>` looks in the step's own sub-workspace, and
+/// `<member>:<workflow>:<step>` in that one. A reference that finds nothing here
+/// is left for [`resolve_transfer_refs`], which knows the graph and reports it.
+fn inherit_from_outside_the_graph(
+    workspace: &Workspace,
+    member: &Member,
+    declared: &RunStep,
+    compiled: &mut RunStep,
+) {
+    let Some(reference) = declared.from.as_deref() else {
+        return;
+    };
+    let parts: Vec<&str> = reference.split(':').collect();
+    let (owner, workflow, name) = match parts[..] {
+        [workflow, name] => (Some(member), workflow, name),
+        [owner, workflow, name] => (workspace.member(owner), workflow, name),
+        _ => return,
+    };
+    let source = owner
+        .and_then(|owner| owner.workflows.get(workflow))
+        .and_then(|workflow| workflow.steps.iter().find(|s| s.name == name));
+    if let Some(source) = source
+        && !std::ptr::eq(source, declared)
+    {
+        compiled.inherit_transfer(source);
+        compiled.from = None;
+    }
+}
+
 /// Resolve every `cache.inputs_from` into the output patterns of the steps it
 /// names, so planning and running a step need nothing but the step itself.
 ///
@@ -989,6 +1021,7 @@ fn compile(
             compiled.wave_group = workflow.wave_grouping.clone();
             compiled.workspace = Some(member.name.clone());
             compiled.cwd = Some(member.rel.clone());
+            inherit_from_outside_the_graph(workspace, member, step, &mut compiled);
 
             // Rewrite in-workflow edges to the new ids, and check them here so
             // the error names the workflow the typo is actually in.
@@ -1210,13 +1243,12 @@ fn compile(
             compiled.wave_group = workflow.wave_grouping.clone();
             compiled.workspace = Some(member.name.clone());
             compiled.cwd = Some(member.rel.clone());
+            // Started and never waited for. A step that exits on its own is
+            // allowed — a one-shot warm-up is a reasonable thing to want running
+            // alongside — it simply finishes early. An after action is the
+            // opposite: it runs, and is waited for, last.
             compiled.background = !is_after;
             compiled.after = is_after;
-            // Started and never waited for, whatever it declared. A step that
-            // exits on its own is allowed — a one-shot warm-up is a reasonable
-            // thing to want running alongside — it simply finishes early. An
-            // after action is the opposite: it runs, and is waited for, last.
-            compiled.persistent = !is_after;
             compiled.recover = false;
             compiled.on_error = None;
             compiled.retry = None;
@@ -1424,7 +1456,7 @@ mod tests {
         let graph = build(&ws, "test", &Selection::default()).unwrap();
 
         let drop = graph.steps.iter().find(|s| s.name == "db:drop").unwrap();
-        assert!(drop.after && !drop.background && !drop.persistent);
+        assert!(drop.after && !drop.background);
         // Its first step follows the graph's last ones; its second keeps its own edge.
         assert_eq!(drop.needs, ["web:unit", "web:lint"]);
         let report = graph.steps.iter().find(|s| s.name == "db:report").unwrap();
@@ -1473,7 +1505,7 @@ mod tests {
         workflow(
             &mock,
             "serve",
-            "[[steps]]\nname = \"api\"\nrun = \"node mock.js\"\npersistent = true\n",
+            "[[steps]]\nname = \"api\"\nrun = \"node mock.js\"\n",
         );
         let web = member(&root, "packages/web", "[workspace]\nname = \"web\"\n");
         workflow(
@@ -1492,7 +1524,6 @@ mod tests {
             .find(|s| s.name == "mock:api")
             .expect("the target's step is a node of the graph");
         assert!(task.background, "marked as a background task");
-        assert!(task.persistent, "a background task is never waited for");
         assert!(task.needs.is_empty(), "and waits for nothing itself");
 
         // Nothing depends on it, so it can never gate anything.
@@ -1525,7 +1556,7 @@ mod tests {
         workflow(
             &stack,
             "up",
-            "[[steps]]\nname = \"db\"\nrun = \"postgres\"\npersistent = true\n\
+            "[[steps]]\nname = \"db\"\nrun = \"postgres\"\n\
              [[steps]]\nname = \"app\"\nrun = \"node app.js\"\nneeds = [\"db\"]\n",
         );
         let web = member(&root, "packages/web", "[workspace]\nname = \"web\"\n");
@@ -1544,7 +1575,7 @@ mod tests {
             vec!["stack:db".to_string()],
             "its own ordering is kept; only edges to the graph proper are dropped"
         );
-        assert!(app.background && app.persistent);
+        assert!(app.background);
 
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -2371,6 +2402,47 @@ mod tests {
             .unwrap();
         let transfer = elsewhere.transfer().unwrap();
         assert_eq!(transfer.registry, Some("nexus"), "inherited");
+        assert_eq!(transfer.artifact, Some("vendor/app"), "stated wins");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// The usual reason to pull: fetching what another workflow published,
+    /// without that workflow being part of this run.
+    #[test]
+    fn a_from_can_name_a_push_in_a_workflow_outside_the_graph() {
+        let root = scratch("from_outside");
+        let a = member(&root, "a", "[workspace]\nname = \"a\"\n");
+        let b = member(&root, "b", "[workspace]\nname = \"b\"\n");
+        workflow(
+            &a,
+            "release",
+            "[[steps]]\nname = \"publish\"\nkind = \"push\"\nregistry = \"nexus\"\n\
+             artifact = \"dist/app\"\npublish_path = \"app/1\"\n",
+        );
+        workflow(
+            &a,
+            "fetch",
+            "[[steps]]\nname = \"get\"\nkind = \"pull\"\nfrom = \"release:publish\"\n",
+        );
+        workflow(
+            &b,
+            "fetch",
+            "[[steps]]\nname = \"get\"\nkind = \"pull\"\nfrom = \"a:release:publish\"\n\
+             artifact = \"vendor/app\"\n",
+        );
+        let ws = Workspace::load(&root).unwrap();
+        let run = into_run(build(&ws, "fetch", &Selection::default()).unwrap()).unwrap();
+
+        assert!(run.steps.iter().all(|s| !s.name.contains("publish")));
+        let own = run.steps.iter().find(|s| s.name == "a:get").unwrap();
+        let transfer = own.transfer().unwrap();
+        assert_eq!(transfer.registry, Some("nexus"));
+        assert_eq!(transfer.artifact, Some("dist/app"));
+
+        let other = run.steps.iter().find(|s| s.name == "b:get").unwrap();
+        let transfer = other.transfer().unwrap();
+        assert_eq!(transfer.registry, Some("nexus"));
         assert_eq!(transfer.artifact, Some("vendor/app"), "stated wins");
 
         std::fs::remove_dir_all(&root).ok();

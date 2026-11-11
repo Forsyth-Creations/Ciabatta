@@ -78,6 +78,7 @@ export function runCommand(state: RunState): string {
   for (const member of run.only ?? []) parts.push("--only", quote(member));
   if (run.isolated) parts.push("--isolated");
   if (run.force) parts.push("--force");
+  if (run.resumed_from) parts.push("--from-failed");
   if (state.dry_run) parts.push("--dry-run");
   if (run.env_profile) parts.push("--env-profile", quote(run.env_profile));
   if ((run.args ?? []).length > 0) parts.push("...", ...run.args!.map(quote));

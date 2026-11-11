@@ -272,11 +272,6 @@
           "default": 0,
           "description": "Extra attempts to make when the step fails, for transient errors. Default 0: one attempt, no retry."
         },
-        "persistent": {
-          "type": "boolean",
-          "default": false,
-          "description": "A step that never exits on its own — a dev server, a log tailer, a watcher. Its dependents are released immediately and it runs alongside the rest of the graph rather than hanging it. It OUTLIVES the run: the daemon takes ownership as a watch session, so `ciabatta dev` leaves you a server to work against. Stop it with `ciabatta watch --stop <id>`. For a process that exists only to get this run through and should go away with it, use the workflow's `background:` array instead."
-        },
         "continue_on_error": {
           "type": "boolean",
           "default": false,

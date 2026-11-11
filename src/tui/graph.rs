@@ -351,9 +351,9 @@ fn step_list(frame: &mut Frame, area: Rect, rows: &[Row], state: &mut ListState)
                         Style::default().fg(Color::Magenta),
                     ));
                 }
-                if step.persistent {
+                if step.background {
                     spans.push(Span::styled(
-                        "  persistent",
+                        "  background",
                         Style::default().fg(Color::Blue),
                     ));
                 }
@@ -511,8 +511,8 @@ fn detail(frame: &mut Frame, area: Rect, step: Option<&RunStep>, graph: &Workflo
     if step.retries > 0 {
         field("retries", step.retries.to_string());
     }
-    if step.persistent {
-        field("persistent", "keeps running; the graph won't wait".into());
+    if step.background {
+        field("background", "keeps running; the graph won't wait".into());
     }
     if step.continue_on_error {
         field("on failure", "the rest of the graph carries on".into());

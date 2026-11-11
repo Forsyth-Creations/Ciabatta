@@ -92,6 +92,13 @@ pub enum ProgressUpdate {
     /// A run step was skipped because its `when`/`skip_if` condition said so.
     /// It counts as satisfied, so its dependents still run. `reason` is a short
     /// explanation (e.g. ``skip_if `env.IN_CI == true` ``).
+    /// A step that passed in an earlier run, carried over by `--from-failed`
+    /// instead of being run again. `from` names that run.
+    StepCarried {
+        workflow: String,
+        step: String,
+        from: String,
+    },
     StepSkipped {
         workflow: String,
         step: String,
@@ -223,6 +230,10 @@ impl Flight {
                 tracing::debug!("{step}: {}", if *ok { "finished" } else { "failed" });
             }
             ProgressUpdate::StepWarned { step, .. } => self.set(step, None),
+            ProgressUpdate::StepCarried { step, from, .. } => {
+                self.set(step, None);
+                tracing::debug!("{step}: carried over from {from}");
+            }
             ProgressUpdate::StepSkipped { step, reason, .. } => {
                 self.set(step, None);
                 tracing::debug!("{step}: skipped ({reason})");
@@ -324,10 +335,10 @@ impl Cancel {
     }
 }
 
-/// The policy a run is executed under: how it resolves recovery choices, what
-/// happens to work that outlives it, and how strictly it holds steps to what
-/// they declared. Push/pull ignore this entirely.
-#[derive(Clone)]
+/// The policy a run is executed under: how it resolves recovery choices, what it
+/// carries over from an earlier run, and how strictly it holds steps to what they
+/// declared. Push/pull ignore this entirely.
+#[derive(Default, Clone)]
 pub struct RunCtl {
     /// When true, recovery nodes wait for a UI choice on `choices`; when false
     /// (plain / CI) the engine auto-picks the first `default` option or fails.
@@ -339,12 +350,6 @@ pub struct RunCtl {
     /// `None` means nobody can answer: each question takes its `--default`
     /// or fails, which is what CI wants.
     pub inputs: Option<tokio::sync::broadcast::Sender<crate::run::input::Answer>>,
-    /// Hand `persistent` steps to the daemon as watch sessions, so they outlive
-    /// the run — starting the daemon if it isn't up. On by default, because a
-    /// dev server that dies with the build that started it isn't persistent at
-    /// all. Turned off where spawning a daemon would be a surprise: unit tests,
-    /// and anywhere a caller asks for a self-contained run.
-    pub persist_via_daemon: bool,
     /// Run every step against only the files it declared under `cache.inputs`,
     /// in an isolated copy of the tree — so a build that reads something it
     /// never declared fails now rather than being served a stale artifact
@@ -353,6 +358,9 @@ pub struct RunCtl {
     /// Extra paths to stage into each `authoritative` sandbox, from
     /// `--sandbox-also`. Symlinked, and explicitly outside the guarantee.
     pub sandbox_also: Vec<String>,
+    /// `--from-failed`: the earlier run this one carries on from. Steps that
+    /// passed there aren't run again.
+    pub resume: Option<crate::run::resume::Resume>,
     /// `--force`: ignore what the cache holds and run every step. Results are
     /// still stored, so the next ordinary run can reuse them.
     pub force: bool,
@@ -387,23 +395,6 @@ impl RunCtl {
     }
 }
 
-impl Default for RunCtl {
-    fn default() -> Self {
-        Self {
-            interactive: false,
-            choices: None,
-            inputs: None,
-            persist_via_daemon: true,
-            authoritative: false,
-            sandbox_also: Vec::new(),
-            force: false,
-            cancel: None,
-            jobs: None,
-            start_anyway: false,
-        }
-    }
-}
-
 /// Drive one compiled workflow to completion, reporting progress as it goes.
 ///
 /// There is nothing to fan out over any more: a workflow is a single graph, and
@@ -411,9 +402,8 @@ impl Default for RunCtl {
 /// DAG, scheduled by the engine against their real dependencies rather than by
 /// being named on the same command line.
 ///
-/// [`RunCtl`] carries the run's policy — how recovery choices are resolved,
-/// whether persistent steps are handed to the daemon, and whether steps are
-/// held to their declared inputs. `RunCtl::default()` is the plain
+/// [`RunCtl`] carries the run's policy — how recovery choices are resolved and
+/// whether steps are held to their declared inputs. `RunCtl::default()` is the plain
 /// non-interactive run.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_workflow_ctl(
@@ -553,6 +543,20 @@ pub async fn run_workflow_ctl(
         };
         let duration_ms = started.elapsed().as_millis() as u64;
         record_run(name, resolved, config, root, outcome, duration_ms).await;
+        if let Err(e) = crate::run::resume::save(
+            root,
+            name,
+            match outcome {
+                crate::run::history::Outcome::Success => "success",
+                crate::run::history::Outcome::Stopped => "stopped",
+                crate::run::history::Outcome::Failed => "failed",
+            },
+            ledger.prior(&resolved.steps),
+        ) {
+            crate::tui::note(format!(
+                "note: couldn't record this run for --from-failed: {e:#}"
+            ));
+        }
 
         // A run with no CI variables (one started from the web app, or a
         // terminal without `--local`) still came from some commit: say which.

@@ -173,7 +173,9 @@ fn build_registry_rows(config: &CiabattaConfig) -> Vec<RegistryRow> {
             );
             RegistryRow {
                 name: name.clone(),
-                url: cfg.url.clone(),
+                // The repository itself, when Nexus names one: that's what is
+                // browsed, and what the table should say.
+                url: cfg.nexus_repo_url(),
                 needs_auth: cfg.needs_auth,
                 has_login_script: cfg.login_script.is_some(),
                 kind: format!("{:?}", kind).to_lowercase(),

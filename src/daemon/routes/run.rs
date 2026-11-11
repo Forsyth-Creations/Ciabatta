@@ -125,6 +125,7 @@ impl Run {
             "root": self.root.display().to_string(),
             "dry_run": self.request.dry_run,
             "force": self.request.force,
+            "resumed_from": self.request.resumed_from,
             "filter": self.request.filter,
             "only": self.request.only,
             "isolated": self.request.isolated,
@@ -352,6 +353,13 @@ pub struct CreatePayload {
     /// Ignore the cache and run every step. Results are still stored.
     #[serde(default)]
     force: bool,
+    /// `--from-failed` from a terminal: carry on from the last run on record.
+    #[serde(default, skip_serializing)]
+    from_failed: bool,
+    /// How to name the run this one carries on from, when it does. Kept with the
+    /// run so its page can say so, and cleared by a plain "run again".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    resumed_from: Option<String>,
     /// `--start-anyway`: don't wait for a run slot. Not kept with the run, so
     /// "run again" waits its turn like any other.
     #[serde(default, skip_serializing)]
@@ -377,6 +385,19 @@ pub struct CreatePayload {
     /// [`Runs::environment_for`]).
     #[serde(default, skip_serializing)]
     terminal: bool,
+}
+
+/// What a re-run may add to the request it repeats.
+#[derive(Deserialize, Default)]
+pub struct RerunPayload {
+    /// Values for variables the first launch was given by hand, which were
+    /// deliberately not written to the run's record.
+    #[serde(default)]
+    env: HashMap<String, String>,
+    /// Don't repeat the steps that passed: carry them over and run from the
+    /// failure.
+    #[serde(default)]
+    from_failed: bool,
 }
 
 #[derive(Deserialize)]
@@ -456,7 +477,7 @@ async fn create(
     State(state): State<AppState>,
     Json(payload): Json<CreatePayload>,
 ) -> RouteResult<Json<Value>> {
-    start(state, payload).await
+    start(state, payload, None).await
 }
 
 /// Start a previous run again, from the request that started it.
@@ -464,13 +485,43 @@ async fn create(
 /// The graph is compiled fresh rather than replayed: the point of re-running is
 /// usually that something on disk changed, and a replay of the old graph would
 /// be the one thing that can't tell you whether the change helped.
-async fn rerun(State(state): State<AppState>, Path(id): Path<u64>) -> RouteResult<Json<Value>> {
+///
+/// With `from_failed`, what passed in that run is carried over rather than
+/// repeated, so the failed step and everything behind it are all that run.
+async fn rerun(
+    State(state): State<AppState>,
+    Path(id): Path<u64>,
+    body: Option<Json<RerunPayload>>,
+) -> RouteResult<Json<Value>> {
     let run = state
         .runs
         .get(id)
         .ok_or_else(|| RouteError::not_found("No such run."))?;
-    let payload = run.request.clone();
-    start(state, payload).await
+    let body = body.map(|Json(body)| body).unwrap_or_default();
+    let mut payload = run.request.clone();
+    payload.env.extend(body.env);
+    payload.resumed_from = None;
+
+    let resume = if body.from_failed {
+        let gui = lock(&run.state);
+        if !gui.done() {
+            return Err(RouteError::bad_request(
+                "This run hasn't finished. Wait for it, or stop it, before re-running from the failure.",
+            ));
+        }
+        if gui.outcome() == "success" {
+            return Err(RouteError::bad_request(
+                "This run passed, so there is no failure to re-run from.",
+            ));
+        }
+        Some(crate::run::resume::Resume {
+            from: format!("run #{id}"),
+            prior: gui.prior_steps(),
+        })
+    } else {
+        None
+    };
+    start(state, payload, resume).await
 }
 
 /// The directory a run's `.env` search starts from: `cwd` under `root`, or
@@ -489,7 +540,11 @@ fn start_dir(root: &std::path::Path, cwd: Option<&str>) -> std::path::PathBuf {
     }
 }
 
-async fn start(state: AppState, payload: CreatePayload) -> RouteResult<Json<Value>> {
+async fn start(
+    state: AppState,
+    mut payload: CreatePayload,
+    resume: Option<crate::run::resume::Resume>,
+) -> RouteResult<Json<Value>> {
     let project_root = state.project_root(&payload.project)?;
     let config = crate::config::load_config(&project_root)?;
 
@@ -539,6 +594,24 @@ async fn start(state: AppState, payload: CreatePayload) -> RouteResult<Json<Valu
         (workspace.root, vec![(name, resolved)])
     };
     let names: Vec<String> = runs.iter().map(|(name, _)| name.clone()).collect();
+
+    // `--from-failed` from a terminal has no run id to name, so it carries on
+    // from whatever the last run of this workflow left on record.
+    let resume = match resume {
+        Some(resume) => Some(resume),
+        None if payload.from_failed => Some(
+            crate::run::resume::from_last_run(&root, &names[0])
+                .map_err(RouteError::bad_request)?
+                .ok_or_else(|| {
+                    RouteError::bad_request(format!(
+                        "'{}' passed last time, so there is no failure to re-run from.",
+                        names[0]
+                    ))
+                })?,
+        ),
+        None => None,
+    };
+    payload.resumed_from = resume.as_ref().map(|r| r.from.clone());
 
     // Seed from the daemon's own environment and, for a run the browser
     // started, the last terminal's (`build_env_vars` does the same for a run in
@@ -692,6 +765,7 @@ async fn start(state: AppState, payload: CreatePayload) -> RouteResult<Json<Valu
         cancel: Some(cancel),
         force: payload.force,
         start_anyway: payload.start_anyway,
+        resume,
         ..Default::default()
     };
     tokio::spawn(async move {
@@ -783,6 +857,11 @@ fn trace(run: u64, update: &runner::ProgressUpdate) {
             step,
             detail,
         } => tracing::warn!(run, %workflow, %step, %detail, "step failed as a warning"),
+        P::StepCarried {
+            workflow,
+            step,
+            from,
+        } => tracing::info!(run, %workflow, %step, %from, "step carried over"),
         P::StepSkipped {
             workflow,
             step,

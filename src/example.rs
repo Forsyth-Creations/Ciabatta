@@ -7,7 +7,7 @@
 //!
 //! So this generates the whole thing: four sub-workspaces with real
 //! dependencies between them, workflows that span them, scripts on disk, a
-//! toolchain section, tagged steps to filter on, a recovery node, a persistent
+//! toolchain section, tagged steps to filter on, a recovery node, a background
 //! dev server, and a README explaining every decision. Every step runs `echo`
 //! or `sh`, so the generated repo works on a machine with no toolchain
 //! installed — `ciabatta build` in it succeeds on the first try, which is
@@ -197,6 +197,7 @@ fn plan(options: &Options) -> Vec<File> {
         file("packages/web/.ciabatta/workflows/build.yaml", WEB_BUILD),
         file("packages/web/.ciabatta/workflows/test.yaml", WEB_TEST),
         file("packages/web/.ciabatta/workflows/dev.yaml", WEB_DEV),
+        file("packages/web/.ciabatta/workflows/serve.yaml", WEB_SERVE),
         file("packages/web/.ciabatta/workflows/greet.yaml", WEB_GREET),
     ];
 
@@ -804,32 +805,40 @@ steps:
     run: "for i in 1 2 3; do echo \"tick $i\"; sleep 1; done"
 "#;
 
-const WEB_DEV: &str = r#"# A workflow with a step that never exits.
+const WEB_DEV: &str = r#"# A workflow that needs a server up while it works.
 #
-# `persistent: true` starts the dev server, releases everything downstream
-# immediately, and hands the process to the ciabatta daemon — so it keeps
-# running after the graph finishes instead of hanging it forever. The run prints
-# a session id:
+# `background:` starts the `serve` workflow before the first step, never waits
+# for it, and stops it again when the run ends, so it can't hang the graph or
+# be left holding its port. Its output is in its own node, like any step's.
 #
-#   ciabatta watch --attach <ID>    follow its output
-#   ciabatta watch --list           find it again later
-#   ciabatta watch --stop <ID>      stop it
+# For a dev server you want to keep, run it as an ordinary step and end the run
+# with Ctrl-C, or start it with `ciabatta watch <command>`, which outlives the
+# terminal.
 
-description: Run the app locally against a live api
+description: Try the app against a server that runs for as long as this does
+owner: Web Team
+tags: [dev]
+
+background:
+  - self:serve
+
+steps:
+  - name: open
+    description: Print where to go, while the server is up
+    run: "sleep 1 && echo 'web: open http://localhost:3000'"
+    tags: [dev]
+"#;
+
+const WEB_SERVE: &str = r#"# The dev server, declared once. `dev.yaml` names it under `background:`.
+
+description: The dev server. It never exits, so nothing should wait for it
 owner: Web Team
 tags: [dev]
 
 steps:
   - name: serve
-    description: The dev server — keeps running after this workflow finishes
+    description: Listens until the run that started it ends
     run: "echo 'web: dev server listening on http://localhost:3000' && sleep 3600"
-    persistent: true
-    tags: [dev]
-
-  - name: open
-    description: Print where to go, once the server is up
-    run: "echo 'web: open http://localhost:3000'"
-    needs: [serve]
     tags: [dev]
 "#;
 
@@ -896,7 +905,7 @@ Nobody wrote that graph down. Each package declared what *it* needs, and
 | Tags, for `--filter` | steps in `packages/api/.ciabatta/workflows/test.yaml` |
 | Timeouts and retries | `packages/api/.ciabatta/workflows/build.yaml` |
 | A recovery node (`on_error`) | `packages/api/.ciabatta/workflows/build.yaml` → `fix-build` |
-| A step that never exits | `packages/web/.ciabatta/workflows/dev.yaml` → `persistent` |
+| A process a run needs up, that never exits | `packages/web/.ciabatta/workflows/dev.yaml` → `background` |
 | Required variables | `packages/api/.ciabatta/workflows/build.yaml` → `required_env` |
 | `.env` files | `packages/api/.env`, and `.env.example` at the root |
 | A workflow written inline rather than in its own file | `.ciabatta/ciabatta.yaml` → `workflows.smoke` |

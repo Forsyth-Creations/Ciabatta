@@ -757,7 +757,6 @@ pub fn implied_refs(
     for text in [transfer.artifact, transfer.local_image]
         .into_iter()
         .chain(transfer.artifacts.iter().map(|a| a.artifact.as_deref()))
-        .into_iter()
         .flatten()
     {
         for key in placeholder_refs(text) {

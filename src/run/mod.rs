@@ -1341,7 +1341,10 @@ pub fn validate_flowchart(steps: &[RunStep], run_name: &str) -> Result<()> {
                     run_name
                 );
             }
-            if let Some(entry) = step.artifacts.iter().find(|a| a.publish_path.trim().is_empty())
+            if let Some(entry) = step
+                .artifacts
+                .iter()
+                .find(|a| a.publish_path.trim().is_empty())
             {
                 bail!(
                     "Step '{}' in run '{}' has an `artifacts:` entry with an empty \
@@ -2246,7 +2249,9 @@ needs = ["b"]
             kind: Some("push".into()),
             registry: Some("nexus".into()),
             artifact: Some("dist".into()),
-            publish_path: Some(crate::config::PublishPath::Single("app/{CIABATTA_COMMIT}".into())),
+            publish_path: Some(crate::config::PublishPath::Single(
+                "app/{CIABATTA_COMMIT}".into(),
+            )),
             ..Default::default()
         };
         let mut pull = RunStep {

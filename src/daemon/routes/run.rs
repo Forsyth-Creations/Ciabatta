@@ -591,7 +591,11 @@ async fn start(
 
         let config = crate::config::load_config(&workspace.root).unwrap_or_default();
         let prefetch = payload.prefetch.unwrap_or_else(|| {
-            config.workspace.as_ref().and_then(|w| w.prefetch).unwrap_or(false)
+            config
+                .workspace
+                .as_ref()
+                .and_then(|w| w.prefetch)
+                .unwrap_or(false)
         });
         if prefetch {
             crate::workspace::graph::insert_prefetch(&mut graph, &config)

@@ -1359,7 +1359,8 @@ pub async fn fetch_only(
         let env = step_env(step, &prepared.env);
         let mut lines: Vec<String> = Vec::new();
         let mut sink = LogSink::collecting(&mut lines);
-        let result = transfer::prefetch(step, &transfer, config, root, &cwd, &env, false, &mut sink).await;
+        let result =
+            transfer::prefetch(step, &transfer, config, root, &cwd, &env, false, &mut sink).await;
         match result {
             Ok(_) => {
                 fetched += 1;
@@ -1420,7 +1421,10 @@ async fn prefetch_node(
             continue;
         };
         if dry_run {
-            sink.push(format!("[dry-run] would fetch {} into the pull cache", step.name));
+            sink.push(format!(
+                "[dry-run] would fetch {} into the pull cache",
+                step.name
+            ));
             continue;
         }
         sink.push(format!("── {}", step.name));

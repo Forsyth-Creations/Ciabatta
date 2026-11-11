@@ -137,7 +137,10 @@ pub fn candidate_ports(flag: Option<u16>) -> Vec<u16> {
 /// through `*.localhost`, which is always loopback, so that address is used
 /// instead.
 pub fn web_url(port: u16) -> String {
-    let host = match std::env::var(WEB_HOST_ENV).ok().filter(|h| !h.trim().is_empty()) {
+    let host = match std::env::var(WEB_HOST_ENV)
+        .ok()
+        .filter(|h| !h.trim().is_empty())
+    {
         Some(host) => host.trim().to_string(),
         None => {
             let probe = probe_host();

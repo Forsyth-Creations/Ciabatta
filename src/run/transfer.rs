@@ -787,7 +787,10 @@ mod tests {
             strip_prefix: None,
             artifacts: &artifacts,
         };
-        assert_eq!(commit_template(&transfer), Some("proto/{CIABATTA_COMMIT}/proto"));
+        assert_eq!(
+            commit_template(&transfer),
+            Some("proto/{CIABATTA_COMMIT}/proto")
+        );
 
         let none = Transfer {
             artifacts: &artifacts[..1],

@@ -2303,7 +2303,10 @@ mod tests {
         let ws = Workspace::load(&root).unwrap();
         // A run refuses to compile without it...
         let err = build(&ws, "bootstrap", &Selection::default()).unwrap_err();
-        assert!(format!("{err}").contains("CIAB_TEST_NEVER_SET_SECRET"), "{err}");
+        assert!(
+            format!("{err}").contains("CIAB_TEST_NEVER_SET_SECRET"),
+            "{err}"
+        );
         // ...but the cache page and the graph view still get the graph.
         let view = Selection {
             skip_env_check: true,
@@ -2742,7 +2745,10 @@ mod tests {
             assert_eq!(by(root).needs, vec![PREFETCH_NODE.to_string()], "{root}");
         }
         assert_eq!(by("compile").needs, vec!["vendor".to_string()]);
-        assert!(by("mock").needs.is_empty(), "a background task waits for nothing");
+        assert!(
+            by("mock").needs.is_empty(),
+            "a background task waits for nothing"
+        );
         assert!(by("vendor").prefetched && !by("image").prefetched);
 
         // And it still compiles into a run.
@@ -2752,7 +2758,11 @@ mod tests {
     #[test]
     fn no_registry_pulls_leaves_the_graph_alone() {
         let mut graph = graph_of(vec![cmd("lint", &[]), pull("image", "images")]);
-        assert!(insert_prefetch(&mut graph, &prefetch_config()).unwrap().is_empty());
+        assert!(
+            insert_prefetch(&mut graph, &prefetch_config())
+                .unwrap()
+                .is_empty()
+        );
         assert_eq!(graph.steps.len(), 2);
         assert!(graph.steps.iter().all(|s| s.name != PREFETCH_NODE));
     }

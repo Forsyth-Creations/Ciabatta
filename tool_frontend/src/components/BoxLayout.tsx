@@ -40,6 +40,23 @@ export const ROW_HEIGHT = 24;
 /** The gap between boxes, in px. */
 const MARGIN = 12;
 
+/** A side's resize grip: how long it is along the edge, and how thick across
+ *  it, in px. Short enough to leave the scrollbar on that edge reachable. */
+const GRIP_LENGTH = 48;
+const GRIP_THICKNESS = 6;
+/** A corner's resize handle, in px: square, and drawn as nothing. */
+const CORNER = 12;
+
+/** What every side grip shares: a pill that's faint until it's pointed at. */
+const grip = {
+  transform: "none",
+  borderRadius: `${GRIP_THICKNESS / 2}px`,
+  bgcolor: "divider",
+  transition: "background-color 120ms",
+  "&::after": { display: "none" },
+  "&:hover, &:active": { bgcolor: "primary.main" },
+} as const;
+
 /** Grid rows that fit `px` of box height, for writing defaults in pixels. */
 export function rowsFor(px: number): number {
   return Math.max(1, Math.round((px + MARGIN) / (ROW_HEIGHT + MARGIN)));
@@ -165,8 +182,12 @@ export function BoxLayout({
   layouts,
   onChange,
   onFit,
+  resizable = true,
 }: {
   boxes: BoxItem[];
+  /** Whether the boxes show their resize grips and can be resized. A page
+   *  that's mostly for reading hides them until somebody asks to customize. */
+  resizable?: boolean;
   layouts: Layouts;
   onChange: (current: Layout[], all: Layouts) => void;
   /** Told the rows a `fit` box needs; `useBoxLayout().fit`. */
@@ -181,6 +202,7 @@ export function BoxLayout({
       margin={[MARGIN, MARGIN]}
       containerPadding={[0, 0]}
       draggableHandle=".box-drag"
+      isResizable={resizable}
       // Buttons, switches and fields in a title bar are for clicking, not
       // for picking the box up.
       draggableCancel=".box-actions"
@@ -205,33 +227,45 @@ export function BoxLayout({
             overflow: "hidden",
             // The library draws a triangular grip in each corner, which pops
             // up under the pointer and reads as clutter. The corners still
-            // resize — the cursor says so — but draw nothing; edges become
-            // strips the full length of the side, which light up under the
-            // pointer — easier to find than a 20px square. The selectors name
-            // the grid item and both handle classes to outrank the library's
-            // own (`.react-grid-item > .react-resizable-handle.…-w`), which
-            // turns each side handle 45° — a long diagonal bar otherwise.
-            "&.react-grid-item > .react-resizable-handle": { zIndex: 3, backgroundImage: "none" },
+            // resize — the cursor says so — but draw nothing, and are kept
+            // small so they cover as little of a scrollbar's corner as they
+            // can.
+            //
+            // Each side's handle is a short grip centred on that side — long
+            // along the edge, thin across it — rather than a strip the full
+            // length of it. A box whose content scrolls has its scrollbar on
+            // those same edges, and a full-length strip sat on top of it, so
+            // grabbing the scrollbar resized the box instead. A grip leaves
+            // most of the edge, and the scrollbar along it, to the content.
+            //
+            // The selectors name the grid item and both handle classes to
+            // outrank the library's own (`.react-grid-item >
+            // .react-resizable-handle.…-w`), which turns each side handle 45°.
+            "&.react-grid-item > .react-resizable-handle": {
+              zIndex: 3,
+              backgroundImage: "none",
+              width: CORNER,
+              height: CORNER,
+            },
             "&.react-grid-item > .react-resizable-handle::after": { display: "none" },
             "&.react-grid-item > .react-resizable-handle.react-resizable-handle-e, &.react-grid-item > .react-resizable-handle.react-resizable-handle-w": {
-              top: 36,
-              bottom: 16,
-              height: "auto",
-              width: 8,
-              marginTop: 0,
-              transform: "none",
-              "&::after": { display: "none" },
-              "&:hover": { bgcolor: "action.selected" },
+              ...grip,
+              top: "50%",
+              bottom: "auto",
+              width: GRIP_THICKNESS,
+              height: GRIP_LENGTH,
+              marginTop: `${-GRIP_LENGTH / 2}px`,
             },
+            "&.react-grid-item > .react-resizable-handle.react-resizable-handle-e": { right: 1 },
+            "&.react-grid-item > .react-resizable-handle.react-resizable-handle-w": { left: 1 },
             "&.react-grid-item > .react-resizable-handle.react-resizable-handle-s": {
-              left: 16,
-              right: 16,
-              width: "auto",
-              height: 8,
-              marginLeft: 0,
-              transform: "none",
-              "&::after": { display: "none" },
-              "&:hover": { bgcolor: "action.selected" },
+              ...grip,
+              left: "50%",
+              right: "auto",
+              bottom: 1,
+              width: GRIP_LENGTH,
+              height: GRIP_THICKNESS,
+              marginLeft: `${-GRIP_LENGTH / 2}px`,
             },
           }}
         >

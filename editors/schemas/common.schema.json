@@ -310,6 +310,26 @@
           "type": "string",
           "description": "For the glob-list form of `publish_path`: a leading path fragment stripped from each matched file before it is joined under {CIABATTA_PATH}."
         },
+        "artifacts": {
+          "type": "array",
+          "description": "For a `kind: pull` step: several things to fetch from the one registry, in place of the step's own `publish_path` and `artifact`. One node, one login; the downloads run side by side, each through the pull cache.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["publish_path"],
+            "properties": {
+              "publish_path": {
+                "type": "string",
+                "description": "What to fetch, as a single pull's publish_path: a path in a raw repository (a file or a folder), or an npm/PyPI package spec. {VAR} substitution works.",
+                "examples": ["shared/proto/{CIABATTA_COMMIT}/proto", "@acme/sdk@1.2.3"]
+              },
+              "artifact": {
+                "type": "string",
+                "description": "Where it lands, relative to the step's directory. Defaults to the directory itself."
+              }
+            }
+          }
+        },
         "release": {
           "type": "object",
           "additionalProperties": false,

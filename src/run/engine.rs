@@ -678,7 +678,11 @@ async fn run_dag(
                 // step's declared outputs and marks it satisfied, so
                 // everything downstream proceeds exactly as if it had run.
                 let mut pending = None;
-                if let Some(session) = cache.as_deref_mut() {
+                // The prefetch node fills the pull cache and writes nothing to
+                // the tree. Asking the build cache about it would count it as a
+                // step that can't say what it produced, and rebuild everything
+                // behind it — which is all of the graph.
+                if let Some(session) = cache.as_deref_mut().filter(|_| !step.is_prefetch()) {
                     session.report_to(tx.clone(), workflow);
                     let _ = tx
                         .send(ProgressUpdate::StepProcessing {
@@ -1317,6 +1321,134 @@ async fn stop_background(
     }
 }
 
+/// `ciabatta <workflow> --fetch-only`: download what every registry pull in
+/// the graph would fetch into the pull cache, and run nothing else — no build
+/// step, no push, no release, and the working tree isn't touched.
+///
+/// Every step is tried even after one fails, so a single unreachable registry
+/// doesn't leave the others unfetched; the run fails at the end if any did.
+pub async fn fetch_only(
+    resolved: &ResolvedRun,
+    config: &CiabattaConfig,
+    root: &Path,
+    env_vars: &HashMap<String, String>,
+) -> Result<()> {
+    use owo_colors::OwoColorize;
+
+    let prepared = prepare_env(resolved, root, env_vars)?;
+    let mut fetched = 0usize;
+    let mut failed: Vec<String> = Vec::new();
+    for step in &resolved.steps {
+        let Some(transfer) = step
+            .transfer()
+            .filter(|t| t.direction == super::Direction::Pull)
+        else {
+            continue;
+        };
+        // A step with its own command fetches however that command does; there
+        // is nothing ciabatta can fetch on its behalf.
+        if step.script.is_some() || step.run.is_some() {
+            println!(
+                "  {} {} — runs its own command, skipped",
+                "·".style(crate::color::faint()),
+                step.name
+            );
+            continue;
+        }
+        let cwd = step_cwd(step, root);
+        let env = step_env(step, &prepared.env);
+        let mut lines: Vec<String> = Vec::new();
+        let mut sink = LogSink::collecting(&mut lines);
+        let result =
+            transfer::prefetch(step, &transfer, config, root, &cwd, &env, false, &mut sink).await;
+        match result {
+            Ok(_) => {
+                fetched += 1;
+                println!("  {} {}", "✓".style(crate::color::good()), step.name);
+                for line in &lines {
+                    println!("      {}", line.style(crate::color::faint()));
+                }
+            }
+            Err(e) => {
+                println!("  {} {}", "✗".style(crate::color::bad()), step.name);
+                for line in &lines {
+                    println!("      {}", line.style(crate::color::faint()));
+                }
+                eprintln!("      {}", format!("{e:#}").style(crate::color::bad()));
+                failed.push(step.name.clone());
+            }
+        }
+    }
+
+    if fetched == 0 && failed.is_empty() {
+        println!("Nothing to fetch: no step in this run pulls from a registry.");
+        return Ok(());
+    }
+    let cache = crate::cache::store::global_root()?;
+    if !failed.is_empty() {
+        bail!(
+            "{} of {} pull step(s) couldn't be fetched: {}",
+            failed.len(),
+            failed.len() + fetched,
+            failed.join(", ")
+        );
+    }
+    println!(
+        "Fetched {fetched} pull step(s) into {}. A pull that can't reach its registry \
+         will use this copy, with a warning.",
+        cache.display()
+    );
+    Ok(())
+}
+
+/// The `prefetch` node's action: fetch every pull step it carries into the
+/// pull cache, one after another, into this node's log.
+///
+/// Every pull is tried even after one fails, so the log says everything that
+/// couldn't be reached at once; the node fails at the end if anything did, and
+/// the graph behind it doesn't start.
+async fn prefetch_node(
+    node: &RunStep,
+    config: &CiabattaConfig,
+    root: &Path,
+    env_vars: &HashMap<String, String>,
+    dry_run: bool,
+    sink: &mut LogSink<'_>,
+) -> Result<()> {
+    let mut failed: Vec<String> = Vec::new();
+    for step in &node.prefetch {
+        let Some(transfer) = step.transfer() else {
+            continue;
+        };
+        if dry_run {
+            sink.push(format!(
+                "[dry-run] would fetch {} into the pull cache",
+                step.name
+            ));
+            continue;
+        }
+        sink.push(format!("── {}", step.name));
+        let cwd = step_cwd(step, root);
+        let env = step_env(step, env_vars);
+        match transfer::prefetch(step, &transfer, config, root, &cwd, &env, true, sink).await {
+            Ok(_) => {}
+            Err(e) => {
+                sink.push(format!("✗ {}: {e:#}", step.name));
+                failed.push(step.name.clone());
+            }
+        }
+    }
+    if !failed.is_empty() {
+        bail!(
+            "{} of {} pull(s) couldn't be fetched: {}",
+            failed.len(),
+            node.prefetch.len(),
+            failed.join(", ")
+        );
+    }
+    Ok(())
+}
+
 /// The directory a step's action runs from: its own `cwd` (a sub-workspace's
 /// directory, for a workflow graph) resolved against the project root, or the
 /// root itself.
@@ -1571,6 +1703,19 @@ async fn run_step_action(
             // which is how a project keeps its own publishing script while
             // still being a node on the graph.
             match step.transfer() {
+                _ if step.is_prefetch() => {
+                    let action = prefetch_node(step, config, root, env_vars, dry_run, &mut sink);
+                    match limit {
+                        None => action.await,
+                        Some(limit) => match tokio::time::timeout(limit, action).await {
+                            Ok(result) => result,
+                            Err(_) => Err(anyhow::Error::new(TimedOut).context(format!(
+                                "timed out after {} and was killed",
+                                format_duration(limit)
+                            ))),
+                        },
+                    }
+                }
                 // A release step is the same idea pointed at the cache: the
                 // built-in action, unless the step brings a command of its own.
                 _ if step.release_direction().is_some() && script.is_none() && run.is_none() => {

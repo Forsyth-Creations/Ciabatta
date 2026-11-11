@@ -229,7 +229,8 @@ packages/*/generated/
 .env
 !.env.example
 
-# ciabatta's own cache (the .env drift snapshot).
+# Where older ciabatta versions kept their cache. It lives in ~/.ciabatta/cache
+# now, out of the checkout; this keeps a leftover one out of git.
 .ciabatta/cache/
 ";
 
@@ -985,10 +986,10 @@ Precedence, weakest first: `.env` file → CI-derived → ambient environment �
 `-e KEY=VALUE` on the command line.
 
 Ciabatta snapshots the variables these files define (names and value *hashes* —
-never the values) into `.ciabatta/cache/`. When they change — someone pulls a
-branch that adds a required variable — the next run says so before it starts,
-rather than failing later with an error about something else. Try it: edit
-`packages/api/.env` and run `ciabatta build` again.
+never the values) into its cache under `~/.ciabatta/cache/`. When they change —
+someone pulls a branch that adds a required variable — the next run says so
+before it starts, rather than failing later with an error about something else.
+Try it: edit `packages/api/.env` and run `ciabatta build` again.
 
 ## Best practices this example is demonstrating
 

@@ -216,6 +216,20 @@ pub struct RunStep {
     /// the workflow, not the step.
     #[serde(skip)]
     pub required_env: Vec<String>,
+    /// Set by [`crate::workspace::graph::insert_prefetch`] on the `prefetch`
+    /// node it adds under `--prefetch`: the registry pull steps it fetches into
+    /// the pull cache before anything else runs, already resolved (`from:`
+    /// copied in). Empty on every other step.
+    ///
+    /// `#[serde(skip)]` like `background`: the node is made by ciabatta, never
+    /// written in a workflow file.
+    #[serde(skip)]
+    pub prefetch: Vec<RunStep>,
+    /// Set on a pull step whose download the `prefetch` node already made: it
+    /// copies what that node put in the pull cache rather than downloading it a
+    /// second time. See [`transfer::run`].
+    #[serde(skip)]
+    pub prefetched: bool,
     /// Set by the compiler from the workflow's `env` list: the variables this
     /// step's workflow says it uses. Their values come from the run's own
     /// environment — the terminal, then the `.env` search, which a profile
@@ -293,6 +307,13 @@ pub struct RunStep {
     /// `{CIABATTA_PATH}`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub strip_prefix: Option<String>,
+    /// For a `kind: pull` step: several things to fetch from the one
+    /// registry, each with its own `publish_path` and the `artifact` it lands
+    /// in — in place of the step's own `publish_path` and `artifact`. One node,
+    /// one login, and the downloads run side by side.
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub artifacts: Vec<PullArtifact>,
     /// For a `kind = "pull"` step: the push step it mirrors, as
     /// `<workflow>:<step>` or a bare `<step>` in the same workflow.
     ///
@@ -383,6 +404,21 @@ pub struct RunStep {
     pub release: Option<release::ReleaseSpec>,
 }
 
+/// One entry of a pull step's `artifacts:` list: what to fetch, and where it
+/// lands.
+#[derive(Debug, Deserialize, Serialize, Clone, Default, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PullArtifact {
+    /// What to fetch, exactly as a single pull's `publish_path`: a path in a
+    /// raw repository (a file, or a folder), or an npm/PyPI package spec.
+    /// `{VAR}` substitution works.
+    pub publish_path: String,
+    /// Where it lands, relative to the step's directory. Defaults to the
+    /// directory itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact: Option<String>,
+}
+
 /// One fix choice on a recovery node.
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
 pub struct FixOption {
@@ -432,6 +468,8 @@ pub struct Transfer<'a> {
     pub local_image: Option<&'a str>,
     pub publish_path: Option<&'a crate::config::PublishPath>,
     pub strip_prefix: Option<&'a str>,
+    /// A pull step's `artifacts:` list; empty for a single transfer.
+    pub artifacts: &'a [PullArtifact],
 }
 
 impl RunStep {
@@ -444,10 +482,17 @@ impl RunStep {
     /// recovery node that only presents options. A transfer step counts: its
     /// action is the built-in registry move.
     pub fn has_action(&self) -> bool {
-        self.script.is_some()
+        self.is_prefetch()
+            || self.script.is_some()
             || self.run.is_some()
             || self.direction().is_some()
             || self.release_direction().is_some()
+    }
+
+    /// Whether this is the `prefetch` node `--prefetch` puts at the front of a
+    /// graph. It moves nothing into the tree and is never cached.
+    pub fn is_prefetch(&self) -> bool {
+        !self.prefetch.is_empty()
     }
 
     /// Whether this is a `kind: release-push` or `kind: release-pull` step,
@@ -479,6 +524,7 @@ impl RunStep {
             local_image: self.local_image.as_deref(),
             publish_path: self.publish_path.as_ref(),
             strip_prefix: self.strip_prefix.as_deref(),
+            artifacts: &self.artifacts,
         })
     }
 
@@ -496,6 +542,11 @@ impl RunStep {
     pub fn inherit_transfer(&mut self, source: &RunStep) {
         if self.registry.is_none() {
             self.registry = source.registry.clone();
+        }
+        // A pull with an `artifacts:` list says what it fetches itself; from
+        // the push it takes only the registry.
+        if !self.artifacts.is_empty() {
+            return;
         }
         if self.artifact.is_none() {
             self.artifact = source.artifact.clone();
@@ -1267,6 +1318,46 @@ pub fn validate_flowchart(steps: &[RunStep], run_name: &str) -> Result<()> {
                 step.name,
                 run_name
             );
+        }
+
+        // `artifacts:` is a pull's list of things to fetch, and replaces the
+        // single `publish_path`/`artifact` rather than adding to them.
+        if !step.artifacts.is_empty() {
+            if step.direction() != Some(Direction::Pull) {
+                bail!(
+                    "Step '{}' in run '{}' has `artifacts:`, which is for `kind: pull`. A push \
+                     publishes several files with a list of globs in `publish_path`.",
+                    step.name,
+                    run_name
+                );
+            }
+            if step.publish_path.is_some() || step.artifact.is_some() || step.local_image.is_some()
+            {
+                bail!(
+                    "Step '{}' in run '{}' sets `artifacts:` and also `publish_path`/`artifact`. \
+                     Put each thing to fetch in the list, with its own `publish_path` and \
+                     `artifact`, and drop the single ones.",
+                    step.name,
+                    run_name
+                );
+            }
+            if let Some(entry) = step
+                .artifacts
+                .iter()
+                .find(|a| a.publish_path.trim().is_empty())
+            {
+                bail!(
+                    "Step '{}' in run '{}' has an `artifacts:` entry with an empty \
+                     `publish_path`{} — say what to fetch.",
+                    step.name,
+                    run_name,
+                    entry
+                        .artifact
+                        .as_deref()
+                        .map(|a| format!(" (landing in '{a}')"))
+                        .unwrap_or_default()
+                );
+            }
         }
 
         // A release push with nothing to publish can only fail at run time,
@@ -2099,5 +2190,77 @@ needs = ["b"]
                 .to_string()
                 .contains("cycle")
         );
+    }
+
+    fn list_pull(name: &str) -> RunStep {
+        RunStep {
+            name: name.into(),
+            kind: Some("pull".into()),
+            registry: Some("nexus".into()),
+            artifacts: vec![
+                PullArtifact {
+                    publish_path: "proto/{CIABATTA_COMMIT}/proto".into(),
+                    artifact: Some("vendor/proto".into()),
+                },
+                PullArtifact {
+                    publish_path: "@acme/sdk@1.2.3".into(),
+                    artifact: None,
+                },
+            ],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_pull_can_list_several_artifacts() {
+        validate_flowchart(&[list_pull("vendor")], "build").unwrap();
+
+        let yaml: RunStep = serde_yaml_ng::from_str(
+            "name: vendor\nkind: pull\nregistry: nexus\nartifacts:\n  \
+             - publish_path: proto/x\n    artifact: vendor/proto\n  - publish_path: '@acme/sdk'\n",
+        )
+        .unwrap();
+        assert_eq!(yaml.artifacts.len(), 2);
+        assert_eq!(yaml.artifacts[1].artifact, None);
+        assert_eq!(yaml.transfer().unwrap().artifacts.len(), 2);
+    }
+
+    #[test]
+    fn an_artifacts_list_is_refused_where_it_cant_mean_anything() {
+        let push = RunStep {
+            kind: Some("push".into()),
+            ..list_pull("publish")
+        };
+        let err = validate_flowchart(&[push], "build").unwrap_err();
+        assert!(format!("{err}").contains("for `kind: pull`"), "{err}");
+
+        let both = RunStep {
+            publish_path: Some(crate::config::PublishPath::Single("x".into())),
+            ..list_pull("vendor")
+        };
+        let err = validate_flowchart(&[both], "build").unwrap_err();
+        assert!(format!("{err}").contains("drop the single ones"), "{err}");
+    }
+
+    #[test]
+    fn a_pull_list_takes_only_the_registry_from_its_push() {
+        let push = RunStep {
+            name: "publish".into(),
+            kind: Some("push".into()),
+            registry: Some("nexus".into()),
+            artifact: Some("dist".into()),
+            publish_path: Some(crate::config::PublishPath::Single(
+                "app/{CIABATTA_COMMIT}".into(),
+            )),
+            ..Default::default()
+        };
+        let mut pull = RunStep {
+            registry: None,
+            ..list_pull("vendor")
+        };
+        pull.inherit_transfer(&push);
+        assert_eq!(pull.registry.as_deref(), Some("nexus"));
+        assert!(pull.publish_path.is_none() && pull.artifact.is_none());
+        validate_flowchart(&[pull], "build").unwrap();
     }
 }

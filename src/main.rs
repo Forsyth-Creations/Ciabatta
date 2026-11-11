@@ -464,6 +464,7 @@ async fn cmd_workflow(
         only: args.only.clone(),
         isolated: args.isolated,
         provided,
+        skip_env_check: false,
     };
     let (ws, mut graph) = workspace::graph::prepare_many(&cwd, &workflows, &selection).map_err(
         |err| match bare_name {
@@ -488,6 +489,13 @@ async fn cmd_workflow(
     let filters = run::filter::parse_all(&args.filter)?;
     let (steps, pruned) = run::filter::apply(&graph.steps, &filters)?;
     graph.steps = steps;
+
+    // `--prefetch` goes in after the filter, so it fetches only what the run
+    // that's left pulls, and before the drawing, so the graph shows the node.
+    let prefetch_cfg = load_config(&ws.root)?;
+    if !args.fetch_only && wants_prefetch(&args, &prefetch_cfg) {
+        workspace::graph::insert_prefetch(&mut graph, &prefetch_cfg)?;
+    }
 
     // The graph goes to stderr when a TUI is about to take the screen, so it
     // survives in the scrollback either way.
@@ -593,6 +601,11 @@ async fn cmd_workflow(
         &cfg.workspace.clone().unwrap_or_default(),
     );
 
+    if args.fetch_only {
+        println!("Fetching what '{name}' pulls, and nothing else:");
+        return run::engine::fetch_only(&resolved, &cfg, &ws.root, &vars).await;
+    }
+
     if viz == cli::Viz::Gui {
         // The daemon owns the run, so it compiles the graph itself from the
         // same declarations rather than being handed our copy.
@@ -619,6 +632,18 @@ async fn cmd_workflow(
         },
     )
     .await
+}
+
+/// Whether this run gets a `prefetch` node: `--prefetch`, or
+/// `workspace.prefetch: true` in the root config unless `--no-prefetch`.
+fn wants_prefetch(args: &cli::WorkflowArgs, cfg: &config::CiabattaConfig) -> bool {
+    args.prefetch
+        || (!args.no_prefetch
+            && cfg
+                .workspace
+                .as_ref()
+                .and_then(|w| w.prefetch)
+                .unwrap_or(false))
 }
 
 /// Print the summation of what the named runs depend on, before any of them
@@ -799,6 +824,7 @@ fn cmd_env_show(mut args: cli::EnvShowArgs, custom_args: &[String]) -> Result<()
                 only: args.only.clone(),
                 isolated: args.isolated,
                 provided,
+                skip_env_check: false,
             };
             let (ws, mut graph) = workspace::graph::prepare_many(&cwd, &workflows, &selection)?;
             let filters = run::filter::parse_all(&args.filter)?;
@@ -909,6 +935,9 @@ async fn cmd_workflow_gui(
             "force": args.force,
             "from_failed": args.from_failed,
             "start_anyway": args.start_anyway,
+            // Resolved here, flags over `workspace.prefetch`, so the daemon
+            // builds the same graph this terminal drew.
+            "prefetch": wants_prefetch(args, &load_config(root).unwrap_or_default()),
             // Sent as typed, not only as the variables they became: the daemon
             // keeps them with the run, so "run again" repeats them.
             "args": custom_args,
@@ -931,7 +960,7 @@ async fn cmd_workflow_gui(
     let id = run["id"]
         .as_u64()
         .context("The daemon returned no run id")?;
-    let url = format!("{}/run/{id}", session.daemon.base_url);
+    let url = format!("{}/run/{id}", session.daemon.web_url);
 
     println!(
         "Running workflow '{}' from {}",
@@ -992,16 +1021,19 @@ fn cmd_list(search: Option<&str>, verbose: bool, recipes_only: bool) -> Result<(
 async fn cmd_daemon(subcommand: DaemonCommand) -> Result<()> {
     match subcommand {
         DaemonCommand::Serve { port } => {
-            let port = daemon::resolve_port(port);
+            let ports = daemon::candidate_ports(port);
             init_daemon_logging()?;
-            daemon::app::serve(port).await
+            daemon::app::serve(&ports).await
         }
 
         DaemonCommand::Status => {
             match daemon::find_running().await {
                 Some(handle) => {
                     println!("ciabatta daemon is running");
-                    println!("  url:  {}", handle.base_url);
+                    println!("  url:  {}", handle.web_url);
+                    if let Some(note) = daemon::read_record().and_then(|r| r.port_note) {
+                        println!("  note: {note}");
+                    }
                     println!("  pid:  {}", handle.pid);
                     println!("  log:  {}", daemon::log_path()?.display());
                 }
@@ -1037,7 +1069,7 @@ async fn cmd_daemon(subcommand: DaemonCommand) -> Result<()> {
             let handle = daemon::ensure_running(port).await?;
             println!(
                 "ciabatta daemon restarted at {} (pid {}).",
-                handle.base_url, handle.pid
+                handle.web_url, handle.pid
             );
             Ok(())
         }
@@ -1259,7 +1291,7 @@ async fn cmd_todo(
     }
 
     let session = daemon::connect(port).await?;
-    let url = format!("{}/todo", session.daemon.base_url);
+    let url = format!("{}/todo", session.daemon.web_url);
     println!("Todo app: {url}");
     daemon::open_browser(&url);
     Ok(())
@@ -1393,7 +1425,7 @@ async fn cmd_watch(
 
     // Attaching follows a session the daemon already has, by id.
     if let Some(id) = attach {
-        let url = format!("{}/watch/{id}", session.daemon.base_url);
+        let url = format!("{}/watch/{id}", session.daemon.web_url);
         println!("Attaching to watch session {id}.");
         println!("Live view: {url}");
         println!(
@@ -1439,7 +1471,7 @@ async fn cmd_watch(
     let id = created["id"]
         .as_u64()
         .context("The daemon returned no session id")?;
-    let url = format!("{}/watch/{id}", session.daemon.base_url);
+    let url = format!("{}/watch/{id}", session.daemon.web_url);
 
     println!("Watching: {command}");
     println!("Live view: {url}");
@@ -1703,7 +1735,7 @@ async fn tail_watch_session(
         tokio::select! {
             _ = tokio::signal::ctrl_c() => {
                 println!();
-                println!("Detached. Session {id} is still running at {}/watch/{id}", session.daemon.base_url);
+                println!("Detached. Session {id} is still running at {}/watch/{id}", session.daemon.web_url);
                 return Ok(());
             }
             _ = tokio::time::sleep(std::time::Duration::from_millis(300)) => {}
@@ -1747,7 +1779,7 @@ async fn tail_watch_session(
             println!();
             println!(
                 "Command finished. Output stays available at {}/watch/{id}",
-                session.daemon.base_url
+                session.daemon.web_url
             );
             return Ok(());
         }
@@ -2496,6 +2528,12 @@ async fn run_plain(
                 step,
                 line,
             } => {
+                // A pull served only from the cache is the one line of a step's
+                // output ciabatta wrote itself and nobody should miss.
+                let line = match line.starts_with(cache::pulls::STALE_WARNING) {
+                    true => line.style(color::warn()).to_string(),
+                    false => line,
+                };
                 println!(
                     "{}   {} {line}",
                     tag(&workflow),
@@ -3830,7 +3868,35 @@ fn cmd_cache(subcommand: CacheCommand) -> Result<()> {
             cache::cli::print_status(&store)
         }
 
-        CacheCommand::Clean { yes } => {
+        CacheCommand::Clean { yes, pulls: true } => {
+            let (count, bytes) = cache::pulls::stats()?;
+            if count == 0 {
+                println!("The pull cache is already empty.");
+                return Ok(());
+            }
+            if !yes {
+                print!(
+                    "Delete {count} pulled artifact(s) ({}) from {}? Every project on this \
+                     machine shares them, and a pull off the network has nothing to fall back \
+                     on until it's fetched again. [y/N]: ",
+                    cache::store::human_size(bytes),
+                    cache::pulls::dir()?.display()
+                );
+                use std::io::Write;
+                std::io::stdout().flush()?;
+                let mut answer = String::new();
+                std::io::stdin().read_line(&mut answer)?;
+                if !matches!(answer.trim().to_lowercase().as_str(), "y" | "yes") {
+                    println!("Left it alone.");
+                    return Ok(());
+                }
+            }
+            let removed = cache::pulls::clear()?;
+            println!("Removed {removed} pulled artifact(s).");
+            Ok(())
+        }
+
+        CacheCommand::Clean { yes, pulls: false } => {
             let store = cache::graph::store_for(&root)?;
             let stats = store.stats()?;
             if stats.entries == 0 {

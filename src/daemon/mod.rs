@@ -31,9 +31,26 @@ use serde::{Deserialize, Serialize};
 /// Environment variable overriding the port the daemon listens on.
 pub const PORT_ENV: &str = "CIABATTA_DAEMON_PORT";
 
-/// The default daemon port. Deliberately one number, replacing the six ports
-/// the individual servers used to claim (7878 / 8080 / 8088 / 8090 / 8091 / 8095).
+/// The port the daemon falls back to when it can't have [`PREFERRED_PORT`].
+/// Deliberately one number, replacing the six ports the individual servers used
+/// to claim (7878 / 8080 / 8088 / 8090 / 8091 / 8095).
 pub const DEFAULT_PORT: u16 = 8099;
+
+/// The port the daemon tries first, so the web app is plain
+/// `http://oven.localhost` with no port to remember. Linux keeps ports below
+/// 1024 for root, so there it usually takes a one-time `setcap` (which the CLI
+/// prints when it falls back); macOS and Windows allow it as is, unless
+/// something else already has it.
+pub const PREFERRED_PORT: u16 = 80;
+
+/// The name the web app is opened under. Every `*.localhost` name resolves to
+/// this machine's loopback without a hosts-file entry — browsers and curl do it
+/// themselves, on every OS — so nothing needs root to set it up.
+pub const WEB_HOST: &str = "oven.localhost";
+
+/// Environment variable overriding [`WEB_HOST`] in the URLs ciabatta prints
+/// and opens (`127.0.0.1`, for a browser that doesn't resolve `*.localhost`).
+pub const WEB_HOST_ENV: &str = "CIABATTA_WEB_HOST";
 
 /// How long to wait for a health probe before deciding nothing is there.
 const PROBE_TIMEOUT: Duration = Duration::from_millis(400);
@@ -52,6 +69,11 @@ pub struct DaemonRecord {
     /// Bearer token required by mutating API routes. See [`auth`].
     pub token: String,
     pub started_at: String,
+    /// Why the daemon isn't on [`PREFERRED_PORT`] and how to get it there,
+    /// when it chose its port itself and had to fall back. Printed by the
+    /// command that started it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port_note: Option<String>,
 }
 
 /// A reachable daemon: everything a CLI command needs to talk to it.
@@ -60,6 +82,10 @@ pub struct DaemonHandle {
     /// e.g. `http://127.0.0.1:8099` — the port is part of this, so it isn't
     /// carried separately.
     pub base_url: String,
+    /// Where a person opens the web app: `http://oven.localhost`, with the port
+    /// when it isn't 80. Every URL ciabatta prints or opens uses this; the API
+    /// calls use [`Self::base_url`].
+    pub web_url: String,
     pub token: String,
     pub pid: u32,
 }
@@ -89,15 +115,71 @@ impl DaemonHandle {
     }
 }
 
-/// The port the daemon should use: `--port` if given, else [`PORT_ENV`], else
-/// [`DEFAULT_PORT`].
-pub fn resolve_port(flag: Option<u16>) -> u16 {
-    if let Some(p) = flag {
-        return p;
+/// The port someone asked for: `--port` if given, else [`PORT_ENV`]. `None`
+/// leaves the daemon to choose: see [`candidate_ports`].
+pub fn requested_port(flag: Option<u16>) -> Option<u16> {
+    flag.or_else(|| std::env::var(PORT_ENV).ok()?.trim().parse().ok())
+}
+
+/// The ports a daemon tries, in order: only the one asked for, or
+/// [`PREFERRED_PORT`] then [`DEFAULT_PORT`].
+pub fn candidate_ports(flag: Option<u16>) -> Vec<u16> {
+    match requested_port(flag) {
+        Some(port) => vec![port],
+        None => vec![PREFERRED_PORT, DEFAULT_PORT],
     }
-    match std::env::var(PORT_ENV) {
-        Ok(v) => v.trim().parse().unwrap_or(DEFAULT_PORT),
-        Err(_) => DEFAULT_PORT,
+}
+
+/// The web app's address on `port`: `http://oven.localhost`, with `:port`
+/// unless it's 80.
+///
+/// A daemon bound to one specific non-loopback address can't be reached
+/// through `*.localhost`, which is always loopback, so that address is used
+/// instead.
+pub fn web_url(port: u16) -> String {
+    let host = match std::env::var(WEB_HOST_ENV)
+        .ok()
+        .filter(|h| !h.trim().is_empty())
+    {
+        Some(host) => host.trim().to_string(),
+        None => {
+            let probe = probe_host();
+            match probe.as_str() {
+                "127.0.0.1" | "localhost" | "::1" => WEB_HOST.to_string(),
+                _ => probe,
+            }
+        }
+    };
+    match port {
+        80 => format!("http://{host}"),
+        _ => format!("http://{host}:{port}"),
+    }
+}
+
+/// What to say when a daemon that chose its own port couldn't have
+/// [`PREFERRED_PORT`], given why.
+pub fn port_note(error: &std::io::Error) -> String {
+    let exe = std::env::current_exe()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| "$(which ciabatta)".to_string());
+    match error.kind() {
+        ErrorKind::PermissionDenied if cfg!(target_os = "linux") => format!(
+            "Port {PREFERRED_PORT} needs permission on Linux, so the web app is on \
+             {DEFAULT_PORT}. For plain http://{WEB_HOST}, allow it once (again after each \
+             ciabatta upgrade):\n    sudo setcap cap_net_bind_service=+ep {exe}\n\
+             then `ciabatta daemon restart`."
+        ),
+        ErrorKind::PermissionDenied if cfg!(windows) => format!(
+            "Windows refused port {PREFERRED_PORT} (another program has reserved it — \
+             `netsh http show servicestate` lists who), so the web app is on {DEFAULT_PORT}."
+        ),
+        ErrorKind::AddrInUse => format!(
+            "Something else is using port {PREFERRED_PORT}, so the web app is on \
+             {DEFAULT_PORT}. Free it for plain http://{WEB_HOST}, then `ciabatta daemon restart`."
+        ),
+        _ => format!(
+            "Couldn't use port {PREFERRED_PORT} ({error}), so the web app is on {DEFAULT_PORT}."
+        ),
     }
 }
 
@@ -212,7 +294,7 @@ fn probe_host() -> String {
 ///
 /// This is the single entry point every web-facing command calls.
 pub async fn ensure_running(port: Option<u16>) -> Result<DaemonHandle> {
-    let port = resolve_port(port);
+    let port = requested_port(port);
     let current_version = env!("CARGO_PKG_VERSION");
 
     // A record plus a healthy, version-matched daemon means we're already done.
@@ -238,7 +320,13 @@ pub async fn ensure_running(port: Option<u16>) -> Result<DaemonHandle> {
     // Nothing healthy on the recorded port. Something may still be listening on
     // the port we're about to use, so say so clearly rather than looping.
     spawn_detached(port)?;
-    wait_for_startup(port, current_version).await
+    let handle = wait_for_startup(current_version).await?;
+    // Said by the command that started the daemon, since the daemon itself has
+    // only a log file to say it in.
+    if let Some(note) = read_record().and_then(|r| r.port_note) {
+        eprintln!("note: {note}");
+    }
+    Ok(handle)
 }
 
 /// What a CLI command needs to hand the user off to the web app: a running
@@ -254,7 +342,7 @@ impl Session {
     pub fn page_url(&self, path: &str) -> String {
         format!(
             "{}/{}?project={}",
-            self.daemon.base_url.trim_end_matches('/'),
+            self.daemon.web_url.trim_end_matches('/'),
             path.trim_start_matches('/'),
             self.project.id
         )
@@ -327,6 +415,7 @@ pub async fn find_running() -> Option<DaemonHandle> {
 fn handle_from(record: &DaemonRecord, pid: u32) -> DaemonHandle {
     DaemonHandle {
         base_url: format!("http://{}:{}", probe_host(), record.port),
+        web_url: web_url(record.port),
         token: record.token.clone(),
         pid,
     }
@@ -362,22 +451,21 @@ async fn wait_for_exit(port: u16) {
     }
 }
 
-/// Poll until a daemon of the expected version answers on `port`.
-async fn wait_for_startup(port: u16, expected_version: &str) -> Result<DaemonHandle> {
+/// Poll until a daemon of the expected version answers on the port its record
+/// names. The record is what says which port: a daemon left to choose tries
+/// [`PREFERRED_PORT`] first and may end up on [`DEFAULT_PORT`].
+async fn wait_for_startup(expected_version: &str) -> Result<DaemonHandle> {
     let deadline = std::time::Instant::now() + STARTUP_TIMEOUT;
     loop {
-        if let Some(health) = probe(port).await
+        if let Some(record) = read_record()
+            && let Some(health) = probe(record.port).await
             && health.version == expected_version
         {
-            let record = read_record().context(
-                "The daemon started but didn't write ~/.ciabatta/daemon.json. \
-                 Check `ciabatta daemon logs`.",
-            )?;
             return Ok(handle_from(&record, health.pid));
         }
         if std::time::Instant::now() >= deadline {
             anyhow::bail!(
-                "The ciabatta daemon didn't come up on port {port} within {}s.\n\
+                "The ciabatta daemon didn't come up within {}s.\n\
                  Check the log with `ciabatta daemon logs`, or start it in the \
                  foreground with `ciabatta daemon serve` to see the error.",
                 STARTUP_TIMEOUT.as_secs()
@@ -397,7 +485,7 @@ async fn wait_for_startup(port: u16, expected_version: &str) -> Result<DaemonHan
 /// failed allocation and a stack overflow all print to stderr and then kill the
 /// process, and discarding them is exactly why a daemon that dies mid-run looks
 /// like it vanished for no reason.
-fn spawn_detached(port: u16) -> Result<()> {
+fn spawn_detached(port: Option<u16>) -> Result<()> {
     use std::process::{Command, Stdio};
 
     let exe = std::env::current_exe().context("Failed to locate the ciabatta executable")?;
@@ -416,11 +504,13 @@ fn spawn_detached(port: u16) -> Result<()> {
         .map(Stdio::from)
         .unwrap_or_else(Stdio::null);
 
-    Command::new(exe)
-        .arg("daemon")
-        .arg("serve")
-        .arg("--port")
-        .arg(port.to_string())
+    let mut command = Command::new(exe);
+    command.arg("daemon").arg("serve");
+    // Only a port someone asked for is passed on; otherwise the daemon picks.
+    if let Some(port) = port {
+        command.arg("--port").arg(port.to_string());
+    }
+    command
         // Started from inside a step, it would otherwise carry that run's slot
         // for life and treat every run it is asked for as nested in it.
         .env_remove(crate::run::slots::SLOT_VAR)
@@ -437,17 +527,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn resolve_port_prefers_the_flag() {
-        assert_eq!(resolve_port(Some(1234)), 1234);
+    fn a_requested_port_is_the_only_one_tried() {
+        assert_eq!(candidate_ports(Some(1234)), vec![1234]);
     }
 
     #[test]
-    fn resolve_port_falls_back_to_the_default() {
+    fn left_to_choose_it_tries_80_then_the_default() {
         // The env var is not set in the test environment, so this exercises the
-        // final fallback rather than the env branch (which would race with
-        // other tests if we mutated the process environment here).
+        // daemon choosing for itself (mutating the process environment here
+        // would race with other tests).
         if std::env::var(PORT_ENV).is_err() {
-            assert_eq!(resolve_port(None), DEFAULT_PORT);
+            assert_eq!(candidate_ports(None), vec![PREFERRED_PORT, DEFAULT_PORT]);
+        }
+    }
+
+    #[test]
+    fn the_web_url_is_oven_localhost_and_drops_port_80() {
+        if std::env::var(WEB_HOST_ENV).is_err() && probe_host() == "127.0.0.1" {
+            assert_eq!(web_url(80), "http://oven.localhost");
+            assert_eq!(web_url(8099), "http://oven.localhost:8099");
         }
     }
 
@@ -455,6 +553,7 @@ mod tests {
     fn handle_builds_urls_without_doubling_slashes() {
         let handle = DaemonHandle {
             base_url: "http://127.0.0.1:8099/".to_string(),
+            web_url: "http://oven.localhost:8099".to_string(),
             token: "t".to_string(),
             pid: 1,
         };

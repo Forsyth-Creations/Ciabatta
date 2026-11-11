@@ -247,6 +247,8 @@ async fn graph(
             .map(str::to_string)
             .collect(),
         isolated: query.isolated,
+        // A drawing, not a run: variables this daemon can't see don't stop it.
+        skip_env_check: true,
         ..Default::default()
     };
 
@@ -383,6 +385,7 @@ fn step_json(step: &crate::run::RunStep) -> Value {
         "registry": step.registry,
         "artifact": step.artifact,
         "publish_path": step.publish_path,
+        "artifacts": step.artifacts,
         "push": step.is_push(),
         "needs": step.needs,
         "requires": step.requires,

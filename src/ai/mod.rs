@@ -877,7 +877,10 @@ pub async fn run_serve(root: &Path, config: &CiabattaConfig, port: u16, mode: Mo
     let base = &session.daemon.base_url;
     let project = &session.project.id;
 
-    println!("\nThe ciabatta daemon serves the assistant at {base}");
+    println!(
+        "\nThe ciabatta daemon serves the assistant at {}",
+        session.daemon.web_url
+    );
     println!("  {}", session.page_url("/ai"));
     println!("      live architecture mind map");
     println!("  POST {base}/api/ai/ask       {{\"project\": \"{project}\", \"prompt\": \"...\"}}");

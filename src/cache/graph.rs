@@ -159,7 +159,10 @@ fn plan_graph_now(
     for step in steps {
         // A recovery node isn't part of the success graph and has no build to
         // cache — it exists to be jumped to when something else fails.
-        if step.recover {
+        // Nor does the prefetch node: it fills the pull cache, writes nothing
+        // to the tree, and counting it as unaccounted would rebuild everything
+        // behind it.
+        if step.recover || step.is_prefetch() {
             continue;
         }
 

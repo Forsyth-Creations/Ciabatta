@@ -6,7 +6,6 @@ services:
         # Match these to your host user so mounted files keep your ownership.
         USER_UID: "1000"
         USER_GID: "1000"
-    image: rust-claude
     # Keep STDIN open + allocate a TTY so you can `docker compose exec dev claude`.
     stdin_open: true
     tty: true
@@ -15,7 +14,9 @@ services:
       - .:/workspace
       # Persist Claude auth/config and the cargo cache across containers.
       - claude-config:/home/dev/.claude
-      - cargo-cache:/home/dev/.cargo/registry
+      # The rust image's CARGO_HOME is /usr/local/cargo, so that's where the
+      # registry is — not ~/.cargo, which cargo never reads in this image.
+      - cargo-cache:/usr/local/cargo/registry
     command: sleep infinity
   nexus:
     image: sonatype/nexus3:latest

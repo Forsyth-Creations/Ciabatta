@@ -206,7 +206,7 @@ impl RunWatch {
             // success isn't: the status bar already said so on its way out.
             if status == "failed" {
                 let link = crate::daemon::read_record()
-                    .map(|d| format!(" — http://127.0.0.1:{}/run/{id}", d.port))
+                    .map(|d| format!(" — {}/run/{id}", crate::daemon::web_url(d.port)))
                     .unwrap_or_default();
                 rpc::notify(
                     output,

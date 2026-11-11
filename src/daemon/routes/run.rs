@@ -360,6 +360,11 @@ pub struct CreatePayload {
     /// run so its page can say so, and cleared by a plain "run again".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     resumed_from: Option<String>,
+    /// `--prefetch`: put a `prefetch` node at the front of the graph. Kept
+    /// with the run, so "run again" builds the same graph. Unset — a run the
+    /// browser started — follows `workspace.prefetch` in the root config.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    prefetch: Option<bool>,
     /// `--start-anyway`: don't wait for a run slot. Not kept with the run, so
     /// "run again" waits its turn like any other.
     #[serde(default, skip_serializing)]
@@ -569,6 +574,7 @@ async fn start(
             only: payload.only.clone(),
             isolated: payload.isolated,
             provided: provided(&payload)?,
+            skip_env_check: false,
         };
         let (workspace, mut graph) =
             crate::workspace::graph::prepare_many(&project_root, &workflows, &selection)
@@ -582,6 +588,19 @@ async fn start(
         let (steps, _) =
             crate::run::filter::apply(&graph.steps, &filters).map_err(RouteError::bad_request)?;
         graph.steps = steps;
+
+        let config = crate::config::load_config(&workspace.root).unwrap_or_default();
+        let prefetch = payload.prefetch.unwrap_or_else(|| {
+            config
+                .workspace
+                .as_ref()
+                .and_then(|w| w.prefetch)
+                .unwrap_or(false)
+        });
+        if prefetch {
+            crate::workspace::graph::insert_prefetch(&mut graph, &config)
+                .map_err(RouteError::bad_request)?;
+        }
 
         let name = graph.label();
         let resolved = crate::workspace::graph::into_run(graph).map_err(RouteError::bad_request)?;
@@ -988,6 +1007,7 @@ async fn preflight(
         only: payload.only.clone(),
         isolated: payload.isolated,
         provided: provided(&payload)?,
+        skip_env_check: false,
     };
     let (workspace, graph) =
         crate::workspace::graph::prepare_many(&project_root, &workflows, &selection)

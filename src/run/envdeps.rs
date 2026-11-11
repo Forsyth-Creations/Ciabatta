@@ -749,8 +749,14 @@ pub fn implied_refs(
         ),
         None => {}
     }
+    for entry in transfer.artifacts {
+        for key in placeholder_refs(&entry.publish_path) {
+            add(key, format!("substituted into the {direction} path"), false);
+        }
+    }
     for text in [transfer.artifact, transfer.local_image]
         .into_iter()
+        .chain(transfer.artifacts.iter().map(|a| a.artifact.as_deref()))
         .flatten()
     {
         for key in placeholder_refs(text) {

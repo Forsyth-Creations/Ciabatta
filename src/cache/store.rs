@@ -1,6 +1,11 @@
 //! The local cache store: where built outputs are kept, and how they come back.
 //!
-//! Layout under `.ciabatta/cache/`:
+//! The store lives outside the project, under [`global_root`] —
+//! `~/.ciabatta/cache/projects/<name>-<hash>/` — so a `git clean -xdf` that
+//! wipes the working tree doesn't take every build with it. Each checkout gets
+//! a directory of its own, named after where it is on disk.
+//!
+//! Layout within a project's directory:
 //!
 //! ```text
 //! entries/<key>.json          the manifest: inputs, outputs, when, by whom
@@ -30,8 +35,14 @@ use serde::{Deserialize, Serialize};
 use super::FileHash;
 use crate::config::CIABATTA_DIR;
 
-/// Directory under `.ciabatta/` holding everything in this module.
-const CACHE_DIR: &str = "cache";
+/// Where the store used to live, under `.ciabatta/`: moved out of the tree on
+/// first use (see [`Store::for_project`]).
+const LEGACY_CACHE_DIR: &str = "cache";
+/// Overrides [`global_root`] — for CI runners that keep a cache volume, or a
+/// machine whose home directory is small.
+pub const CACHE_DIR_ENV: &str = "CIABATTA_CACHE_DIR";
+/// Under [`global_root`]: one directory per checkout.
+const PROJECTS_DIR: &str = "projects";
 /// Where manifests live.
 const ENTRIES_DIR: &str = "entries";
 /// Where the output files live.
@@ -149,10 +160,64 @@ pub struct Store {
     root: PathBuf,
 }
 
+/// The machine-wide cache directory: `$CIABATTA_CACHE_DIR`, or
+/// `~/.ciabatta/cache`.
+///
+/// Tests get a directory under the system temp dir instead, so `cargo test`
+/// never writes into the real one.
+pub fn global_root() -> Result<PathBuf> {
+    if let Some(dir) = std::env::var_os(CACHE_DIR_ENV).filter(|d| !d.is_empty()) {
+        return Ok(PathBuf::from(dir));
+    }
+    if cfg!(test) {
+        return Ok(std::env::temp_dir().join("ciabatta-test-cache"));
+    }
+    let home = crate::daemon::home_dir()
+        .context("Could not determine your home directory (HOME is unset)")?;
+    Ok(home.join(CIABATTA_DIR).join("cache"))
+}
+
+/// The directory a project's cache state lives in, outside its tree:
+/// `<global root>/projects/<name>-<hash of its path>`.
+///
+/// Keyed on the canonical path, so two checkouts of the same repository keep
+/// separate stores — their `cache stats` and retention stay their own — and
+/// the name is there so a person looking in the directory can tell which is
+/// which.
+pub fn project_dir(project_root: &Path) -> Result<PathBuf> {
+    let canonical = project_root
+        .canonicalize()
+        .unwrap_or_else(|_| project_root.to_path_buf());
+    let digest = super::hash_bytes(canonical.to_string_lossy().as_bytes());
+    let name: String = canonical
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "root".to_string())
+        .chars()
+        .map(
+            |c| match c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                true => c,
+                false => '_',
+            },
+        )
+        .collect();
+    Ok(global_root()?
+        .join(PROJECTS_DIR)
+        .join(format!("{name}-{}", &digest[..12])))
+}
+
 impl Store {
-    /// The store for a project, at `<project>/.ciabatta/cache/`.
+    /// The store for a project, in its [`project_dir`].
+    ///
+    /// A store left at the old in-tree spot, `<project>/.ciabatta/cache/`, is
+    /// moved there the first time, so upgrading doesn't cost a cold cache.
     pub fn for_project(project_root: &Path) -> Result<Self> {
-        Self::at(project_root.join(CIABATTA_DIR).join(CACHE_DIR))
+        let dir = project_dir(project_root)?;
+        adopt_legacy(
+            &project_root.join(CIABATTA_DIR).join(LEGACY_CACHE_DIR),
+            &dir,
+        );
+        Self::at(dir)
     }
 
     /// A store rooted anywhere — the remote cache server's own backing storage
@@ -783,9 +848,54 @@ pub fn human_size(bytes: u64) -> String {
     }
 }
 
+/// Move an in-tree store from before 0.9.1 to `dir`, when `dir` doesn't exist
+/// yet. Best-effort: a store that can't be moved (another filesystem, say) is
+/// left where it is and the new one starts cold, which is only slower.
+fn adopt_legacy(legacy: &Path, dir: &Path) {
+    if dir.exists() || !legacy.join(ENTRIES_DIR).is_dir() {
+        return;
+    }
+    if let Some(parent) = dir.parent()
+        && std::fs::create_dir_all(parent).is_err()
+    {
+        return;
+    }
+    match std::fs::rename(legacy, dir) {
+        Ok(()) => {
+            tracing::info!(from = %legacy.display(), to = %dir.display(), "moved the cache store out of the tree")
+        }
+        Err(e) => {
+            tracing::debug!(error = %e, from = %legacy.display(), "left the old cache store in place")
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_project_store_lives_outside_the_tree_and_adopts_the_old_one() {
+        let project = std::env::temp_dir().join(format!("ciab_legacy_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&project);
+        let legacy = project.join(CIABATTA_DIR).join(LEGACY_CACHE_DIR);
+        std::fs::create_dir_all(legacy.join(ENTRIES_DIR)).unwrap();
+        std::fs::write(legacy.join(ENTRIES_DIR).join("k.json"), "{}").unwrap();
+        let dir = project_dir(&project).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let store = Store::for_project(&project).unwrap();
+        assert_eq!(store.root(), dir);
+        assert!(!dir.starts_with(&project), "out of the checkout");
+        assert!(
+            dir.join(ENTRIES_DIR).join("k.json").is_file(),
+            "the old store came along"
+        );
+        assert!(!legacy.exists());
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&project);
+    }
 
     fn scratch(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("ciab_store_{name}_{}", std::process::id()));

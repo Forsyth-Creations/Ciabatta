@@ -44,7 +44,7 @@ pub enum Commands {
         #[arg(long)]
         quiet: bool,
 
-        /// Port the ciabatta daemon listens on (default 8099, or
+        /// Port the ciabatta daemon listens on (default 80, falling back to 8099; or
         /// CIABATTA_DAEMON_PORT).
         #[arg(short = 'p', long)]
         port: Option<u16>,
@@ -243,7 +243,7 @@ pub enum Commands {
         #[arg(long)]
         no_register: bool,
 
-        /// Port the ciabatta daemon listens on (default 8099, or
+        /// Port the ciabatta daemon listens on (default 80, falling back to 8099; or
         /// CIABATTA_DAEMON_PORT).
         #[arg(short = 'p', long)]
         port: Option<u16>,
@@ -260,7 +260,7 @@ pub enum Commands {
         #[arg(short = 'o', long)]
         output: Option<std::path::PathBuf>,
 
-        /// Port the ciabatta daemon listens on (default 8099, or
+        /// Port the ciabatta daemon listens on (default 80, falling back to 8099; or
         /// CIABATTA_DAEMON_PORT).
         #[arg(short = 'p', long)]
         port: Option<u16>,
@@ -310,7 +310,7 @@ pub enum Commands {
         #[arg(short = 'd', long, hide = true)]
         detach: bool,
 
-        /// Port the ciabatta daemon listens on (default 8099, or
+        /// Port the ciabatta daemon listens on (default 80, falling back to 8099; or
         /// CIABATTA_DAEMON_PORT).
         #[arg(short = 'p', long)]
         port: Option<u16>,
@@ -363,7 +363,7 @@ pub enum Commands {
         #[arg(long, default_value_t = 200_000)]
         max_lines: usize,
 
-        /// Port the ciabatta daemon listens on (default 8099, or
+        /// Port the ciabatta daemon listens on (default 80, falling back to 8099; or
         /// CIABATTA_DAEMON_PORT).
         #[arg(short = 'p', long)]
         port: Option<u16>,
@@ -644,6 +644,12 @@ pub enum CacheCommand {
         /// Skip the confirmation prompt.
         #[arg(long, short)]
         yes: bool,
+
+        /// Clear the pull cache instead (~/.ciabatta/cache/pulls/): the last
+        /// copy of everything a registry pull fetched, shared by every project
+        /// on this machine. This project's build entries are left alone.
+        #[arg(long)]
+        pulls: bool,
     },
 
     /// Apply a retention policy to the local cache.
@@ -1049,6 +1055,29 @@ pub struct WorkflowArgs {
     #[arg(long)]
     pub force: bool,
 
+    /// Run only the graph's registry pulls (Nexus, Artifactory, S3, generic
+    /// endpoints): download what they fetch into this machine's pull cache and
+    /// run nothing else — no build steps, no pushes, working tree untouched. A
+    /// pull that later can't reach its registry (off the VPN, on a plane) is
+    /// served from that copy, with a warning that it's using only the cache.
+    #[arg(
+        long = "fetch-only",
+        conflicts_with_all = ["dry_run", "graph", "from_failed", "prefetch"]
+    )]
+    pub fetch_only: bool,
+
+    /// Put a `prefetch` node at the front of the graph that downloads
+    /// everything its registry pulls fetch, before any other step starts. The
+    /// pull steps then copy from what it fetched. `workspace.prefetch: true`
+    /// in the root config makes this the default.
+    #[arg(long, conflicts_with = "no_prefetch")]
+    pub prefetch: bool,
+
+    /// Don't add the `prefetch` node, even though `workspace.prefetch: true`
+    /// asks for it.
+    #[arg(long = "no-prefetch")]
+    pub no_prefetch: bool,
+
     /// Carry on from where the last run of this workflow failed: the steps that
     /// passed are not run again, and the failed step and everything behind it
     /// are. The graph is compiled fresh, so a step whose command has changed
@@ -1345,7 +1374,8 @@ pub enum DaemonCommand {
     /// start invokes; run it yourself to watch the log live or debug a daemon
     /// that won't come up.
     Serve {
-        /// Port to listen on. Defaults to CIABATTA_DAEMON_PORT, then 8099.
+        /// Port to listen on. Defaults to CIABATTA_DAEMON_PORT; unset, 80 is tried
+        /// first, then 8099.
         #[arg(short = 'p', long)]
         port: Option<u16>,
     },

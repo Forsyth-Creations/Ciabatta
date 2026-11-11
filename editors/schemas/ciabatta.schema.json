@@ -92,6 +92,11 @@
           "default": 1,
           "examples": [2, 0]
         },
+        "prefetch": {
+          "type": "boolean",
+          "description": "Run every workflow as though --prefetch were passed: a `prefetch` node at the front of the graph fetches everything the run's registry pulls (Nexus, Artifactory, S3, generic) into the pull cache before any other step starts. Read from the monorepo root. --no-prefetch turns it off for one run.",
+          "default": false
+        },
         "env_file": {
           "$ref": "./common.schema.json#/$defs/stringOrList",
           "description": ".env file path(s) relative to this sub-workspace, sourced before any of its workflows run. Unset means `.env`; setting it REPLACES that default rather than adding to it."

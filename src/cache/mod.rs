@@ -40,6 +40,7 @@ pub mod cargo;
 pub mod cli;
 pub mod diff;
 pub mod graph;
+pub mod pulls;
 pub mod scope;
 pub mod store;
 

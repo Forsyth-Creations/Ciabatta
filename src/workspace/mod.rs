@@ -113,6 +113,12 @@ pub struct WorkspaceMeta {
     /// time; `0` is no limit. See [`crate::run::slots`].
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_concurrent_runs: Option<usize>,
+    /// Run every workflow as though `--prefetch` were passed: a `prefetch`
+    /// node at the front of the graph downloads everything the run's registry
+    /// pulls fetch into the pull cache before any other step starts. Read from
+    /// the monorepo root. `--no-prefetch` turns it off for one run.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prefetch: Option<bool>,
     /// `.env` file path(s), relative to this sub-workspace, sourced before any
     /// of its workflows run.
     ///

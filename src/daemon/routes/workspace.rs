@@ -247,6 +247,8 @@ async fn graph(
             .map(str::to_string)
             .collect(),
         isolated: query.isolated,
+        // A drawing, not a run: variables this daemon can't see don't stop it.
+        skip_env_check: true,
         ..Default::default()
     };
 

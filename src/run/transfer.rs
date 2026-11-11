@@ -532,6 +532,34 @@ pub async fn run(
         return Ok(());
     }
 
+    // The `prefetch` node at the front of this run already downloaded these
+    // into the pull cache: copy them from there rather than fetching twice. A
+    // copy that isn't there (the node was carried over by --from-failed, or
+    // the cache was cleared under it) falls back to an ordinary pull.
+    if step.prefetched
+        && transfer.direction == Direction::Pull
+        && crate::cache::pulls::cacheable(registry_name, prepared.registry_config)
+    {
+        let cached: Option<Vec<_>> = opts
+            .iter()
+            .map(|o| crate::cache::pulls::lookup(o.registry_name, o.registry_config, o.remote_path))
+            .collect();
+        if let Some(cached) = cached {
+            let total = opts.len();
+            for (i, (o, c)) in opts.iter().zip(&cached).enumerate() {
+                crate::cache::pulls::restore(c, o)?;
+                sink.push(format!(
+                    "{} → {} (from the pull cache, fetched {})",
+                    c.meta.url,
+                    o.local_path.display(),
+                    c.meta.fetched_at
+                ));
+                progress(i + 1, total);
+            }
+            return Ok(());
+        }
+    }
+
     // Authentication is per-registry, so the first transfer's options speak for
     // all of them. A pull whose login fails — the registry is off the network —
     // can still be served from the pull cache, so that's not the end of it.
@@ -606,9 +634,16 @@ async fn one(
     (i, res, sublog)
 }
 
-/// `--pre-fetch` for one pull step: fetch everything it would pull into the
-/// pull cache, without touching the working tree. Returns how many artifacts
-/// were cached; a pull whose registry isn't cached (an image) is skipped.
+/// `--fetch-only`, and the `prefetch` node, for one pull step: fetch
+/// everything it would pull into the pull cache, without touching the working
+/// tree. Returns how many artifacts were fetched; a pull whose registry isn't
+/// cached (an image) is skipped.
+///
+/// With `keep_stale` (the `prefetch` node), an artifact that can't be fetched
+/// but is already in the cache is left at that copy with a warning, so a run
+/// off the network still gets going; only one with nothing cached fails.
+/// `--fetch-only` exists to refresh the cache, so it fails either way.
+#[allow(clippy::too_many_arguments)]
 pub async fn prefetch(
     step: &RunStep,
     transfer: &Transfer<'_>,
@@ -616,31 +651,56 @@ pub async fn prefetch(
     root: &Path,
     cwd: &Path,
     env_vars: &HashMap<String, String>,
+    keep_stale: bool,
     sink: &mut crate::registry::LogSink<'_>,
 ) -> Result<usize> {
     let prepared = prepare(step, transfer, config, cwd, env_vars, sink).await?;
     if !crate::cache::pulls::cacheable(prepared.registry_name, prepared.registry_config) {
         sink.push(format!(
             "'{}' is an image registry; the container engine keeps its own copy, so there's \
-             nothing to pre-fetch",
+             nothing to fetch",
             prepared.registry_name
         ));
         return Ok(0);
     }
     let opts = prepared.opts(false);
-    if let Some(first) = opts.first() {
-        login(&prepared, first, root, sink).await?;
-    }
-    for o in &opts {
-        let mut lines = Vec::new();
-        let result = crate::cache::pulls::fetch(o, &mut lines).await;
-        for line in lines {
-            sink.push(line);
+    let mut offline: Option<String> = None;
+    if let Some(first) = opts.first()
+        && let Err(e) = login(&prepared, first, root, sink).await
+    {
+        if !keep_stale {
+            return Err(e);
         }
-        let cached = result?;
-        sink.push(format!("cached {}", cached.meta.url));
+        offline = Some(format!("login failed: {e:#}"));
     }
-    Ok(opts.len())
+    let mut fetched = 0;
+    for o in &opts {
+        let result = match &offline {
+            Some(reason) => Err(anyhow::anyhow!("{reason}")),
+            None => {
+                let mut lines = Vec::new();
+                let result = crate::cache::pulls::fetch(o, &mut lines).await;
+                for line in lines {
+                    sink.push(line);
+                }
+                result
+            }
+        };
+        match result {
+            Ok(cached) => {
+                fetched += 1;
+                sink.push(format!("cached {}", cached.meta.url));
+            }
+            Err(e) => match keep_stale
+                .then(|| crate::cache::pulls::keep_cached(o, &format!("{e:#}")))
+                .flatten()
+            {
+                Some(warning) => sink.push(warning),
+                None => return Err(e),
+            },
+        }
+    }
+    Ok(fetched)
 }
 
 #[cfg(test)]

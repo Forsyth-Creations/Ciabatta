@@ -216,6 +216,20 @@ pub struct RunStep {
     /// the workflow, not the step.
     #[serde(skip)]
     pub required_env: Vec<String>,
+    /// Set by [`crate::workspace::graph::insert_prefetch`] on the `prefetch`
+    /// node it adds under `--prefetch`: the registry pull steps it fetches into
+    /// the pull cache before anything else runs, already resolved (`from:`
+    /// copied in). Empty on every other step.
+    ///
+    /// `#[serde(skip)]` like `background`: the node is made by ciabatta, never
+    /// written in a workflow file.
+    #[serde(skip)]
+    pub prefetch: Vec<RunStep>,
+    /// Set on a pull step whose download the `prefetch` node already made: it
+    /// copies what that node put in the pull cache rather than downloading it a
+    /// second time. See [`transfer::run`].
+    #[serde(skip)]
+    pub prefetched: bool,
     /// Set by the compiler from the workflow's `env` list: the variables this
     /// step's workflow says it uses. Their values come from the run's own
     /// environment — the terminal, then the `.env` search, which a profile
@@ -444,10 +458,17 @@ impl RunStep {
     /// recovery node that only presents options. A transfer step counts: its
     /// action is the built-in registry move.
     pub fn has_action(&self) -> bool {
-        self.script.is_some()
+        self.is_prefetch()
+            || self.script.is_some()
             || self.run.is_some()
             || self.direction().is_some()
             || self.release_direction().is_some()
+    }
+
+    /// Whether this is the `prefetch` node `--prefetch` puts at the front of a
+    /// graph. It moves nothing into the tree and is never cached.
+    pub fn is_prefetch(&self) -> bool {
+        !self.prefetch.is_empty()
     }
 
     /// Whether this is a `kind: release-push` or `kind: release-pull` step,

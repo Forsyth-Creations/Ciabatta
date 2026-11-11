@@ -15,7 +15,9 @@ services:
       - .:/workspace
       # Persist Claude auth/config and the cargo cache across containers.
       - claude-config:/home/dev/.claude
-      - cargo-cache:/home/dev/.cargo/registry
+      # The rust image's CARGO_HOME is /usr/local/cargo, so that's where the
+      # registry is — not ~/.cargo, which cargo never reads in this image.
+      - cargo-cache:/usr/local/cargo/registry
     command: sleep infinity
   nexus:
     image: sonatype/nexus3:latest

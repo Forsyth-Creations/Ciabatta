@@ -1,5 +1,25 @@
+import { readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
+
+/**
+ * The port the running daemon is on. It picks 80 when it can and 8099 when it
+ * can't, and writes down which in ~/.ciabatta/daemon.json — so that is read
+ * before falling back to 8099. CIABATTA_DAEMON_PORT still wins.
+ */
+function daemonPort(): string {
+  if (process.env.CIABATTA_DAEMON_PORT) return process.env.CIABATTA_DAEMON_PORT;
+  try {
+    const record = JSON.parse(readFileSync(join(homedir(), ".ciabatta", "daemon.json"), "utf8"));
+    if (record.port) return String(record.port);
+  } catch {
+    // No daemon recorded yet: the fallback port.
+  }
+  return "8099";
+}
+const daemon = `http://127.0.0.1:${daemonPort()}`;
 
 /**
  * The daemon serves this bundle from the root of its own origin, so `base` is
@@ -7,7 +27,7 @@ import react from "@vitejs/plugin-react";
  * site and lives under /Ciabatta/.
  *
  * In dev, `yarn dev` runs Vite on 5173 and proxies /api through to a real
- * daemon on 8099, so HMR works against live data. The proxy also keeps
+ * daemon (port 80, or 8099 — see daemonPort), so HMR works against live data. The proxy also keeps
  * everything same-origin, which is why the daemon needs no CORS layer.
  */
 export default defineConfig({
@@ -27,13 +47,13 @@ export default defineConfig({
     port: 5173,
     proxy: {
       "/api": {
-        target: `http://127.0.0.1:${process.env.CIABATTA_DAEMON_PORT ?? 8099}`,
+        target: daemon,
         changeOrigin: true,
       },
       // The config schemas the editor docs link to and offer as downloads.
       // Unauthenticated, and served by the daemon rather than by Vite.
       "/schemas": {
-        target: `http://127.0.0.1:${process.env.CIABATTA_DAEMON_PORT ?? 8099}`,
+        target: daemon,
         changeOrigin: true,
       },
     },

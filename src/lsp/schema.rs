@@ -204,6 +204,8 @@ fn step() -> crate::run::RunStep {
         background: false,
         after: false,
         required_env: Vec::new(),
+        prefetch: Vec::new(),
+        prefetched: false,
         declared_env: Vec::new(),
         cache_id: None,
         // Not a config key — copied from the workflow's `wave_grouping` when
@@ -250,6 +252,7 @@ fn workspace_meta() -> crate::workspace::WorkspaceMeta {
         stale_after: Some(one()),
         input_timeout: Some(one()),
         max_concurrent_runs: Some(1),
+        prefetch: Some(true),
         env_file: list(),
         env_default: Some(one()),
         env: map(),

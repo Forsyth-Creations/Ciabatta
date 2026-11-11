@@ -323,7 +323,12 @@ fn resolve_targets(
         if all.is_empty() {
             return Ok((Vec::new(), None));
         }
-        let selection = crate::workspace::graph::Selection::default();
+        // Only looked at, never run: a workflow whose `required_env` this
+        // daemon can't see is still planned.
+        let selection = crate::workspace::graph::Selection {
+            skip_env_check: true,
+            ..Default::default()
+        };
         let (_, graph) = crate::workspace::graph::prepare_many(root, &all, &selection)?;
         return Ok((graph.steps, None));
     }
@@ -331,7 +336,12 @@ fn resolve_targets(
     if let (Some(ws), Some(first)) = (workspace.as_ref(), targets.first())
         && ws.workflow_names().iter().any(|name| name == first)
     {
-        let selection = crate::workspace::graph::Selection::default();
+        // Only looked at, never run: a workflow whose `required_env` this
+        // daemon can't see is still planned.
+        let selection = crate::workspace::graph::Selection {
+            skip_env_check: true,
+            ..Default::default()
+        };
         let (_, graph) = crate::workspace::graph::prepare_many(root, targets, &selection)?;
         return Ok((graph.steps, None));
     }

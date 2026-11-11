@@ -7,8 +7,9 @@
 //! instead, with a warning that says so: a laptop off the VPN still builds, and
 //! nobody mistakes what it built for something fresh.
 //!
-//! `ciabatta <workflow> --pre-fetch` fills it ahead of time, without running
-//! the workflow — the thing to do before getting on a plane.
+//! `ciabatta <workflow> --fetch-only` fills it ahead of time without running
+//! the workflow — the thing to do before getting on a plane — and
+//! `--prefetch` fills it as the first node of a run.
 //!
 //! Docker and ECR pulls aren't kept here: an image goes into the container
 //! engine's own store, which already serves it once it's been pulled.
@@ -73,6 +74,24 @@ pub fn cacheable(registry_name: &str, config: &RegistryConfig) -> bool {
         infer_registry_kind(registry_name, config),
         RegistryKind::Docker | RegistryKind::Ecr
     )
+}
+
+/// Whether a step is a pull ciabatta itself fetches into this cache: a
+/// `kind: pull` with no `run:`/`script:` of its own, through a registry that
+/// is defined and isn't an image registry. These are what `--fetch-only` runs
+/// and what the `--prefetch` node fetches. A pull with its own command fetches
+/// however that command does, which ciabatta can't do on its behalf.
+pub fn fetchable(step: &crate::run::RunStep, config: &crate::config::CiabattaConfig) -> bool {
+    if step.direction() != Some(crate::run::Direction::Pull)
+        || step.script.is_some()
+        || step.run.is_some()
+    {
+        return false;
+    }
+    step.registry
+        .as_deref()
+        .and_then(|name| config.registries.get(name).map(|cfg| cacheable(name, cfg)))
+        .unwrap_or(false)
 }
 
 /// The URL a pull of `remote_path` fetches from, as the key sees it. For npm
@@ -217,13 +236,19 @@ pub fn from_cache(opts: &RegistryOpOptions<'_>, reason: &str, log: &mut Vec<Stri
     let Some(cached) = lookup_for(opts) else {
         bail!(
             "couldn't reach '{}' ({reason}), and nothing from {} is in the pull cache — \
-             run with --pre-fetch while on the network to keep a copy",
+             run with --fetch-only (or --prefetch) while on the network to keep a copy",
             opts.registry_name,
             source_url(opts.registry_config, opts.remote_path)
         );
     };
     log.push(stale_warning(opts.registry_name, &cached, reason));
     restore(&cached, opts)
+}
+
+/// When `opts` can't be fetched but the cache has a copy: the warning to log
+/// for leaving it at that copy. `None` when nothing is cached.
+pub fn keep_cached(opts: &RegistryOpOptions<'_>, reason: &str) -> Option<String> {
+    lookup_for(opts).map(|cached| stale_warning(opts.registry_name, &cached, reason))
 }
 
 /// How the warning on a pull served from the cache starts, so the terminal can
@@ -237,6 +262,47 @@ fn stale_warning(registry_name: &str, cached: &Cached, reason: &str) -> String {
          of {}, fetched {} — it may be out of date",
         cached.meta.url, cached.meta.fetched_at
     )
+}
+
+/// What the pull cache holds: how many artifacts, and how many bytes.
+pub fn stats() -> Result<(usize, u64)> {
+    let root = dir()?;
+    let Ok(entries) = std::fs::read_dir(&root) else {
+        return Ok((0, 0));
+    };
+    let mut count = 0;
+    let mut bytes = 0;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.join(META_FILE).is_file() {
+            count += 1;
+        }
+        bytes += size_of(&path);
+    }
+    Ok((count, bytes))
+}
+
+/// `ciabatta cache clean --pulls`: delete the whole pull cache — every
+/// project's, since it's shared. A pull that can't reach its registry
+/// afterwards has nothing to fall back on until it's fetched again.
+pub fn clear() -> Result<usize> {
+    let (count, _) = stats()?;
+    let root = dir()?;
+    match std::fs::remove_dir_all(&root) {
+        Ok(()) => Ok(count),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(0),
+        Err(e) => Err(e).with_context(|| format!("Failed to remove {}", root.display())),
+    }
+}
+
+fn size_of(path: &Path) -> u64 {
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.is_dir() => std::fs::read_dir(path)
+            .map(|entries| entries.flatten().map(|e| size_of(&e.path())).sum())
+            .unwrap_or(0),
+        Ok(meta) => meta.len(),
+        Err(_) => 0,
+    }
 }
 
 fn copy_file(from: &Path, to: &Path) -> Result<()> {

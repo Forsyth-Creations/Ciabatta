@@ -369,6 +369,9 @@ const COMMANDS: CommandGroup[] = [
           ["--dry-run", "Walk every step, executing none of them."],
           ["--force", "Ignore the cache and run every step. Results are still stored, so the next run reuses them."],
           ["--from-failed", "Carry on from where this workflow's last run failed: what passed isn't run again; the failed step and everything after it are. Also works with --gui. See Run again, below."],
+          ["--fetch-only", "Run only the graph's registry pulls, into this machine's pull cache: no build steps, no pushes, working tree untouched. For before you go off the network. See Pulling from Nexus."],
+          ["--prefetch", "Add a prefetch node to the front of the graph that fetches every registry pull before any other step starts. workspace.prefetch: true makes it the default."],
+          ["--no-prefetch", "Leave the prefetch node out, even though workspace.prefetch: true asks for it."],
           ["--start-anyway", "Start now, even when the workspace already has as many runs going as workspace.max_concurrent_runs allows. The run takes no slot. Also works with --gui."],
           ["-j, --jobs N", "How many steps may run at once. Defaults to CIABATTA_JOBS, then the CPU count; -j 1 runs them one at a time."],
           ["--env-profile NAME", "Copy each workspace's .ciabatta/.env.NAME into its .env first (backing up a hand-written .env). Also spelled --env_profile."],
@@ -504,6 +507,10 @@ const COMMANDS: CommandGroup[] = [
       {
         usage: "ciabatta cache prune | clean",
         note: "Apply a retention policy, or empty the store for this project.",
+        flags: [
+          ["clean --pulls", "Empty the machine-wide pull cache instead — the last copy of everything a registry pull fetched, shared by every project. This project's build cache is left alone."],
+          ["clean --yes", "Skip the confirmation prompt."],
+        ],
       },
       {
         usage: "ciabatta remote-cache <init|start|login|status|add-user>",
@@ -783,7 +790,7 @@ function ExtensionDownloads() {
  * at render time, so the block you copy is the block that works.
  */
 function EditorSetup() {
-  const origin = typeof window === "undefined" ? "http://127.0.0.1:8099" : window.location.origin;
+  const origin = typeof window === "undefined" ? "http://oven.localhost" : window.location.origin;
 
   const served = `{
   "lsp": {
@@ -2202,15 +2209,9 @@ steps:
     publish_path: "my-tool@{TOOL_VERSION}"
     artifact: vendor`}</Pre>
         <P>
-          Every such pull — and one from Artifactory, S3 or a generic endpoint — goes through a
-          pull cache on this machine, <C>~/.ciabatta/cache/pulls/</C>. When the registry can&apos;t
-          be reached, the pull is served from the last copy fetched, and the step&apos;s log
-          warns that it is using only the cache. To fill it before going off the network, run the
-          workflow with <C>--pre-fetch</C>: only its <C>kind: pull</C> steps run, only into the
-          cache — no build step, no push, and the working tree isn&apos;t touched. Docker and ECR
-          images aren&apos;t kept there; the container engine already keeps them.
+          Pulls have a page of their own — the formats, pulling by branch, and working off the
+          network: see <a href="#pulling">Pulling from Nexus</a>.
         </P>
-        <Pre>{`ciabatta build --pre-fetch    # download what build pulls; run nothing else`}</Pre>
 
         <SubHeading>Lining waves up: wave_grouping</SubHeading>
         <P>
@@ -2239,6 +2240,150 @@ steps:
           The schemas that back all of this are served by this daemon and understood by VS Code
           and Zed — see <a href="#editors">Editors</a> for the two-minute setup.{" "}
           <C>ciabatta config reference</C> prints the same thing in a terminal.
+        </P>
+      </>
+    ),
+  },
+  {
+    id: "pulling",
+    group: "Start here",
+    title: "Pulling from Nexus",
+    body: (
+      <>
+        <P>
+          A step with <C>kind: pull</C> fetches an artifact from a registry into the working
+          tree. It is a node on the graph like any other, so whatever <C>needs</C> it waits until
+          the artifact is there. Nexus is the registry it does the most for: every Nexus format
+          pulls, a pull by commit finds the newest build on your branch, and everything pulled is
+          kept on this machine so the build still works off the network.
+        </P>
+
+        <SubHeading>The step</SubHeading>
+        <FieldTable
+          rows={[
+            ["kind: pull", "Selects the built-in pull. Give the step a run or script instead and that runs in its place — it is still a pull node on the graph, but ciabatta can't cache or prefetch what your command fetches."],
+            ["registry", "A registries: entry from the root config: the Nexus host, its repository and its format."],
+            ["publish_path", "What to fetch. For raw, a path in the repository — a file, or a folder pulled file by file. For npm and pypi, a package spec: \"@acme/sdk@1.2.3\", \"my-tool@1.2.3\" (no version takes the newest). {VAR} substitution works in all three."],
+            ["artifact", "Where it lands, relative to the step's directory (default: the directory itself). For npm, a .tgz file name works too."],
+            ["from", "The push step this pull mirrors, as <workflow>:<step> or a bare <step>. Its registry, publish_path and artifact are copied in, so the two can't drift apart; anything the pull sets itself wins."],
+          ]}
+        />
+        <Pre>{`# .ciabatta/ciabatta.yaml — the registry, once
+registries:
+  nexus:
+    type: nexus
+    url: https://nexus.example.com
+    repository: raw-hosted
+    format: raw                         # raw (default) · npm · pypi
+
+# .ciabatta/workflows/build.yaml
+steps:
+  - name: vendor
+    kind: pull
+    registry: nexus
+    publish_path: "shared/proto/{CIABATTA_BRANCH}/{CIABATTA_COMMIT}/proto"
+    artifact: vendor/proto
+
+  - name: compile
+    run: cargo build
+    needs: [vendor]`}</Pre>
+
+        <SubHeading>How each format pulls</SubHeading>
+        <FieldTable
+          rows={[
+            ["raw", "HTTP GET from <url>/repository/<repository>/<base_path>/<publish_path>. A folder comes back file by file, the way it was pushed. Nothing to install."],
+            ["npm", "npm pack <package> --registry <repo>: the tarball, downloaded but not installed, without its dependencies. Needs npm on PATH."],
+            ["pypi", "pip download <package> --no-deps: the wheel or sdist, not installed. Needs pip on PATH."],
+          ]}
+        />
+        <P>
+          Credentials come from <C>CIABATTA_&lt;NAME&gt;_USER</C> and <C>_PASS</C> (npm also takes{" "}
+          <C>_TOKEN</C>), or the registry&apos;s <C>login_script</C>. They are checked before the
+          run starts, with the rest of its variables.
+        </P>
+
+        <SubHeading>Pulling by branch</SubHeading>
+        <P>
+          When <C>publish_path</C> contains <C>{"{CIABATTA_COMMIT}"}</C> and that exact commit was
+          never published — you have local commits, or CI skipped one — the pull walks your
+          branch&apos;s history, newest first, and takes the most recent commit that was. The
+          step&apos;s log says which. It needs the branch history, which a normal checkout has.
+        </P>
+
+        <SubHeading>Off the network: the pull cache</SubHeading>
+        <P>
+          Every pull from Nexus — and from Artifactory, S3 or a generic endpoint — goes through a
+          pull cache on this machine, <C>~/.ciabatta/cache/pulls/</C> (or under{" "}
+          <C>CIABATTA_CACHE_DIR</C>), shared by every project. The pull downloads into it and is
+          copied into the tree from there, so it always holds the newest copy. When the registry
+          can&apos;t be reached — off the VPN, on a plane, the login failing — the pull is served
+          from that copy, and the log warns, in yellow, that it is using <strong>only</strong>{" "}
+          the cache. With nothing cached, the pull fails as it always would. A pull by branch
+          that can&apos;t reach the registry takes the newest commit on the branch the cache has.
+          Docker and ECR images aren&apos;t kept here: the container engine keeps its own.
+        </P>
+        <P>
+          <C>ciabatta cache clean --pulls</C> empties it — every project&apos;s copy, since it is
+          shared — and leaves this project&apos;s build cache alone; plain{" "}
+          <C>ciabatta cache clean</C> is the other way round.
+        </P>
+
+        <SubHeading>Fetching without building: --fetch-only</SubHeading>
+        <P>
+          To fill the cache ahead of time, run the workflow with <C>--fetch-only</C>. ciabatta
+          looks at the graph and runs only its registry pulls, only into the cache: no build
+          step, no push, and the working tree isn&apos;t touched. Every pull is tried even if one
+          fails, and the command fails at the end if any did. A pull with its own{" "}
+          <C>run</C>/<C>script</C> is listed and skipped.
+        </P>
+        <Pre>{`ciabatta build --fetch-only   # download what build pulls; run nothing else`}</Pre>
+
+        <SubHeading>Fetching first: --prefetch</SubHeading>
+        <P>
+          <C>--prefetch</C> runs the whole workflow, but adds a node called <C>prefetch</C> to the
+          front of the graph that fetches every registry pull before any other step starts.
+          Every step that needed nothing now needs <C>prefetch</C>, so a registry that&apos;s down
+          fails the run in the first second rather than twenty minutes in, at whichever pull
+          happened to be last. The pull steps stay where they were and copy from what{" "}
+          <C>prefetch</C> fetched, so nothing is downloaded twice.
+        </P>
+        <Pre>{`ciabatta build --prefetch --graph   # see where it goes
+
+  wave 1 — runs in parallel
+  └─ prefetch  [prefetch]
+        Download what 1 registry pull(s) fetch into the pull cache, before anything else runs
+
+  wave 2 — runs in parallel
+  ├─ api:vendor  [pull]
+  │     after prefetch
+  └─ api:lint
+        after prefetch
+
+  wave 3 — runs in parallel
+  └─ api:compile
+        after api:vendor`}</Pre>
+        <P>
+          Off the network, <C>prefetch</C> doesn&apos;t stop the run over a pull the cache
+          already has: it logs the same yellow &ldquo;using ONLY the cached copy&rdquo; warning
+          and carries on, and the pull step copies that copy. It fails only for a pull with
+          nothing cached — which is what <C>workspace.prefetch: true</C> needs to be safe to leave
+          on. <C>--fetch-only</C> is stricter: refreshing the cache is its whole job, so a pull
+          it can&apos;t reach fails it.
+        </P>
+        <P>
+          The node fetches the pulls left after <C>--filter</C> and <C>--only</C>, never caches
+          itself, and doesn&apos;t make anything behind it rebuild — the build cache ignores it.
+          Background tasks and <C>after:</C> actions don&apos;t wait for it. A graph with no
+          registry pulls gets no node. A step of your own called <C>prefetch</C> is refused while
+          the flag is on: rename it, or pass <C>--no-prefetch</C>.
+        </P>
+        <P>To make it the default for every run of the workspace, set it in the root config:</P>
+        <Pre>{`# .ciabatta/ciabatta.yaml
+workspace:
+  prefetch: true   # every run fetches first; --no-prefetch turns it off once`}</Pre>
+        <P>
+          Runs started here, in the app, follow the same setting, and <C>--gui</C> passes the
+          flags on, so the browser draws the same graph the terminal did.
         </P>
       </>
     ),
@@ -2978,6 +3123,33 @@ ciabatta.pause("Flip the maintenance switch, then continue")`}</Pre>
           that asked for it: a watch session, a run, and a serial capture all outlive the command
           that started them and the tab that is watching them.
         </P>
+
+        <SubHeading>Where it lives: oven.localhost</SubHeading>
+        <P>
+          The web app is at <C>http://oven.localhost</C>. There is nothing to set up for the name:
+          every <C>*.localhost</C> name resolves to this machine by itself — browsers and curl do
+          it, on Linux, macOS and Windows — so there is no hosts-file entry to add and nothing that
+          needs root or admin. <C>.local</C> is avoided on purpose: it belongs to mDNS/Bonjour, and
+          a hosts entry for it can be slow or ignored. For a browser that doesn&apos;t resolve{" "}
+          <C>*.localhost</C>, set <C>CIABATTA_WEB_HOST=127.0.0.1</C>.
+        </P>
+        <P>
+          There&apos;s no port to remember because the daemon asks for <strong>port 80</strong>{" "}
+          first. When it can&apos;t have it, it falls back to <strong>8099</strong> (
+          <C>http://oven.localhost:8099</C>), and the command that started it says why, once:
+        </P>
+        <FieldTable
+          rows={[
+            ["Linux", "Ports below 1024 are root's. Allow ciabatta once — again after each upgrade, since a new binary loses it — then restart: sudo setcap cap_net_bind_service=+ep \"$(which ciabatta)\" && ciabatta daemon restart"],
+            ["macOS", "Allowed as is, unless something else already has port 80."],
+            ["Windows", "Allowed as is, unless something else has reserved port 80 — netsh http show servicestate lists who."],
+          ]}
+        />
+        <P>
+          <C>ciabatta daemon status</C> prints the address it ended up on, and the reason when it
+          isn&apos;t 80. <C>CIABATTA_DAEMON_PORT</C>, or <C>-p</C> on any command, pins a port
+          instead; then only that one is tried.
+        </P>
         <Bullets
           items={[
             <>
@@ -3220,7 +3392,7 @@ export CIABATTA_REMOTE_CA=/path/to/cert.pem`}</Pre>
         <P>
           Everything above works on one machine, which is the sanest way to try the remote cache
           before pointing a team at it. Two things to know first. The cache server and the ciabatta
-          daemon are <strong>different processes</strong> — the daemon serves this web app on 8099,
+          daemon are <strong>different processes</strong> — the daemon serves this web app on 80 (or 8099),
           the cache is its own server on 8380 — so running both is just picking two free ports. And{" "}
           <C>remote-cache start</C> runs in the foreground: it is a server, and it holds the
           terminal until you stop it.
@@ -3261,7 +3433,7 @@ ciabatta remote-cache status         # hit rate, storage, retention`}</Pre>
         <Alert severity="info" sx={{ mb: 2, maxWidth: "78ch" }}>
           <strong>On the daemon&apos;s port.</strong> <C>--port</C> picks the port a daemon{" "}
           <em>starts</em> on; it does not move one that is already running. A plain{" "}
-          <C>ciabatta watch -p 9099</C> with a healthy daemon on 8099 quietly keeps using 8099 — so
+          <C>ciabatta watch -p 9099</C> with a healthy daemon on 80 quietly keeps using 80 — so
           change it with <C>ciabatta daemon restart --port 9099</C>, or export{" "}
           <C>CIABATTA_DAEMON_PORT=9099</C> before the first command that starts one. There is one
           daemon record (<C>~/.ciabatta/daemon.json</C>), so there is one daemon at a time: the port

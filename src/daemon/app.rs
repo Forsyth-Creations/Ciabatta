@@ -199,7 +199,12 @@ async fn shutdown(
 /// invocation racing to start a daemon loses cleanly: it gets `AddrInUse`,
 /// finds the winner healthy, and exits quietly rather than clobbering the
 /// record.
-pub async fn serve(port: u16) -> Result<()> {
+///
+/// `ports` are tried in order ([`super::candidate_ports`]): left to choose, the
+/// daemon tries 80 — so the web app is plain `http://oven.localhost` — and
+/// falls back to 8099, recording why so the command that started it can say
+/// how to get 80.
+pub async fn serve(ports: &[u16]) -> Result<()> {
     // Every run this daemon drives is read in a browser, and the web app parses
     // SGR escapes into styled spans. So the steps are asked for colour — the
     // question "is the daemon's stdout a terminal?" is about a log file and has
@@ -207,30 +212,48 @@ pub async fn serve(port: u16) -> Result<()> {
     crate::color::decide(crate::color::Consumer::Web);
 
     let host = crate::config::bind_host();
-    let addr: SocketAddr = format!("{host}:{port}")
-        .parse()
-        .with_context(|| format!("Invalid bind address {host}:{port}"))?;
-
-    let listener = match tokio::net::TcpListener::bind(addr).await {
-        Ok(l) => l,
-        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
-            // Someone else may have won the startup race. If a healthy ciabatta
-            // is answering there, this process has nothing to do.
-            if super::find_running().await.is_some() {
-                tracing::info!("another ciabatta daemon already holds port {port}; exiting");
-                return Ok(());
+    let mut port_note: Option<String> = None;
+    let mut bound = None;
+    for (i, &port) in ports.iter().enumerate() {
+        let addr: SocketAddr = format!("{host}:{port}")
+            .parse()
+            .with_context(|| format!("Invalid bind address {host}:{port}"))?;
+        let last = i + 1 == ports.len();
+        match tokio::net::TcpListener::bind(addr).await {
+            Ok(l) => {
+                bound = Some((l, port));
+                break;
             }
-            anyhow::bail!(
-                "Port {port} is already in use by something that isn't ciabatta.\n\
-                 Pick another with `ciabatta daemon serve --port <PORT>` or set \
-                 {}=<PORT>.",
-                super::PORT_ENV
-            );
+            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+                // Someone else may have won the startup race. If a healthy
+                // ciabatta is answering, this process has nothing to do.
+                if super::find_running().await.is_some() {
+                    tracing::info!("another ciabatta daemon is already running; exiting");
+                    return Ok(());
+                }
+                if last {
+                    anyhow::bail!(
+                        "Port {port} is already in use by something that isn't ciabatta.\n\
+                         Pick another with `ciabatta daemon serve --port <PORT>` or set \
+                         {}=<PORT>.",
+                        super::PORT_ENV
+                    );
+                }
+                port_note.get_or_insert_with(|| super::port_note(&e));
+            }
+            Err(e) if !last => {
+                tracing::info!("couldn't bind {addr} ({e}); trying the next port");
+                port_note.get_or_insert_with(|| super::port_note(&e));
+            }
+            Err(e) => {
+                return Err(e).with_context(|| format!("Failed to bind {addr}"));
+            }
         }
-        Err(e) => {
-            return Err(e).with_context(|| format!("Failed to bind {addr}"));
-        }
-    };
+    }
+    let (listener, port) = bound.context("No port to listen on")?;
+    if let Some(note) = &port_note {
+        tracing::info!("{note}");
+    }
 
     if host != crate::config::DEFAULT_BIND_HOST {
         tracing::warn!(
@@ -279,14 +302,16 @@ pub async fn serve(port: u16) -> Result<()> {
         version: state.version.to_string(),
         token,
         started_at: state.started_at.clone(),
+        port_note,
     })?;
 
     tracing::info!(
         pid = state.pid,
         version = %state.version,
         log = %crate::daemon::log_path().map(|p| p.display().to_string()).unwrap_or_default(),
-        "ciabatta daemon {} listening on http://{host}:{port}",
-        state.version
+        "ciabatta daemon {} listening on http://{host}:{port} — open {}",
+        state.version,
+        super::web_url(port)
     );
 
     let signal = state.shutdown.clone();

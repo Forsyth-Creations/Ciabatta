@@ -32,7 +32,15 @@ RUN groupadd --gid ${USER_GID} ${USERNAME} \
     && chmod 0440 /etc/sudoers.d/${USERNAME} \
     # Pre-create ~/.claude so a mounted named volume inherits dev ownership
     # (Docker creates fresh volumes as root otherwise, which breaks login).
-    && install -d -o ${USERNAME} -g ${USERNAME} /home/${USERNAME}/.claude
+    && install -d -o ${USERNAME} -g ${USERNAME} /home/${USERNAME}/.claude \
+    # The rust image keeps cargo and rustup in /usr/local (CARGO_HOME and
+    # RUSTUP_HOME), owned by root, and the `cargo install` above filled the
+    # registry there as root. Builds run as dev, so hand both over — otherwise
+    # `cargo build` can't write the registry cache ("Permission denied").
+    # Creating the registry dir first also gives the cargo-cache volume mounted
+    # on it dev's ownership.
+    && install -d -o ${USERNAME} -g ${USERNAME} ${CARGO_HOME}/registry \
+    && chown -R ${USER_UID}:${USER_GID} ${CARGO_HOME} ${RUSTUP_HOME}
 
 USER ${USERNAME}
 WORKDIR /workspace
@@ -47,5 +55,9 @@ RUN curl -fsSL https://claude.ai/install.sh | bash
 
 # Add some rustup deps
 RUN rustup component add clippy rustfmt rust-src
+
+
+# Install the latest version of Ciabatta so that we can build
+RUN curl -fsSL https://forsyth-creations.github.io/Ciabatta/install.sh | sh
 
 CMD ["bash"]

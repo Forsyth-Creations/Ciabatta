@@ -297,6 +297,68 @@ pub fn into_run(graph: WorkflowGraph) -> Result<crate::run::ResolvedRun> {
     })
 }
 
+/// The name of the node [`insert_prefetch`] adds.
+pub const PREFETCH_NODE: &str = "prefetch";
+
+/// `--prefetch` (or `workspace.prefetch: true`): put a `prefetch` node at the
+/// front of the graph that downloads everything the graph's registry pulls
+/// fetch into the pull cache, before any other step starts.
+///
+/// Every step that needs nothing else is made to need `prefetch`, so the rest
+/// of the graph waits for it; background tasks and `after:` actions are left
+/// as they are. The pull steps themselves stay where they were, and copy from
+/// the cache what the node just fetched instead of downloading it again.
+///
+/// Returns the names of the pull steps the node fetches; when there are none
+/// the graph is left alone.
+pub fn insert_prefetch(
+    graph: &mut WorkflowGraph,
+    config: &crate::config::CiabattaConfig,
+) -> Result<Vec<String>> {
+    // `from:` is resolved on a copy, so the node's own steps carry their
+    // registry and path; `into_run` resolves the graph's again later.
+    let mut resolved = graph.steps.clone();
+    resolve_transfer_refs(&mut resolved)?;
+    let fetches: Vec<RunStep> = resolved
+        .into_iter()
+        .filter(|step| !step.recover && crate::cache::pulls::fetchable(step, config))
+        .collect();
+    if fetches.is_empty() {
+        return Ok(Vec::new());
+    }
+    if graph.steps.iter().any(|s| s.name == PREFETCH_NODE) {
+        bail!(
+            "This graph already has a step named '{PREFETCH_NODE}', which is the name --prefetch \
+             gives the node it adds. Rename that step, or run with --no-prefetch."
+        );
+    }
+
+    let names: Vec<String> = fetches.iter().map(|s| s.name.clone()).collect();
+    for step in graph.steps.iter_mut() {
+        if names.contains(&step.name) {
+            step.prefetched = true;
+        }
+        if step.needs.is_empty() && !step.recover && !step.background && !step.after {
+            step.needs.push(PREFETCH_NODE.to_string());
+        }
+    }
+    graph.steps.insert(
+        0,
+        RunStep {
+            name: PREFETCH_NODE.to_string(),
+            kind: Some(PREFETCH_NODE.to_string()),
+            description: Some(format!(
+                "Download what {} registry pull(s) fetch into the pull cache, before anything \
+                 else runs",
+                names.len()
+            )),
+            prefetch: fetches,
+            ..Default::default()
+        },
+    );
+    Ok(names)
+}
+
 /// Resolve every `from:` back-reference, so a transfer step is self-contained
 /// by the time anything executes it.
 ///
@@ -549,6 +611,12 @@ pub struct Selection {
     /// `-e` flags and custom arguments — which satisfy a `required_env` like
     /// any other.
     pub provided: Vec<String>,
+    /// Compile the graph to look at, not to run: a workflow whose
+    /// `required_env` isn't set is compiled anyway rather than refused. For
+    /// the read-only views — the cache page's plan — which never start a run,
+    /// and which the daemon serves without the terminal's environment, so a
+    /// project with a secret in `required_env` would otherwise not show at all.
+    pub skip_env_check: bool,
 }
 
 /// Compile `workflow` across the monorepo into one graph.
@@ -679,6 +747,7 @@ pub fn build_many(
         &after,
         &deps,
         &selection.provided,
+        selection.skip_env_check,
     )?;
     resolve_inputs_from(&mut graph.steps, selection.isolated)?;
     Ok(graph)
@@ -949,6 +1018,7 @@ fn topological_order(deps: &BTreeMap<UnitId, Vec<UnitId>>) -> Result<Vec<UnitId>
 
 /// Turn ordered units into steps: rename each step to a graph-wide unique id,
 /// stamp it with its origin, and wire the cross-unit edges.
+#[allow(clippy::too_many_arguments)]
 fn compile(
     workspace: &Workspace,
     workflow_names: &[String],
@@ -957,6 +1027,7 @@ fn compile(
     after: &[UnitId],
     deps: &BTreeMap<UnitId, Vec<UnitId>>,
     provided: &[String],
+    skip_env_check: bool,
 ) -> Result<WorkflowGraph> {
     // A member usually contributes one workflow, and `api:compile` reads far
     // better than `api:build:compile`. Only disambiguate where it's needed.
@@ -1146,7 +1217,7 @@ fn compile(
         // it — which is what this used to do — makes a shared `API_URL`
         // impossible to declare once. Checked here because this is the only
         // place the member, its chain, and the requirement are all in scope.
-        if !workflow.required_env.is_empty() {
+        if !workflow.required_env.is_empty() && !skip_env_check {
             let missing = crate::environment::files::unaccounted_for(
                 &env_layers(workspace, member),
                 &workflow.required_env,
@@ -2221,6 +2292,29 @@ mod tests {
     }
 
     #[test]
+    fn a_read_only_view_compiles_past_unset_required_env() {
+        let root = scratch("viewenv");
+        let a = member(&root, "a", "[workspace]\nname = \"a\"\n");
+        workflow(
+            &a,
+            "bootstrap",
+            "required_env = [\"CIAB_TEST_NEVER_SET_SECRET\"]\n[[steps]]\nname = \"s\"\nrun = \"true\"\n",
+        );
+        let ws = Workspace::load(&root).unwrap();
+        // A run refuses to compile without it...
+        let err = build(&ws, "bootstrap", &Selection::default()).unwrap_err();
+        assert!(format!("{err}").contains("CIAB_TEST_NEVER_SET_SECRET"), "{err}");
+        // ...but the cache page and the graph view still get the graph.
+        let view = Selection {
+            skip_env_check: true,
+            ..Default::default()
+        };
+        let graph = build(&ws, "bootstrap", &view).unwrap();
+        assert_eq!(graph.steps.len(), 1);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
     fn a_step_needing_a_non_step_says_which_workflow_it_is_in() {
         let root = scratch("badneed");
         let a = member(&root, "a", "[workspace]\nname = \"a\"\n");
@@ -2577,5 +2671,96 @@ mod tests {
                     .unwrap()
         );
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    fn prefetch_config() -> crate::config::CiabattaConfig {
+        serde_yaml_ng::from_str(
+            "registries:\n  nexus:\n    url: https://nexus.example\n    type: nexus\n    repository: raw\n  \
+             images:\n    url: registry.example\n    type: docker\n",
+        )
+        .unwrap()
+    }
+
+    fn graph_of(steps: Vec<RunStep>) -> WorkflowGraph {
+        WorkflowGraph {
+            workflows: vec!["build".into()],
+            units: Vec::new(),
+            steps,
+            env_files: Vec::new(),
+            required_env: Vec::new(),
+        }
+    }
+
+    fn pull(name: &str, registry: &str) -> RunStep {
+        RunStep {
+            name: name.into(),
+            kind: Some("pull".into()),
+            registry: Some(registry.into()),
+            artifact: Some("vendor".into()),
+            publish_path: serde_yaml_ng::from_str("team/app.tgz").ok(),
+            ..Default::default()
+        }
+    }
+
+    fn cmd(name: &str, needs: &[&str]) -> RunStep {
+        RunStep {
+            name: name.into(),
+            run: Some("true".into()),
+            needs: needs.iter().map(|n| n.to_string()).collect(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn prefetch_goes_in_front_of_every_root_and_fetches_the_registry_pulls() {
+        let mut graph = graph_of(vec![
+            pull("vendor", "nexus"),
+            pull("image", "images"),
+            RunStep {
+                run: Some("./fetch.sh".into()),
+                ..pull("scripted", "nexus")
+            },
+            cmd("lint", &[]),
+            cmd("compile", &["vendor"]),
+            RunStep {
+                background: true,
+                ..cmd("mock", &[])
+            },
+        ]);
+        let fetched = insert_prefetch(&mut graph, &prefetch_config()).unwrap();
+        // Images live in the container engine; a pull with its own command
+        // fetches however it fetches.
+        assert_eq!(fetched, vec!["vendor".to_string()]);
+
+        let node = &graph.steps[0];
+        assert_eq!(node.name, PREFETCH_NODE);
+        assert!(node.is_prefetch() && node.has_action());
+        assert_eq!(node.prefetch.len(), 1);
+
+        let by = |name: &str| graph.steps.iter().find(|s| s.name == name).unwrap();
+        for root in ["vendor", "image", "scripted", "lint"] {
+            assert_eq!(by(root).needs, vec![PREFETCH_NODE.to_string()], "{root}");
+        }
+        assert_eq!(by("compile").needs, vec!["vendor".to_string()]);
+        assert!(by("mock").needs.is_empty(), "a background task waits for nothing");
+        assert!(by("vendor").prefetched && !by("image").prefetched);
+
+        // And it still compiles into a run.
+        into_run(graph).unwrap();
+    }
+
+    #[test]
+    fn no_registry_pulls_leaves_the_graph_alone() {
+        let mut graph = graph_of(vec![cmd("lint", &[]), pull("image", "images")]);
+        assert!(insert_prefetch(&mut graph, &prefetch_config()).unwrap().is_empty());
+        assert_eq!(graph.steps.len(), 2);
+        assert!(graph.steps.iter().all(|s| s.name != PREFETCH_NODE));
+    }
+
+    #[test]
+    fn a_step_already_called_prefetch_is_refused() {
+        let mut graph = graph_of(vec![cmd("prefetch", &[]), pull("vendor", "nexus")]);
+        let err = insert_prefetch(&mut graph, &prefetch_config()).unwrap_err();
+        assert!(format!("{err}").contains("--no-prefetch"), "{err}");
     }
 }

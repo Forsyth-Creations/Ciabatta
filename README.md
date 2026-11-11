@@ -746,7 +746,7 @@ workflows:
         artifact: vendor                  # where it lands
 ```
 
-### Pulling off the network: the pull cache and `--pre-fetch`
+### Pulling off the network: the pull cache, `--fetch-only` and `--prefetch`
 
 Every `kind: pull` from Nexus (raw, npm or PyPI), Artifactory, S3 or a generic
 endpoint goes through a pull cache on this machine,
@@ -765,17 +765,43 @@ With nothing cached, the pull fails the way it always did. A pull by branch
 (`{CIABATTA_COMMIT}` in `publish_path`) that can't reach the registry uses the
 newest commit on the branch that the cache has a copy of.
 
-To fill the cache ahead of time, without running anything, add `--pre-fetch`:
+The graph says which steps pull from a registry, and two flags use that:
 
 ```bash
-ciabatta build --pre-fetch      # download what build's pull steps fetch; run nothing else
+ciabatta build --fetch-only   # run only the registry pulls, into the cache; nothing else
+ciabatta build --prefetch     # add a `prefetch` node that fetches them all first, then build
 ```
 
-It runs only the workflow's `kind: pull` steps, and only into the cache: no
-build step runs, nothing is pushed, and the working tree isn't touched. A pull
-step that brings its own `run:`/`script:` is skipped, since ciabatta can't know
-what that command fetches. Docker and ECR pulls aren't cached here: the
-container engine already keeps the image once it's been pulled.
+`--fetch-only` runs only the graph's registry pulls, and only into the cache: no
+build step runs, nothing is pushed, and the working tree isn't touched. It's
+for filling the cache before going off the network, so a pull it can't reach
+fails it.
+
+`--prefetch` runs the whole workflow with a node called `prefetch` at the
+front: it fetches every registry pull into the cache, and every step that
+needed nothing now needs it, so a registry that's down shows up in the first
+second rather than at the last pull. The pull steps then copy what it fetched
+instead of downloading again. Off the network, a pull the cache already has is
+kept at that copy (with the warning above) rather than failing the node. The
+node fetches only what's left after `--filter`/`--only`, is never cached, and
+doesn't make anything behind it rebuild. Background tasks and `after:` actions
+don't wait for it. `--graph` shows it.
+
+To make it the default, set it in the root config, and turn it off for one run
+with `--no-prefetch`:
+
+```yaml
+workspace:
+  prefetch: true
+```
+
+`ciabatta cache clean --pulls` empties the pull cache — every project's, since
+it's shared — and leaves this project's build cache alone.
+
+A pull step that brings its own `run:`/`script:` is left out of both, since
+ciabatta can't know what that command fetches. Docker and ECR pulls aren't
+cached here: the container engine already keeps the image once it's been
+pulled.
 
 ### S3
 
@@ -1075,7 +1101,7 @@ ciabatta deploy --gui         # live view: graph + streaming logs + fix buttons
 ```
 
 `--gui` hands the run to the daemon and opens a page at
-`http://127.0.0.1:8099/run/<id>` showing each step lighting up as it runs,
+`http://oven.localhost/run/<id>` showing each step lighting up as it runs,
 per-step logs, and interactive recovery. The daemon owns the run, so it keeps
 going if you close the terminal.
 
@@ -1109,7 +1135,8 @@ without throwing every cached build away with it. Set `CIABATTA_CACHE_DIR` to
 put it somewhere else (a CI runner's cache volume, a bigger disk). A store left
 in `.ciabatta/cache/` by an older version is moved there the first time it's
 used. `ciabatta cache clean` still clears this project's entries, and only
-this project's.
+this project's; `ciabatta cache clean --pulls` clears the machine-wide pull
+cache instead.
 
 **Cache settings live with the workflow they describe** — in
 `.ciabatta/workflows/<name>.yaml`, next to the steps — because what a build
@@ -1570,7 +1597,7 @@ Everything above works on one machine, which is the sanest way to try the remote
 cache before pointing a team at it. Two things to know first:
 
 **The cache server and the ciabatta daemon are different processes.** The daemon
-serves the web app on **8099**; the remote cache is its own server on **8380**.
+serves the web app on **80** (or 8099); the remote cache is its own server on **8380**.
 They don't know about each other and don't share a port, so running both is just
 picking two free ones.
 
@@ -1616,7 +1643,7 @@ artifacts can come back from is the server.
 
 **On the daemon's port.** `--port` picks the port a daemon *starts* on; it does
 not move one that's already running. A plain `ciabatta watch -p 9099` with a
-healthy daemon on 8099 quietly keeps using 8099 — so change it with
+healthy daemon on 80 quietly keeps using 80 — so change it with
 `ciabatta daemon restart --port 9099`, or export `CIABATTA_DAEMON_PORT=9099`
 before the first command that starts one. There's one daemon record
 (`~/.ciabatta/daemon.json`), so there's one daemon at a time; the port moves,
@@ -1987,7 +2014,7 @@ It scans `Cargo.toml`, `package.json`, `requirements.txt` / `pyproject.toml`,
 images) for external dependencies, identifies the internal packages in the repo,
 and derives publish points from your `kind: push` steps (and a publishable crate →
 crates.io). The result is written as JSON and shown at
-`http://127.0.0.1:8099/analyze`, where you can sort, filter and click through the
+`http://oven.localhost/analyze`, where you can sort, filter and click through the
 graph. You can also rescan from that page.
 
 **Accurate Rust versions.** A `Cargo.toml` dependency is only a *requirement*
@@ -2014,7 +2041,7 @@ publish`, `twine upload`, `helm push`, and `curl` uploads (`-T` / `--upload-file
 ciabatta push step — is **not** flagged as ciabatta-managed.
 
 ```bash
-ciabatta analyze                 # write JSON + open the view at :8099/analyze
+ciabatta analyze                 # write JSON + open the view at oven.localhost/analyze
 ciabatta analyze --no-serve      # just write ciabatta-analyze.json
 ciabatta analyze --check-vulns   # also query OSV for known vulnerabilities
 ciabatta analyze --requirements reqs.txt --trace trace.csv   # requirements column
@@ -2080,7 +2107,7 @@ ciabatta watch --stop 3          # stop session 3
 
 The command runs through your shell, so pipes, `&&`, and redirects work — quote
 the whole command when you use them. The view opens in your browser at
-`http://127.0.0.1:8099/watch/<id>` (suppress with `--no-open`), and
+`http://oven.localhost/watch/<id>` (suppress with `--no-open`), and
 keeps serving after the command exits so the logs stay browsable. The status pill
 shows whether it's running or how it exited.
 
@@ -2108,7 +2135,7 @@ lines themselves are never written to disk. The in-memory buffer is bounded
 Useful flags:
 
 - `-t, --trigger PHRASE` — notify on lines containing this phrase (repeatable).
-- `-p, --port PORT` — the ciabatta daemon's port (default `8099`).
+- `-p, --port PORT` — the ciabatta daemon's port (default: 80, falling back to `8099`).
 - `--stop ID` — stop a running session. Ctrl-C on `ciabatta watch` only
   detaches from it; the command keeps running in the daemon.
 - `--max-lines N` — cap the in-memory log buffer (default `200000`).
@@ -2150,14 +2177,39 @@ has it; it tries the branch ref, then `origin/<branch>`, then `HEAD`.
 
 Every browser-facing feature — todo, watch, run, analyze and the AI mind map
 — is served by **one background daemon** on **one port**, at
-`http://127.0.0.1:8099`. Each is a page in a single web app rather than a
+**`http://oven.localhost`**. Each is a page in a single web app rather than a
 separate server on its own port.
+
+There's nothing to set up for the name: every `*.localhost` name resolves to
+your own machine on its own — browsers and curl do it themselves, on Linux,
+macOS and Windows — so there's no hosts-file entry to add and nothing that needs
+root or admin. (`.local` is avoided on purpose: it belongs to mDNS/Bonjour, and
+a hosts entry for it can be slow or ignored.) Set `CIABATTA_WEB_HOST=127.0.0.1`
+for a browser that doesn't resolve `*.localhost`.
+
+The port is left off because the daemon asks for **port 80** first. When it
+can't have it, it uses **8099** — `http://oven.localhost:8099` — and the
+command that started it says why, once:
+
+- **Linux** keeps ports below 1024 for root. Allow ciabatta once (again after
+  each upgrade, since a new binary loses it), then restart the daemon:
+
+  ```bash
+  sudo setcap cap_net_bind_service=+ep "$(which ciabatta)"
+  ciabatta daemon restart
+  ```
+
+- **macOS** and **Windows** allow it as is, unless something else already has
+  port 80 (on Windows, `netsh http show servicestate` lists who).
+
+`ciabatta daemon status` prints the address it ended up on, and the reason when
+it isn't 80.
 
 You almost never start it by hand. Any command with a web view checks for a
 running daemon and launches one in the background if there isn't one:
 
 ```bash
-ciabatta todo        # starts the daemon if needed, opens http://127.0.0.1:8099/todo
+ciabatta todo        # starts the daemon if needed, opens http://oven.localhost/todo
 ciabatta watch make    # reuses the same daemon, opens /watch/<id>
 ```
 
@@ -2182,8 +2234,8 @@ ciabatta daemon logs -f    # follow ~/.ciabatta/daemon.log
 ciabatta daemon serve      # run it in the foreground, e.g. to debug startup
 ```
 
-The port is `8099` by default; override it with `CIABATTA_DAEMON_PORT` or `-p`
-on any command. `CIABATTA_BIND_HOST=0.0.0.0` exposes it beyond loopback — see
+Left alone, the port is 80, falling back to 8099; `CIABATTA_DAEMON_PORT` or
+`-p` on any command pins one instead (and then only that one is tried). `CIABATTA_BIND_HOST=0.0.0.0` exposes it beyond loopback — see
 the security note below before you do that.
 
 ### Projects
@@ -2268,7 +2320,7 @@ can't disagree with each other or with the build.
 The VS Code extension isn't on the Marketplace, so there are three places to
 get the `.vsix`, all of them the same file:
 
-- **A running daemon** serves it at `127.0.0.1:8099/extensions`, and the
+- **A running daemon** serves it at `oven.localhost/extensions`, and the
   Editors page of the web app has a download button. This is the copy built
   from the commit that built the binary, so the extension and the
   `ciabatta lsp` it launches can't be different versions.

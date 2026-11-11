@@ -1049,6 +1049,15 @@ pub struct WorkflowArgs {
     #[arg(long)]
     pub force: bool,
 
+    /// Download what this workflow's `kind: pull` steps would fetch from
+    /// their registries (Nexus, or Artifactory, S3 and generic endpoints) into
+    /// this machine's pull cache, and run nothing else: no build steps, no
+    /// pushes. A pull that later can't reach its registry (off the VPN, on a
+    /// plane) is served from that copy, with a warning that it's using only
+    /// the cache.
+    #[arg(long = "pre-fetch", conflicts_with_all = ["dry_run", "graph", "from_failed"])]
+    pub pre_fetch: bool,
+
     /// Carry on from where the last run of this workflow failed: the steps that
     /// passed are not run again, and the failed step and everything behind it
     /// are. The graph is compiled fresh, so a step whose command has changed

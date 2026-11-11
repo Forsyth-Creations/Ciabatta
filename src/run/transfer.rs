@@ -117,10 +117,48 @@ pub async fn resolve_pull_commit(
                 return Some(trial);
             }
             Ok(Some(false)) => continue,
-            // Registry can't be probed, or a network error occurred: don't
-            // override — let the pull run against the exact commit.
-            Ok(None) | Err(_) => return None,
+            // Registry can't be probed: don't override — let the pull run
+            // against the exact commit.
+            Ok(None) => return None,
+            // The registry can't be reached: the newest commit on the branch
+            // the pull cache has a copy of is the best there is. Nothing
+            // cached leaves the commit alone, so the pull surfaces the error.
+            Err(_) => {
+                return cached_commit(&candidates, template, reg_name, reg_cfg, env_vars, sink);
+            }
         }
+    }
+    None
+}
+
+/// The newest of `candidates` whose artifact is in the pull cache, as an
+/// adjusted variable map — or `None` to keep the exact commit.
+fn cached_commit(
+    candidates: &[String],
+    template: &str,
+    reg_name: &str,
+    reg_cfg: &crate::config::RegistryConfig,
+    env_vars: &HashMap<String, String>,
+    sink: &mut crate::registry::LogSink<'_>,
+) -> Option<HashMap<String, String>> {
+    let exact = candidates.first()?;
+    for commit in candidates {
+        let mut trial = env_vars.clone();
+        set_commit(&mut trial, commit);
+        let Ok(remote) = substitute_vars(template, &trial) else {
+            continue;
+        };
+        if crate::cache::pulls::lookup(reg_name, reg_cfg, &remote).is_none() {
+            continue;
+        }
+        if commit == exact {
+            return None;
+        }
+        sink.push(format!(
+            "registry unreachable; the newest commit on this branch in the pull cache is {}",
+            short_sha(commit),
+        ));
+        return Some(trial);
     }
     None
 }
@@ -299,26 +337,43 @@ fn remote_for_file(file: &Path, root: &Path, base: &str, strip: Option<&str>) ->
     )
 }
 
-/// Perform a transfer step: log in to its registry, then move every resolved
-/// (local, remote) pair.
-///
-/// Progress is reported per file, so a directory artifact shows a counter
-/// rather than sitting silent through fifty uploads. Transfers run concurrently
-/// (bounded by [`MAX_CONCURRENT_TRANSFERS`]) and their logs are buffered per
-/// transfer and replayed in declaration order, so out-of-order completion
-/// doesn't interleave into nonsense.
-#[allow(clippy::too_many_arguments)]
-pub async fn run(
+/// Everything a transfer step resolves before it moves a byte: the registry,
+/// the variables (with a pull's commit chosen), and each (local, remote) pair.
+struct Prepared<'a> {
+    registry_name: &'a str,
+    registry_config: &'a crate::config::RegistryConfig,
+    local_image: Option<&'a str>,
+    env_vars: HashMap<String, String>,
+    container_cmd: String,
+    pairs: Vec<(PathBuf, String)>,
+}
+
+impl Prepared<'_> {
+    fn opts(&self, dry_run: bool) -> Vec<RegistryOpOptions<'_>> {
+        self.pairs
+            .iter()
+            .map(|(local, remote)| RegistryOpOptions {
+                registry_name: self.registry_name,
+                registry_config: self.registry_config,
+                local_path: local.as_path(),
+                remote_path: remote.as_str(),
+                local_image: self.local_image,
+                env_vars: &self.env_vars,
+                dry_run,
+                container_cmd: &self.container_cmd,
+            })
+            .collect()
+    }
+}
+
+async fn prepare<'a>(
     step: &RunStep,
-    transfer: &Transfer<'_>,
-    config: &CiabattaConfig,
-    root: &Path,
+    transfer: &Transfer<'a>,
+    config: &'a CiabattaConfig,
     cwd: &Path,
     env_vars: &HashMap<String, String>,
-    dry_run: bool,
     sink: &mut crate::registry::LogSink<'_>,
-    progress: impl Fn(usize, usize),
-) -> Result<()> {
+) -> Result<Prepared<'a>> {
     let registry_name = transfer.registry.ok_or_else(|| {
         anyhow::anyhow!(
             "Step '{}' is a {} step but names no `registry`.",
@@ -392,19 +447,74 @@ pub async fn run(
     } else {
         build_transfers(transfer, cwd, &env_vars)?
     };
-    let opts: Vec<RegistryOpOptions<'_>> = pairs
-        .iter()
-        .map(|(local, remote)| RegistryOpOptions {
-            registry_name,
-            registry_config,
-            local_path: local.as_path(),
-            remote_path: remote.as_str(),
-            local_image: transfer.local_image,
-            env_vars: &env_vars,
-            dry_run,
-            container_cmd: &container_cmd,
-        })
-        .collect();
+    Ok(Prepared {
+        registry_name,
+        registry_config,
+        local_image: transfer.local_image,
+        env_vars,
+        container_cmd,
+        pairs,
+    })
+}
+
+/// Log in to a registry: its `login_script`, or the built-in login for its
+/// kind.
+async fn login(
+    prepared: &Prepared<'_>,
+    first: &RegistryOpOptions<'_>,
+    root: &Path,
+    sink: &mut crate::registry::LogSink<'_>,
+) -> Result<()> {
+    match prepared.registry_config.login_script.as_deref() {
+        Some(script) => {
+            let path = root.join(script);
+            let command = format!(
+                "bash '{}'",
+                path.display().to_string().replace('\'', r"'\''")
+            );
+            sink.push(format!("$ {command}"));
+            registry::run_shell_command_opts(&command, root, &prepared.env_vars, false, sink)
+                .await?;
+        }
+        None => {
+            let mut lines: Vec<String> = Vec::new();
+            let result = registry::default_login(first, &mut lines).await;
+            for line in lines {
+                sink.push(line);
+            }
+            result?;
+        }
+    }
+    Ok(())
+}
+
+/// Perform a transfer step: log in to its registry, then move every resolved
+/// (local, remote) pair.
+///
+/// Progress is reported per file, so a directory artifact shows a counter
+/// rather than sitting silent through fifty uploads. Transfers run concurrently
+/// (bounded by [`MAX_CONCURRENT_TRANSFERS`]) and their logs are buffered per
+/// transfer and replayed in declaration order, so out-of-order completion
+/// doesn't interleave into nonsense.
+///
+/// A pull goes through the pull cache ([`crate::cache::pulls`]): when the
+/// registry can't be reached, what was last fetched is used instead, with a
+/// warning.
+#[allow(clippy::too_many_arguments)]
+pub async fn run(
+    step: &RunStep,
+    transfer: &Transfer<'_>,
+    config: &CiabattaConfig,
+    root: &Path,
+    cwd: &Path,
+    env_vars: &HashMap<String, String>,
+    dry_run: bool,
+    sink: &mut crate::registry::LogSink<'_>,
+    progress: impl Fn(usize, usize),
+) -> Result<()> {
+    let prepared = prepare(step, transfer, config, cwd, env_vars, sink).await?;
+    let registry_name = prepared.registry_name;
+    let opts = prepared.opts(dry_run);
 
     if dry_run {
         sink.push(format!(
@@ -423,26 +533,18 @@ pub async fn run(
     }
 
     // Authentication is per-registry, so the first transfer's options speak for
-    // all of them.
-    if let Some(first) = opts.first() {
-        match registry_config.login_script.as_deref() {
-            Some(script) => {
-                let path = root.join(script);
-                let command = format!(
-                    "bash '{}'",
-                    path.display().to_string().replace('\'', r"'\''")
-                );
-                sink.push(format!("$ {command}"));
-                registry::run_shell_command_opts(&command, root, &env_vars, false, sink).await?;
-            }
-            None => {
-                let mut lines: Vec<String> = Vec::new();
-                registry::default_login(first, &mut lines).await?;
-                for line in lines {
-                    sink.push(line);
-                }
-            }
+    // all of them. A pull whose login fails — the registry is off the network —
+    // can still be served from the pull cache, so that's not the end of it.
+    let mut offline: Option<String> = None;
+    if let Some(first) = opts.first()
+        && let Err(e) = login(&prepared, first, root, sink).await
+    {
+        let cached = transfer.direction == Direction::Pull
+            && crate::cache::pulls::cacheable(registry_name, prepared.registry_config);
+        if !cached {
+            return Err(e);
         }
+        offline = Some(format!("login failed: {e:#}"));
     }
 
     use futures::stream::StreamExt;
@@ -451,7 +553,7 @@ pub async fn run(
 
     let mut futs = Vec::with_capacity(total);
     for (i, o) in opts.iter().enumerate() {
-        futs.push(one(i, o, transfer.direction));
+        futs.push(one(i, o, transfer.direction, offline.as_deref()));
     }
     let mut stream = futures::stream::iter(futs).buffer_unordered(MAX_CONCURRENT_TRANSFERS);
 
@@ -485,17 +587,60 @@ pub async fn run(
 
 /// One transfer into its own log buffer, tagged with its original index so the
 /// caller can replay concurrent results in order.
+///
+/// `offline` is why the registry is known to be unreachable, when it is: a pull
+/// then goes straight to the cache rather than waiting on a connection that
+/// won't come.
 async fn one(
     i: usize,
     o: &RegistryOpOptions<'_>,
     direction: Direction,
+    offline: Option<&str>,
 ) -> (usize, Result<()>, Vec<String>) {
     let mut sublog: Vec<String> = Vec::new();
-    let res = match direction {
-        Direction::Push => registry::push(o, &mut sublog).await,
-        Direction::Pull => registry::pull(o, &mut sublog).await,
+    let res = match (direction, offline) {
+        (Direction::Push, _) => registry::push(o, &mut sublog).await,
+        (Direction::Pull, None) => crate::cache::pulls::pull(o, &mut sublog).await,
+        (Direction::Pull, Some(reason)) => crate::cache::pulls::from_cache(o, reason, &mut sublog),
     };
     (i, res, sublog)
+}
+
+/// `--pre-fetch` for one pull step: fetch everything it would pull into the
+/// pull cache, without touching the working tree. Returns how many artifacts
+/// were cached; a pull whose registry isn't cached (an image) is skipped.
+pub async fn prefetch(
+    step: &RunStep,
+    transfer: &Transfer<'_>,
+    config: &CiabattaConfig,
+    root: &Path,
+    cwd: &Path,
+    env_vars: &HashMap<String, String>,
+    sink: &mut crate::registry::LogSink<'_>,
+) -> Result<usize> {
+    let prepared = prepare(step, transfer, config, cwd, env_vars, sink).await?;
+    if !crate::cache::pulls::cacheable(prepared.registry_name, prepared.registry_config) {
+        sink.push(format!(
+            "'{}' is an image registry; the container engine keeps its own copy, so there's \
+             nothing to pre-fetch",
+            prepared.registry_name
+        ));
+        return Ok(0);
+    }
+    let opts = prepared.opts(false);
+    if let Some(first) = opts.first() {
+        login(&prepared, first, root, sink).await?;
+    }
+    for o in &opts {
+        let mut lines = Vec::new();
+        let result = crate::cache::pulls::fetch(o, &mut lines).await;
+        for line in lines {
+            sink.push(line);
+        }
+        let cached = result?;
+        sink.push(format!("cached {}", cached.meta.url));
+    }
+    Ok(opts.len())
 }
 
 #[cfg(test)]

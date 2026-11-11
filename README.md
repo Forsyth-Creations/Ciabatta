@@ -746,6 +746,37 @@ workflows:
         artifact: vendor                  # where it lands
 ```
 
+### Pulling off the network: the pull cache and `--pre-fetch`
+
+Every `kind: pull` from Nexus (raw, npm or PyPI), Artifactory, S3 or a generic
+endpoint goes through a pull cache on this machine,
+`~/.ciabatta/cache/pulls/` (or under `CIABATTA_CACHE_DIR`). The pull downloads
+into it and is copied into the working tree from there, so the cache always
+holds the newest copy fetched. When the registry can't be reached (off the VPN,
+on a plane, the login failing), the pull is served from that copy and the
+step's log says so:
+
+```text
+warning: couldn't pull from 'nexus' (HTTP GET from https://nexus.example.com/… failed).
+Using ONLY the cached copy of https://nexus.example.com/…, fetched 2026-11-10T09:12:44Z — it may be out of date
+```
+
+With nothing cached, the pull fails the way it always did. A pull by branch
+(`{CIABATTA_COMMIT}` in `publish_path`) that can't reach the registry uses the
+newest commit on the branch that the cache has a copy of.
+
+To fill the cache ahead of time, without running anything, add `--pre-fetch`:
+
+```bash
+ciabatta build --pre-fetch      # download what build's pull steps fetch; run nothing else
+```
+
+It runs only the workflow's `kind: pull` steps, and only into the cache: no
+build step runs, nothing is pushed, and the working tree isn't touched. A pull
+step that brings its own `run:`/`script:` is skipped, since ciabatta can't know
+what that command fetches. Docker and ECR pulls aren't cached here: the
+container engine already keeps the image once it's been pulled.
+
 ### S3
 
 An S3 registry drives the AWS CLI, so it's just a bucket URL: set `url` to
@@ -1070,6 +1101,15 @@ ciabatta dry-run build         # what would be reused, and why not
 ciabatta dry-run build --diff  # ...with the lines that changed
 ciabatta cache status          # what the local store is holding
 ```
+
+**The local store lives outside the checkout**, in
+`~/.ciabatta/cache/projects/<repo>-<hash>/` — one directory per checkout,
+named after where it is on disk — so `git clean -xdf` clears the build output
+without throwing every cached build away with it. Set `CIABATTA_CACHE_DIR` to
+put it somewhere else (a CI runner's cache volume, a bigger disk). A store left
+in `.ciabatta/cache/` by an older version is moved there the first time it's
+used. `ciabatta cache clean` still clears this project's entries, and only
+this project's.
 
 **Cache settings live with the workflow they describe** — in
 `.ciabatta/workflows/<name>.yaml`, next to the steps — because what a build
@@ -1560,7 +1600,7 @@ ciabatta cache init --enable --remote http://127.0.0.1:8380
 
 ciabatta build                       # first build: uploads
 
-rm -rf .ciabatta/cache dist          # pretend to be a colleague's machine
+ciabatta cache clean --yes && rm -rf dist   # pretend to be a colleague's machine
 ciabatta build                       # "restored from the remote cache"
 
 ciabatta remote-cache status         # hit rate, storage, retention
@@ -1570,7 +1610,7 @@ Open `http://127.0.0.1:8380/` while it's running: that's the server's own admin
 page, and on an `open` cache you can mint a credential there and immediately use
 it with `ciabatta remote-cache login`.
 
-Wiping `.ciabatta/cache` along with the build output is the whole trick: it
+Clearing the local store along with the build output is the whole trick: it
 leaves the workspace looking like a fresh checkout, so the only place the
 artifacts can come back from is the server.
 

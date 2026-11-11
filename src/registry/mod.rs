@@ -33,6 +33,11 @@ impl<'a> LogSink<'a> {
         }
     }
 
+    /// A sink that only accumulates, for a caller that prints the lines itself.
+    pub fn collecting(lines: &'a mut Vec<String>) -> Self {
+        Self { lines, live: None }
+    }
+
     /// Record one fully-formed log line, forwarding it live if wired.
     pub fn push(&mut self, line: String) {
         if let Some(tx) = &self.live {

@@ -1317,6 +1317,86 @@ async fn stop_background(
     }
 }
 
+/// `ciabatta <workflow> --pre-fetch`: download what every `kind: pull` step in
+/// the run would fetch from its registry into the pull cache, and run nothing
+/// else — no build step, no push, no release.
+///
+/// Every step is tried even after one fails, so a single unreachable registry
+/// doesn't leave the others unfetched; the run fails at the end if any did.
+pub async fn prefetch(
+    resolved: &ResolvedRun,
+    config: &CiabattaConfig,
+    root: &Path,
+    env_vars: &HashMap<String, String>,
+) -> Result<()> {
+    use owo_colors::OwoColorize;
+
+    let prepared = prepare_env(resolved, root, env_vars)?;
+    let mut fetched = 0usize;
+    let mut failed: Vec<String> = Vec::new();
+    for step in &resolved.steps {
+        let Some(transfer) = step
+            .transfer()
+            .filter(|t| t.direction == super::Direction::Pull)
+        else {
+            continue;
+        };
+        let (script, run) = step.action();
+        // A step with its own command fetches however that command does; there
+        // is nothing ciabatta can fetch on its behalf.
+        if script.is_some() || run.is_some() {
+            println!(
+                "  {} {} — runs its own command, skipped",
+                "·".style(crate::color::faint()),
+                step.name
+            );
+            continue;
+        }
+        let cwd = step_cwd(step, root);
+        let env = step_env(step, &prepared.env);
+        let mut lines: Vec<String> = Vec::new();
+        let mut sink = LogSink::collecting(&mut lines);
+        let result = transfer::prefetch(step, &transfer, config, root, &cwd, &env, &mut sink).await;
+        match result {
+            Ok(_) => {
+                fetched += 1;
+                println!("  {} {}", "✓".style(crate::color::good()), step.name);
+                for line in &lines {
+                    println!("      {}", line.style(crate::color::faint()));
+                }
+            }
+            Err(e) => {
+                println!("  {} {}", "✗".style(crate::color::bad()), step.name);
+                for line in &lines {
+                    println!("      {}", line.style(crate::color::faint()));
+                }
+                eprintln!("      {}", format!("{e:#}").style(crate::color::bad()));
+                failed.push(step.name.clone());
+            }
+        }
+    }
+
+    if fetched == 0 && failed.is_empty() {
+        println!("Nothing to pre-fetch: no step in this run pulls from a registry.");
+        return Ok(());
+    }
+    let cache = crate::cache::store::global_root()?;
+    if !failed.is_empty() {
+        bail!(
+            "{} of {} pull step(s) couldn't be pre-fetched: {}",
+            failed.len(),
+            failed.len() + fetched,
+            failed.join(", ")
+        );
+    }
+    println!(
+        "Pre-fetched {fetched} pull step(s) into {}. A pull that can't reach its registry \
+         will use this copy, with a warning.",
+        cache.display()
+    );
+    Ok(())
+}
+
 /// The directory a step's action runs from: its own `cwd` (a sub-workspace's
 /// directory, for a workflow graph) resolved against the project root, or the
 /// root itself.

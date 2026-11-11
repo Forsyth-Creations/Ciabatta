@@ -1718,12 +1718,19 @@ cache:
           hashing to finish.
         </P>
         <P>
-          ciabatta&apos;s own state — <C>.ciabatta/cache/</C> (the local store) and{" "}
-          <C>.ciabatta/history/</C>, in any sub-workspace — is never read as an input or walked,
+          ciabatta&apos;s own state — <C>.ciabatta/history/</C>, and a <C>.ciabatta/cache/</C>{" "}
+          left by a version before 0.9.1, in any sub-workspace — is never read as an input or walked,
           whether or not your <C>.gitignore</C> lists it. Before, a project that didn&apos;t list
           them had every step walk the store, which got slower with every build, and a step
           reading the whole tree (<C>inputs: [.]</C>) keyed on its own cache and never hit. Still
           add them to <C>.gitignore</C>, so they aren&apos;t committed.
+        </P>
+        <P>
+          The store itself lives outside the checkout, in{" "}
+          <C>~/.ciabatta/cache/projects/&lt;repo&gt;-&lt;hash&gt;/</C> — one directory per
+          checkout — so <C>git clean -xdf</C> doesn&apos;t throw every cached build away. Set{" "}
+          <C>CIABATTA_CACHE_DIR</C> to put it elsewhere, such as a CI runner&apos;s cache volume.
+          An older in-tree store is moved there the first time it is used.
         </P>
       </>
     ),
@@ -2194,6 +2201,16 @@ steps:
     registry: tools                     # format: pypi  (runs pip download)
     publish_path: "my-tool@{TOOL_VERSION}"
     artifact: vendor`}</Pre>
+        <P>
+          Every such pull — and one from Artifactory, S3 or a generic endpoint — goes through a
+          pull cache on this machine, <C>~/.ciabatta/cache/pulls/</C>. When the registry can&apos;t
+          be reached, the pull is served from the last copy fetched, and the step&apos;s log
+          warns that it is using only the cache. To fill it before going off the network, run the
+          workflow with <C>--pre-fetch</C>: only its <C>kind: pull</C> steps run, only into the
+          cache — no build step, no push, and the working tree isn&apos;t touched. Docker and ECR
+          images aren&apos;t kept there; the container engine already keeps them.
+        </P>
+        <Pre>{`ciabatta build --pre-fetch    # download what build pulls; run nothing else`}</Pre>
 
         <SubHeading>Lining waves up: wave_grouping</SubHeading>
         <P>
@@ -3227,7 +3244,7 @@ ciabatta cache init --enable --remote http://127.0.0.1:8380
 
 ciabatta run build                   # first build: uploads
 
-rm -rf .ciabatta/cache dist          # pretend to be a colleague's machine
+ciabatta cache clean --yes && rm -rf dist   # pretend to be a colleague's machine
 ciabatta run build                   # "restored from the remote cache"
 
 ciabatta remote-cache status         # hit rate, storage, retention`}</Pre>
@@ -3237,7 +3254,7 @@ ciabatta remote-cache status         # hit rate, storage, retention`}</Pre>
           straight away with <C>ciabatta remote-cache login</C>.
         </P>
         <P>
-          Wiping <C>.ciabatta/cache</C> along with the build output is the whole trick: it leaves
+          Clearing the local store along with the build output is the whole trick: it leaves
           the workspace looking like a fresh checkout, so the only place the artifacts can come back
           from is the server.
         </P>

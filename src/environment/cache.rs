@@ -7,8 +7,9 @@
 //! and the build fails three minutes later with an error about something else
 //! entirely.
 //!
-//! So every run snapshots the variables its `.env` files define into
-//! `.ciabatta/cache/env.json`, and the next run diffs against it. Added,
+//! So every run snapshots the variables its `.env` files define into the
+//! project's cache directory (`env.json`, beside the cache store — see
+//! [`crate::cache::store::project_dir`]), and the next run diffs against it. Added,
 //! removed, and changed variables are reported once, in the terminal and
 //! through the daemon API for the web app.
 //!
@@ -25,8 +26,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::CIABATTA_DIR;
 
-/// Where the snapshot lives, relative to the project root.
-const CACHE_FILE: &str = "cache/env.json";
+/// The snapshot's file name, in the project's cache directory.
+const CACHE_FILE: &str = "env.json";
 
 /// One file's worth of remembered variables: name → hash of its value.
 type Vars = BTreeMap<String, String>;
@@ -129,9 +130,12 @@ impl Drift {
     }
 }
 
-/// Where a project's snapshot lives.
+/// Where a project's snapshot lives: beside its cache store, outside the tree,
+/// or in `.ciabatta/cache/` as before when there's no home directory to use.
 pub fn cache_path(root: &Path) -> PathBuf {
-    root.join(CIABATTA_DIR).join(CACHE_FILE)
+    crate::cache::store::project_dir(root)
+        .unwrap_or_else(|_| root.join(CIABATTA_DIR).join("cache"))
+        .join(CACHE_FILE)
 }
 
 /// Read the stored snapshot, treating anything unreadable or stale as absent —
@@ -271,7 +275,7 @@ fn hash_value(key: &str, value: &str) -> String {
     format!("{hash:016x}")
 }
 
-/// Write the snapshot, creating `.ciabatta/cache/` if it isn't there.
+/// Write the snapshot, creating its directory if it isn't there.
 fn store(root: &Path, snapshot: &Snapshot) -> Result<()> {
     let path = cache_path(root);
     if let Some(parent) = path.parent() {

@@ -593,6 +593,11 @@ async fn cmd_workflow(
         &cfg.workspace.clone().unwrap_or_default(),
     );
 
+    if args.pre_fetch {
+        println!("Pre-fetching what '{name}' pulls:");
+        return run::engine::prefetch(&resolved, &cfg, &ws.root, &vars).await;
+    }
+
     if viz == cli::Viz::Gui {
         // The daemon owns the run, so it compiles the graph itself from the
         // same declarations rather than being handed our copy.
@@ -2496,6 +2501,12 @@ async fn run_plain(
                 step,
                 line,
             } => {
+                // A pull served only from the cache is the one line of a step's
+                // output ciabatta wrote itself and nobody should miss.
+                let line = match line.starts_with(cache::pulls::STALE_WARNING) {
+                    true => line.style(color::warn()).to_string(),
+                    false => line,
+                };
                 println!(
                     "{}   {} {line}",
                     tag(&workflow),

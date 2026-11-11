@@ -137,10 +137,16 @@ jobs:
         id: py39
         shell: bash
         run: |
-          uv python install 3.9
-          py=$(uv python find --managed-python 3.9)
-          "$py" -m ensurepip --upgrade >/dev/null
+          # uv marks its own installs externally managed (PEP 668), so pip
+          # won't touch them; a seeded venv on top has pip and is fair game.
+          uv venv --python 3.9 --managed-python --seed "$RUNNER_TEMP/py39"
+          if [ -x "$RUNNER_TEMP/py39/bin/python" ]; then
+            py="$RUNNER_TEMP/py39/bin/python"
+          else
+            py="$RUNNER_TEMP/py39/Scripts/python.exe"
+          fi
           "$py" --version
+          "$py" -m pip --version
           echo "python-path=$py" >> "$GITHUB_OUTPUT"
       - name: Set up Python 3.12
         id: py312

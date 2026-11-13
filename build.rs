@@ -46,6 +46,130 @@ fn main() {
         "ciabatta-remote-cache-web",
         "the remote cache server",
     );
+    protos(root);
+}
+
+/// Compile `proto/` into Rust types (prost, with pbjson for JSON) and the
+/// matching TypeScript, all in `OUT_DIR`.
+///
+/// `protox` rather than `protoc`, so building ciabatta needs no protobuf
+/// compiler installed. The TypeScript isn't written into the source tree from
+/// here — a build script that edits checked-in files is a surprise — but a test
+/// compares it with `remote-cache-web/src/gen/oven.ts` and rewrites that file
+/// when asked (see `src/oven/proto.rs`).
+fn protos(root: &Path) {
+    println!("cargo:rerun-if-changed=proto");
+    let out = std::path::PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR is set"));
+    let fds = protox::compile(["oven.proto"], [root.join("proto")])
+        .unwrap_or_else(|e| panic!("proto/oven.proto doesn't compile: {e:?}"));
+    let encoded = prost::Message::encode_to_vec(&fds);
+
+    prost_build::Config::new()
+        .out_dir(&out)
+        .compile_fds(fds.clone())
+        .expect("generating the Rust protobuf types");
+    pbjson_build::Builder::new()
+        .register_descriptors(&encoded)
+        .expect("registering the protobuf descriptors")
+        .out_dir(&out)
+        // The JSON is what travels, so it reads the way the .proto does:
+        // snake_case names, and every field there whether or not it's set.
+        .preserve_proto_field_names()
+        .emit_fields()
+        // An older client talking to a newer server, or the other way round.
+        .ignore_unknown_fields()
+        .build(&[".ciabatta.oven"])
+        .expect("generating the protobuf JSON mapping");
+
+    for file in &fds.file {
+        let ts = typescript(file);
+        let name = file.name().trim_end_matches(".proto");
+        fs::write(out.join(format!("{name}.ts")), ts).expect("writing the TypeScript");
+    }
+}
+
+/// TypeScript for the JSON a `.proto` file's messages travel as.
+///
+/// Small on purpose: plain interfaces and string unions, no runtime, because
+/// the web app only ever reads and writes JSON. It follows protobuf's JSON
+/// mapping as `build.rs` configures pbjson above — field names as written,
+/// enums by value name, 64-bit integers as strings.
+fn typescript(file: &prost_types::FileDescriptorProto) -> String {
+    use prost_types::field_descriptor_proto::{Label, Type};
+    use std::fmt::Write;
+
+    // Leading comments, by descriptor path: [4, m] is message m, [4, m, 2, f]
+    // its field f, [5, e] enum e, [5, e, 2, v] its value v.
+    let mut comments = std::collections::HashMap::new();
+    if let Some(info) = &file.source_code_info {
+        for location in &info.location {
+            if let Some(text) = &location.leading_comments {
+                comments.insert(location.path.clone(), text.trim().to_string());
+            }
+        }
+    }
+    let doc = |out: &mut String, path: &[i32], indent: &str| {
+        if let Some(text) = comments.get(path) {
+            let _ = writeln!(out, "{indent}/**");
+            for line in text.lines() {
+                let _ = writeln!(out, "{indent} * {}", line.trim()).map(|_| ());
+            }
+            let _ = writeln!(out, "{indent} */");
+        }
+    };
+    let package = format!(".{}.", file.package());
+    let short = |name: &str| name.trim_start_matches(&package).replace('.', "_");
+
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "// Generated from proto/{} by build.rs. Don't edit it: change the .proto, then\n\
+         // run `CIABATTA_REGENERATE=1 cargo test generated_typescript` to write it here.\n",
+        file.name()
+    );
+
+    for (e, en) in file.enum_type.iter().enumerate() {
+        doc(&mut out, &[5, e as i32], "");
+        let values: Vec<String> = en
+            .value
+            .iter()
+            .map(|v| format!("\"{}\"", v.name()))
+            .collect();
+        let _ = writeln!(
+            out,
+            "export type {} =\n  | {};\n",
+            en.name(),
+            values.join("\n  | ")
+        );
+    }
+
+    for (m, message) in file.message_type.iter().enumerate() {
+        doc(&mut out, &[4, m as i32], "");
+        let _ = writeln!(out, "export interface {} {{", message.name());
+        for (f, field) in message.field.iter().enumerate() {
+            doc(&mut out, &[4, m as i32, 2, f as i32], "  ");
+            let base = match field.r#type() {
+                Type::String | Type::Bytes => "string".to_string(),
+                Type::Bool => "boolean".to_string(),
+                Type::Int64 | Type::Uint64 | Type::Sint64 | Type::Fixed64 | Type::Sfixed64 => {
+                    "string".to_string()
+                }
+                Type::Message | Type::Enum => short(field.type_name()),
+                _ => "number".to_string(),
+            };
+            let repeated = field.label() == Label::Repeated;
+            // `optional`, and any singular message field, may be absent.
+            let optional =
+                field.proto3_optional() || (field.r#type() == Type::Message && !repeated);
+            let ty = if repeated { format!("{base}[]") } else { base };
+            let _ = match optional {
+                true => writeln!(out, "  {}?: {ty} | null;", field.name()),
+                false => writeln!(out, "  {}: {ty};", field.name()),
+            };
+        }
+        let _ = writeln!(out, "}}\n");
+    }
+    out.trim_end().to_string() + "\n"
 }
 
 /// Make sure `<dir>/dist` holds a web app, writing a placeholder if it doesn't.

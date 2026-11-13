@@ -8,7 +8,6 @@
 
 import { MarkerType, Position, type Edge, type Node } from "@xyflow/react";
 
-
 /**
  * Edge defaults for the layered graphs: drawn by `RoutedEdge` along the route
  * `layeredLayout` worked out, rather than by react-flow's own path functions.
@@ -43,11 +42,15 @@ export function radialLayout(
 
   const hubRadius = Math.max(160, hubs.length * 46);
   hubs.forEach((hub, index) => {
-    const angle = (index / Math.max(1, hubs.length)) * Math.PI * 2 - Math.PI / 2;
+    const angle =
+      (index / Math.max(1, hubs.length)) * Math.PI * 2 - Math.PI / 2;
     nodes.push({
       id: hub.id,
       data: hub.data,
-      position: { x: Math.cos(angle) * hubRadius, y: Math.sin(angle) * hubRadius },
+      position: {
+        x: Math.cos(angle) * hubRadius,
+        y: Math.sin(angle) * hubRadius,
+      },
       type: "default",
     });
   });
@@ -78,7 +81,10 @@ export function radialLayout(
     const spread = (Math.PI * 2) / Math.max(1, byHub.size);
 
     group.forEach((leaf, index) => {
-      const offset = group.length === 1 ? 0 : (index / (group.length - 1) - 0.5) * spread * 0.9;
+      const offset =
+        group.length === 1
+          ? 0
+          : (index / (group.length - 1) - 0.5) * spread * 0.9;
       const angle = centreAngle + offset;
       // Stagger across three radii so long labels in a dense cluster don't
       // collide with their neighbours.
@@ -144,7 +150,8 @@ export interface EdgeRoute {
 }
 
 /** The key an edge's route is listed under. */
-export const routeKey = (source: string, target: string) => `${source}->${target}`;
+export const routeKey = (source: string, target: string) =>
+  `${source}->${target}`;
 
 /** Where a node or lane was put: its column's depth, and its centre height. */
 export interface Placement {
@@ -276,19 +283,28 @@ export function layeredLayout(
   const rowGap = options.rowGap ?? 30;
   const nodeHeight = options.nodeHeight ?? 46;
   const isBottom = options.bottom ?? (() => false);
-  const heightOf = (id: string) => (isLane(id) ? 0 : (options.heightOf?.(id) ?? nodeHeight));
+  const heightOf = (id: string) =>
+    isLane(id) ? 0 : (options.heightOf?.(id) ?? nodeHeight);
   // Centre to centre: half of each, plus the room the pair needs between them.
   const distance = (a: string, b: string) =>
     heightOf(a) / 2 +
     heightOf(b) / 2 +
-    (isLane(a) && isLane(b) ? LANE_GAP : isLane(a) || isLane(b) ? LANE_CLEARANCE : rowGap);
+    (isLane(a) && isLane(b)
+      ? LANE_GAP
+      : isLane(a) || isLane(b)
+        ? LANE_CLEARANCE
+        : rowGap);
 
   const layered = ids.filter((id) => !isBottom(id));
   const parked = ids.filter(isBottom);
 
   const previous = options.previous;
   const ranked = edges.filter((edge) => edge.rank !== false);
-  const depth = computeDepths(layered, ranked, (id) => previous?.get(id)?.depth);
+  const depth = computeDepths(
+    layered,
+    ranked,
+    (id) => previous?.get(id)?.depth,
+  );
   if (options.align) alignGroups(layered, ranked, depth, options.align);
   if (options.pin) {
     for (const id of layered) {
@@ -303,12 +319,17 @@ export function layeredLayout(
   // How many wires each source has in each family. A source with one has
   // nothing to fan out, so its wire converges with the others into its target.
   const fanOut = new Map<string, number>();
-  const family = (edge: LayoutEdge) => `${edge.group ?? ""}\u0000${edge.source}`;
-  for (const edge of edges) fanOut.set(family(edge), (fanOut.get(family(edge)) ?? 0) + 1);
+  const family = (edge: LayoutEdge) =>
+    `${edge.group ?? ""}\u0000${edge.source}`;
+  for (const edge of edges)
+    fanOut.set(family(edge), (fanOut.get(family(edge)) ?? 0) + 1);
   const converges = (edge: LayoutEdge) => fanOut.get(family(edge)) === 1;
 
   const laneDepth = new Map<string, number>();
-  const chains = new Map<string, { edge: LayoutEdge; chain: string[]; from: number }>();
+  const chains = new Map<
+    string,
+    { edge: LayoutEdge; chain: string[]; from: number }
+  >();
   const links = new Map<string, { source: string; target: string }>();
   for (const edge of edges) {
     const from = depth.get(edge.source);
@@ -324,7 +345,10 @@ export function layeredLayout(
     const chain = [edge.source, ...lanes, edge.target];
     chains.set(routeKey(edge.source, edge.target), { edge, chain, from });
     for (let i = 0; i + 1 < chain.length; i++) {
-      links.set(`${chain[i]}\u0000${chain[i + 1]}`, { source: chain[i], target: chain[i + 1] });
+      links.set(`${chain[i]}\u0000${chain[i + 1]}`, {
+        source: chain[i],
+        target: chain[i + 1],
+      });
     }
   }
   const inner = [...links.values()];
@@ -366,7 +390,10 @@ export function layeredLayout(
       nodes.push({
         id,
         data: data(id),
-        position: { x: columnFor(depths[index]) * columnWidth, y: centres.get(id)! - heightOf(id) / 2 },
+        position: {
+          x: columnFor(depths[index]) * columnWidth,
+          y: centres.get(id)! - heightOf(id) / 2,
+        },
         type: "default",
         // The graph runs left to right, so edges must leave the right side and
         // arrive at the left. With react-flow's default top/bottom handles
@@ -380,7 +407,10 @@ export function layeredLayout(
 
   // The parked row, clear of the lowest any layered node reached.
   if (parked.length > 0) {
-    const lowest = Math.max(0, ...[...centres].map(([id, y]) => y + heightOf(id) / 2));
+    const lowest = Math.max(
+      0,
+      ...[...centres].map(([id, y]) => y + heightOf(id) / 2),
+    );
     parked.forEach((id, index) => {
       nodes.push({
         id,
@@ -432,7 +462,11 @@ export function layeredLayout(
     routes.set(key, {
       fromTarget: converges(edge) && !edge.merge,
       lanes: chain.slice(1, -1).map((id) => centres.get(id)!),
-      tracks: chain.slice(0, -1).map((id, i) => trackX.get(`${from + i}\u0000${id}\u0000${chain[i + 1]}`)!),
+      tracks: chain
+        .slice(0, -1)
+        .map((id, i) =>
+          trackX.get(`${from + i}\u0000${id}\u0000${chain[i + 1]}`)!,
+        ),
     });
   }
 
@@ -442,7 +476,9 @@ export function layeredLayout(
     const from = depth.get(edge.source);
     const to = depth.get(edge.target);
     if (from === undefined || to === undefined || to > from) continue;
-    const spanned = order.filter((_, index) => depths[index] >= to && depths[index] <= from);
+    const spanned = order.filter(
+      (_, index) => depths[index] >= to && depths[index] <= from,
+    );
     routes.set(routeKey(edge.source, edge.target), {
       lanes: [],
       tracks: [],
@@ -457,7 +493,8 @@ export function layeredLayout(
 
   const placement = new Map<string, Placement>();
   order.forEach((column, index) => {
-    for (const id of column) placement.set(id, { depth: depths[index], y: centres.get(id)! });
+    for (const id of column)
+      placement.set(id, { depth: depths[index], y: centres.get(id)! });
   });
 
   return { nodes, routes, placement };
@@ -479,7 +516,9 @@ function clearHeight(
 ): number {
   const busy = ids
     .map((id) => {
-      const half = isLane(id) ? LANE_GAP / 2 : heightOf(id) / 2 + LANE_CLEARANCE / 2;
+      const half = isLane(id)
+        ? LANE_GAP / 2
+        : heightOf(id) / 2 + LANE_CLEARANCE / 2;
       return [centres.get(id)! - half, centres.get(id)! + half] as const;
     })
     .sort((a, b) => a[0] - b[0]);
@@ -494,7 +533,9 @@ function clearHeight(
     reach = Math.max(reach, end);
   }
   candidates.push(reach + LOOP_LIFT);
-  return candidates.reduce((best, y) => (Math.abs(y - wanted) < Math.abs(best - wanted) ? y : best));
+  return candidates.reduce((best, y) =>
+    Math.abs(y - wanted) < Math.abs(best - wanted) ? y : best,
+  );
 }
 
 /** One wire's crossing of one gap, from its height on the left to the right. */
@@ -533,7 +574,11 @@ interface Net {
  * where it now does best — a local search, but crossings here are counted
  * exactly, and the gaps hold a handful of nets rather than hundreds.
  */
-function assignTracks(segments: GapSegment[], left: number, right: number): Map<string, number> {
+function assignTracks(
+  segments: GapSegment[],
+  left: number,
+  right: number,
+): Map<string, number> {
   const key = (s: GapSegment) => `${s.left}\u0000${s.right}`;
   const centre = (left + right) / 2;
   const x = new Map<string, number>();
@@ -563,7 +608,13 @@ function assignTracks(segments: GapSegment[], left: number, right: number): Map<
     const lefts = [...new Set(members.map((s) => s.ly))];
     const rights = [...new Set(members.map((s) => s.ry))];
     const all = [...lefts, ...rights];
-    const net = { segments: members, lo: Math.min(...all), hi: Math.max(...all), lefts, rights };
+    const net = {
+      segments: members,
+      lo: Math.min(...all),
+      hi: Math.max(...all),
+      lefts,
+      rights,
+    };
     // A net that never changes height has no vertical, so it needs no track.
     if (net.hi - net.lo < 0.5) {
       for (const segment of members) x.set(key(segment), centre);
@@ -586,7 +637,8 @@ function assignTracks(segments: GapSegment[], left: number, right: number): Map<
     track.push(at);
   });
   const count = Math.max(0, ...track) + 1;
-  const spacing = count > 1 ? Math.min(TRACK_SPACING, (right - left) / (count - 1)) : 0;
+  const spacing =
+    count > 1 ? Math.min(TRACK_SPACING, (right - left) / (count - 1)) : 0;
   order.forEach((net, i) => {
     const at = centre + (track[i] - (count - 1) / 2) * spacing;
     for (const segment of net.segments) x.set(key(segment), at);
@@ -609,9 +661,11 @@ function overlaps(a: Net, b: Net): boolean {
  * end of a vertical counts too, since it draws a junction that isn't one.
  */
 function crossings(a: Net, b: Net): number {
-  const within = (y: number, net: Net) => y >= net.lo - 0.5 && y <= net.hi + 0.5;
+  const within = (y: number, net: Net) =>
+    y >= net.lo - 0.5 && y <= net.hi + 0.5;
   return (
-    b.lefts.filter((y) => within(y, a)).length + a.rights.filter((y) => within(y, b)).length
+    b.lefts.filter((y) => within(y, a)).length +
+    a.rights.filter((y) => within(y, b)).length
   );
 }
 
@@ -640,7 +694,8 @@ function orderNets(nets: Net[]): Net[] {
 
   // The widest first: they constrain the most, so they should choose first.
   const order: Net[] = [];
-  for (const net of [...nets].sort((a, b) => b.hi - b.lo - (a.hi - a.lo))) insert(order, net);
+  for (const net of [...nets].sort((a, b) => b.hi - b.lo - (a.hi - a.lo)))
+    insert(order, net);
   for (let pass = 0; pass < 3; pass++) {
     for (const net of [...order]) {
       order.splice(order.indexOf(net), 1);
@@ -672,14 +727,23 @@ const SWEEPS = 8;
  * visible lanes, and it is thirty lines rather than a layout engine in the
  * bundle.
  */
-function reduceCrossings(order: string[][], edges: { source: string; target: string }[]): void {
+function reduceCrossings(
+  order: string[][],
+  edges: { source: string; target: string }[],
+): void {
   if (order.length < 2) return;
 
   const successors = new Map<string, string[]>();
   const predecessors = new Map<string, string[]>();
   for (const edge of edges) {
-    successors.set(edge.source, [...(successors.get(edge.source) ?? []), edge.target]);
-    predecessors.set(edge.target, [...(predecessors.get(edge.target) ?? []), edge.source]);
+    successors.set(edge.source, [
+      ...(successors.get(edge.source) ?? []),
+      edge.target,
+    ]);
+    predecessors.set(edge.target, [
+      ...(predecessors.get(edge.target) ?? []),
+      edge.source,
+    ]);
   }
 
   let best = order.map((column) => [...column]);
@@ -700,7 +764,10 @@ function reduceCrossings(order: string[][], edges: { source: string; target: str
 
     for (const index of columns) {
       const fixed = new Map(
-        order[sweep % 2 === 0 ? index - 1 : index + 1].map((id, position) => [id, position]),
+        order[sweep % 2 === 0 ? index - 1 : index + 1].map((id, position) => [
+          id,
+          position,
+        ]),
       );
       // A node with no neighbours in the fixed column has no barycentre, so it
       // keeps the position it has rather than being swept to the top.
@@ -714,7 +781,9 @@ function reduceCrossings(order: string[][], edges: { source: string; target: str
       // Stable, so nodes that tie keep the order they already had — which on
       // the first sweep is declaration order, the most meaningful tiebreak
       // available.
-      order[index] = [...order[index]].sort((a, b) => keys.get(a)! - keys.get(b)!);
+      order[index] = [...order[index]].sort(
+        (a, b) => keys.get(a)! - keys.get(b)!,
+      );
     }
 
     const crossings = countCrossings(order, edges);
@@ -739,7 +808,10 @@ function reduceCrossings(order: string[][], edges: { source: string; target: str
  * columns, which on graphs of this size is nothing, and it is only ever
  * compared against itself.
  */
-function countCrossings(order: string[][], edges: { source: string; target: string }[]): number {
+function countCrossings(
+  order: string[][],
+  edges: { source: string; target: string }[],
+): number {
   const position = new Map<string, { column: number; row: number }>();
   order.forEach((column, index) => {
     column.forEach((id, row) => position.set(id, { column: index, row }));
@@ -748,7 +820,10 @@ function countCrossings(order: string[][], edges: { source: string; target: stri
   let crossings = 0;
   for (let index = 0; index + 1 < order.length; index++) {
     const between = edges
-      .map((edge) => ({ from: position.get(edge.source), to: position.get(edge.target) }))
+      .map((edge) => ({
+        from: position.get(edge.source),
+        to: position.get(edge.target),
+      }))
       .filter((e) => e.from?.column === index && e.to?.column === index + 1)
       .map((e) => [e.from!.row, e.to!.row] as const)
       .sort((a, b) => a[0] - b[0] || a[1] - b[1]);
@@ -795,8 +870,14 @@ function assignRows(
   const successors = new Map<string, string[]>();
   const predecessors = new Map<string, string[]>();
   for (const edge of edges) {
-    successors.set(edge.source, [...(successors.get(edge.source) ?? []), edge.target]);
-    predecessors.set(edge.target, [...(predecessors.get(edge.target) ?? []), edge.source]);
+    successors.set(edge.source, [
+      ...(successors.get(edge.source) ?? []),
+      edge.target,
+    ]);
+    predecessors.set(edge.target, [
+      ...(predecessors.get(edge.target) ?? []),
+      edge.source,
+    ]);
   }
 
   for (let pass = 0; pass < SWEEPS; pass++) {
@@ -879,8 +960,14 @@ function holdRows(
   const successors = new Map<string, string[]>();
   const predecessors = new Map<string, string[]>();
   for (const edge of edges) {
-    successors.set(edge.source, [...(successors.get(edge.source) ?? []), edge.target]);
-    predecessors.set(edge.target, [...(predecessors.get(edge.target) ?? []), edge.source]);
+    successors.set(edge.source, [
+      ...(successors.get(edge.source) ?? []),
+      edge.target,
+    ]);
+    predecessors.set(edge.target, [
+      ...(predecessors.get(edge.target) ?? []),
+      edge.source,
+    ]);
   }
 
   const rows = new Map<string, number>();
@@ -937,16 +1024,23 @@ function spread(wanted: number[], gaps: number[], weights: number[]): number[] {
   const blocks: { value: number; weight: number; count: number }[] = [];
   wanted.forEach((y, i) => {
     blocks.push({ value: y - offsets[i], weight: weights[i], count: 1 });
-    while (blocks.length > 1 && blocks[blocks.length - 2].value > blocks[blocks.length - 1].value) {
+    while (
+      blocks.length > 1 &&
+      blocks[blocks.length - 2].value > blocks[blocks.length - 1].value
+    ) {
       const last = blocks.pop()!;
       const into = blocks[blocks.length - 1];
-      into.value = (into.value * into.weight + last.value * last.weight) / (into.weight + last.weight);
+      into.value =
+        (into.value * into.weight + last.value * last.weight) /
+        (into.weight + last.weight);
       into.weight += last.weight;
       into.count += last.count;
     }
   });
 
-  return blocks.flatMap((block) => Array<number>(block.count).fill(block.value)).map((v, i) => v + offsets[i]);
+  return blocks
+    .flatMap((block) => Array<number>(block.count).fill(block.value))
+    .map((v, i) => v + offsets[i]);
 }
 
 function mean(values: number[]): number {
@@ -972,7 +1066,9 @@ export function executionOrder(
   if (options.exclude) ids = ids.filter((id) => !options.exclude!(id));
   const depth = computeDepths(ids, edges);
   // Array#sort is stable, so equal depths keep their declaration order.
-  const sequence = [...ids].sort((a, b) => (depth.get(a) ?? 0) - (depth.get(b) ?? 0));
+  const sequence = [...ids].sort(
+    (a, b) => (depth.get(a) ?? 0) - (depth.get(b) ?? 0),
+  );
   return new Map(sequence.map((id, index) => [id, index + 1]));
 }
 
@@ -990,7 +1086,9 @@ function computeDepths(
   /** The earliest each node may go, when it already has a column to keep. */
   floor: (id: string) => number | undefined = () => undefined,
 ): Map<string, number> {
-  const depth = new Map<string, number>(ids.map((id) => [id, Math.max(0, floor(id) ?? 0)]));
+  const depth = new Map<string, number>(
+    ids.map((id) => [id, Math.max(0, floor(id) ?? 0)]),
+  );
 
   for (let pass = 0; pass < ids.length; pass++) {
     let changed = false;
@@ -1071,7 +1169,10 @@ function alignGroups(
 /** Convenience: turn `{from,to}` pairs into react-flow edges. */
 export function toEdges(
   pairs: { from: string; to: string }[],
-  options: { animated?: boolean; dashed?: (pair: { from: string; to: string }) => boolean } = {},
+  options: {
+    animated?: boolean;
+    dashed?: (pair: { from: string; to: string }) => boolean;
+  } = {},
 ): Edge[] {
   return pairs.map((pair, index) => ({
     id: `${pair.from}->${pair.to}-${index}`,

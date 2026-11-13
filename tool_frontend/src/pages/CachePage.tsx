@@ -47,7 +47,13 @@ import BuildIcon from "@mui/icons-material/Build";
 import AccountTreeIcon from "@mui/icons-material/AccountTree";
 import RemoveCircleOutlineIcon from "@mui/icons-material/RemoveCircleOutline";
 
-import { humanizeBytes, humanizeMs, useCachePlan, useCacheStatus, useRemoteCache } from "../api/cache";
+import {
+  humanizeBytes,
+  humanizeMs,
+  useCachePlan,
+  useCacheStatus,
+  useRemoteCache,
+} from "../api/cache";
 import { useWorkspace } from "../api/workspace";
 import type {
   CachePlan,
@@ -61,10 +67,19 @@ import type {
 import { Prose, ago } from "../components/CacheReport";
 import { CacheDiffView } from "../components/CacheDiff";
 import { FileTree } from "../components/FileTree";
-import { ErrorNote, Loading, PageHeader, RequireProject } from "../components/Page";
+import {
+  ErrorNote,
+  Loading,
+  PageHeader,
+  RequireProject,
+} from "../components/Page";
 
 export function CachePage() {
-  return <RequireProject>{(projectId) => <Cache projectId={projectId} />}</RequireProject>;
+  return (
+    <RequireProject>
+      {(projectId) => <Cache projectId={projectId} />}
+    </RequireProject>
+  );
 }
 
 function Cache({ projectId }: { projectId: string }) {
@@ -95,7 +110,11 @@ function Cache({ projectId }: { projectId: string }) {
 function PlanTab({ projectId }: { projectId: string }) {
   const workspace = useWorkspace(projectId);
   const [target, setTarget] = useState<string>("");
-  const { data: plan, isLoading, error } = useCachePlan(projectId, target || null);
+  const {
+    data: plan,
+    isLoading,
+    error,
+  } = useCachePlan(projectId, target || null);
 
   const workflows = workspace.data?.workflows ?? [];
 
@@ -117,7 +136,8 @@ function PlanTab({ projectId }: { projectId: string }) {
           ))}
         </Select>
         <Typography variant="body2" color="text.secondary">
-          This is the same answer <code>ciabatta dry-run</code> gives — nothing is run.
+          This is the same answer <code>ciabatta dry-run</code> gives — nothing
+          is run.
         </Typography>
       </Stack>
 
@@ -139,9 +159,9 @@ function PlanSummary({ plan }: { plan: CachePlan }) {
   if (!plan.caching) {
     return (
       <Alert severity="info">
-        Caching is off for every stage here, so all {plan.steps.length} would run. Turn it
-        on with <code>ciabatta cache init</code> — it proposes the inputs and outputs from
-        what's actually in the directory.
+        Caching is off for every stage here, so all {plan.steps.length} would
+        run. Turn it on with <code>ciabatta cache init</code> — it proposes the
+        inputs and outputs from what's actually in the directory.
       </Alert>
     );
   }
@@ -151,7 +171,13 @@ function PlanSummary({ plan }: { plan: CachePlan }) {
 
   return (
     <Paper variant="outlined" sx={{ p: 2 }}>
-      <Stack direction="row" spacing={3} alignItems="center" flexWrap="wrap" useFlexGap>
+      <Stack
+        direction="row"
+        spacing={3}
+        alignItems="center"
+        flexWrap="wrap"
+        useFlexGap
+      >
         <Stat label="Reused" value={String(plan.reused)} />
         <Stat label="Would run" value={String(plan.rebuilt)} />
         {plan.saved_ms > 0 && (
@@ -172,7 +198,15 @@ function PlanSummary({ plan }: { plan: CachePlan }) {
   );
 }
 
-function Stat({ label, value, hint }: { label: string; value: string; hint?: string }) {
+function Stat({
+  label,
+  value,
+  hint,
+}: {
+  label: string;
+  value: string;
+  hint?: string;
+}) {
   const body = (
     <Box>
       <Typography variant="h2" sx={{ fontSize: 24, lineHeight: 1.2 }}>
@@ -196,26 +230,40 @@ function Stat({ label, value, hint }: { label: string; value: string; hint?: str
 function StageCard({ step }: { step: PlannedStep }) {
   const { icon, color, label } = describe(step.decision);
   const inputBytes = step.inputs.reduce((total, file) => total + file.size, 0);
-  const outputBytes = step.outputs.reduce((total, file) => total + file.size, 0);
+  const outputBytes = step.outputs.reduce(
+    (total, file) => total + file.size,
+    0,
+  );
 
   return (
     <Card variant="outlined">
       <CardContent>
         <Stack direction="row" spacing={1.5} alignItems="center" sx={{ mb: 1 }}>
           <Box sx={{ color, display: "flex" }}>{icon}</Box>
-          <Typography variant="subtitle1" sx={{ fontFamily: "monospace", flexGrow: 1 }}>
+          <Typography
+            variant="subtitle1"
+            sx={{ fontFamily: "monospace", flexGrow: 1 }}
+          >
             {step.name}
           </Typography>
           <Chip size="small" variant="outlined" label={label} />
         </Stack>
 
         {step.needs.length > 0 && (
-          <Typography variant="caption" color="text.secondary" sx={{ display: "block", mb: 1.5 }}>
+          <Typography
+            variant="caption"
+            color="text.secondary"
+            sx={{ display: "block", mb: 1.5 }}
+          >
             needs {step.needs.join(", ")}
           </Typography>
         )}
 
-        <Stack direction={{ xs: "column", sm: "row" }} spacing={2} sx={{ mb: 1 }}>
+        <Stack
+          direction={{ xs: "column", sm: "row" }}
+          spacing={2}
+          sx={{ mb: 1 }}
+        >
           <FileList
             title="Inputs"
             subtitle={`${step.inputs.length} file(s), ${humanizeBytes(inputBytes)} — a change to any of these means a rebuild`}
@@ -261,7 +309,11 @@ function StageTree({ step }: { step: PlannedStep }) {
       </Button>
       <Collapse in={open} unmountOnExit>
         <Box sx={{ mt: 0.5 }}>
-          <FileTree inputs={step.inputs} outputs={step.outputs} maxHeight={360} />
+          <FileTree
+            inputs={step.inputs}
+            outputs={step.outputs}
+            maxHeight={360}
+          />
         </Box>
       </Collapse>
     </Box>
@@ -283,7 +335,11 @@ function FileList({
   return (
     <Box sx={{ flex: 1, minWidth: 0 }}>
       <Typography variant="subtitle2">{title}</Typography>
-      <Typography variant="caption" color="text.secondary" sx={{ display: "block", mb: 0.5 }}>
+      <Typography
+        variant="caption"
+        color="text.secondary"
+        sx={{ display: "block", mb: 0.5 }}
+      >
         {subtitle}
       </Typography>
       {files.length === 0 ? (
@@ -309,7 +365,12 @@ function FileList({
             </Typography>
           ))}
           {files.length > shown.length && (
-            <Typography component="li" variant="body2" color="text.secondary" sx={{ fontSize: 12 }}>
+            <Typography
+              component="li"
+              variant="body2"
+              color="text.secondary"
+              sx={{ fontSize: 12 }}
+            >
               … and {files.length - shown.length} more
             </Typography>
           )}
@@ -393,8 +454,9 @@ function RemoteStatusView({ status }: { status: RemoteStatus }) {
     return (
       <Alert severity="info" icon={<CloudOffIcon />}>
         This workspace isn't pointed at a remote cache. Stand one up with{" "}
-        <code>ciabatta remote-cache init</code> (add <code>--tls</code> to serve HTTPS), then
-        connect this workspace with <code>ciabatta cache init --remote &lt;URL&gt;</code>.
+        <code>ciabatta remote-cache init</code> (add <code>--tls</code> to serve
+        HTTPS), then connect this workspace with{" "}
+        <code>ciabatta cache init --remote &lt;URL&gt;</code>.
       </Alert>
     );
   }
@@ -417,12 +479,15 @@ function RemoteStatusView({ status }: { status: RemoteStatus }) {
   const activity = stats.activity;
   // This workspace's own entry on the server — the part of the picture that
   // is about the code in front of you.
-  const mine = stats.projects.find((entry) => entry.project.id === status.project);
+  const mine = stats.projects.find(
+    (entry) => entry.project.id === status.project,
+  );
   const others = stats.projects.filter((entry) => entry !== mine);
   // Insights about this project first; everything else after.
   const insights = [...(stats.insights ?? [])].sort(
     (a, b) =>
-      Number(b.project === mine?.project.name) - Number(a.project === mine?.project.name) ||
+      Number(b.project === mine?.project.name) -
+        Number(a.project === mine?.project.name) ||
       Number(b.severity === "warn") - Number(a.severity === "warn"),
   );
   const recent = (activity?.recent ?? [])
@@ -432,7 +497,14 @@ function RemoteStatusView({ status }: { status: RemoteStatus }) {
   return (
     <Stack spacing={3}>
       <Paper variant="outlined" sx={{ p: 2 }}>
-        <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 2 }} flexWrap="wrap" useFlexGap>
+        <Stack
+          direction="row"
+          spacing={1}
+          alignItems="center"
+          sx={{ mb: 2 }}
+          flexWrap="wrap"
+          useFlexGap
+        >
           <CloudQueueIcon fontSize="small" color="success" />
           <Typography variant="subtitle1" sx={{ fontFamily: "monospace" }}>
             {status.url}
@@ -473,12 +545,18 @@ function RemoteStatusView({ status }: { status: RemoteStatus }) {
               <Stat
                 label="Last used"
                 value={ago(activity.last_used_at, true)}
-                hint={stamp(activity.last_used_at, "Nothing has been read from or written to it yet.")}
+                hint={stamp(
+                  activity.last_used_at,
+                  "Nothing has been read from or written to it yet.",
+                )}
               />
               <Stat
                 label="Last saved to"
                 value={ago(activity.last_saved_at, true)}
-                hint={stamp(activity.last_saved_at, "Nothing has been uploaded yet.")}
+                hint={stamp(
+                  activity.last_saved_at,
+                  "Nothing has been uploaded yet.",
+                )}
               />
             </>
           )}
@@ -494,7 +572,10 @@ function RemoteStatusView({ status }: { status: RemoteStatus }) {
             }
           />
           <Stat label="Entries" value={String(stats.storage.entries)} />
-          <Stat label="Served" value={humanizeBytes(stats.counters.bytes_served)} />
+          <Stat
+            label="Served"
+            value={humanizeBytes(stats.counters.bytes_served)}
+          />
         </Stack>
         {/* Only once it is worth seeing: a sliver of a bar on a near-empty
             store reads as a full one, since the track is tinted too. */}
@@ -502,12 +583,22 @@ function RemoteStatusView({ status }: { status: RemoteStatus }) {
           <LinearProgress
             variant="determinate"
             value={Math.min(100, stats.storage.percent)}
-            color={stats.storage.percent >= 100 ? "error" : stats.storage.percent >= 80 ? "warning" : "success"}
+            color={
+              stats.storage.percent >= 100
+                ? "error"
+                : stats.storage.percent >= 80
+                  ? "warning"
+                  : "success"
+            }
             sx={{ mt: 2, height: 4, borderRadius: 2 }}
           />
         )}
 
-        <Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: 2 }}>
+        <Typography
+          variant="caption"
+          color="text.secondary"
+          sx={{ display: "block", mt: 2 }}
+        >
           Retention: {stats.retention.description}.{" "}
           {activity?.since
             ? `Counted since ${new Date(activity.since).toLocaleDateString()}.`
@@ -527,17 +618,28 @@ function RemoteStatusView({ status }: { status: RemoteStatus }) {
           ) : (
             <Stack spacing={1}>
               {insights.map((insight, index) => (
-                <Alert key={index} severity={insight.severity === "warn" ? "warning" : "info"}>
+                <Alert
+                  key={index}
+                  severity={insight.severity === "warn" ? "warning" : "info"}
+                >
                   <Typography variant="body2" sx={{ fontWeight: 600 }}>
                     {insight.project && (
-                      <Typography component="span" variant="caption" color="text.secondary" sx={{ mr: 1 }}>
+                      <Typography
+                        component="span"
+                        variant="caption"
+                        color="text.secondary"
+                        sx={{ mr: 1 }}
+                      >
                         {insight.project}
                         {insight.target && ` · ${insight.target}`}
                       </Typography>
                     )}
                     <Prose text={insight.message} />
                   </Typography>
-                  <Typography variant="caption" sx={{ display: "block", mt: 0.5 }}>
+                  <Typography
+                    variant="caption"
+                    sx={{ display: "block", mt: 0.5 }}
+                  >
                     <Prose text={insight.action} />
                   </Typography>
                 </Alert>
@@ -577,13 +679,27 @@ function RemoteStatusView({ status }: { status: RemoteStatus }) {
                       <Chip
                         size="small"
                         variant="outlined"
-                        color={event.kind === "miss" ? "warning" : event.kind === "touch" ? "default" : "success"}
-                        label={event.kind === "touch" ? `kept ${event.count} alive` : event.kind}
+                        color={
+                          event.kind === "miss"
+                            ? "warning"
+                            : event.kind === "touch"
+                              ? "default"
+                              : "success"
+                        }
+                        label={
+                          event.kind === "touch"
+                            ? `kept ${event.count} alive`
+                            : event.kind
+                        }
                       />
                     </TableCell>
-                    <TableCell sx={{ fontFamily: "monospace", fontSize: 12 }}>{event.target ?? ""}</TableCell>
+                    <TableCell sx={{ fontFamily: "monospace", fontSize: 12 }}>
+                      {event.target ?? ""}
+                    </TableCell>
                     <TableCell>{event.user ?? ""}</TableCell>
-                    <TableCell align="right">{event.bytes ? humanizeBytes(event.bytes) : ""}</TableCell>
+                    <TableCell align="right">
+                      {event.bytes ? humanizeBytes(event.bytes) : ""}
+                    </TableCell>
                   </TableRow>
                 ))}
               </TableBody>
@@ -602,18 +718,33 @@ function RemoteStatusView({ status }: { status: RemoteStatus }) {
           <Stack spacing={1}>
             {others.map((entry) => (
               <Paper key={entry.project.id} variant="outlined" sx={{ p: 1.5 }}>
-                <Stack direction="row" spacing={2} alignItems="center" flexWrap="wrap" useFlexGap>
-                  <Typography variant="body2" sx={{ fontWeight: 600, minWidth: 140 }}>
+                <Stack
+                  direction="row"
+                  spacing={2}
+                  alignItems="center"
+                  flexWrap="wrap"
+                  useFlexGap
+                >
+                  <Typography
+                    variant="body2"
+                    sx={{ fontWeight: 600, minWidth: 140 }}
+                  >
                     {entry.project.name}
                   </Typography>
-                  <Typography variant="caption" color="text.secondary" sx={{ fontFamily: "monospace" }}>
+                  <Typography
+                    variant="caption"
+                    color="text.secondary"
+                    sx={{ fontFamily: "monospace" }}
+                  >
                     {entry.project.id}
                   </Typography>
                   <Box sx={{ flexGrow: 1 }} />
                   <Typography variant="body2" color="text.secondary">
                     {entry.counters.hits} hit · {entry.counters.misses} miss
-                    {entry.hit_rate !== null && ` · ${entry.hit_rate.toFixed(0)}%`}
-                    {entry.last_used_at !== undefined && ` · used ${ago(entry.last_used_at)}`}
+                    {entry.hit_rate !== null &&
+                      ` · ${entry.hit_rate.toFixed(0)}%`}
+                    {entry.last_used_at !== undefined &&
+                      ` · used ${ago(entry.last_used_at)}`}
                   </Typography>
                 </Stack>
               </Paper>
@@ -634,12 +765,20 @@ function ThisProject({ entry }: { entry: RemoteProject }) {
   const saved = entry.last_saved_at ?? entry.newest_entry_at ?? null;
   return (
     <Paper variant="outlined" sx={{ p: 2 }}>
-      <Typography variant="subtitle2">This project — {entry.project.name}</Typography>
-      <Typography variant="caption" color="text.secondary" sx={{ display: "block", mb: 1.5 }}>
+      <Typography variant="subtitle2">
+        This project — {entry.project.name}
+      </Typography>
+      <Typography
+        variant="caption"
+        color="text.secondary"
+        sx={{ display: "block", mb: 1.5 }}
+      >
         {entry.counters.hits} hit · {entry.counters.misses} miss
-        {entry.hit_rate !== null && ` (${entry.hit_rate.toFixed(0)}%)`} · {entry.entries} entries
+        {entry.hit_rate !== null && ` (${entry.hit_rate.toFixed(0)}%)`} ·{" "}
+        {entry.entries} entries
         {entry.bytes !== undefined && `, ${humanizeBytes(entry.bytes)}`}
-        {entry.last_used_at !== undefined && ` · last used ${ago(entry.last_used_at)}`}
+        {entry.last_used_at !== undefined &&
+          ` · last used ${ago(entry.last_used_at)}`}
         {` · last saved to ${ago(saved)}`}
       </Typography>
       {(entry.targets?.length ?? 0) > 0 ? (
@@ -657,11 +796,18 @@ function ThisProject({ entry }: { entry: RemoteProject }) {
           <TableBody>
             {entry.targets!.map((target) => (
               <TableRow key={target.name}>
-                <TableCell sx={{ fontFamily: "monospace", fontSize: 12 }}>{target.name}</TableCell>
+                <TableCell sx={{ fontFamily: "monospace", fontSize: 12 }}>
+                  {target.name}
+                </TableCell>
                 <TableCell align="right">{target.hits}</TableCell>
                 <TableCell
                   align="right"
-                  sx={{ color: target.misses > 0 && target.hits === 0 ? "warning.main" : undefined }}
+                  sx={{
+                    color:
+                      target.misses > 0 && target.hits === 0
+                        ? "warning.main"
+                        : undefined,
+                  }}
                 >
                   {target.misses}
                 </TableCell>
@@ -701,18 +847,28 @@ function ReleaseCard({ release }: { release: Release }) {
       <Typography variant="subtitle2">Ciabatta {release.version}</Typography>
       {platforms.length === 0 ? (
         <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
-          This cache doesn't hand out binaries. Point <code>releases.binaries</code> at them in
-          the server's config to let everyone update with <code>ciabatta self update</code>.
+          This cache doesn't hand out binaries. Point{" "}
+          <code>releases.binaries</code> at them in the server's config to let
+          everyone update with <code>ciabatta self update</code>.
         </Typography>
       ) : (
         <>
-          <Typography variant="caption" color="text.secondary" sx={{ display: "block", mb: 1 }}>
-            Update with <code>ciabatta self update</code>. The download is checked against these
-            hashes before anything is replaced.
+          <Typography
+            variant="caption"
+            color="text.secondary"
+            sx={{ display: "block", mb: 1 }}
+          >
+            Update with <code>ciabatta self update</code>. The download is
+            checked against these hashes before anything is replaced.
           </Typography>
           <Stack spacing={0.5}>
             {platforms.map((platform) => (
-              <Stack key={platform} direction="row" spacing={2} alignItems="center">
+              <Stack
+                key={platform}
+                direction="row"
+                spacing={2}
+                alignItems="center"
+              >
                 <Chip size="small" label={platform} sx={{ minWidth: 80 }} />
                 <Typography variant="caption" color="text.secondary">
                   {humanizeBytes(release.builds[platform].size)}
@@ -757,8 +913,8 @@ function ConfigTab({ projectId }: { projectId: string }) {
       {!data.enabled && (
         <Alert severity="info">
           {data.why_disabled ?? "Caching is off for this workspace."} Run{" "}
-          <code>ciabatta cache init</code> — it looks at what's actually in the directory and
-          proposes the inputs and outputs for you.
+          <code>ciabatta cache init</code> — it looks at what's actually in the
+          directory and proposes the inputs and outputs for you.
         </Alert>
       )}
 
@@ -770,7 +926,10 @@ function ConfigTab({ projectId }: { projectId: string }) {
           <Stat label="Entries" value={String(data.entries)} />
           <Stat label="Size" value={data.human} />
           {data.build_time_ms > 0 && (
-            <Stat label="Build time stored" value={humanizeMs(data.build_time_ms)} />
+            <Stat
+              label="Build time stored"
+              value={humanizeMs(data.build_time_ms)}
+            />
           )}
         </Stack>
         <Typography
@@ -829,7 +988,11 @@ function PatternList({
   return (
     <Paper variant="outlined" sx={{ p: 2, flex: 1 }}>
       <Typography variant="subtitle2">{title}</Typography>
-      <Typography variant="caption" color="text.secondary" sx={{ display: "block", mb: 1 }}>
+      <Typography
+        variant="caption"
+        color="text.secondary"
+        sx={{ display: "block", mb: 1 }}
+      >
         {subtitle}
       </Typography>
       {patterns.length === 0 ? (
@@ -839,7 +1002,11 @@ function PatternList({
       ) : (
         <Stack spacing={0.5}>
           {patterns.map((pattern) => (
-            <Typography key={pattern} variant="body2" sx={{ fontFamily: "monospace", fontSize: 13 }}>
+            <Typography
+              key={pattern}
+              variant="body2"
+              sx={{ fontFamily: "monospace", fontSize: 13 }}
+            >
               {pattern}
             </Typography>
           ))}

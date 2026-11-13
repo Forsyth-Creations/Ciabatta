@@ -543,6 +543,27 @@ pub enum Commands {
         subcommand: CacheCommand,
     },
 
+    /// Run this machine as an executor that other machines can offload
+    /// workflows to, through a remote cache.
+    ///
+    ///   ciabatta oven executor                     advertise, pair, take jobs
+    Oven {
+        #[command(subcommand)]
+        subcommand: OvenCommand,
+    },
+
+    /// Look after jobs started with --offload.
+    ///
+    ///   ciabatta offload list                      recent jobs for this project
+    ///   ciabatta offload logs <N>                  follow a job's log
+    ///   ciabatta offload fetch <N>                 download a finished job's outputs
+    ///   ciabatta offload cancel <N>                stop a job
+    ///   ciabatta offload executors                 what there is to run on
+    Offload {
+        #[command(subcommand)]
+        subcommand: OffloadCommand,
+    },
+
     /// Run or connect to a shared remote cache.
     ///
     ///   ciabatta remote-cache init                 write a server config
@@ -1090,6 +1111,20 @@ pub struct WorkflowArgs {
     /// no slot, so it doesn't hold anyone else up either.
     #[arg(long)]
     pub start_anyway: bool,
+
+    /// Run on an executor instead of here, through the project's remote
+    /// cache. The executor clones the repository at this commit — so it has
+    /// to be committed and pushed — runs the workflow, and streams its log
+    /// back. Files the steps declare as cache `outputs` come back into
+    /// `offloaded/<execution number>/` (or `workspace.offload_dir`). Ctrl-C
+    /// stops watching, not the job; `ciabatta offload cancel <N>` stops it.
+    #[arg(long)]
+    pub offload: bool,
+
+    /// Offload to the executor of this name, rather than the first free one.
+    /// Implies --offload. `ciabatta offload executors` lists them.
+    #[arg(long = "offload-to", value_name = "EXECUTOR")]
+    pub offload_to: Option<String>,
 
     /// How many steps may run at once. Steps whose dependencies are met run
     /// side by side; `-j 1` runs them one at a time, as ciabatta used to.
@@ -1771,4 +1806,74 @@ pub enum PythonCommand {
         #[arg(last = true, value_name = "PIP_ARGS")]
         pip_args: Vec<String>,
     },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum OvenCommand {
+    /// Run workflows for other machines.
+    ///
+    /// Advertises this machine on the local network (mDNS) and prints its
+    /// address and a pairing code. Add it on the remote cache's Executors page
+    /// — it's listed there when the cache is on the same network — or enter
+    /// the address and code by hand. Once paired it takes jobs from that cache
+    /// one at a time: clones the repository at the job's commit, runs the
+    /// workflow, streams the log back, and returns the steps' declared
+    /// outputs. The pairing is remembered across restarts.
+    Executor {
+        /// What the executor is called on the cache (and what --offload-to
+        /// names). Defaults to the host name.
+        #[arg(long)]
+        name: Option<String>,
+
+        /// The port to listen on for pairing.
+        #[arg(long, default_value_t = crate::oven::DEFAULT_PORT)]
+        port: u16,
+
+        /// Where the executor keeps its identity and pairing. Defaults to
+        /// ~/.ciabatta/oven. A second executor on the same machine needs its
+        /// own — it is a different executor, with a pairing of its own.
+        #[arg(long, value_name = "DIR")]
+        dir: Option<std::path::PathBuf>,
+
+        /// Where repositories and job checkouts go. Defaults to <dir>/work.
+        #[arg(long, value_name = "DIR")]
+        work_dir: Option<std::path::PathBuf>,
+
+        /// Only build repositories whose URL matches (repeatable; globs
+        /// allowed, e.g. `git@github.com:my-org/*`). Without it, any
+        /// repository a cache user offloads is built.
+        #[arg(long = "allow-repo", value_name = "URL")]
+        allow_repo: Vec<String>,
+
+        /// Don't advertise on the network; add it by address instead.
+        #[arg(long)]
+        no_mdns: bool,
+
+        /// Don't verify the remote cache's TLS certificate.
+        #[arg(long)]
+        insecure: bool,
+
+        /// Forget the cache it was paired with, and wait to be paired again.
+        #[arg(long)]
+        unpair: bool,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum OffloadCommand {
+    /// Recent offloaded jobs for this project.
+    #[command(visible_alias = "ls")]
+    List {
+        /// Every project's jobs, not only this one's.
+        #[arg(long)]
+        all: bool,
+    },
+    /// Follow a job's log from the start, and fetch its outputs when it ends.
+    Logs { id: u32 },
+    /// Download a finished job's outputs into the offload directory.
+    Fetch { id: u32 },
+    /// Stop a job: a queued one at once, a running one within seconds.
+    Cancel { id: u32 },
+    /// The executors paired with this project's remote cache.
+    Executors,
 }

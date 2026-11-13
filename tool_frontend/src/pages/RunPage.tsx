@@ -46,7 +46,12 @@ import {
 import { EnvPrompt } from "../components/EnvPrompt";
 import { StatusIcon, statusLabel } from "@ciabatta/graphs";
 import { EnvDriftBanner } from "../components/EnvDriftBanner";
-import { ErrorNote, Loading, PageHeader, RequireProject } from "../components/Page";
+import {
+  ErrorNote,
+  Loading,
+  PageHeader,
+  RequireProject,
+} from "../components/Page";
 import { monoFontStack } from "../theme";
 
 const RunLink = styled(Link)(({ theme }) => ({
@@ -64,14 +69,20 @@ export function RunPage() {
         title="Run"
         description="Execute a workflow's step DAG live, with fix-it branches when a step fails. The daemon owns the run, so it survives closing the terminal."
         actions={
-          <Button component={Link} to="/run/builder" startIcon={<AccountTreeIcon />}>
+          <Button
+            component={Link}
+            to="/run/builder"
+            startIcon={<AccountTreeIcon />}
+          >
             Flowchart builder
           </Button>
         }
       />
       {/* Keyed by project so switching projects starts the launcher afresh —
           a workflow picked in one repo means nothing in the next. */}
-      <RequireProject>{(project) => <Launcher key={project} project={project} />}</RequireProject>
+      <RequireProject>
+        {(project) => <Launcher key={project} project={project} />}
+      </RequireProject>
     </>
   );
 }
@@ -142,7 +153,8 @@ function Launcher({ project }: { project: string }) {
     });
   };
 
-  if (loadingTargets) return <Loading label="Loading what this project can run…" />;
+  if (loadingTargets)
+    return <Loading label="Loading what this project can run…" />;
 
   return (
     <>
@@ -153,14 +165,26 @@ function Launcher({ project }: { project: string }) {
       {targets.length === 0 ? (
         <Alert severity="info" sx={{ mb: 3 }}>
           Nothing to run in this project yet. Opt a package in with{" "}
-          <code style={{ fontFamily: monoFontStack }}>ciabatta init --lib</code>, add a{" "}
-          <code style={{ fontFamily: monoFontStack }}>[recipies.&lt;name&gt;.run]</code> section, or
-          generate a worked example with{" "}
-          <code style={{ fontFamily: monoFontStack }}>ciabatta init --example</code>.
+          <code style={{ fontFamily: monoFontStack }}>ciabatta init --lib</code>
+          , add a{" "}
+          <code style={{ fontFamily: monoFontStack }}>
+            [recipies.&lt;name&gt;.run]
+          </code>{" "}
+          section, or generate a worked example with{" "}
+          <code style={{ fontFamily: monoFontStack }}>
+            ciabatta init --example
+          </code>
+          .
         </Alert>
       ) : (
         <Stack spacing={1.5} sx={{ mb: 3 }}>
-          <Stack direction="row" spacing={2} alignItems="center" flexWrap="wrap" useFlexGap>
+          <Stack
+            direction="row"
+            spacing={2}
+            alignItems="center"
+            flexWrap="wrap"
+            useFlexGap
+          >
             {/* Workflows and workflows in one list: they are the same kind of
                 thing, and making someone know which they have before they can
                 start it is the distinction this tool exists to remove. */}
@@ -177,7 +201,12 @@ function Launcher({ project }: { project: string }) {
               </MenuItem>
               {targets.map((t) => (
                 <MenuItem key={`${t.kind}:${t.name}`} value={t.name}>
-                  <Stack direction="row" spacing={1} alignItems="center" sx={{ width: "100%" }}>
+                  <Stack
+                    direction="row"
+                    spacing={1}
+                    alignItems="center"
+                    sx={{ width: "100%" }}
+                  >
                     <Box component="span" sx={{ fontFamily: monoFontStack }}>
                       {t.name}
                     </Box>
@@ -220,7 +249,12 @@ function Launcher({ project }: { project: string }) {
                 {(profiles ?? []).map((p) => (
                   <MenuItem key={p.name} value={p.name}>
                     {p.name}
-                    <Typography component="span" variant="caption" color="text.secondary" sx={{ ml: 1 }}>
+                    <Typography
+                      component="span"
+                      variant="caption"
+                      color="text.secondary"
+                      sx={{ ml: 1 }}
+                    >
                       {p.vars} var{p.vars === 1 ? "" : "s"}
                     </Typography>
                   </MenuItem>
@@ -241,7 +275,11 @@ function Launcher({ project }: { project: string }) {
 
             <FormControlLabel
               control={
-                <Switch size="small" checked={dryRun} onChange={(e) => setDryRun(e.target.checked)} />
+                <Switch
+                  size="small"
+                  checked={dryRun}
+                  onChange={(e) => setDryRun(e.target.checked)}
+                />
               }
               label="Dry run"
             />
@@ -323,12 +361,22 @@ function RunRow({ run }: { run: RunSummary }) {
     <Card>
       <CardContent sx={{ py: 1.5, "&:last-child": { pb: 1.5 } }}>
         <Stack direction="row" alignItems="center" spacing={2}>
-          <StatusIcon status={run.status ?? (run.done ? "success" : "running")} size={20} />
+          <StatusIcon
+            status={run.status ?? (run.done ? "success" : "running")}
+            size={20}
+          />
           <Box sx={{ flexGrow: 1, minWidth: 0 }}>
-            <RunLink to={`/run/${run.id}`}>{run.workflows.join(", ") || "—"}</RunLink>
-            <Typography variant="caption" color="text.secondary" sx={{ display: "block" }}>
-              #{run.id} · {statusLabel(run.status ?? (run.done ? "success" : "running"))} · started{" "}
-              {new Date(run.created_at).toLocaleString()}
+            <RunLink to={`/run/${run.id}`}>
+              {run.workflows.join(", ") || "—"}
+            </RunLink>
+            <Typography
+              variant="caption"
+              color="text.secondary"
+              sx={{ display: "block" }}
+            >
+              #{run.id} ·{" "}
+              {statusLabel(run.status ?? (run.done ? "success" : "running"))} ·
+              started {new Date(run.created_at).toLocaleString()}
               {run.dry_run && " · dry run"}
               {(run.filter ?? []).length > 0 && ` · ${run.filter.join(" ")}`}
             </Typography>

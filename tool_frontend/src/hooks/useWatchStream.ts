@@ -10,7 +10,14 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { api, streamUrl } from "../api/client";
-import type { Bookmark, LogLine, RunStatus, Trigger, TriggerHit, WatchSnapshot } from "../api/watch";
+import type {
+  Bookmark,
+  LogLine,
+  RunStatus,
+  Trigger,
+  TriggerHit,
+  WatchSnapshot,
+} from "../api/watch";
 
 export interface WatchStreamState {
   lines: LogLine[];
@@ -56,7 +63,9 @@ export function useWatchStream(
     setState(EMPTY);
     pending.current = [];
 
-    const source = new EventSource(streamUrl(`/api/watch/sessions/${sessionId}/stream`));
+    const source = new EventSource(
+      streamUrl(`/api/watch/sessions/${sessionId}/stream`),
+    );
 
     const flush = () => {
       frame.current = null;
@@ -64,12 +73,17 @@ export function useWatchStream(
       pending.current = [];
 
       setState((previous) => {
-        const lines = incoming.length ? [...previous.lines, ...incoming] : previous.lines;
+        const lines = incoming.length
+          ? [...previous.lines, ...incoming]
+          : previous.lines;
         return {
           ...latest.current,
           // Drop from the front once past the cap, matching the daemon's own
           // bounded buffer rather than growing without limit.
-          lines: lines.length > maxLines ? lines.slice(lines.length - maxLines) : lines,
+          lines:
+            lines.length > maxLines
+              ? lines.slice(lines.length - maxLines)
+              : lines,
         };
       });
     };
@@ -105,7 +119,10 @@ export function useWatchStream(
         source.close();
         return;
       }
-      setState((previous) => ({ ...previous, error: "Lost the connection to the daemon." }));
+      setState((previous) => ({
+        ...previous,
+        error: "Lost the connection to the daemon.",
+      }));
     };
 
     return () => {
@@ -123,8 +140,13 @@ export function useWatchStream(
    * the page was reloaded. Asking for no lines makes this cheap.
    */
   const refresh = useCallback(async () => {
-    const snapshot = await api.get<WatchSnapshot>(`/api/watch/sessions/${sessionId}?limit=0`);
-    const marks = { bookmarks: snapshot.bookmarks ?? [], triggers: snapshot.triggers ?? [] };
+    const snapshot = await api.get<WatchSnapshot>(
+      `/api/watch/sessions/${sessionId}?limit=0`,
+    );
+    const marks = {
+      bookmarks: snapshot.bookmarks ?? [],
+      triggers: snapshot.triggers ?? [],
+    };
     latest.current = { ...latest.current, ...marks };
     setState((previous) => ({ ...previous, ...marks }));
   }, [sessionId]);

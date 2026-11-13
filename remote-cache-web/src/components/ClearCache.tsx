@@ -28,7 +28,13 @@ const PHRASE = "clear";
  * What it keeps is said up front: projects, counters, charts and build history
  * all survive, so nobody hesitates thinking the hit-rate history goes with it.
  */
-export function ClearCache({ stats, onCleared }: { stats: Stats; onCleared: () => void }) {
+export function ClearCache({
+  stats,
+  onCleared,
+}: {
+  stats: Stats;
+  onCleared: () => void;
+}) {
   const [open, setOpen] = useState(false);
   const [typed, setTyped] = useState("");
   const [password, setPassword] = useState("");
@@ -37,7 +43,9 @@ export function ClearCache({ stats, onCleared }: { stats: Stats; onCleared: () =
   const [done, setDone] = useState<string | null>(null);
 
   const needsPassword = stats.clear?.password_required ?? false;
-  const armed = typed.trim().toLowerCase() === PHRASE && (!needsPassword || password !== "");
+  const armed =
+    typed.trim().toLowerCase() === PHRASE &&
+    (!needsPassword || password !== "");
 
   const close = () => {
     setOpen(false);
@@ -49,13 +57,16 @@ export function ClearCache({ stats, onCleared }: { stats: Stats; onCleared: () =
   const clear = async () => {
     setBusy(true);
     try {
-      const result = await api<{ entries_removed: number; bytes_freed: number }>(
-        "/api/cache/clear",
-        {
-          method: "POST",
-          body: JSON.stringify({ confirm: true, password: needsPassword ? password : undefined }),
-        },
-      );
+      const result = await api<{
+        entries_removed: number;
+        bytes_freed: number;
+      }>("/api/cache/clear", {
+        method: "POST",
+        body: JSON.stringify({
+          confirm: true,
+          password: needsPassword ? password : undefined,
+        }),
+      });
       close();
       setDone(
         `Cleared ${result.entries_removed.toLocaleString()} entr${result.entries_removed === 1 ? "y" : "ies"}, ${human(result.bytes_freed)}.`,
@@ -88,7 +99,12 @@ export function ClearCache({ stats, onCleared }: { stats: Stats; onCleared: () =
         </Alert>
       )}
 
-      <Dialog open={open} onClose={busy ? undefined : close} maxWidth="xs" fullWidth>
+      <Dialog
+        open={open}
+        onClose={busy ? undefined : close}
+        maxWidth="xs"
+        fullWidth
+      >
         <DialogTitle>Clear the whole cache?</DialogTitle>
         <DialogContent>
           <DialogContentText sx={{ mb: 1.5 }}>
@@ -97,7 +113,8 @@ export function ClearCache({ stats, onCleared }: { stats: Stats; onCleared: () =
               {stats.storage.entries.toLocaleString()} entr
               {stats.storage.entries === 1 ? "y" : "ies"}, {stats.storage.human}
             </strong>
-            . The next build of each target rebuilds and uploads it again. This can't be undone.
+            . The next build of each target rebuilds and uploads it again. This
+            can't be undone.
           </DialogContentText>
           <DialogContentText sx={{ mb: 2 }}>
             Projects, statistics, charts and build history are kept.
@@ -135,7 +152,12 @@ export function ClearCache({ stats, onCleared }: { stats: Stats; onCleared: () =
           <Button onClick={close} disabled={busy}>
             Cancel
           </Button>
-          <Button color="error" variant="contained" disabled={!armed || busy} onClick={clear}>
+          <Button
+            color="error"
+            variant="contained"
+            disabled={!armed || busy}
+            onClick={clear}
+          >
             Clear all
           </Button>
         </DialogActions>

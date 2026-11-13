@@ -10,6 +10,8 @@
 //! /api/projects…                           project identity and cache traffic
 //! /api/release  /api/release/{platform}    the ciabatta binaries it hands out
 //!                                          (PUT: upload one — admin + `update` password)
+//! /api/oven…                               executors, and the jobs offloaded to them
+//!                                          (see `super::oven`)
 //! ```
 //!
 //! Artifacts move as raw bytes over `PUT`/`GET` on a path per file rather than
@@ -64,6 +66,9 @@ pub struct AppState {
     /// Who used what, and when — persisted, unlike the counters it replaced.
     /// See [`super::activity`].
     pub activity: Arc<super::activity::Activity>,
+    /// Paired executors and the jobs offloaded to them — see
+    /// [`super::oven`].
+    pub oven: Arc<super::oven::Oven>,
     pub started_at: String,
     /// Set by an applied upload: the binary to start again from once the
     /// server has finished what it is doing.
@@ -87,6 +92,7 @@ impl AppState {
         let workflows = super::workflows::Store::open(&config.server.storage)?;
         let activity = super::activity::Activity::open(&config.server.storage)?;
         let builds = super::builds::Store::open(&config.server.storage)?;
+        let oven = super::oven::Oven::open(&config.server.storage)?;
         let release = config.releases.with_uploads(&config.server.storage).scan();
 
         Ok(AppState {
@@ -96,6 +102,7 @@ impl AppState {
             workflows: Arc::new(workflows),
             builds: Arc::new(builds),
             activity: Arc::new(activity),
+            oven: Arc::new(oven),
             sessions: Arc::new(Sessions::open(&config.server.storage)),
             release: Arc::new(std::sync::RwLock::new(release)),
             started_at: crate::cache::store::now(),
@@ -109,7 +116,7 @@ impl AppState {
     ///
     /// An `open`-mode server skips the check entirely — there is no point
     /// issuing sessions nobody's identity depends on.
-    fn identify(&self, headers: &header::HeaderMap) -> Result<Identity, ApiError> {
+    pub(crate) fn identify(&self, headers: &header::HeaderMap) -> Result<Identity, ApiError> {
         if matches!(self.config.auth.mode(), Ok(auth::Mode::Open)) {
             return Ok(Identity::anonymous());
         }
@@ -144,7 +151,10 @@ impl AppState {
     }
 
     /// Who's making this request, and are they allowed to change anything?
-    fn identify_writer(&self, headers: &header::HeaderMap) -> Result<Identity, ApiError> {
+    pub(crate) fn identify_writer(
+        &self,
+        headers: &header::HeaderMap,
+    ) -> Result<Identity, ApiError> {
         let identity = self.identify(headers)?;
         if !identity.can_write {
             return Err(ApiError::new(
@@ -161,7 +171,7 @@ impl AppState {
     /// whoever is on this network", and refusing would leave no way to mint the
     /// first credential when locking the cache down. On an authenticated one:
     /// an admin, and only an admin.
-    fn identify_admin(&self, headers: &header::HeaderMap) -> Result<Identity, ApiError> {
+    pub(crate) fn identify_admin(&self, headers: &header::HeaderMap) -> Result<Identity, ApiError> {
         if matches!(self.config.auth.mode(), Ok(auth::Mode::Open)) {
             return Ok(Identity::anonymous());
         }
@@ -182,7 +192,7 @@ impl AppState {
 }
 
 /// Pull a bearer token out of the `Authorization` header.
-fn bearer(headers: &header::HeaderMap) -> Option<String> {
+pub(crate) fn bearer(headers: &header::HeaderMap) -> Option<String> {
     headers
         .get(header::AUTHORIZATION)?
         .to_str()
@@ -217,7 +227,7 @@ pub const CODE_SESSION_UNKNOWN: &str = "session_unknown";
 pub const CODE_NO_CREDENTIAL: &str = "no_credential";
 
 impl ApiError {
-    fn new(status: StatusCode, message: impl std::fmt::Display) -> Self {
+    pub(crate) fn new(status: StatusCode, message: impl std::fmt::Display) -> Self {
         ApiError {
             status,
             message: message.to_string(),
@@ -233,11 +243,11 @@ impl ApiError {
         }
     }
 
-    fn not_found(message: impl std::fmt::Display) -> Self {
+    pub(crate) fn not_found(message: impl std::fmt::Display) -> Self {
         Self::new(StatusCode::NOT_FOUND, message)
     }
 
-    fn bad_request(message: impl std::fmt::Display) -> Self {
+    pub(crate) fn bad_request(message: impl std::fmt::Display) -> Self {
         Self::new(StatusCode::BAD_REQUEST, message)
     }
 }
@@ -268,7 +278,7 @@ impl IntoResponse for ApiError {
     }
 }
 
-type ApiResult<T> = std::result::Result<T, ApiError>;
+pub(crate) type ApiResult<T> = std::result::Result<T, ApiError>;
 
 // ─── Router ─────────────────────────────────────────────────────────────────
 
@@ -311,6 +321,7 @@ pub fn router(state: AppState) -> Router {
             "/api/release/{platform}",
             get(download_release).put(upload_release),
         )
+        .merge(super::oven::routes())
         // The admin app, as the fallback, so no API path can be shadowed by it.
         .fallback(super::web::serve)
         .layer(DefaultBodyLimit::max(MAX_ARTIFACT_BYTES))
@@ -869,7 +880,7 @@ async fn clear_cache(
 // ─── Cache traffic ──────────────────────────────────────────────────────────
 
 /// Check a project exists before touching its cache.
-fn require_project(state: &AppState, id: &str) -> ApiResult<()> {
+pub(crate) fn require_project(state: &AppState, id: &str) -> ApiResult<()> {
     state
         .projects
         .get(id)
@@ -1619,6 +1630,8 @@ pub async fn serve(config: ServerConfig) -> Result<()> {
     announce(&state, &listen);
     tokio::spawn(sweeper(state.clone(), listen.sweep_every.clone()));
     tokio::spawn(flusher(state.clone()));
+    tokio::spawn(super::oven::discover(state.oven.clone()));
+    tokio::spawn(super::oven::sweeper(state.oven.clone()));
 
     let restart_now = state.restart_now.clone();
     let shutdown = async move {

@@ -55,8 +55,8 @@ export function Releases({ refreshKey }: { refreshKey: number }) {
           <TableBody>
             {releases.length === 0 && (
               <EmptyRow colSpan={7}>
-                No releases yet. Add a <Mono>kind: release-push</Mono> step to a workflow, or run{" "}
-                <Mono>ciabatta releases push</Mono>.
+                No releases yet. Add a <Mono>kind: release-push</Mono> step to a
+                workflow, or run <Mono>ciabatta releases push</Mono>.
               </EmptyRow>
             )}
             {releases.map((r) => (
@@ -74,7 +74,9 @@ export function Releases({ refreshKey }: { refreshKey: number }) {
                   <When at={r.created_at} />
                 </TableCell>
                 <TableCell>
-                  <Mono title={r.commit ?? ""}>{(r.commit ?? "").slice(0, 8) || "—"}</Mono>
+                  <Mono title={r.commit ?? ""}>
+                    {(r.commit ?? "").slice(0, 8) || "—"}
+                  </Mono>
                 </TableCell>
                 <TableCell align="right">{r.files}</TableCell>
                 <TableCell align="right">{human(r.size)}</TableCell>

@@ -30,7 +30,10 @@ import { monoFontStack } from "../theme";
 import { useLoad } from "../useLoad";
 
 export function Users({ refreshKey }: { refreshKey: number }) {
-  const { data, error, loading, reload } = useLoad(() => api<UsersData>("/api/users"), refreshKey);
+  const { data, error, loading, reload } = useLoad(
+    () => api<UsersData>("/api/users"),
+    refreshKey,
+  );
   const [name, setName] = useState("");
   const [readOnly, setReadOnly] = useState(false);
   const [admin, setAdmin] = useState(false);
@@ -56,7 +59,11 @@ export function Users({ refreshKey }: { refreshKey: number }) {
   return (
     <Section title="Users" sub={<Prose text={sub} />}>
       {actionError && (
-        <Alert severity="error" sx={{ mb: 2 }} onClose={() => setActionError(null)}>
+        <Alert
+          severity="error"
+          sx={{ mb: 2 }}
+          onClose={() => setActionError(null)}
+        >
           {actionError}
         </Alert>
       )}
@@ -69,7 +76,9 @@ export function Users({ refreshKey }: { refreshKey: number }) {
           sx={{ mb: 2 }}
           onClose={() => setCreated(null)}
         >
-          <Typography sx={{ fontWeight: 600 }}>Token for {created.user.name}</Typography>
+          <Typography sx={{ fontWeight: 600 }}>
+            Token for {created.user.name}
+          </Typography>
           <Box
             component="code"
             sx={{
@@ -98,7 +107,12 @@ export function Users({ refreshKey }: { refreshKey: number }) {
         <CardContent>
           <Box
             component="form"
-            sx={{ display: "flex", flexWrap: "wrap", gap: 2, alignItems: "center" }}
+            sx={{
+              display: "flex",
+              flexWrap: "wrap",
+              gap: 2,
+              alignItems: "center",
+            }}
             onSubmit={async (event) => {
               event.preventDefault();
               try {
@@ -126,7 +140,10 @@ export function Users({ refreshKey }: { refreshKey: number }) {
             />
             <FormControlLabel
               control={
-                <Checkbox checked={readOnly} onChange={(e) => setReadOnly(e.target.checked)} />
+                <Checkbox
+                  checked={readOnly}
+                  onChange={(e) => setReadOnly(e.target.checked)}
+                />
               }
               label="read-only"
             />
@@ -134,7 +151,12 @@ export function Users({ refreshKey }: { refreshKey: number }) {
                 server — so don't offer a checkbox that will be refused. */}
             {!open && (
               <FormControlLabel
-                control={<Checkbox checked={admin} onChange={(e) => setAdmin(e.target.checked)} />}
+                control={
+                  <Checkbox
+                    checked={admin}
+                    onChange={(e) => setAdmin(e.target.checked)}
+                  />
+                }
                 label="admin"
               />
             )}
@@ -156,7 +178,9 @@ export function Users({ refreshKey }: { refreshKey: number }) {
             </TableRow>
           </TableHead>
           <TableBody>
-            {data.users.length === 0 && <EmptyRow colSpan={4}>No users yet.</EmptyRow>}
+            {data.users.length === 0 && (
+              <EmptyRow colSpan={4}>No users yet.</EmptyRow>
+            )}
             {data.users.map((u) => (
               <TableRow key={u.name} hover>
                 <TableCell>
@@ -187,7 +211,11 @@ export function Users({ refreshKey }: { refreshKey: number }) {
                       —
                     </Typography>
                   ) : (
-                    <Button size="small" color="error" onClick={() => setRevoking(u.name)}>
+                    <Button
+                      size="small"
+                      color="error"
+                      onClick={() => setRevoking(u.name)}
+                    >
                       Revoke
                     </Button>
                   )}
@@ -201,7 +229,9 @@ export function Users({ refreshKey }: { refreshKey: number }) {
       <Dialog open={revoking !== null} onClose={() => setRevoking(null)}>
         <DialogTitle>Revoke {revoking}?</DialogTitle>
         <DialogContent>
-          <DialogContentText>Anything using its token stops working.</DialogContentText>
+          <DialogContentText>
+            Anything using its token stops working.
+          </DialogContentText>
         </DialogContent>
         <DialogActions>
           <Button onClick={() => setRevoking(null)}>Cancel</Button>
@@ -212,7 +242,9 @@ export function Users({ refreshKey }: { refreshKey: number }) {
               const who = revoking!;
               setRevoking(null);
               try {
-                await api(`/api/users/${encodeURIComponent(who)}`, { method: "DELETE" });
+                await api(`/api/users/${encodeURIComponent(who)}`, {
+                  method: "DELETE",
+                });
                 setActionError(null);
                 reload();
               } catch (e) {

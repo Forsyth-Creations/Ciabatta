@@ -1,0 +1,230 @@
+// The offloading protocol: what the client, the remote cache and an executor
+// say to each other. See `src/oven/mod.rs` for how the three fit together.
+//
+// One definition for both sides. Rust gets it through `build.rs` (prost, with
+// pbjson for JSON), and the remote cache's web app gets
+// `remote-cache-web/src/gen/oven.ts`, generated from this same file — the
+// `generated_typescript_is_current` test fails when that file is out of date,
+// and `CIABATTA_REGENERATE=1 cargo test generated_typescript` rewrites it.
+//
+// It travels as JSON, not protobuf binary: protobuf's JSON mapping, with these
+// field names as written (snake_case). Every field is sent except an
+// `optional` or message field that isn't set, which is left out. Two things
+// follow from that mapping, and are why the types below are what they are:
+//
+// * an enum travels as its value's name — "JOB_STATE_RUNNING";
+// * a 64-bit integer travels as a string, so ids and counts are 32-bit and
+//   stay JSON numbers. Only byte sizes, which can pass 4 GB, are 64-bit, and
+//   arrive as strings ("size": "79").
+
+syntax = "proto3";
+
+package ciabatta.oven;
+
+// What a client asks for: one workflow run, at one commit.
+message JobSpec {
+  // The cache project it belongs to.
+  string project = 1;
+  // The URL the executor clones.
+  string repo = 2;
+  // The commit it checks out — always a full hash.
+  string commit = 3;
+  // The branch the commit is on, so the run sees the same CIABATTA_BRANCH
+  // (and CIABATTA_PATH) it would have locally.
+  optional string branch = 4;
+  // The workflows to run, first named first.
+  repeated string workflows = 5;
+  // The workspace root, relative to the top of the repository ("" when they
+  // are the same directory).
+  string root = 6;
+  // Where the command was typed, relative to the workspace root.
+  string cwd = 7;
+  repeated string only = 8;
+  bool solo = 9;
+  bool all = 10;
+  repeated string filter = 11;
+  // `-e KEY=VALUE` flags, as typed.
+  repeated string env = 12;
+  // Custom arguments, as typed after `...`.
+  repeated string args = 13;
+  bool force = 14;
+  // Run only on the executor of this name; unset takes the first free one.
+  optional string executor = 15;
+}
+
+// Where a job has got to.
+enum JobState {
+  JOB_STATE_UNSPECIFIED = 0;
+  // Waiting for an executor.
+  JOB_STATE_QUEUED = 1;
+  // Handed to an executor, which is working on it.
+  JOB_STATE_RUNNING = 2;
+  JOB_STATE_SUCCEEDED = 3;
+  JOB_STATE_FAILED = 4;
+  JOB_STATE_CANCELLED = 5;
+}
+
+// One file a job sent back, relative to the workspace root.
+message OutputFile {
+  string path = 1;
+  uint64 size = 2;
+}
+
+// A job, as the cache keeps it.
+message Job {
+  // Its execution number: what its outputs are filed under, and what the run
+  // sees as CIABATTA_EXECUTION_NUMBER.
+  uint32 id = 1;
+  JobSpec spec = 2;
+  JobState state = 3;
+  // Who asked for it.
+  string requested_by = 4;
+  string created_at = 5;
+  // The executor running it, once one has it.
+  optional string executor = 6;
+  optional string started_at = 7;
+  optional string finished_at = 8;
+  // Somebody asked for it to stop; the executor stops it at its next
+  // heartbeat.
+  bool cancel_requested = 9;
+  // Why it ended the way it did, in a sentence.
+  optional string message = 10;
+  // The CIABATTA_PATH the run had, for the record.
+  optional string ciabatta_path = 11;
+  // The files it sent back.
+  repeated OutputFile outputs = 12;
+  // How many log lines it has.
+  uint32 log_lines = 13;
+}
+
+// What an executor is doing.
+enum ExecutorState {
+  EXECUTOR_STATE_UNSPECIFIED = 0;
+  EXECUTOR_STATE_IDLE = 1;
+  EXECUTOR_STATE_BUSY = 2;
+  EXECUTOR_STATE_OFFLINE = 3;
+}
+
+// A paired executor, as the cache shows it.
+message ExecutorView {
+  string id = 1;
+  string name = 2;
+  ExecutorState state = 3;
+  // The job it is running.
+  optional uint32 job = 4;
+  // Where it was paired from.
+  string address = 5;
+  string version = 6;
+  // The OS and architecture it runs on ("linux-x86_64").
+  string platform = 7;
+  string added_at = 8;
+  string added_by = 9;
+  optional string last_seen = 10;
+}
+
+// Whether an executor found on the network can be added.
+enum Availability {
+  AVAILABILITY_UNSPECIFIED = 0;
+  // Not paired with any cache: add it with its code.
+  AVAILABILITY_AVAILABLE = 1;
+  // Paired with this cache already.
+  AVAILABILITY_PAIRED_HERE = 2;
+  // Paired with some other cache. Pairing it here moves it, and that cache
+  // stops reaching it.
+  AVAILABILITY_PAIRED_ELSEWHERE = 3;
+}
+
+// An executor the cache can see on the network, paired or not.
+message Discovered {
+  string id = 1;
+  string name = 2;
+  // "http://host:port", ready to pair with.
+  string address = 3;
+  string version = 4;
+  Availability availability = 5;
+  // The OS and architecture it runs on ("linux-x86_64").
+  string platform = 6;
+}
+
+// GET /api/oven/executors
+message ExecutorList {
+  repeated ExecutorView executors = 1;
+  repeated Discovered discovered = 2;
+}
+
+// GET /api/oven/jobs
+message JobList {
+  repeated Job jobs = 1;
+}
+
+// What an executor says about itself at GET /oven/info.
+message ExecutorInfo {
+  string id = 1;
+  string name = 2;
+  string version = 3;
+  string platform = 4;
+  // The cache it is paired with, if any.
+  optional string paired_with = 5;
+}
+
+// What the cache sends an executor to pair with it: POST /oven/pair.
+message PairRequest {
+  // The code the executor printed.
+  string code = 1;
+  // Where the executor reaches the cache from now on.
+  string server = 2;
+  // The executor's credential for that cache. The cache keeps only its hash.
+  string token = 3;
+}
+
+// What a person asks the cache to pair with: POST /api/oven/executors.
+message PairWith {
+  // "host:port" or a URL, discovered or typed.
+  string address = 1;
+  string code = 2;
+  // The URL the executor should use for the cache: where the page was loaded
+  // from, unless set.
+  optional string server = 3;
+}
+
+// The answer to a pairing.
+message Paired {
+  ExecutorInfo executor = 1;
+}
+
+// An executor waiting for work: POST /api/oven/executors/{id}/poll.
+message Poll {
+  // The job it was given, or unset when nothing came up in time.
+  Job job = 1;
+}
+
+// An executor saying what it is doing: POST /api/oven/executors/{id}/heartbeat.
+message Heartbeat {
+  optional uint32 job = 1;
+}
+
+// The cache's answer to a heartbeat.
+message HeartbeatReply {
+  // Stop the job it named.
+  bool cancel = 1;
+}
+
+// A batch of log lines from an executor.
+message LogBatch {
+  repeated string lines = 1;
+}
+
+// What a reader of a job's log gets: lines from `from` on.
+message LogPage {
+  repeated string lines = 1;
+  // Where to read from next time.
+  uint32 next = 2;
+}
+
+// How an executor reports that a job is over.
+message Finish {
+  JobState state = 1;
+  optional string message = 2;
+  optional string ciabatta_path = 3;
+  repeated OutputFile outputs = 4;
+}

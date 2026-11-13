@@ -47,7 +47,12 @@ import { useMutation } from "@tanstack/react-query";
 import { useVirtualizer } from "@tanstack/react-virtual";
 
 import { api, downloadText } from "../api/client";
-import { useSearch, useStopSession, type Bookmark, type LogLine } from "../api/watch";
+import {
+  useSearch,
+  useStopSession,
+  type Bookmark,
+  type LogLine,
+} from "../api/watch";
 import { useWatchStream } from "../hooks/useWatchStream";
 import { AnsiText, stripAnsi } from "../components/AnsiText";
 import { ErrorNote, Loading } from "../components/Page";
@@ -105,7 +110,8 @@ export function WatchSessionPage() {
     [searching, search.data, rows],
   );
   const matched = useMemo(() => new Set(matches), [matches]);
-  const currentSeq = matches.length > 0 ? matches[Math.min(current, matches.length - 1)] : null;
+  const currentSeq =
+    matches.length > 0 ? matches[Math.min(current, matches.length - 1)] : null;
   const marked = useMemo(
     () => new Map(stream.bookmarks.map((mark) => [mark.seq, mark])),
     [stream.bookmarks],
@@ -196,7 +202,10 @@ export function WatchSessionPage() {
     setSidebar(false);
     showLine(mark.seq);
     setFlash(mark.seq);
-    window.setTimeout(() => setFlash((seq) => (seq === mark.seq ? null : seq)), 1600);
+    window.setTimeout(
+      () => setFlash((seq) => (seq === mark.seq ? null : seq)),
+      1600,
+    );
   };
 
   const addBookmark = useMutation({
@@ -212,16 +221,30 @@ export function WatchSessionPage() {
 
   const removeBookmark = useMutation({
     mutationFn: (bookmarkId: number) =>
-      api.post(`/api/watch/sessions/${id}/bookmarks/delete`, { id: bookmarkId }),
+      api.post(`/api/watch/sessions/${id}/bookmarks/delete`, {
+        id: bookmarkId,
+      }),
     onSuccess: () => stream.refresh(),
   });
 
-  if (!stream.ready && !stream.error) return <Loading label="Connecting to the session…" />;
+  if (!stream.ready && !stream.error)
+    return <Loading label="Connecting to the session…" />;
 
   return (
-    <Box sx={{ display: "flex", flexDirection: "column", height: "calc(100vh - 128px)" }}>
+    <Box
+      sx={{
+        display: "flex",
+        flexDirection: "column",
+        height: "calc(100vh - 128px)",
+      }}
+    >
       <Stack direction="row" alignItems="center" spacing={1.5} sx={{ mb: 1.5 }}>
-        <IconButton component={Link} to="/watch" size="small" aria-label="Back to sessions">
+        <IconButton
+          component={Link}
+          to="/watch"
+          size="small"
+          aria-label="Back to sessions"
+        >
           <ArrowBackIcon />
         </IconButton>
 
@@ -261,7 +284,14 @@ export function WatchSessionPage() {
         </Tooltip>
       </Stack>
 
-      <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 1.5 }} flexWrap="wrap" useFlexGap>
+      <Stack
+        direction="row"
+        spacing={1}
+        alignItems="center"
+        sx={{ mb: 1.5 }}
+        flexWrap="wrap"
+        useFlexGap
+      >
         <FindBar
           value={query}
           onChange={(next) => {
@@ -273,7 +303,9 @@ export function WatchSessionPage() {
           onStep={(by) => showMatch(stepMatch(current, matches.length, by))}
           placeholder="Search the whole buffer…"
           width={420}
-          note={search.data?.capped ? "Showing the first 2,000 matches" : undefined}
+          note={
+            search.data?.capped ? "Showing the first 2,000 matches" : undefined
+          }
         />
 
         <ToggleButtonGroup
@@ -301,7 +333,8 @@ export function WatchSessionPage() {
 
         {searching && search.data?.capped && (
           <Typography variant="caption" color="text.secondary">
-            {search.data.total.toLocaleString()} matches — stepping through the first 2,000
+            {search.data.total.toLocaleString()} matches — stepping through the
+            first 2,000
           </Typography>
         )}
       </Stack>
@@ -328,7 +361,9 @@ export function WatchSessionPage() {
             Waiting for output…
           </Typography>
         ) : (
-          <Box sx={{ height: virtualizer.getTotalSize(), position: "relative" }}>
+          <Box
+            sx={{ height: virtualizer.getTotalSize(), position: "relative" }}
+          >
             {virtualizer.getVirtualItems().map((item) => {
               const line = rows[item.index];
               const isCurrent = line.seq === currentSeq || line.seq === flash;
@@ -352,22 +387,35 @@ export function WatchSessionPage() {
                     whiteSpace: "pre",
                     // stderr is where tools log as a matter of course, so it's
                     // set apart quietly rather than painted as an error.
-                    color: line.stream === "stderr" ? "text.secondary" : "text.primary",
+                    color:
+                      line.stream === "stderr"
+                        ? "text.secondary"
+                        : "text.primary",
                     bgcolor: isCurrent
                       ? alpha(theme.palette.warning.main, 0.38)
                       : matched.has(line.seq)
                         ? alpha(theme.palette.warning.main, 0.14)
                         : undefined,
-                    boxShadow: isCurrent ? `inset 2px 0 ${theme.palette.warning.main}` : undefined,
+                    boxShadow: isCurrent
+                      ? `inset 2px 0 ${theme.palette.warning.main}`
+                      : undefined,
                     transition: "background-color 300ms",
-                    "&:hover": isCurrent ? undefined : { bgcolor: "action.hover" },
+                    "&:hover": isCurrent
+                      ? undefined
+                      : { bgcolor: "action.hover" },
                     "&:hover .bookmark": { opacity: 1 },
                   }}
                 >
-                  <Box component="span" sx={{ color: "text.disabled", userSelect: "none" }}>
+                  <Box
+                    component="span"
+                    sx={{ color: "text.disabled", userSelect: "none" }}
+                  >
                     {String(line.seq).padStart(6, " ")}
                   </Box>
-                  <Box component="span" sx={{ flexGrow: 1, overflow: "hidden" }}>
+                  <Box
+                    component="span"
+                    sx={{ flexGrow: 1, overflow: "hidden" }}
+                  >
                     <AnsiText
                       text={line.text}
                       fallbackColor={
@@ -380,7 +428,9 @@ export function WatchSessionPage() {
                   {mark ? (
                     // A bookmarked line keeps its mark in view; clicking it
                     // takes the bookmark off again.
-                    <Tooltip title={`Bookmarked: ${mark.label} — click to remove`}>
+                    <Tooltip
+                      title={`Bookmarked: ${mark.label} — click to remove`}
+                    >
                       <IconButton
                         size="small"
                         aria-label="Remove this bookmark"
@@ -443,7 +493,8 @@ function ExportMenu({ id }: { id: number }) {
       return filename;
     },
     onSuccess: (filename) => setToast(`Saved ${filename}`),
-    onError: (error: Error) => setToast(`Couldn't save the log: ${error.message}`),
+    onError: (error: Error) =>
+      setToast(`Couldn't save the log: ${error.message}`),
   });
 
   const copy = useMutation({
@@ -453,7 +504,9 @@ function ExportMenu({ id }: { id: number }) {
       return text;
     },
     onSuccess: (text) =>
-      setToast(`Copied ${text.split("\n").length.toLocaleString()} lines to the clipboard`),
+      setToast(
+        `Copied ${text.split("\n").length.toLocaleString()} lines to the clipboard`,
+      ),
     // Clipboard writes are refused outside a secure context, which is worth
     // saying plainly rather than failing silently.
     onError: () => setToast("Couldn't copy — save the file instead."),
@@ -477,24 +530,37 @@ function ExportMenu({ id }: { id: number }) {
         </IconButton>
       </Tooltip>
 
-      <Menu anchorEl={anchor} open={Boolean(anchor)} onClose={() => setAnchor(null)}>
+      <Menu
+        anchorEl={anchor}
+        open={Boolean(anchor)}
+        onClose={() => setAnchor(null)}
+      >
         <MenuItem onClick={choose(() => save.mutate(false))}>
           <ListItemIcon>
             <DownloadIcon fontSize="small" />
           </ListItemIcon>
-          <ListItemText primary="Download as a file" secondary="Command, status and bookmarks included" />
+          <ListItemText
+            primary="Download as a file"
+            secondary="Command, status and bookmarks included"
+          />
         </MenuItem>
         <MenuItem onClick={choose(() => save.mutate(true))}>
           <ListItemIcon>
             <ScheduleIcon fontSize="small" />
           </ListItemIcon>
-          <ListItemText primary="Download with timestamps" secondary="For working out where it stalled" />
+          <ListItemText
+            primary="Download with timestamps"
+            secondary="For working out where it stalled"
+          />
         </MenuItem>
         <MenuItem onClick={choose(() => copy.mutate())}>
           <ListItemIcon>
             <ContentCopyIcon fontSize="small" />
           </ListItemIcon>
-          <ListItemText primary="Copy to clipboard" secondary="Paste straight into a ticket or chat" />
+          <ListItemText
+            primary="Copy to clipboard"
+            secondary="Paste straight into a ticket or chat"
+          />
         </MenuItem>
       </Menu>
 
@@ -510,7 +576,9 @@ function ExportMenu({ id }: { id: number }) {
 
 function StatusChip({ stream }: { stream: ReturnType<typeof useWatchStream> }) {
   if (stream.running) {
-    return <Chip size="small" color="success" variant="outlined" label="running" />;
+    return (
+      <Chip size="small" color="success" variant="outlined" label="running" />
+    );
   }
   const status = stream.status;
   if (!status) return null;
@@ -526,9 +594,13 @@ function StatusChip({ stream }: { stream: ReturnType<typeof useWatchStream> }) {
         />
       );
     case "signaled":
-      return <Chip size="small" color="warning" variant="outlined" label="stopped" />;
+      return (
+        <Chip size="small" color="warning" variant="outlined" label="stopped" />
+      );
     case "failed":
-      return <Chip size="small" color="error" variant="outlined" label="failed" />;
+      return (
+        <Chip size="small" color="error" variant="outlined" label="failed" />
+      );
     default:
       return null;
   }
@@ -555,7 +627,10 @@ function SidePanel({
 
   const addTrigger = useMutation({
     mutationFn: (value: string) =>
-      api.post(`/api/watch/sessions/${sessionId}/triggers`, { pattern: value, is_regex: false }),
+      api.post(`/api/watch/sessions/${sessionId}/triggers`, {
+        pattern: value,
+        is_regex: false,
+      }),
     onSuccess: () => {
       setPattern("");
       stream.refresh();
@@ -602,13 +677,23 @@ function SidePanel({
 
         <Stack spacing={0.5} sx={{ mt: 1.5 }}>
           {stream.triggers.map((trigger) => (
-            <Stack key={trigger.id} direction="row" alignItems="center" spacing={1}>
+            <Stack
+              key={trigger.id}
+              direction="row"
+              alignItems="center"
+              spacing={1}
+            >
               <NotificationsActiveIcon fontSize="small" color="warning" />
-              <Typography sx={{ flexGrow: 1, fontFamily: monoFontStack, fontSize: 13 }}>
+              <Typography
+                sx={{ flexGrow: 1, fontFamily: monoFontStack, fontSize: 13 }}
+              >
                 {trigger.pattern}
               </Typography>
               <Chip size="small" label={trigger.hits} />
-              <IconButton size="small" onClick={() => removeTrigger.mutate(trigger.id)}>
+              <IconButton
+                size="small"
+                onClick={() => removeTrigger.mutate(trigger.id)}
+              >
                 <DeleteOutlineIcon fontSize="small" />
               </IconButton>
             </Stack>
@@ -622,7 +707,8 @@ function SidePanel({
 
         {stream.hits.length > 0 && (
           <Alert severity="warning" sx={{ mt: 2 }}>
-            {stream.hits.length} trigger hit{stream.hits.length === 1 ? "" : "s"} in this view.
+            {stream.hits.length} trigger hit
+            {stream.hits.length === 1 ? "" : "s"} in this view.
           </Alert>
         )}
 
@@ -633,8 +719,17 @@ function SidePanel({
         </Typography>
         <Stack spacing={1}>
           {stream.bookmarks.map((bookmark) => (
-            <Stack key={bookmark.id} direction="row" alignItems="flex-start" spacing={1}>
-              <BookmarkIcon fontSize="small" color="primary" sx={{ mt: 0.25 }} />
+            <Stack
+              key={bookmark.id}
+              direction="row"
+              alignItems="flex-start"
+              spacing={1}
+            >
+              <BookmarkIcon
+                fontSize="small"
+                color="primary"
+                sx={{ mt: 0.25 }}
+              />
               <Box
                 component="button"
                 type="button"

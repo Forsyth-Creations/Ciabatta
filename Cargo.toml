@@ -85,9 +85,19 @@ hyper-util = { version = "0.1", features = ["server-auto", "tokio", "service"] }
 # `remote-cache init --tls` generates a self-signed certificate, so HTTPS works
 # out of the box on a network with no CA to hand.
 rcgen = { version = "0.13", default-features = false, features = ["ring", "pem"] }
+mdns-sd = "0.21.7"
+prost = "0.14.6"
+pbjson = "0.9.0"
 
 # Killing a timed-out or abandoned step means killing its whole process group:
 # `sh -c "…"` forks rather than execs, so signalling the shell alone orphans
 # whatever it started. Already in the tree via tokio; named here for `killpg`.
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+[build-dependencies]
+pbjson-build = "0.9.0"
+prost = "0.14.6"
+prost-build = "0.14.6"
+prost-types = "0.14.6"
+protox = "0.10.0"

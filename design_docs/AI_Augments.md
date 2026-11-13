@@ -9,4 +9,3 @@
 5. Make sure the AI remembers when it used local tooling. Usually this will be for builds, lints, formats, etc
 
 6. When the AI makes a change to a file, it should also update the mind map to reflect that change. This will help keep the architecture mapping accurate and up-to-date.
-

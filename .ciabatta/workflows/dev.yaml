@@ -1,0 +1,47 @@
+# The whole system, from source, for end-to-end testing: the remote cache, an
+# oven executor working for it, and the daemon that serves the web app.
+# `ciabatta dev` runs this beside every sub-workspace's own dev workflow (the
+# website, the remote cache admin app), each as an ordinary step, so they all
+# stay up together until Ctrl-C ends the run. Restart the run to pick up a
+# change to the Rust code.
+#
+# Ordinary steps rather than `background:`, on purpose: a background task is
+# stopped when the run's steps finish, and a dev server is the whole point.
+#
+# All three `cargo run` the same checkout, so they share one build: the first
+# to take cargo's lock builds, the others wait on it and then start.
+
+description: Run the remote cache, an oven executor and the daemon from source, alongside the web apps' dev servers
+owner: Henry Forsyth
+requires:
+  - cargo
+steps:
+  - name: remote_cache
+    # Config and artifact store in .ciabatta/dev-remote-cache/ (gitignored),
+    # written by `remote-cache init` the first time. On 8380: the port
+    # remote-cache-web's dev server proxies to, and the `cache.remote.url` in
+    # ciabatta.yaml.
+    run: |
+      dir=.ciabatta/dev-remote-cache
+      [ -f "$dir/remote-cache.yaml" ] || cargo run -- remote-cache init --into "$dir" --port 8380
+      cargo run -- remote-cache start --config "$dir/remote-cache.yaml"
+    description: The remote cache server on 8380, built from this checkout
+
+  - name: executor
+    # Its own identity and pairing in .ciabatta/dev-oven/ (gitignored), so it
+    # never touches a real executor's in ~/.ciabatta/oven. Pair it once on the
+    # cache's Executors page with the code it prints; it stays paired.
+    run: cargo run -- oven executor --name dev --port 8381 --dir .ciabatta/dev-oven
+    description: An oven executor on 8381 for the dev cache, built from this checkout
+
+  - name: daemon
+    # `serve`, in the foreground, not `restart`: restart would stop the
+    # installed daemon and every watch session and run it owns. This one takes
+    # its own port and leaves the installed daemon running.
+    #
+    # The daemon record (~/.ciabatta/daemon.json) is per-user, not per-daemon,
+    # so while this runs it is the daemon every ciabatta command finds, and
+    # what tool_frontend's dev server proxies to. Once it stops, the next
+    # command that needs a daemon starts a fresh one.
+    run: cargo run -- daemon serve --port 9999
+    description: The daemon serving the web app on 9999, built from this checkout

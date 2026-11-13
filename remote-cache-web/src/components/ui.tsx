@@ -32,7 +32,15 @@ export function Section({
 }) {
   return (
     <Box component="section" sx={{ mt: 4 }}>
-      <Box sx={{ display: "flex", alignItems: "flex-end", gap: 2, flexWrap: "wrap", mb: 1.5 }}>
+      <Box
+        sx={{
+          display: "flex",
+          alignItems: "flex-end",
+          gap: 2,
+          flexWrap: "wrap",
+          mb: 1.5,
+        }}
+      >
         <Box sx={{ flex: 1, minWidth: 200 }}>
           <Typography variant="h2">{title}</Typography>
           {sub && (
@@ -63,7 +71,11 @@ export function StatTile({
   return (
     <Card sx={{ height: "100%" }}>
       <CardContent sx={{ py: 1.5, "&:last-child": { pb: 1.5 } }}>
-        <Typography variant="overline" color="text.secondary" sx={{ lineHeight: 1.6 }}>
+        <Typography
+          variant="overline"
+          color="text.secondary"
+          sx={{ lineHeight: 1.6 }}
+        >
           {label}
         </Typography>
         <Typography
@@ -74,7 +86,12 @@ export function StatTile({
           {value}
         </Typography>
         {detail && (
-          <Typography variant="caption" color="text.secondary" noWrap component="div">
+          <Typography
+            variant="caption"
+            color="text.secondary"
+            noWrap
+            component="div"
+          >
             {detail}
           </Typography>
         )}
@@ -117,7 +134,13 @@ export function ChartCard({
 }
 
 /** Shown where a chart would be, when there's nothing to plot yet. */
-export function NoData({ height, children }: { height: number; children: ReactNode }) {
+export function NoData({
+  height,
+  children,
+}: {
+  height: number;
+  children: ReactNode;
+}) {
   return (
     <Box
       sx={{
@@ -154,24 +177,42 @@ export function When({ at }: { at: string | null | undefined }) {
   );
 }
 
-export function Mono({ children, title }: { children: ReactNode; title?: string }) {
+export function Mono({
+  children,
+  title,
+}: {
+  children: ReactNode;
+  title?: string;
+}) {
   return (
-    <Box component="span" title={title} sx={{ fontFamily: monoFontStack, fontSize: "0.85em" }}>
+    <Box
+      component="span"
+      title={title}
+      sx={{ fontFamily: monoFontStack, fontSize: "0.85em" }}
+    >
       {children}
     </Box>
   );
 }
 
-const TAG_COLOURS: Record<string, "success" | "warning" | "error" | "default"> = {
-  hit: "success",
-  upload: "success",
-  success: "success",
-  reused: "success",
-  miss: "warning",
-  stopped: "warning",
-  skipped: "warning",
-  failed: "error",
-};
+const TAG_COLOURS: Record<string, "success" | "warning" | "error" | "default"> =
+  {
+    hit: "success",
+    upload: "success",
+    success: "success",
+    reused: "success",
+    miss: "warning",
+    stopped: "warning",
+    skipped: "warning",
+    failed: "error",
+    idle: "success",
+    succeeded: "success",
+    busy: "warning",
+    running: "warning",
+    queued: "default",
+    cancelled: "warning",
+    offline: "error",
+  };
 
 export function Tag({ kind, label }: { kind: string; label?: string }) {
   return (
@@ -185,7 +226,13 @@ export function Tag({ kind, label }: { kind: string; label?: string }) {
   );
 }
 
-export function EmptyRow({ colSpan, children }: { colSpan: number; children: ReactNode }) {
+export function EmptyRow({
+  colSpan,
+  children,
+}: {
+  colSpan: number;
+  children: ReactNode;
+}) {
   return (
     <TableRow>
       <TableCell colSpan={colSpan} sx={{ color: "text.secondary" }}>
@@ -198,5 +245,11 @@ export function EmptyRow({ colSpan, children }: { colSpan: number; children: Rea
 /** Backticked names in server prose read as code. */
 export function Prose({ text }: { text: string }) {
   const parts = text.split(/`([^`]+)`/g);
-  return <>{parts.map((part, i) => (i % 2 === 1 ? <Mono key={i}>{part}</Mono> : part))}</>;
+  return (
+    <>
+      {parts.map((part, i) =>
+        i % 2 === 1 ? <Mono key={i}>{part}</Mono> : part,
+      )}
+    </>
+  );
 }

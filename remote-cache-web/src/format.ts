@@ -27,14 +27,16 @@ export function duration(ms: number | null | undefined): string {
   if (ms === null || ms === undefined) return "";
   const s = Math.round(ms / 1000);
   if (s < 60) return `${(ms / 1000).toFixed(1)}s`;
-  if (s < 3600) return `${Math.floor(s / 60)}m${String(s % 60).padStart(2, "0")}s`;
+  if (s < 3600)
+    return `${Math.floor(s / 60)}m${String(s % 60).padStart(2, "0")}s`;
   return `${Math.floor(s / 3600)}h${String(Math.floor(s / 60) % 60).padStart(2, "0")}m`;
 }
 
 export function compact(n: number): string {
-  return new Intl.NumberFormat(undefined, { notation: "compact", maximumFractionDigits: 1 }).format(
-    n,
-  );
+  return new Intl.NumberFormat(undefined, {
+    notation: "compact",
+    maximumFractionDigits: 1,
+  }).format(n);
 }
 
 /** The last `count` UTC days, oldest first, as `YYYY-MM-DD`. */
@@ -43,7 +45,11 @@ export function lastDays(count: number): string[] {
   const today = new Date();
   for (let i = count - 1; i >= 0; i--) {
     const d = new Date(
-      Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate() - i),
+      Date.UTC(
+        today.getUTCFullYear(),
+        today.getUTCMonth(),
+        today.getUTCDate() - i,
+      ),
     );
     out.push(d.toISOString().slice(0, 10));
   }
@@ -72,8 +78,10 @@ export function saved(ms: number | null | undefined): string {
   const t = ms ?? 0;
   if (t < MINUTE) return `${Math.floor(t / 1000)}s`;
   if (t < HOUR) return `${Math.floor(t / MINUTE)}m`;
-  if (t < DAY) return `${Math.floor(t / HOUR)}h ${Math.floor((t % HOUR) / MINUTE)}m`;
-  if (t < YEAR) return `${Math.floor(t / DAY)}d ${Math.floor((t % DAY) / HOUR)}h`;
+  if (t < DAY)
+    return `${Math.floor(t / HOUR)}h ${Math.floor((t % HOUR) / MINUTE)}m`;
+  if (t < YEAR)
+    return `${Math.floor(t / DAY)}d ${Math.floor((t % DAY) / HOUR)}h`;
   return `${Math.floor(t / YEAR)}y ${Math.floor((t % YEAR) / DAY)}d`;
 }
 

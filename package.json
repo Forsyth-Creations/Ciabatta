@@ -1,25 +1,26 @@
 {
-    "name": "ciabatta",
-    "version": "0.1.0",
-    "private": true,
-    "packageManager": "yarn@4.17.0",
-    "workspaces": [
-        "packages/graphs",
-        "frontend",
-        "src",
-        "tool_frontend",
-        "remote-cache-web",
-        "editors/vscode"
-    ],
-    "scripts": {
-        "build": "yarn workspaces foreach -A --topological-dev run build",
-        "dev": "yarn workspaces foreach -Api run dev",
-        "preview": "yarn workspaces foreach -Api run preview",
-        "check": "yarn workspaces foreach -A --topological-dev run check",
-        "package": "yarn workspace ciabatta-vscode package",
-        "clean": "yarn workspaces foreach -A run clean"
-    },
-    "resolutions": {
-        "@types/react-grid-layout/@types/react": "^18.3.12"
-    }
+  "name": "ciabatta",
+  "version": "0.1.0",
+  "private": true,
+  "packageManager": "yarn@4.17.0",
+  "workspaces": [
+    "packages/graphs",
+    "frontend",
+    "src",
+    "tool_frontend",
+    "remote-cache-web",
+    "editors/vscode"
+  ],
+  "scripts": {
+    "build": "yarn workspaces foreach -A --topological-dev run build",
+    "dev": "yarn workspaces foreach -Api run dev",
+    "preview": "yarn workspaces foreach -Api run preview",
+    "check": "yarn workspaces foreach -A --topological-dev run check",
+    "package": "yarn workspace ciabatta-vscode package",
+    "clean": "yarn workspaces foreach -A run clean",
+    "format": "npx prettier --write \"**/*.{ts,tsx,js,jsx,mjs,cjs}\""
+  },
+  "resolutions": {
+    "@types/react-grid-layout/@types/react": "^18.3.12"
+  }
 }

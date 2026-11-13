@@ -107,11 +107,20 @@ export const monoFontStack = [
   "monospace",
 ].join(", ");
 
-const bodyFontStack = ["Barlow", "ui-sans-serif", "system-ui", "-apple-system", "sans-serif"].join(
-  ", ",
-);
+const bodyFontStack = [
+  "Barlow",
+  "ui-sans-serif",
+  "system-ui",
+  "-apple-system",
+  "sans-serif",
+].join(", ");
 
-const headingFontStack = ["'Barlow Condensed'", "Barlow", "ui-sans-serif", "system-ui"].join(", ");
+const headingFontStack = [
+  "'Barlow Condensed'",
+  "Barlow",
+  "ui-sans-serif",
+  "system-ui",
+].join(", ");
 
 /**
  * Headings are condensed, bold and uppercase, per the brand sheet.
@@ -175,7 +184,11 @@ export function buildTheme(mode: "light" | "dark"): Theme {
       subtitle2: { fontWeight: 600 },
       // Sentence case for everything a person reads as a sentence — the brand's
       // rule, and the reason buttons aren't shouting.
-      button: { textTransform: "none", fontWeight: 600, letterSpacing: "0.01em" },
+      button: {
+        textTransform: "none",
+        fontWeight: 600,
+        letterSpacing: "0.01em",
+      },
     },
     components: {
       MuiCssBaseline: {
@@ -193,7 +206,9 @@ export function buildTheme(mode: "light" | "dark"): Theme {
             scrollbarColor: `${dark ? surface.iron : brand.mist} transparent`,
           },
           "*::-webkit-scrollbar": { width: 8, height: 8 },
-          "*::-webkit-scrollbar-track, *::-webkit-scrollbar-corner": { background: "transparent" },
+          "*::-webkit-scrollbar-track, *::-webkit-scrollbar-corner": {
+            background: "transparent",
+          },
           "*::-webkit-scrollbar-thumb": {
             backgroundColor: dark ? surface.iron : brand.mist,
             borderRadius: 8,

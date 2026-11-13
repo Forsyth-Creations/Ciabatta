@@ -61,14 +61,21 @@ export function InputPrompt() {
   const { data } = useWaitingInputs();
   // Oldest first: the step that has been waiting longest is answered first.
   const waiting = useMemo(
-    () => [...(data?.inputs ?? [])].sort((a, b) => a.asked_at.localeCompare(b.asked_at)),
+    () =>
+      [...(data?.inputs ?? [])].sort((a, b) =>
+        a.asked_at.localeCompare(b.asked_at),
+      ),
     [data],
   );
   const current = waiting[0];
   if (!current) return null;
   // Keyed by question, so the next one starts closed with an empty field.
   return (
-    <Question key={`${current.run}:${current.id}`} input={current} queued={waiting.length - 1} />
+    <Question
+      key={`${current.run}:${current.id}`}
+      input={current}
+      queued={waiting.length - 1}
+    />
   );
 }
 
@@ -112,7 +119,13 @@ function Question({ input, queued }: { input: WaitingInput; queued: number }) {
       <ButtonBase
         onClick={() => setOpen((was) => !was)}
         aria-expanded={open}
-        sx={{ display: "block", width: "100%", textAlign: "left", px: 1.5, py: 1 }}
+        sx={{
+          display: "block",
+          width: "100%",
+          textAlign: "left",
+          px: 1.5,
+          py: 1,
+        }}
       >
         <Stack direction="row" spacing={1} alignItems="center">
           <HelpOutlineIcon color="primary" fontSize="small" />
@@ -123,7 +136,9 @@ function Question({ input, queued }: { input: WaitingInput; queued: number }) {
           >
             {input.prompt}
           </Typography>
-          {queued > 0 && <Chip size="small" variant="outlined" label={`${queued} more`} />}
+          {queued > 0 && (
+            <Chip size="small" variant="outlined" label={`${queued} more`} />
+          )}
           {remaining !== null && (
             <Chip
               size="small"
@@ -138,7 +153,11 @@ function Question({ input, queued }: { input: WaitingInput; queued: number }) {
             sx={{ display: "inline-flex", alignItems: "center", flexShrink: 0 }}
           >
             {open ? "Later" : "Answer"}
-            {open ? <ExpandLessIcon fontSize="small" /> : <ExpandMoreIcon fontSize="small" />}
+            {open ? (
+              <ExpandLessIcon fontSize="small" />
+            ) : (
+              <ExpandMoreIcon fontSize="small" />
+            )}
           </Typography>
         </Stack>
       </ButtonBase>
@@ -155,7 +174,10 @@ function Question({ input, queued }: { input: WaitingInput; queued: number }) {
             </Link>
           </Typography>
           {input.details && (
-            <Typography variant="body2" sx={{ mb: 1.5, whiteSpace: "pre-wrap" }}>
+            <Typography
+              variant="body2"
+              sx={{ mb: 1.5, whiteSpace: "pre-wrap" }}
+            >
               {input.details}
             </Typography>
           )}
@@ -164,7 +186,8 @@ function Question({ input, queued }: { input: WaitingInput; queued: number }) {
               {[
                 input.default === "y" && "No answer in time means yes.",
                 input.default === "n" && "No answer in time means no.",
-                input.env && `Set ${input.env} to y or n to skip this question next time.`,
+                input.env &&
+                  `Set ${input.env} to y or n to skip this question next time.`,
               ]
                 .filter(Boolean)
                 .join(" ")}
@@ -181,7 +204,9 @@ function Question({ input, queued }: { input: WaitingInput; queued: number }) {
               onKeyDown={(e) => {
                 if (e.key === "Enter") submit();
               }}
-              placeholder={input.default && !input.secret ? input.default : undefined}
+              placeholder={
+                input.default && !input.secret ? input.default : undefined
+              }
               disabled={expired}
               helperText={
                 [
@@ -189,8 +214,10 @@ function Question({ input, queued }: { input: WaitingInput; queued: number }) {
                     (input.secret
                       ? "Leave blank for the default."
                       : `Leave blank for "${input.default}".`),
-                  input.env && `Set ${input.env} to skip this question next time.`,
-                  remaining === null && "This question waits until it's answered.",
+                  input.env &&
+                    `Set ${input.env} to skip this question next time.`,
+                  remaining === null &&
+                    "This question waits until it's answered.",
                 ]
                   .filter(Boolean)
                   .join(" ") || undefined
@@ -205,7 +232,8 @@ function Question({ input, queued }: { input: WaitingInput; queued: number }) {
           )}
           {input.enter && remaining !== null && (
             <Typography variant="body2" color="text.secondary">
-              The step carries on when you press Continue, or by itself when the time runs out.
+              The step carries on when you press Continue, or by itself when the
+              time runs out.
             </Typography>
           )}
           {(answer.error || stop.error) && (
@@ -215,14 +243,21 @@ function Question({ input, queued }: { input: WaitingInput; queued: number }) {
           )}
           {cancelling && (
             <Typography variant="body2" color="warning.main" sx={{ mt: 1.5 }}>
-              Cancel stops run #{input.run}: the step asking is killed and nothing further
-              starts. What has already happened stays happened.
+              Cancel stops run #{input.run}: the step asking is killed and
+              nothing further starts. What has already happened stays happened.
             </Typography>
           )}
-          <Stack direction="row" spacing={1} justifyContent="flex-end" sx={{ mt: 1.5 }}>
+          <Stack
+            direction="row"
+            spacing={1}
+            justifyContent="flex-end"
+            sx={{ mt: 1.5 }}
+          >
             {cancelling ? (
               <>
-                <Button onClick={() => setCancelling(false)}>Keep waiting</Button>
+                <Button onClick={() => setCancelling(false)}>
+                  Keep waiting
+                </Button>
                 <Button
                   color="error"
                   variant="contained"
@@ -234,7 +269,11 @@ function Question({ input, queued }: { input: WaitingInput; queued: number }) {
               </>
             ) : (
               <>
-                <Button color="error" onClick={() => setCancelling(true)} sx={{ mr: "auto" }}>
+                <Button
+                  color="error"
+                  onClick={() => setCancelling(true)}
+                  sx={{ mr: "auto" }}
+                >
                   Cancel
                 </Button>
                 {input.yes_no ? (

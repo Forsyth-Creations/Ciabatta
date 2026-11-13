@@ -29,9 +29,13 @@ const run = promisify(execFile);
 /** The one server instance, so a restart can stop the old one first. */
 let client: LanguageClient | undefined;
 
-export async function activate(context: vscode.ExtensionContext): Promise<void> {
+export async function activate(
+  context: vscode.ExtensionContext,
+): Promise<void> {
   context.subscriptions.push(
-    vscode.commands.registerCommand("ciabatta.restartServer", () => start(context, true)),
+    vscode.commands.registerCommand("ciabatta.restartServer", () =>
+      start(context, true),
+    ),
   );
 
   // A changed binary path is a different server; a toggled `enabled` is a
@@ -60,7 +64,10 @@ export async function deactivate(): Promise<void> {
  * before they have the CLI, and the schemas work regardless — but when someone
  * has just pointed a setting at a binary, silence would be a bug.
  */
-async function start(context: vscode.ExtensionContext, announce: boolean): Promise<void> {
+async function start(
+  context: vscode.ExtensionContext,
+  announce: boolean,
+): Promise<void> {
   await client?.stop();
   client = undefined;
 
@@ -95,13 +102,23 @@ async function start(context: vscode.ExtensionContext, announce: boolean): Promi
     // Only ciabatta's own files. Every other YAML document in the workspace
     // belongs to some other tool, and this server has nothing to say about it.
     documentSelector: [
-      { scheme: "file", language: "yaml", pattern: "**/.ciabatta/ciabatta.{yaml,yml}" },
-      { scheme: "file", language: "yaml", pattern: "**/.ciabatta/workflows/*.{yaml,yml}" },
+      {
+        scheme: "file",
+        language: "yaml",
+        pattern: "**/.ciabatta/ciabatta.{yaml,yml}",
+      },
+      {
+        scheme: "file",
+        language: "yaml",
+        pattern: "**/.ciabatta/workflows/*.{yaml,yml}",
+      },
     ],
     synchronize: {
       // A member added or removed elsewhere in the repo changes what every
       // open file may refer to.
-      fileEvents: vscode.workspace.createFileSystemWatcher("**/.ciabatta/**/*.{yaml,yml,toml}"),
+      fileEvents: vscode.workspace.createFileSystemWatcher(
+        "**/.ciabatta/**/*.{yaml,yml,toml}",
+      ),
     },
     outputChannelName: "Ciabatta",
   };
@@ -112,7 +129,9 @@ async function start(context: vscode.ExtensionContext, announce: boolean): Promi
   context.subscriptions.push(started);
 
   if (announce) {
-    void vscode.window.showInformationMessage(`Ciabatta language server running (${version}).`);
+    void vscode.window.showInformationMessage(
+      `Ciabatta language server running (${version}).`,
+    );
   }
 }
 
@@ -154,18 +173,37 @@ function isCiabattaFile(document: vscode.TextDocument): boolean {
 function suggestAfterInsertedKeys(): vscode.Disposable {
   return vscode.workspace.onDidChangeTextDocument((event) => {
     const editor = vscode.window.activeTextEditor;
-    if (!editor || editor.document !== event.document || !isCiabattaFile(event.document)) return;
-    if (!vscode.workspace.getConfiguration("ciabatta").get<boolean>("completion.autoTrigger", true)) {
+    if (
+      !editor ||
+      editor.document !== event.document ||
+      !isCiabattaFile(event.document)
+    )
+      return;
+    if (
+      !vscode.workspace
+        .getConfiguration("ciabatta")
+        .get<boolean>("completion.autoTrigger", true)
+    ) {
       return;
     }
     // One character is typing, which the trigger characters handle.
-    if (event.contentChanges.length !== 1 || event.contentChanges[0].text.length < 2) return;
+    if (
+      event.contentChanges.length !== 1 ||
+      event.contentChanges[0].text.length < 2
+    )
+      return;
 
     // After the edit settles, so the cursor (and any snippet) is in place.
     setTimeout(async () => {
-      if (vscode.window.activeTextEditor !== editor || !editor.selection.isEmpty) return;
+      if (
+        vscode.window.activeTextEditor !== editor ||
+        !editor.selection.isEmpty
+      )
+        return;
       const position = editor.selection.active;
-      const before = editor.document.lineAt(position.line).text.slice(0, position.character);
+      const before = editor.document
+        .lineAt(position.line)
+        .text.slice(0, position.character);
       if (!/(^\s*-|[\w-]:)\s$/.test(before)) return;
 
       const list = await vscode.commands.executeCommand<vscode.CompletionList>(

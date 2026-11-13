@@ -56,7 +56,10 @@ function inlineHashIndex(s) {
 function highlightValue(v) {
   return v
     .replace(/("[^"]*"|'[^']*')/g, '<span class="v">$1</span>')
-    .replace(/(^|[\s,[])(-?\d+(?:\.\d+)?|true|false)\b/g, '$1<span class="v">$2</span>');
+    .replace(
+      /(^|[\s,[])(-?\d+(?:\.\d+)?|true|false)\b/g,
+      '$1<span class="v">$2</span>',
+    );
 }
 
 export function toml(src) {
@@ -146,7 +149,8 @@ function slugify(s) {
 export function mountDoc({ slug, eyebrow, title, lede, contentHTML }) {
   const idx = DOC_PAGES.findIndex((p) => p.slug === slug);
   const prev = idx > 0 ? DOC_PAGES[idx - 1] : null;
-  const next = idx >= 0 && idx < DOC_PAGES.length - 1 ? DOC_PAGES[idx + 1] : null;
+  const next =
+    idx >= 0 && idx < DOC_PAGES.length - 1 ? DOC_PAGES[idx + 1] : null;
 
   const nav = DOC_PAGES.map(
     (p) =>

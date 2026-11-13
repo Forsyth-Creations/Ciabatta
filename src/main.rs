@@ -15,6 +15,7 @@ mod format;
 mod git;
 mod lsp;
 mod migrate;
+mod oven;
 mod python;
 mod registry;
 mod remote_cache;
@@ -345,6 +346,42 @@ async fn main() -> Result<()> {
             cmd_remote_cache(subcommand).await?;
         }
 
+        Commands::Oven { subcommand } => match subcommand {
+            cli::OvenCommand::Executor {
+                name,
+                port,
+                dir,
+                work_dir,
+                allow_repo,
+                no_mdns,
+                insecure,
+                unpair,
+            } => {
+                oven::executor::run(oven::executor::Options {
+                    name,
+                    port,
+                    dir,
+                    work_dir,
+                    allow_repo,
+                    no_mdns,
+                    tls_verify: !insecure,
+                    unpair,
+                })
+                .await?;
+            }
+        },
+
+        Commands::Offload { subcommand } => {
+            let cwd = env::current_dir().context("Failed to get current directory")?;
+            match subcommand {
+                cli::OffloadCommand::List { all } => oven::offload::list(&cwd, all).await?,
+                cli::OffloadCommand::Logs { id } => oven::offload::logs(&cwd, id).await?,
+                cli::OffloadCommand::Fetch { id } => oven::offload::fetch(&cwd, id).await?,
+                cli::OffloadCommand::Cancel { id } => oven::offload::cancel(&cwd, id).await?,
+                cli::OffloadCommand::Executors => oven::offload::executors(&cwd).await?,
+            }
+        }
+
         Commands::Releases { command } => {
             cmd_releases(command).await?;
         }
@@ -454,6 +491,19 @@ async fn cmd_workflow(
             member.rel, member.name, member.name
         );
         args.only.push(member.name.clone());
+    }
+
+    // Somewhere else entirely: the executor compiles the graph and checks the
+    // environment itself, against its own checkout and its own variables.
+    if args.offload || args.offload_to.is_some() {
+        return oven::offload::run(oven::offload::Request {
+            workflows: &workflows,
+            args: &args,
+            custom_args,
+            cwd: &cwd,
+            executor: args.offload_to.clone(),
+        })
+        .await;
     }
 
     // What this command sets for the run counts toward `required_env` from
@@ -2083,7 +2133,7 @@ fn build_env_vars(
 ///
 /// Returns `None` when there isn't enough information to build it (no tag and no
 /// branch), so callers leave `CIABATTA_PATH` unset rather than emitting `//`.
-fn derive_ciabatta_path(vars: &HashMap<String, String>) -> Option<String> {
+pub(crate) fn derive_ciabatta_path(vars: &HashMap<String, String>) -> Option<String> {
     let non_empty = |key: &str| vars.get(key).filter(|v| !v.is_empty()).cloned();
 
     if let Some(tag) = non_empty("CIABATTA_TAG") {

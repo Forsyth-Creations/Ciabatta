@@ -257,6 +257,7 @@ fn workspace_meta() -> crate::workspace::WorkspaceMeta {
         input_timeout: Some(one()),
         max_concurrent_runs: Some(1),
         prefetch: Some(true),
+        offload_dir: Some(one()),
         env_file: list(),
         env_default: Some(one()),
         env: map(),

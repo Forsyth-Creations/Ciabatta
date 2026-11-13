@@ -11,7 +11,7 @@ YAML file.
 
 It **orchestrates a monorepo**: every package opts in with `ciabatta init --lib`
 and declares who owns it, what its workflows do, and which other packages they
-need. `ciabatta build` then resolves *one* graph across the whole repo and shows
+need. `ciabatta build` then resolves _one_ graph across the whole repo and shows
 you exactly what will run, in what order, and where each node came from.
 
 And it **publishes artifacts** to common registries — Nexus (raw, **npm**, and
@@ -36,7 +36,7 @@ also just a step on the graph, so a build that ends in a push is one command.
   to open six packages to find out what `build.sh` is for.
 - **Cross-package dependencies are declared, not remembered.** A package that
   needs another's generated protobufs says so once; ciabatta runs them in the
-  right order, every time, and *draws you the graph* before it starts.
+  right order, every time, and _draws you the graph_ before it starts.
 - **Missing toolchains are named up front.** Declare what a step needs, and a
   missing `protoc` is reported before the build starts, with the install command
   your repo wrote down — not as "command not found" ten minutes in.
@@ -54,7 +54,7 @@ also just a step on the graph, so a build that ends in a push is one command.
   for the `ratatui` live view (every step down the left, its output on the
   right), or `--gui` for the browser — or set `CIABATTA_VIZ=tui|gui` to make
   either the default.
-- **Push *and* pull.** Because Ciabatta knows where things live, it can fetch
+- **Push _and_ pull.** Because Ciabatta knows where things live, it can fetch
   artifacts back down, not just upload them — and a pull step names the push it
   mirrors rather than repeating it.
 - **Bring your own auth.** Login is handled by your own scripts — Ciabatta just
@@ -67,11 +67,13 @@ also just a step on the graph, so a build that ends in a push is one command.
 ### One line
 
 **Linux / macOS**
+
 ```bash
 curl -fsSL https://forsyth-creations.github.io/Ciabatta/install.sh | sh
 ```
 
 **Windows** (PowerShell)
+
 ```powershell
 irm https://forsyth-creations.github.io/Ciabatta/install.ps1 | iex
 ```
@@ -100,13 +102,13 @@ block so you can call it with arguments:
 & ([scriptblock]::Create((irm https://forsyth-creations.github.io/Ciabatta/install.ps1))) -List
 ```
 
-| Option | What it does |
-| --- | --- |
-| `--version VERSION` / `-Version` | Install that release (`0.3.0`, `v0.3.0`, or `latest`). |
-| `--dir DIR` / `-Dir` | Install there instead of the default. |
-| `--move` | Move an install you can't write to into `~/.local/bin` without asking. |
-| `--list` / `-List` | Print the available versions and exit. |
-| `--help` | Usage. |
+| Option                           | What it does                                                           |
+| -------------------------------- | ---------------------------------------------------------------------- |
+| `--version VERSION` / `-Version` | Install that release (`0.3.0`, `v0.3.0`, or `latest`).                 |
+| `--dir DIR` / `-Dir`             | Install there instead of the default.                                  |
+| `--move`                         | Move an install you can't write to into `~/.local/bin` without asking. |
+| `--list` / `-List`               | Print the available versions and exit.                                 |
+| `--help`                         | Usage.                                                                 |
 
 `CIABATTA_VERSION` and `CIABATTA_INSTALL_DIR` do the same thing for callers that
 find environment variables easier to set; an explicit flag wins over them.
@@ -131,6 +133,7 @@ Download the archive for your platform from the
 Each archive includes an install script that puts the binary on your `PATH`.
 
 **Linux / macOS**
+
 ```bash
 tar xzf ciabatta-linux-x86_64.tar.gz
 ./install.sh                  # installs to ~/.local/bin
@@ -138,6 +141,7 @@ tar xzf ciabatta-linux-x86_64.tar.gz
 ```
 
 **Windows** (PowerShell)
+
 ```powershell
 Expand-Archive ciabatta-windows-x86_64.zip
 .\install.ps1                 # installs to %LOCALAPPDATA%\Programs\ciabatta and adds it to your PATH
@@ -199,33 +203,33 @@ artifacts are published from. For workflows it goes one level further out: the
 
 ## Commands
 
-| Command | What it does |
-| --- | --- |
-| `ciabatta <WORKFLOW>` | Run that workflow across every sub-workspace that defines one, in dependency order. `ciabatta build`, `ciabatta test`, … |
-| `ciabatta workflow <NAME>` | The same thing, spelled out — for a workflow whose name collides with a command below. |
-| `ciabatta dry-run [TARGET...]` | What a run would reuse from the cache and what it would rebuild — and for a rebuild, exactly what changed. Runs nothing. `--diff` for the lines. |
-| `ciabatta cache <init\|status\|prune\|clean>` | Set up and inspect the build cache. `init [WORKFLOW]` proposes inputs and outputs from what's actually in the directory and writes them into that workflow's file. |
-| `ciabatta remote-cache <init\|start\|login\|logout\|status\|add-user>` | Run or connect to a shared cache the whole team reads from. |
-| `ciabatta releases <list\|push\|pull>` | Versioned releases: list what's been published, or push and pull one by hand. See [Releases](#releases). |
-| `ciabatta self update` | Update this binary from the remote cache that serves it, verified against the SHA-256 it advertises. |
-| `ciabatta self lint` | Compile every workflow in the workspace and list each one that's broken — a file that won't parse, a `needs`/`depends_on`/`on_error` naming something that doesn't exist, a dependency cycle, a push to an undefined registry. Exits non-zero on any (`--json` for CI). |
-| `ciabatta convert --script PATH` | Turn an existing script into a workflow: its tools, its variables, its outputs, and the description in its header. |
-| `ciabatta register` | Tell the daemon this checkout exists, so it shows up in the web app's project switcher. `init` does this for you. |
-| `ciabatta config migrate` | Convert this checkout's TOML config files to YAML. |
-| `ciabatta lsp` | Speak the Language Server Protocol on stdio, so an editor can complete and check `.ciabatta/` files. Your editor extension launches this; you don't. |
-| `ciabatta list` | Every workflow in the monorepo — with descriptions, owners and dependencies. `-s TERM` to search, `-v` for steps. |
-| `ciabatta init --lib` | Opt this package in as a sub-workspace: a `workspace:` identity plus a starter workflow. |
-| `ciabatta init [--ci SYSTEM]` | Create a `.ciabatta/` directory with a starter publishing `ciabatta.yaml`. |
-| `ciabatta configure` | Interactively add a registry — no hand-editing YAML. |
-| `ciabatta configure auto` | Analyze the project and pick publishing workflows from an interactive checklist (Docker → ECR/Nexus, Rust binaries → crates.io / S3 / Nexus). |
-| `ciabatta tui` (alias `browse`) | Interactive registry browser — inspect registries and walk what has been published. |
-| `ciabatta analyze` | Build the project's dependency graph and open an interactive view. |
-| `ciabatta watch <command>` | Run a command and stream its logs into a live, searchable web view with bookmarks and notification triggers. `--list` to see running sessions, `--attach <ID>` to tail one, `--stop <ID>` to end it. |
-| `ciabatta todo [TASK] [--global]` | Task list, scoped to the project you're in — or to the global list with `--global`. With a TASK, adds it and exits; without, opens the todo page. |
-| `ciabatta ai` | AI assistant — chat TUI plus a live architecture mind map. |
-| `ciabatta daemon <status\|stop\|restart\|logs>` | Inspect or control the background daemon. |
-| `ciabatta config show` | Print the resolved configuration. |
-| `ciabatta config reference` | Show documentation on the config format and options. |
+| Command                                                                | What it does                                                                                                                                                                                                                                                            |
+| ---------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ciabatta <WORKFLOW>`                                                  | Run that workflow across every sub-workspace that defines one, in dependency order. `ciabatta build`, `ciabatta test`, …                                                                                                                                                |
+| `ciabatta workflow <NAME>`                                             | The same thing, spelled out — for a workflow whose name collides with a command below.                                                                                                                                                                                  |
+| `ciabatta dry-run [TARGET...]`                                         | What a run would reuse from the cache and what it would rebuild — and for a rebuild, exactly what changed. Runs nothing. `--diff` for the lines.                                                                                                                        |
+| `ciabatta cache <init\|status\|prune\|clean>`                          | Set up and inspect the build cache. `init [WORKFLOW]` proposes inputs and outputs from what's actually in the directory and writes them into that workflow's file.                                                                                                      |
+| `ciabatta remote-cache <init\|start\|login\|logout\|status\|add-user>` | Run or connect to a shared cache the whole team reads from.                                                                                                                                                                                                             |
+| `ciabatta releases <list\|push\|pull>`                                 | Versioned releases: list what's been published, or push and pull one by hand. See [Releases](#releases).                                                                                                                                                                |
+| `ciabatta self update`                                                 | Update this binary from the remote cache that serves it, verified against the SHA-256 it advertises.                                                                                                                                                                    |
+| `ciabatta self lint`                                                   | Compile every workflow in the workspace and list each one that's broken — a file that won't parse, a `needs`/`depends_on`/`on_error` naming something that doesn't exist, a dependency cycle, a push to an undefined registry. Exits non-zero on any (`--json` for CI). |
+| `ciabatta convert --script PATH`                                       | Turn an existing script into a workflow: its tools, its variables, its outputs, and the description in its header.                                                                                                                                                      |
+| `ciabatta register`                                                    | Tell the daemon this checkout exists, so it shows up in the web app's project switcher. `init` does this for you.                                                                                                                                                       |
+| `ciabatta config migrate`                                              | Convert this checkout's TOML config files to YAML.                                                                                                                                                                                                                      |
+| `ciabatta lsp`                                                         | Speak the Language Server Protocol on stdio, so an editor can complete and check `.ciabatta/` files. Your editor extension launches this; you don't.                                                                                                                    |
+| `ciabatta list`                                                        | Every workflow in the monorepo — with descriptions, owners and dependencies. `-s TERM` to search, `-v` for steps.                                                                                                                                                       |
+| `ciabatta init --lib`                                                  | Opt this package in as a sub-workspace: a `workspace:` identity plus a starter workflow.                                                                                                                                                                                |
+| `ciabatta init [--ci SYSTEM]`                                          | Create a `.ciabatta/` directory with a starter publishing `ciabatta.yaml`.                                                                                                                                                                                              |
+| `ciabatta configure`                                                   | Interactively add a registry — no hand-editing YAML.                                                                                                                                                                                                                    |
+| `ciabatta configure auto`                                              | Analyze the project and pick publishing workflows from an interactive checklist (Docker → ECR/Nexus, Rust binaries → crates.io / S3 / Nexus).                                                                                                                           |
+| `ciabatta tui` (alias `browse`)                                        | Interactive registry browser — inspect registries and walk what has been published.                                                                                                                                                                                     |
+| `ciabatta analyze`                                                     | Build the project's dependency graph and open an interactive view.                                                                                                                                                                                                      |
+| `ciabatta watch <command>`                                             | Run a command and stream its logs into a live, searchable web view with bookmarks and notification triggers. `--list` to see running sessions, `--attach <ID>` to tail one, `--stop <ID>` to end it.                                                                    |
+| `ciabatta todo [TASK] [--global]`                                      | Task list, scoped to the project you're in — or to the global list with `--global`. With a TASK, adds it and exits; without, opens the todo page.                                                                                                                       |
+| `ciabatta ai`                                                          | AI assistant — chat TUI plus a live architecture mind map.                                                                                                                                                                                                              |
+| `ciabatta daemon <status\|stop\|restart\|logs>`                        | Inspect or control the background daemon.                                                                                                                                                                                                                               |
+| `ciabatta config show`                                                 | Print the resolved configuration.                                                                                                                                                                                                                                       |
+| `ciabatta config reference`                                            | Show documentation on the config format and options.                                                                                                                                                                                                                    |
 
 Useful flags on `push` / `pull`:
 
@@ -242,7 +246,7 @@ Useful flags on any workflow (`ciabatta build`, `ciabatta release`, …):
 - `--only MEMBER` — start from one sub-workspace. Its dependencies still come
   along, so the result stays correct. Repeatable.
 - **From inside a package, a run is scoped to it.** `cd packages/api &&
-  ciabatta build` is `ciabatta build --only api`, as long as that package
+ciabatta build` is `ciabatta build --only api`, as long as that package
   defines `build` itself (it says so on stderr). `--all` runs the whole
   monorepo's graph anyway.
 - `--solo` — don't follow dependencies out of what you selected, for when
@@ -298,9 +302,9 @@ workspace:
   name: api
   description: Public REST API
   owner: Ada
-  depends_on: [proto:generate]   # what this package needs first
+  depends_on: [proto:generate] # what this package needs first
   tags: [backend]
-  requires: [cargo]              # tools every workflow here needs on PATH
+  requires: [cargo] # tools every workflow here needs on PATH
 ```
 
 `description` and `owner` aren't decoration — they're what `ciabatta list` shows
@@ -317,24 +321,24 @@ the same graph.
 # packages/api/.ciabatta/workflows/build.yaml
 description: Compile the API service
 owner: Ada
-needs: [proto:generate]        # cross-package deps for this workflow
-required_env: [API_TOKEN]      # refuse to start unless set
-env_file: .env                 # relative to this package (and the default)
-env_default: .env.default      # the checked-in template .env comes from
+needs: [proto:generate] # cross-package deps for this workflow
+required_env: [API_TOKEN] # refuse to start unless set
+env_file: .env # relative to this package (and the default)
+env_default: .env.default # the checked-in template .env comes from
 
 steps:
   - name: compile
     description: Build the release binary
     run: cargo build --release
-    requires: [cargo, protoc]  # tools this step needs
+    requires: [cargo, protoc] # tools this step needs
     timeout: 10m
     retries: 1
 
   - name: publish
     description: Publish the binary to Nexus
-    kind: push                 # the built-in registry transfer
+    kind: push # the built-in registry transfer
     needs: [compile]
-    registry: nexus            # a name from `registries:`
+    registry: nexus # a name from `registries:`
     artifact: target/release/api
     publish_path: "api/{CIABATTA_BRANCH}/{CIABATTA_COMMIT}/api"
 ```
@@ -375,13 +379,13 @@ into a live browser view.
 
 Dependencies are declared in two places, and both accept the same spelling:
 
-| Spelling | Means |
-| --- | --- |
-| `depends_on` in `[workspace]` | Applies to **every** workflow in the package. |
-| `needs` in a workflow file | Applies to that workflow only. |
-| `"common"` | That package's workflow *of the same name*. Skipped if it has none. |
-| `"proto:generate"` | Exactly that workflow. An error if it doesn't exist. |
-| `"self:codegen"` | Another workflow in the same package. |
+| Spelling                      | Means                                                               |
+| ----------------------------- | ------------------------------------------------------------------- |
+| `depends_on` in `[workspace]` | Applies to **every** workflow in the package.                       |
+| `needs` in a workflow file    | Applies to that workflow only.                                      |
+| `"common"`                    | That package's workflow _of the same name_. Skipped if it has none. |
+| `"proto:generate"`            | Exactly that workflow. An error if it doesn't exist.                |
+| `"self:codegen"`              | Another workflow in the same package.                               |
 
 A cycle is refused with the loop spelled out, rather than deadlocking.
 
@@ -392,12 +396,12 @@ Declare install instructions once at the monorepo root:
 ```yaml
 # .ciabatta/ciabatta.yaml at the repo root
 workspace:
-  umbrella: true           # the root is shared settings, not a package
+  umbrella: true # the root is shared settings, not a package
 
 toolchain:
   protoc:
     hint: brew install protobuf
-    check: protoc --version         # optional: smarter than a PATH lookup
+    check: protoc --version # optional: smarter than a PATH lookup
     description: Protocol buffer compiler
 ```
 
@@ -413,12 +417,12 @@ Missing 1 build tool(s):
 
 ### Steps that would otherwise hang
 
-| Setting | What it does |
-| --- | --- |
-| `timeout = "10m"` | Kills the step — and everything it spawned — past the limit, marks it failed, and **lets the rest of the graph carry on**. |
-| `retries = 2` | Extra attempts for a flaky step. A timeout isn't retried — it's stuck, not flaky. |
-| `continue_on_error = true` | Its failure skips its dependents but doesn't stop the run. |
-| `warn_on_error = true` | Its failure is reported as a **warning**: its dependents still run, and the run still succeeds. For a stage worth hearing about but not worth stopping for — a linter being phased in, an optional upload. |
+| Setting                    | What it does                                                                                                                                                                                               |
+| -------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `timeout = "10m"`          | Kills the step — and everything it spawned — past the limit, marks it failed, and **lets the rest of the graph carry on**.                                                                                 |
+| `retries = 2`              | Extra attempts for a flaky step. A timeout isn't retried — it's stuck, not flaky.                                                                                                                          |
+| `continue_on_error = true` | Its failure skips its dependents but doesn't stop the run.                                                                                                                                                 |
+| `warn_on_error = true`     | Its failure is reported as a **warning**: its dependents still run, and the run still succeeds. For a stage worth hearing about but not worth stopping for — a linter being phased in, an optional upload. |
 
 A run that tolerated failures still **fails**, and reports every one of them at
 the end — tolerating a failure is not hiding it.
@@ -437,7 +441,7 @@ anything past `stale_after` is flagged:
 ```yaml
 # .ciabatta/ciabatta.yaml, at the monorepo root
 workspace:
-  stale_after: 30d      # the default
+  stale_after: 30d # the default
 ```
 
 ```
@@ -459,7 +463,7 @@ a workflow is dead, and is reported differently.
 
 Which is why it is shared. With a [remote cache](#remote-cache) configured, each
 run reports what it ran and takes back what everyone else has run — so the
-question becomes "when did *anyone* last run this". A workflow you personally
+question becomes "when did _anyone_ last run this". A workflow you personally
 have not touched since March may be the one CI runs hourly; one nobody anywhere
 has run since March is the one worth deleting. Both directions happen at the end
 of a run, so `ciabatta list` never waits on the network.
@@ -481,7 +485,7 @@ Workflows: 24 tracked, 3 not run by anyone in over 30d
 ### Background tasks
 
 Some things a build needs are not steps in it: a mock API the integration tests
-call, a database container, a bundler in watch mode. They have to be *running*,
+call, a database container, a bundler in watch mode. They have to be _running_,
 they never finish, and waiting for one is waiting forever. They go in the
 workflow's `background:` array, beside `steps:` rather than inside it.
 
@@ -493,9 +497,9 @@ steps:
 
 # packages/web/.ciabatta/workflows/test.yaml — used by whoever needs it up
 needs:
-  - proto:generate     # must finish first
+  - proto:generate # must finish first
 background:
-  - mock-api:serve     # must be running; nothing waits for it
+  - mock-api:serve # must be running; nothing waits for it
 
 steps:
   - name: integration
@@ -516,7 +520,7 @@ database has to be up before the app that talks to it — but it may not declare
 workflow-level `needs`, because there is nowhere for those to run: it starts
 before the first wave and waits for nothing.
 
-Being started before wave 1 is not the same as being *ready* before wave 1. If
+Being started before wave 1 is not the same as being _ready_ before wave 1. If
 a step would race the server it talks to, have that step wait for the port;
 ciabatta can't, because "ready" is a different question for every server.
 
@@ -544,9 +548,9 @@ workflow's `after:` array, named the way `needs` and `background` name things:
 ```yaml
 # packages/web/.ciabatta/workflows/test.yaml
 background:
-  - db:serve           # running while the tests run
+  - db:serve # running while the tests run
 after:
-  - db:teardown        # runs when the tests pass, and when they don't
+  - db:teardown # runs when the tests pass, and when they don't
 
 steps:
   - name: integration
@@ -625,8 +629,8 @@ web app.
 
 ## Configuration
 
-Ciabatta reads `.ciabatta/ciabatta.yaml`. Registries describe *where* things go;
-a workflow step with `kind: push` says *what* to publish and *how*.
+Ciabatta reads `.ciabatta/ciabatta.yaml`. Registries describe _where_ things go;
+a workflow step with `kind: push` says _what_ to publish and _how_.
 
 The fastest way to start is `ciabatta configure` (add a registry interactively)
 or `ciabatta configure auto` (let Ciabatta inspect the repo and suggest
@@ -634,25 +638,26 @@ publishing workflows). You can also edit the file by hand:
 
 ```yaml
 system:
-  ci: github           # gitlab | github | jenkins | circleci | azure | bitbucket
-  containers: docker   # docker | podman — when omitted, Ciabatta auto-detects
-                       # what is installed (prefers podman, then docker; asks
-                       # you to choose if both are present).
+  ci: github # gitlab | github | jenkins | circleci | azure | bitbucket
+  containers:
+    docker # docker | podman — when omitted, Ciabatta auto-detects
+    # what is installed (prefers podman, then docker; asks
+    # you to choose if both are present).
 
 registries:
   nexus:
     # url and login_script expand environment variables with bash-style
     # defaults, so one config can target different environments.
     type: nexus
-    url: "https://${NEXUS_HOST:-nexus.example.com}"   # bare Nexus host
-    repository: raw-hosted   # which repo artifacts publish into
-    format: raw              # raw | npm | pypi
+    url: "https://${NEXUS_HOST:-nexus.example.com}" # bare Nexus host
+    repository: raw-hosted # which repo artifacts publish into
+    format: raw # raw | npm | pypi
     tls_verify: true
     needs_auth: true
 
   s3:
     type: s3
-    url: s3://my-artifacts-bucket    # the bucket, with the s3:// scheme
+    url: s3://my-artifacts-bucket # the bucket, with the s3:// scheme
 
 workflows:
   release:
@@ -701,14 +706,14 @@ fields:
   `url` is the bare Nexus host and `/repository/<repository>` is appended for you.
   When omitted, `url` is used as the full repository URL (backwards compatible).
 - `format` — `raw` (default), `npm`, or `pypi`, selecting how a push and a pull happen.
-- `base_path` — *raw only*: an optional prefix prepended to every step's
+- `base_path` — _raw only_: an optional prefix prepended to every step's
   `publish_path`, so raw artifacts land under a common folder.
 
-| `format` | How a push works | How a pull works | Requirements |
-| --- | --- | --- | --- |
-| `raw` | HTTP `PUT` | HTTP `GET`, file by file for a folder | none |
-| `npm` | `npm publish <artifact> --registry <repo>` | `npm pack <package> --registry <repo>` | `npm` on `PATH` |
-| `pypi` | `twine upload --repository-url <repo> <files>` | `pip download <package> --no-deps` | `twine` to push, `pip` to pull, on `PATH` |
+| `format` | How a push works                               | How a pull works                       | Requirements                              |
+| -------- | ---------------------------------------------- | -------------------------------------- | ----------------------------------------- |
+| `raw`    | HTTP `PUT`                                     | HTTP `GET`, file by file for a folder  | none                                      |
+| `npm`    | `npm publish <artifact> --registry <repo>`     | `npm pack <package> --registry <repo>` | `npm` on `PATH`                           |
+| `pypi`   | `twine upload --repository-url <repo> <files>` | `pip download <package> --no-deps`     | `twine` to push, `pip` to pull, on `PATH` |
 
 For `npm` / `pypi`, a push step's `artifact` is the package tarball or the
 `dist/` directory to publish, and `publish_path` is not used (the package name and
@@ -736,14 +741,14 @@ from the push. Setting both the list and `publish_path`/`artifact` is refused,
 and it isn't for pushes (use a glob list) or Docker/ECR images.
 
 ```yaml
-  - name: vendor
-    kind: pull
-    registry: nexus
-    artifacts:
-      - publish_path: "shared/proto/{CIABATTA_BRANCH}/{CIABATTA_COMMIT}/proto"
-        artifact: vendor/proto
-      - publish_path: "tools/protoc-gen/{PROTOC_GEN_VERSION}/protoc-gen"
-        artifact: bin/protoc-gen
+- name: vendor
+  kind: pull
+  registry: nexus
+  artifacts:
+    - publish_path: "shared/proto/{CIABATTA_BRANCH}/{CIABATTA_COMMIT}/proto"
+      artifact: vendor/proto
+    - publish_path: "tools/protoc-gen/{PROTOC_GEN_VERSION}/protoc-gen"
+      artifact: bin/protoc-gen
 ```
 
 On an `npm` or `pypi` registry the entries are package specs instead
@@ -764,15 +769,15 @@ workflows:
       - name: publish
         kind: push
         registry: sdk
-        artifact: packages/sdk   # tarball or package directory
+        artifact: packages/sdk # tarball or package directory
 
   fetch-sdk:
     steps:
       - name: fetch
         kind: pull
         registry: sdk
-        publish_path: "@acme/sdk@1.2.3"   # which package
-        artifact: vendor                  # where it lands
+        publish_path: "@acme/sdk@1.2.3" # which package
+        artifact: vendor # where it lands
 ```
 
 ### Pulling off the network: the pull cache, `--fetch-only` and `--prefetch`
@@ -840,7 +845,7 @@ An S3 registry drives the AWS CLI, so it's just a bucket URL: set `url` to
 ```yaml
 registries:
   s3:
-    type: s3                       # inferred when the name contains "s3"
+    type: s3 # inferred when the name contains "s3"
     url: s3://my-artifacts-bucket
 
 workflows:
@@ -871,7 +876,7 @@ reference and pushes it — so you don't have to bake the registry URL into your
 ```yaml
 registries:
   myecr:
-    type: ecr                      # inferred when the name contains "ecr"
+    type: ecr # inferred when the name contains "ecr"
     url: 123456789.dkr.ecr.us-east-1.amazonaws.com
 
 workflows:
@@ -885,8 +890,8 @@ workflows:
         kind: push
         needs: [image]
         registry: myecr
-        local_image: app:latest                 # a local image (name or name:tag)
-        publish_path: "app:{CIABATTA_COMMIT}"   # remote image ref (repo[:tag])
+        local_image: app:latest # a local image (name or name:tag)
+        publish_path: "app:{CIABATTA_COMMIT}" # remote image ref (repo[:tag])
 ```
 
 On push this runs `docker tag app:latest <url>/app:<commit>` then
@@ -903,12 +908,12 @@ per-direction overrides. It doesn't any more — what those stages were for is
 what a graph already does, and each piece is now a node you can see on the
 graph, filter, cache and fail independently.
 
-| Was | Is now |
-| --- | --- |
-| a `pre` command | a step, and a `needs` edge to it |
-| a `post` command | a step that `needs` the transfer |
-| a `login` override | the registry's own `login_script` |
-| a `main` override | a `run:` on the transfer step itself |
+| Was                | Is now                               |
+| ------------------ | ------------------------------------ |
+| a `pre` command    | a step, and a `needs` edge to it     |
+| a `post` command   | a step that `needs` the transfer     |
+| a `login` override | the registry's own `login_script`    |
+| a `main` override  | a `run:` on the transfer step itself |
 
 ```yaml
 steps:
@@ -936,21 +941,21 @@ so a complex pipeline doesn't clutter `ciabatta.yaml`:
 ```yaml
 # packages/web/.ciabatta/workflows/deploy.yaml — the filename is the name.
 description: Migrate and release the web app
-required_env: [RUN_TOKEN, AWS_REGION]     # gate the whole graph
+required_env: [RUN_TOKEN, AWS_REGION] # gate the whole graph
 
 steps:
   - name: build
-    script: scripts/build.sh        # a bash file… (or use `run:` inline)
+    script: scripts/build.sh # a bash file… (or use `run:` inline)
 
   - name: migrate
     script: scripts/migrate.sh
-    needs: [build]                  # runs once "build" succeeds (a DAG edge)
-    on_error: fix_migrate           # on failure, jump to a recovery node
+    needs: [build] # runs once "build" succeeds (a DAG edge)
+    on_error: fix_migrate # on failure, jump to a recovery node
 
-  - name: fix_migrate               # a recovery node: a choice of fixes
+  - name: fix_migrate # a recovery node: a choice of fixes
     recover: true
     message: "Migration failed — choose how to recover:"
-    retry: migrate                  # re-run this step after a fix succeeds
+    retry: migrate # re-run this step after a fix succeeds
     options:
       - label: Roll back
         script: scripts/rollback.sh
@@ -1067,7 +1072,7 @@ steps:
     run: ./scripts/release.sh --tag $CIABATTA_COMMIT
 ```
 
-Only *unset* variables are filled in: anything you provide explicitly — from a CI
+Only _unset_ variables are filled in: anything you provide explicitly — from a CI
 system, the ambient environment, or `-e CIABATTA_BRANCH=…` — takes precedence. A
 non-git directory is fine; the run just proceeds without the git-derived values.
 
@@ -1125,8 +1130,8 @@ config says otherwise, or `--timeout` overrides it:
 
 ```yaml
 workspace:
-  input_timeout: 5m        # 0 / "none" waits forever (the default)
-  max_concurrent_runs: 2   # runs of this workspace at once here (default 1; 0 = no limit)
+  input_timeout: 5m # 0 / "none" waits forever (the default)
+  max_concurrent_runs: 2 # runs of this workspace at once here (default 1; 0 = no limit)
 ```
 
 `max_concurrent_runs` counts every run of the workspace on the machine — the
@@ -1194,15 +1199,19 @@ cache:
   enabled: true
   # Paths are relative to the WORKSPACE ROOT, not to this file — note the
   # `packages/api/` on each one. See below for why.
-  inputs:  ["packages/api/src/**/*",     # what the build READS
-            "packages/api/Cargo.toml"]
-  outputs: ["packages/api/target/release/app"]   # what the build WRITES
-  exclude: [packages/api/target]        # never counted as an input (outputs
-                                        # never are; this keeps the rest of
-                                        # target/ out of the key too)
-  env: [PROFILE]                        # OPTIONAL: extra variables to key on.
-                                        # Every `env:` and `required_env`
-                                        # variable already keys the cache.
+  inputs: [
+      "packages/api/src/**/*", # what the build READS
+      "packages/api/Cargo.toml",
+    ]
+  outputs: ["packages/api/target/release/app"] # what the build WRITES
+  exclude:
+    [packages/api/target] # never counted as an input (outputs
+    # never are; this keeps the rest of
+    # target/ out of the key too)
+  env:
+    [PROFILE] # OPTIONAL: extra variables to key on.
+    # Every `env:` and `required_env`
+    # variable already keys the cache.
 
 steps:
   - name: compile
@@ -1248,8 +1257,8 @@ variables in two places, and both are part of every step's key:
 
 ```yaml
 # packages/api/.ciabatta/workflows/build.yaml
-env: [MODE]              # used by its steps, by name — the value is the .env's
-required_env: [API_URL, DEPLOY_TOKEN]   # must be set, or the run won't start
+env: [MODE] # used by its steps, by name — the value is the .env's
+required_env: [API_URL, DEPLOY_TOKEN] # must be set, or the run won't start
 ```
 
 A workflow's `env` is a list of names, never values: which value `MODE` has is
@@ -1271,7 +1280,7 @@ variables a step's `when`/`skip_if` conditions test — and marks every variable
 that is part of a cache key. Commands and scripts aren't scanned for `$VAR`:
 a variable a build depends on belongs in `env` or `required_env`.
 
-The third is what makes a *graph* cacheable rather than just a directory. Change
+The third is what makes a _graph_ cacheable rather than just a directory. Change
 a `.proto` file and `proto:generate` misses; its outputs change; every stage
 downstream of it misses too — each for a reason it can name.
 
@@ -1329,7 +1338,7 @@ rebuild too. If it genuinely writes nothing a later step reads, say so:
 cache:
   enabled: true
   inputs: ["packages/api/src/**/*"]
-  no_outputs: true     # skipped on unchanged inputs; holds nothing back
+  no_outputs: true # skipped on unchanged inputs; holds nothing back
 ```
 
 **Rust builds: let Cargo name the files.** Hand-listing every crate, manifest
@@ -1340,11 +1349,11 @@ instead:
 ```yaml
 cache:
   enabled: true
-  gitignore: true          # leave whatever git ignores out of the inputs
+  gitignore: true # leave whatever git ignores out of the inputs
   cargo:
-    package: api           # omit for what `cargo build` would build here; `workspace: true` for all
-    profile: release       # debug (the default) | release | ${CARGO_PROFILE:-release}
-    artifacts: [bin]       # bin | lib | cdylib | dylib | staticlib
+    package: api # omit for what `cargo build` would build here; `workspace: true` for all
+    profile: release # debug (the default) | release | ${CARGO_PROFILE:-release}
+    artifacts: [bin] # bin | lib | cdylib | dylib | staticlib
 ```
 
 `profile` is `debug` or `release` — the `target/` directory the artifacts land
@@ -1381,8 +1390,8 @@ members outside that set are neither keyed on nor stored:
 cache:
   enabled: true
   cargo:
-    workspace: true        # every member, as --workspace
-    exclude: [xtask]       # optional, as --exclude
+    workspace: true # every member, as --workspace
+    exclude: [xtask] # optional, as --exclude
     profile: release
     artifacts: [bin]
 steps:
@@ -1410,7 +1419,7 @@ section for a directory Cargo can read. The in-app docs (**Docs → Rust builds*
 go through every case.
 
 **Why didn't it hit?** A reused step shows a cache icon on the run page's
-graph; click it for the entry it used. *Inspect cache*, in a run's header,
+graph; click it for the entry it used. _Inspect cache_, in a run's header,
 shows what the cache decided for every step — reused, missed and why, or blocked
 by an upstream step — with what to change for each.
 
@@ -1424,7 +1433,7 @@ question you can answer by hand.
 
 ### Proving the inputs are right: `--authoritative`
 
-`dry-run` shows you what the cache *thinks*. `--authoritative` checks whether it
+`dry-run` shows you what the cache _thinks_. `--authoritative` checks whether it
 is entitled to think it.
 
 ```bash
@@ -1447,7 +1456,7 @@ suspicion in the first place.
 **It is opt-in and stays that way.** This is not Bazel and doesn't pretend to
 be: there is no hermetic toolchain, and no attempt to isolate `$HOME`, the
 network, or the clock. The compiler and the package manager are whatever the
-machine has. It answers one question — *are my inputs complete?*
+machine has. It answers one question — _are my inputs complete?_
 
 Some steps genuinely need state that is not a source file. `yarn run check` has
 to sit inside its yarn project; a cargo build wants the shared `target/`.
@@ -1499,7 +1508,7 @@ four places to change when the server moves.
 cache:
   remote:
     url: http://cache.example.com:8380
-    project: 7f3a-…        # assigned on first contact — commit this
+    project: 7f3a-… # assigned on first contact — commit this
 ```
 
 That id is what makes every checkout and every CI runner resolve to the same
@@ -1573,8 +1582,8 @@ The server serves HTTPS itself when given a certificate and key:
 ```yaml
 server:
   tls:
-    cert: tls/cert.pem    # relative to the config file
-    key:  tls/key.pem
+    cert: tls/cert.pem # relative to the config file
+    key: tls/key.pem
 ```
 
 `ciabatta remote-cache init --tls [--tls-host cache.internal]` generates a
@@ -1593,7 +1602,7 @@ machine that can't be given the certificate can opt out of verification:
 cache:
   remote:
     url: https://cache.example.com
-    tls_verify: false     # defaults to true
+    tls_verify: false # defaults to true
 ```
 
 `ciabatta remote-cache login --no-tls-verify` does the same for the login itself
@@ -1616,7 +1625,7 @@ auth:
     url: ldaps://ldap.example.com:636
     bind_dn: "uid={username},ou=people,dc=example,dc=com"
     required_group: "cn=engineering,ou=groups,dc=example,dc=com"
-    write_groups: ["cn=ci,ou=groups,dc=example,dc=com"]   # others are read-only
+    write_groups: ["cn=ci,ou=groups,dc=example,dc=com"] # others are read-only
     tls_verify: true
 ```
 
@@ -1685,7 +1694,7 @@ Clearing the local store along with the build output is the whole trick: it
 leaves the workspace looking like a fresh checkout, so the only place the
 artifacts can come back from is the server.
 
-**On the daemon's port.** `--port` picks the port a daemon *starts* on; it does
+**On the daemon's port.** `--port` picks the port a daemon _starts_ on; it does
 not move one that's already running. A plain `ciabatta watch -p 9099` with a
 healthy daemon on 80 quietly keeps using 80 — so change it with
 `ciabatta daemon restart --port 9099`, or export `CIABATTA_DAEMON_PORT=9099`
@@ -1707,7 +1716,7 @@ ciabatta?".
 releases:
   version: "0.2.0"
   binaries:
-    linux:   /srv/ciabatta/ciabatta-linux-x86_64
+    linux: /srv/ciabatta/ciabatta-linux-x86_64
     windows: /srv/ciabatta/ciabatta-windows-x86_64.exe
 ```
 
@@ -1735,7 +1744,7 @@ cache that isn't configured or can't be reached skips the check.
 
 ## Releases
 
-A cache entry is found by what went *into* a build, and ages out when nobody
+A cache entry is found by what went _into_ a build, and ages out when nobody
 asks for it. That's right for skipping work and wrong for shipping it: a deploy
 wants "the files of v1.4.2", whatever the tree looks like today, still there
 next month. A **release** is a labelled cache entry — the same verified
@@ -1753,12 +1762,12 @@ steps:
     kind: release-push
     needs: [compile]
     release:
-      files: ["dist/**"]          # relative to the step's directory
+      files: ["dist/**"] # relative to the step's directory
 
 # packages/api/.ciabatta/workflows/deploy.yaml
 steps:
   - name: fetch
-    kind: release-pull            # writes dist/ back where the push found it
+    kind: release-pull # writes dist/ back where the push found it
   - name: ship
     needs: [fetch]
     run: ./scripts/deploy.sh dist/
@@ -1777,7 +1786,7 @@ never guesses: deploying "whatever was latest" is how the wrong build reaches
 production.
 
 **A release is immutable.** Re-running a push with the same files is a no-op,
-so a retried CI job doesn't fail; pushing *different* files under an existing
+so a retried CI job doesn't fail; pushing _different_ files under an existing
 version is refused unless the step sets `release.overwrite: true`.
 
 The release's **name** defaults to the step's sub-workspace (or the project's
@@ -1806,13 +1815,13 @@ Four rules, in the order they apply:
 
 1. **`.env` is the default.** A workspace that says nothing gets `.env` from its
    own directory. Nobody should have to configure the conventional thing.
-2. **`env_file` overrides it** — and *replaces* it rather than adding to it,
+2. **`env_file` overrides it** — and _replaces_ it rather than adding to it,
    which is what "use this file instead" has to mean to be useful for keeping
    dev and prod settings apart.
 3. **`env_default` is where a missing `.env` comes from.** `.env` is gitignored,
    so a fresh checkout doesn't have one; the checked-in template does. Naming it
    means ciabatta generates the `.env` rather than failing on a variable the
-   developer has never heard of. A conventional template that's simply *there*
+   developer has never heard of. A conventional template that's simply _there_
    — `.env.default`, `.env.example`, `.env.sample`, `.env.template` — counts
    without being declared: committing one has already said what the variables
    are. Generation happens at the start of a run, for the project and for every
@@ -1826,7 +1835,7 @@ Four rules, in the order they apply:
 does **not** have to document it if the workspace above it already does —
 demanding a template from every package that reads a shared variable would be
 asking the same question once per package, and would make declaring it once
-impossible. A run is refused only when *nothing* provides the variable: not the
+impossible. A run is refused only when _nothing_ provides the variable: not the
 package's own files, not any enclosing workspace's `.env` or checked-in
 template, and not the environment the command is running in. Then the error says
 where to put it:
@@ -1846,8 +1855,8 @@ Set it in the environment, or write it down where whoever needs it will find it:
 
 ```yaml
 workspace:
-  env_file: .env               # the default; set it to override
-  env_default: .env.default    # the checked-in template
+  env_file: .env # the default; set it to override
+  env_default: .env.default # the checked-in template
 ```
 
 And one requirement that follows from the third: **a workspace whose workflows
@@ -1882,7 +1891,7 @@ and everything below it is ignored for that variable:
   are never searched.
 - **Within one workspace,** the `.env` beats the defaults file — `env_default`
   if declared, otherwise a `.env.default` beside the `.env`. An elected profile
-  *is* the `.env`: it's copied in (see [Env profiles](#env-profiles)). A `.env.example` is never a
+  _is_ the `.env`: it's copied in (see [Env profiles](#env-profiles)). A `.env.example` is never a
   source of values, because it often holds placeholders.
 - **Nothing found?** The variable is unset. If it's in `required_env`, the run
   stops before any step executes and names it.
@@ -1946,7 +1955,7 @@ ciabatta build --env-profile dev         # the same copy, then the run
   backups. Add `.env.bak*` to `.gitignore`; ciabatta warns when git would pick
   a backup up.
 - **The copy says where it came from** in its first line, so `ciabatta env
-  list` and the report before each run can tell you which profile `.env` is.
+list` and the report before each run can tell you which profile `.env` is.
   Edit the profile file, not the copy: electing it again replaces the copy.
 - **A `--dry-run` copies nothing**, but reports the values the run would see:
   while a profile is elected, its file stands in for the `.env` in the search.
@@ -1966,7 +1975,7 @@ CIABATTA_FEAT_NEW_UI=1 ciabatta build
 
 There is nothing to declare. The name after the prefix is the feature — `new_ui`
 above — matched case-insensitively with `-` and `_` treated alike. A value that
-is empty, `0`, `false`, `no` or `off` turns the feature *off*; anything else
+is empty, `0`, `false`, `no` or `off` turns the feature _off_; anything else
 turns it on. The same variable set in any `.env` file the run sources counts
 exactly the same, because features are read after the whole `env_file` chain has
 been layered in.
@@ -2001,13 +2010,13 @@ An artifact built with a feature on is not reusable by a build with it off, and
 before this the only way to say so was to list the variable under `cache.env` —
 where one forgotten line meant a build silently served the other
 configuration's artifacts. Anything named with the prefix is in the key by
-construction. A feature explicitly turned *off* is deliberately not in the key:
+construction. A feature explicitly turned _off_ is deliberately not in the key:
 `CIABATTA_FEAT_X=0` produces the same artifacts as never mentioning `X`, and
 giving them different keys would cost a rebuild to prove they were the same.
 
 ## Converting a script
 
-A workflow step *is* a script. The only thing ciabatta adds is the declarations around
+A workflow step _is_ a script. The only thing ciabatta adds is the declarations around
 it — and that's the part nobody wants to write by hand.
 
 ```bash
@@ -2061,7 +2070,7 @@ crates.io). The result is written as JSON and shown at
 `http://oven.localhost/analyze`, where you can sort, filter and click through the
 graph. You can also rescan from that page.
 
-**Accurate Rust versions.** A `Cargo.toml` dependency is only a *requirement*
+**Accurate Rust versions.** A `Cargo.toml` dependency is only a _requirement_
 (`serde = "1"`), so `analyze` reads the workspace `Cargo.lock` and shows the
 concrete version cargo actually locked (`serde 1.0.228`), keeping the original
 requirement alongside it. The lockfile is also how it tells your own crates
@@ -2113,9 +2122,9 @@ zoom in / out / fit.
 flagged **🍞 managed by ciabatta**, distinguishing them from inferred ones like
 crates.io.
 
-**Requirements & traceability.** Point `analyze` at a *requirements file* (one
+**Requirements & traceability.** Point `analyze` at a _requirements file_ (one
 requirement per line, `id` or `id, description`) to add a leftmost
-**Requirements** column. A *trace file* — a CSV of `requirement,file`
+**Requirements** column. A _trace file_ — a CSV of `requirement,file`
 connections — wires each requirement to the internal package that owns the
 traced file(s), threading requirements through to the rest of the graph. Both
 can be set on the command line or in config:
@@ -2189,12 +2198,12 @@ Useful flags:
 
 On a supported CI system Ciabatta resolves these and prints them at startup:
 
-| Variable | Meaning |
-| --- | --- |
-| `CIABATTA_BRANCH` | Current branch |
-| `CIABATTA_COMMIT` | Commit SHA |
-| `CIABATTA_TAG` | Tag, if the build is tagged |
-| `CIABATTA_BUILD_NUMBER` | CI build/run number |
+| Variable                | Meaning                     |
+| ----------------------- | --------------------------- |
+| `CIABATTA_BRANCH`       | Current branch              |
+| `CIABATTA_COMMIT`       | Commit SHA                  |
+| `CIABATTA_TAG`          | Tag, if the build is tagged |
+| `CIABATTA_BUILD_NUMBER` | CI build/run number         |
 
 Pass any of them explicitly with `-e CIABATTA_BRANCH=main` to override what was
 detected — handy for local runs.
@@ -2257,16 +2266,16 @@ ciabatta todo        # starts the daemon if needed, opens http://oven.localhost/
 ciabatta watch make    # reuses the same daemon, opens /watch/<id>
 ```
 
-| Page | What it does |
-| --- | --- |
-| `/` | Landing — every project the daemon knows, to pick one (also the logo), plus the global todo list. |
+| Page         | What it does                                                                                               |
+| ------------ | ---------------------------------------------------------------------------------------------------------- |
+| `/`          | Landing — every project the daemon knows, to pick one (also the logo), plus the global todo list.          |
 | `/dashboard` | The selected project at a glance: runs in progress, watch sessions, open todos, the cache, and its README. |
-| `/readme` | The selected project's `README.md`, rendered. |
-| `/todo` | Your personal task list (global, not per-project). |
-| `/watch` | Watch sessions; `/watch/<id>` is one session's live log. |
-| `/run` | Runs; `/run/<id>` is a live graph of one. |
-| `/analyze` | The dependency graph. |
-| `/ai` | The architecture mind map and background assistant jobs. |
+| `/readme`    | The selected project's `README.md`, rendered.                                                              |
+| `/todo`      | Your personal task list (global, not per-project).                                                         |
+| `/watch`     | Watch sessions; `/watch/<id>` is one session's live log.                                                   |
+| `/run`       | Runs; `/run/<id>` is a live graph of one.                                                                  |
+| `/analyze`   | The dependency graph.                                                                                      |
+| `/ai`        | The architecture mind map and background assistant jobs.                                                   |
 
 ### Managing it
 
@@ -2286,7 +2295,7 @@ the security note below before you do that.
 
 One daemon serves every checkout you use. Each command registers its working
 directory, and the project switcher in the top bar picks which one the
-per-project pages are showing. The todo list is deliberately *not* scoped: it
+per-project pages are showing. The todo list is deliberately _not_ scoped: it
 lives in `~/.ciabatta/todos.json` and follows you between repos.
 
 ### The daemon owns your work
@@ -2332,14 +2341,14 @@ documentation you get while typing is the format ciabatta actually reads.
 
 **`ciabatta lsp`** is the other half: a language server, and a subcommand of
 the CLI you already have. It knows what a schema can't — which sub-workspaces
-*this* monorepo contains, which workflows they define, which tools the root
+_this_ monorepo contains, which workflows they define, which tools the root
 promises to install:
 
 ```yaml
 # .ciabatta/workflows/build.yaml
 needs:
-  - proto:g          # → proto:generate    Generate the protobufs
-  -                  # → common            The shared library crate
+  - proto:g # → proto:generate    Generate the protobufs
+  -  # → common            The shared library crate
 ```
 
 ```
@@ -2353,10 +2362,10 @@ the other packages' workflows. Two fields spelled the same way that mean
 different things, which is exactly the pair worth having an editor keep
 straight.
 
-| Editor | Install |
-| --- | --- |
+| Editor  | Install                                                                                                        |
+| ------- | -------------------------------------------------------------------------------------------------------------- |
 | VS Code | `ciabatta-vscode.vsix`, plus `cargo install ciabatta` for the server. See [`editors/vscode`](editors/vscode/). |
-| Zed | The extension from a checkout, plus one settings block for the schemas. See [`editors/zed`](editors/zed/). |
+| Zed     | The extension from a checkout, plus one settings block for the schemas. See [`editors/zed`](editors/zed/).     |
 
 Neither extension contains any knowledge of the format, which is why they
 can't disagree with each other or with the build.
@@ -2395,6 +2404,7 @@ the react-flow canvas, the layered layout and its routed wires, and the step
 node — so a build opened from the cache looks exactly like a run on the
 daemon. It's linked TypeScript source with no build step of its own; each app
 compiles it in.
+
 - **`frontend/`** — the public docs site on GitHub Pages, with download links
   and usage instructions. See the
   [project site](https://forsyth-creations.github.io/Ciabatta/).

@@ -41,13 +41,15 @@ const KIND_LABEL: Record<ChangeKind, string> = {
 
 export function CacheDiffView({ diff }: { diff: CacheDiff }) {
   const nothing =
-    diff.files.length === 0 && diff.env.length === 0 && diff.upstream.length === 0;
+    diff.files.length === 0 &&
+    diff.env.length === 0 &&
+    diff.upstream.length === 0;
 
   if (nothing) {
     return (
       <Typography variant="body2" color="text.secondary">
-        Nothing changed since the last run — this stage is being rebuilt for another
-        reason (most likely its outputs are missing).
+        Nothing changed since the last run — this stage is being rebuilt for
+        another reason (most likely its outputs are missing).
       </Typography>
     );
   }
@@ -56,7 +58,8 @@ export function CacheDiffView({ diff }: { diff: CacheDiff }) {
     <Stack spacing={2}>
       {diff.previous_at && (
         <Typography variant="caption" color="text.secondary">
-          Compared against the run of {new Date(diff.previous_at).toLocaleString()}
+          Compared against the run of{" "}
+          {new Date(diff.previous_at).toLocaleString()}
         </Typography>
       )}
 
@@ -67,8 +70,17 @@ export function CacheDiffView({ diff }: { diff: CacheDiff }) {
         >
           <Stack spacing={0.5}>
             {diff.upstream.map((entry) => (
-              <Stack key={entry.step} direction="row" spacing={1} alignItems="center">
-                <Chip size="small" color={KIND_COLOR[entry.kind]} label={KIND_LABEL[entry.kind]} />
+              <Stack
+                key={entry.step}
+                direction="row"
+                spacing={1}
+                alignItems="center"
+              >
+                <Chip
+                  size="small"
+                  color={KIND_COLOR[entry.kind]}
+                  label={KIND_LABEL[entry.kind]}
+                />
                 <Typography variant="body2" sx={{ fontFamily: "monospace" }}>
                   {entry.step}
                 </Typography>
@@ -85,18 +97,35 @@ export function CacheDiffView({ diff }: { diff: CacheDiff }) {
         >
           <Stack spacing={0.5}>
             {diff.env.map((entry) => (
-              <Stack key={entry.name} direction="row" spacing={1} alignItems="center">
-                <Chip size="small" color={KIND_COLOR[entry.kind]} label={KIND_LABEL[entry.kind]} />
+              <Stack
+                key={entry.name}
+                direction="row"
+                spacing={1}
+                alignItems="center"
+              >
+                <Chip
+                  size="small"
+                  color={KIND_COLOR[entry.kind]}
+                  label={KIND_LABEL[entry.kind]}
+                />
                 <Typography variant="body2" sx={{ fontFamily: "monospace" }}>
                   {entry.name}
                 </Typography>
                 {entry.kind === "modified" && (
-                  <Typography variant="body2" color="text.secondary" sx={{ fontFamily: "monospace" }}>
+                  <Typography
+                    variant="body2"
+                    color="text.secondary"
+                    sx={{ fontFamily: "monospace" }}
+                  >
                     {entry.before} → {entry.after}
                   </Typography>
                 )}
                 {entry.kind === "added" && (
-                  <Typography variant="body2" color="text.secondary" sx={{ fontFamily: "monospace" }}>
+                  <Typography
+                    variant="body2"
+                    color="text.secondary"
+                    sx={{ fontFamily: "monospace" }}
+                  >
                     = {entry.after}
                   </Typography>
                 )}
@@ -137,7 +166,11 @@ function Section({
   return (
     <Box>
       <Typography variant="subtitle2">{title}</Typography>
-      <Typography variant="caption" color="text.secondary" sx={{ display: "block", mb: 1 }}>
+      <Typography
+        variant="caption"
+        color="text.secondary"
+        sx={{ display: "block", mb: 1 }}
+      >
         {subtitle}
       </Typography>
       {children}
@@ -162,11 +195,24 @@ function FileDiffView({ file }: { file: FileDiff }) {
       expanded={open}
       onChange={(_, next) => setOpen(next)}
       disableGutters
-      sx={{ "&:before": { display: "none" }, border: 1, borderColor: "divider" }}
+      sx={{
+        "&:before": { display: "none" },
+        border: 1,
+        borderColor: "divider",
+      }}
     >
       <AccordionSummary expandIcon={<ExpandMoreIcon />}>
-        <Stack direction="row" spacing={1} alignItems="center" sx={{ minWidth: 0, flexGrow: 1 }}>
-          <Chip size="small" color={KIND_COLOR[file.kind]} label={KIND_LABEL[file.kind]} />
+        <Stack
+          direction="row"
+          spacing={1}
+          alignItems="center"
+          sx={{ minWidth: 0, flexGrow: 1 }}
+        >
+          <Chip
+            size="small"
+            color={KIND_COLOR[file.kind]}
+            label={KIND_LABEL[file.kind]}
+          />
           <Typography
             variant="body2"
             sx={{
@@ -215,10 +261,14 @@ function HunkView({ hunk }: { hunk: Hunk }) {
           fontSize: 12,
         }}
       >
-        @@ -{hunk.old_start},{hunk.old_lines} +{hunk.new_start},{hunk.new_lines} @@
+        @@ -{hunk.old_start},{hunk.old_lines} +{hunk.new_start},{hunk.new_lines}{" "}
+        @@
       </Box>
 
-      <Box component="table" sx={{ borderCollapse: "collapse", width: "100%", fontSize: 12 }}>
+      <Box
+        component="table"
+        sx={{ borderCollapse: "collapse", width: "100%", fontSize: 12 }}
+      >
         <tbody>
           {hunk.lines.map((line, index) => {
             const added = line.op === "added";
@@ -248,7 +298,11 @@ function HunkView({ hunk }: { hunk: Hunk }) {
                     width: "100%",
                     fontFamily: "monospace",
                     whiteSpace: "pre",
-                    color: added ? "success.main" : removed ? "error.main" : "text.primary",
+                    color: added
+                      ? "success.main"
+                      : removed
+                        ? "error.main"
+                        : "text.primary",
                   }}
                 >
                   {added ? "+" : removed ? "−" : " "}

@@ -7,7 +7,7 @@ dist
 *.local
 ciabatta-analyze.json
 .ciabatta/.cache/
-ciabatta/ai/
+.ciabatta/ai
 
 # Turbo
 .turbo

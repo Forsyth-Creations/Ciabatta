@@ -261,6 +261,18 @@ pub struct App {
     /// The mouse is handed back to the terminal and the pane is drawn alone,
     /// without borders, so a drag selects its text and nothing else.
     pub selecting: bool,
+    /// A drag over the output pane, and once let go, the text it copied —
+    /// left highlighted until the next click, key or scroll, the way a
+    /// terminal leaves its own selection. See [`crate::ai::select`].
+    pub selection: Option<crate::ai::select::Selection>,
+    /// The output pane's text area (inside its border, short of the
+    /// scrollbar), stamped as it's drawn so a drag knows what it is over.
+    pub log_area: ratatui::layout::Rect,
+    /// The last frame drawn, which a selection's text is read off: the output
+    /// wrapped exactly as it was on screen.
+    pub frame: Option<ratatui::buffer::Buffer>,
+    /// A short-lived note for the help bar — "copied 42 characters".
+    pub notice: Option<(String, Instant)>,
 }
 
 impl App {
@@ -289,11 +301,41 @@ impl App {
             env: Vec::new(),
             notes: Vec::new(),
             selecting: false,
+            selection: None,
+            log_area: Default::default(),
+            frame: None,
+            notice: None,
             prompts: Default::default(),
             prompt_open: false,
             prompt_area: Default::default(),
         }
         .sorted()
+    }
+
+    /// On letting go of a drag: copy what it covered, and say so in the help
+    /// bar. A click without a drag selects nothing and clears the highlight.
+    pub fn copy_selection(&mut self) {
+        let Some(selection) = self.selection.filter(|s| s.dragged) else {
+            self.selection = None;
+            return;
+        };
+        let Some(frame) = &self.frame else { return };
+        let text = selection.text(frame);
+        if text.is_empty() {
+            return;
+        }
+        let tried = crate::ai::select::copy(&text);
+        let count = text.chars().count();
+        let note = match tried.is_empty() {
+            true => {
+                "couldn't reach a clipboard — c hands the mouse back to the terminal".to_string()
+            }
+            false => format!(
+                "copied {count} character{}",
+                if count == 1 { "" } else { "s" }
+            ),
+        };
+        self.notice = Some((note, Instant::now()));
     }
 
     fn sorted(mut self) -> Self {

@@ -76,7 +76,7 @@ export function runCommand(state: RunState): string {
   const parts = ["ciabatta", "workflow", ...run.workflows];
   for (const term of run.filter ?? []) parts.push("--filter", quote(term));
   for (const member of run.only ?? []) parts.push("--only", quote(member));
-  if (run.isolated) parts.push("--isolated");
+  if (run.solo || run.isolated) parts.push("--solo");
   if (run.force) parts.push("--force");
   if (run.resumed_from) parts.push("--from-failed");
   if (state.dry_run) parts.push("--dry-run");

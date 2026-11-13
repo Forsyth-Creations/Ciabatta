@@ -8,6 +8,7 @@
 //! web view and the visual builder are served by the daemon, in
 //! [`crate::daemon::routes::run`].
 
+pub mod askpass;
 pub mod cached;
 pub mod deps;
 pub mod engine;

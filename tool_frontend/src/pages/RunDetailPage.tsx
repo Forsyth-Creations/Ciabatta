@@ -32,6 +32,7 @@ import {
   Tooltip,
   Typography,
 } from "@mui/material";
+import { useProjectContext } from "../state/project";
 import ArrowDropDownIcon from "@mui/icons-material/ArrowDropDown";
 import LayersIcon from "@mui/icons-material/Layers";
 import SearchIcon from "@mui/icons-material/Search";
@@ -341,6 +342,18 @@ export function RunDetailPage() {
   // for reading a run, not for rearranging it. Not remembered — it's a thing
   // you do for a minute, then put away.
   const [customizing, setCustomizing] = useState(false);
+
+  // A run belongs to one project. Opened from a link that doesn't say which
+  // (or with another one picked in this browser), the selector in the corner
+  // would name the wrong checkout above this run's steps — follow the run.
+  const { projects, projectId, setProjectId } = useProjectContext();
+  const runProject = state?.run.project;
+  useEffect(() => {
+    if (!runProject || runProject === projectId) return;
+    if (projects.some((p) => p.id === runProject)) setProjectId(runProject);
+    // Only when the run (or the project list) arrives — not again if somebody
+    // then picks another project on purpose.
+  }, [runProject, projects]);
 
   if (error) return <ErrorNote error={new Error(error)} />;
   if (!state) return <Loading label="Connecting to the run…" />;

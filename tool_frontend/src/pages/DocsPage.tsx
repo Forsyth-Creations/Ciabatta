@@ -364,7 +364,7 @@ const COMMANDS: CommandGroup[] = [
         flags: [
           ["-f, --filter TERM", "Run only the steps this selects. Repeatable."],
           ["--only MEMBER", "Start from these sub-workspaces; their dependencies still come along."],
-          ["--isolated", "Don't follow dependencies into other sub-workspaces."],
+          ["--solo", "Don't follow dependencies into other sub-workspaces."],
           ["--graph", "Print the resolved graph and run nothing."],
           ["--dry-run", "Walk every step, executing none of them."],
           ["--force", "Ignore the cache and run every step. Results are still stored, so the next run reuses them."],
@@ -1407,7 +1407,7 @@ cache:
           or through its sub-workspace&apos;s <C>depends_on</C> — and declare{" "}
           <C>cache.outputs</C>; otherwise the run stops before starting and says which. Its
           outputs are read even under <C>gitignore: true</C>, because build output is usually
-          ignored and naming the step is asking for it. Run with <C>--isolated</C> and a named
+          ignored and naming the step is asking for it. Run with <C>--solo</C> and a named
           step that isn&apos;t part of the run is skipped.
         </P>
         <P>
@@ -2554,7 +2554,7 @@ export CIABATTA_VIZ=tui              # …or make that the default for every run
 ciabatta test --filter '!tag:flaky'         # everything except the flaky ones
 ciabatta build --filter workspace:api       # one package's steps
 ciabatta build --only api                   # start from api; its dependencies still come
-ciabatta build --only api --isolated        # …and don't follow them at all
+ciabatta build --only api --solo        # …and don't follow them at all
 cd packages/api && ciabatta build           # same as --only api; --all for everything`}</Pre>
         <P>
           Selectors are <C>tag:</C>, <C>workspace:</C> (alias <C>member:</C>), <C>kind:</C>,{" "}
@@ -3072,11 +3072,12 @@ ciabatta.pause("Flip the maintenance switch, then continue")`}</Pre>
             </>,
             <>
               <strong>
-                Steps run through <C>sh -c</C>, from their own package directory
+                Steps run through <C>sh -e -c</C>, from their own package directory
               </strong> — so{" "}
               <C>./scripts/x.sh</C> means the one in that package. Set <C>cwd</C> to move it, and
               remember each step starts in a new shell: a <C>cd</C> in one doesn&apos;t carry to
-              the next.
+              the next. The <C>-e</C> means a multi-line <C>run</C> stops, and the step fails, at
+              the first line that fails; end a line with <C>|| true</C> if it&apos;s allowed to.
             </>,
             <>
               <strong>Name things for the filter you&apos;ll want.</strong> <C>tags: [fast]</C> on

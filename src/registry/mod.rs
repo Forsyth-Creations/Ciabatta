@@ -605,8 +605,13 @@ pub(super) async fn tag_image(
     run_command(opts.container_cmd, &["tag", from, to], opts.env_vars, log).await
 }
 
-/// Run an arbitrary shell command (`sh -c <cmd>`) from `cwd`, with the given
+/// Run an arbitrary shell command (`sh -e -c <cmd>`) from `cwd`, with the given
 /// environment variables injected. Used by the stage-override mechanism.
+///
+/// The shell runs with `errexit`: a multi-line `run:` stops at the first line
+/// that fails, and the step fails with it, rather than carrying on and
+/// reporting whatever the last line happened to exit with. A line that is
+/// allowed to fail says so itself (`cmd || true`).
 pub async fn run_shell_command(
     cmd: &str,
     cwd: &Path,
@@ -643,6 +648,7 @@ pub async fn run_shell_command_opts(
     // lines arrive when they're printed. See [`process`].
     process::unbuffer(&mut command);
     command
+        .arg("-e")
         .arg("-c")
         .arg(cmd)
         .current_dir(cwd)
@@ -871,6 +877,48 @@ mod tests {
         );
         assert_eq!(lines[0], "started");
         assert!(lines[1].contains("still running"), "{lines:?}");
+    }
+
+    #[tokio::test]
+    async fn a_failing_line_stops_a_multi_line_command() {
+        // The last line succeeds; without errexit that success would be the
+        // command's exit status and the failure above it would be swallowed.
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let mut lines = Vec::new();
+        let result = {
+            let mut sink = LogSink::streaming(&mut lines, tx);
+            run_shell_command(
+                "echo before\nfalse\necho after",
+                Path::new("."),
+                &HashMap::new(),
+                &mut sink,
+            )
+            .await
+        };
+        assert!(result.is_err(), "the command should have failed: {lines:?}");
+        assert!(lines.iter().any(|l| l == "before"), "{lines:?}");
+        assert!(
+            !lines.iter().any(|l| l == "after"),
+            "ran past the failure: {lines:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_line_can_opt_out_of_failing_the_command() {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let mut lines = Vec::new();
+        {
+            let mut sink = LogSink::streaming(&mut lines, tx);
+            run_shell_command(
+                "false || true\necho after",
+                Path::new("."),
+                &HashMap::new(),
+                &mut sink,
+            )
+            .await
+            .unwrap();
+        }
+        assert!(lines.iter().any(|l| l == "after"), "{lines:?}");
     }
 
     #[test]

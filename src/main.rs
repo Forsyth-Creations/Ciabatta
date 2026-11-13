@@ -462,7 +462,7 @@ async fn cmd_workflow(
     provided.extend(cli::parse_env_flags(&args.env)?.into_keys());
     let selection = workspace::graph::Selection {
         only: args.only.clone(),
-        isolated: args.isolated,
+        solo: args.solo,
         provided,
         skip_env_check: false,
     };
@@ -822,7 +822,7 @@ fn cmd_env_show(mut args: cli::EnvShowArgs, custom_args: &[String]) -> Result<()
             provided.extend(cli::parse_env_flags(&args.env)?.into_keys());
             let selection = workspace::graph::Selection {
                 only: args.only.clone(),
-                isolated: args.isolated,
+                solo: args.solo,
                 provided,
                 skip_env_check: false,
             };
@@ -928,7 +928,7 @@ async fn cmd_workflow_gui(
             "project": session.project.id,
             "workflows": workflows,
             "only": args.only,
-            "isolated": args.isolated,
+            "solo": args.solo,
             "filter": args.filter,
             "env": vars,
             "dry_run": args.dry_run,
@@ -960,7 +960,7 @@ async fn cmd_workflow_gui(
     let id = run["id"]
         .as_u64()
         .context("The daemon returned no run id")?;
-    let url = format!("{}/run/{id}", session.daemon.web_url);
+    let url = session.page_url(&format!("/run/{id}"));
 
     println!(
         "Running workflow '{}' from {}",
@@ -1425,7 +1425,7 @@ async fn cmd_watch(
 
     // Attaching follows a session the daemon already has, by id.
     if let Some(id) = attach {
-        let url = format!("{}/watch/{id}", session.daemon.web_url);
+        let url = session.page_url(&format!("/watch/{id}"));
         println!("Attaching to watch session {id}.");
         println!("Live view: {url}");
         println!(
@@ -1471,7 +1471,7 @@ async fn cmd_watch(
     let id = created["id"]
         .as_u64()
         .context("The daemon returned no session id")?;
-    let url = format!("{}/watch/{id}", session.daemon.web_url);
+    let url = session.page_url(&format!("/watch/{id}"));
 
     println!("Watching: {command}");
     println!("Live view: {url}");

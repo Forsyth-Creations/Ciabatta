@@ -245,7 +245,7 @@ Useful flags on any workflow (`ciabatta build`, `ciabatta release`, …):
   ciabatta build` is `ciabatta build --only api`, as long as that package
   defines `build` itself (it says so on stderr). `--all` runs the whole
   monorepo's graph anyway.
-- `--isolated` — don't follow dependencies out of what you selected, for when
+- `--solo` — don't follow dependencies out of what you selected, for when
   everything upstream is already built.
 - `-e, --env KEY=VALUE` — set a variable for every step. Repeatable.
 - `--release VERSION` — the release a `kind: release-pull` step fetches (and a
@@ -341,7 +341,10 @@ steps:
 
 Steps run **from their own package's directory**, with the run's `.env`
 variables in scope, so scripts work exactly as they do when you run them by
-hand. (A `workspace.env` table of values in `ciabatta.yaml` is deprecated as of
+hand. A `run:` goes through `sh -e -c`, so a multi-line command stops at the
+first line that fails and the step fails with it — end a line with `|| true`
+when it's allowed to fail. (A `script:` file runs as `bash <file>` and keeps
+its own `set -e` or not.) (A `workspace.env` table of values in `ciabatta.yaml` is deprecated as of
 0.6.4 and prints a note: values belong in the `.env` template or a profile, and
 names in each workflow's `env:` list.)
 
@@ -1100,6 +1103,21 @@ ciabatta input "Flip the maintenance switch, then continue" --enter
   answer, and Esc to come back to it later.
 - With **nobody** to ask (CI, piped), the question takes its `--default`, or fails
   the step and names the variable to set.
+
+#### Passwords for `sudo`, `ssh` and `git`
+
+A step has no terminal, so a tool that reads a password from one used to fail
+with "a terminal is required". On Linux and macOS each run now writes a small
+password helper and points `SUDO_ASKPASS`, `SSH_ASKPASS` and `GIT_ASKPASS` at
+it, so the prompt is asked through the run like `ciabatta input --secret`: in
+the terminal, the TUI's banner, or the web app's dialog. A `sudo` wrapper sits
+first on the step's `PATH` and adds `-A`, so `sudo apt install …` works without
+being rewritten. It leaves `sudo -S`, `-n` and `-A` alone, and a variable you've
+already set keeps its value.
+
+With nobody to ask (CI), the prompt fails the step as before. Passwordless
+`sudo` never asks. Each `sudo` in a run may ask again, because without a
+terminal `sudo` has nowhere to remember the password.
 
 `--env VAR` answers from `VAR` without asking whenever it's set. `--secret`
 masks the answer. How long a question waits is unlimited unless the root

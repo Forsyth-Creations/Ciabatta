@@ -58,6 +58,9 @@ pub fn render(f: &mut Frame, app: &mut App) {
     }
     render_body(f, chunks[3], app);
     render_help(f, chunks[4], app);
+    if let Some(selection) = &app.selection {
+        selection.highlight(f.buffer_mut());
+    }
 }
 
 /// How many rows the question takes: one until it is opened, and enough for the
@@ -538,6 +541,9 @@ fn render_logs(f: &mut Frame, area: Rect, app: &mut App) {
         f.render_widget(body, area);
         return;
     }
+    // Inside the border and short of the scrollbar column: a drag that strays
+    // onto either shouldn't copy the line-drawing characters.
+    app.log_area = Rect::new(area.x + 1, area.y + 1, inner_width as u16, height as u16);
     f.render_widget(
         body.block(
             Block::default()
@@ -712,16 +718,29 @@ fn render_help(f: &mut Frame, area: Rect, app: &App) {
         true => "",
         false => "a answer · ",
     };
+    // Just copied: say so for a few seconds, in place of the key list.
+    if let Some((note, at)) = &app.notice
+        && at.elapsed() < std::time::Duration::from_secs(3)
+        && !app.prompt_open
+    {
+        f.render_widget(
+            Paragraph::new(format!(" {state}{note}")).style(Style::default().fg(Color::Green)),
+            area,
+        );
+        return;
+    }
     let help = match (app.prompt_open, app.pane) {
         (true, _) => format!(" {state}Answering a question · Esc for later · Ctrl-C stops the run"),
         (false, _) if app.selecting => {
             format!(" {answer}Selecting — drag to select, then copy as usual · ↑↓ scroll · c back")
         }
         (false, Pane::Env) => {
-            format!(" {state}{answer}e back to output · wheel scrolls · c select text · q quit")
+            format!(
+                " {state}{answer}e back to output · wheel scrolls · drag copies · c plain text · q quit"
+            )
         }
         (false, Pane::Output) => format!(
-            " {state}{answer}↑↓ step · wheel scrolls · c select text · f follow · s sort · \
+            " {state}{answer}↑↓ step · wheel scrolls · drag copies · c plain text · f follow · s sort · \
              n next failure · e .env · q quit"
         ),
     };

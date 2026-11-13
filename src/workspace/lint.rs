@@ -10,7 +10,7 @@
 //! Each unit is checked in three passes, so a problem is reported against the
 //! unit that has it rather than every unit that happens to depend on it:
 //!
-//! 1. **On its own** (`isolated`): its steps, their `needs` and `on_error`
+//! 1. **On its own** (`solo`): its steps, their `needs` and `on_error`
 //!    targets, its background targets.
 //! 2. **Its references**: every `depends_on` / `needs` entry names a
 //!    sub-workspace and workflow that exist.
@@ -91,9 +91,9 @@ pub fn lint(root: &Path) -> Result<Report> {
         .collect();
     report.workflows = units.len();
 
-    let selection = |unit: &UnitId, isolated: bool| Selection {
+    let selection = |unit: &UnitId, solo: bool| Selection {
         only: vec![unit.member.clone()],
-        isolated,
+        solo,
         ..Default::default()
     };
 

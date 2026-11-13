@@ -128,7 +128,7 @@ impl Run {
             "resumed_from": self.request.resumed_from,
             "filter": self.request.filter,
             "only": self.request.only,
-            "isolated": self.request.isolated,
+            "solo": self.request.solo,
             "args": self.request.args,
             "env_profile": self.request.env_profile,
         })
@@ -335,8 +335,8 @@ pub struct CreatePayload {
     #[serde(default)]
     only: Vec<String>,
     /// With `workflow`: don't follow dependencies into other sub-workspaces.
-    #[serde(default)]
-    isolated: bool,
+    #[serde(default, alias = "isolated")]
+    solo: bool,
     /// With `workflow`: run only the steps these terms select. Same syntax as
     /// the CLI's `--filter`.
     #[serde(default)]
@@ -572,7 +572,7 @@ async fn start(
         }
         let selection = crate::workspace::graph::Selection {
             only: payload.only.clone(),
-            isolated: payload.isolated,
+            solo: payload.solo,
             provided: provided(&payload)?,
             skip_env_check: false,
         };
@@ -1005,7 +1005,7 @@ async fn preflight(
 
     let selection = crate::workspace::graph::Selection {
         only: payload.only.clone(),
-        isolated: payload.isolated,
+        solo: payload.solo,
         provided: provided(&payload)?,
         skip_env_check: false,
     };

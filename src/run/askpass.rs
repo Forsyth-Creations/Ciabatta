@@ -29,7 +29,9 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+#[cfg(unix)]
+use anyhow::Context;
+use anyhow::Result;
 
 /// The variables that name a password helper, and the value each is set to
 /// beyond the helper's path. A step (or the shell ciabatta was started from)
@@ -119,11 +121,13 @@ impl Helpers {
     }
 }
 
+#[cfg(unix)]
 /// Single-quote `value` for `sh`.
 fn quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', r"'\''"))
 }
 
+#[cfg(unix)]
 /// The helper itself: the tool's prompt is its first argument, and the answer
 /// is what it prints. A yes/no question (ssh's "continue connecting?") is
 /// asked as one, not masked like a password.
@@ -146,6 +150,7 @@ esac
     )
 }
 
+#[cfg(unix)]
 /// A `sudo` that is the real one with `-A`, so it asks [`askpass_script`] for
 /// its password instead of a terminal it doesn't have.
 ///

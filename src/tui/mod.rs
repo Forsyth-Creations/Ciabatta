@@ -17,9 +17,10 @@ use crossterm::{
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use futures::StreamExt;
-use ratatui::{Terminal, backend::CrosstermBackend};
+use ratatui::{Terminal, backend::CrosstermBackend, layout::Position};
 use tokio::sync::mpsc;
 
+use crate::ai::select::Selection;
 use crate::config::CiabattaConfig;
 use crate::runner::{self, ProgressUpdate};
 use app::{App, Reply, StepStatus};
@@ -76,9 +77,10 @@ pub async fn run(
 ) -> Result<bool> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    // The wheel scrolls the output pane, so the TUI takes the mouse. `c`
-    // hands it back for selecting text; most terminals also select with Shift
-    // held.
+    // The wheel scrolls the output pane, so the TUI takes the mouse — and
+    // does the selecting itself: a drag over the output highlights it and
+    // letting go copies it. `c` still hands the mouse back to the terminal,
+    // for one whose clipboard can't be reached from here.
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
@@ -255,7 +257,8 @@ async fn tui_loop(
         for note in take_notes() {
             app.note(note);
         }
-        terminal.draw(|f| ui::render(f, app))?;
+        let drawn = terminal.draw(|f| ui::render(f, app))?;
+        app.frame = Some(drawn.buffer.clone());
 
         // A run that succeeded stays up long enough to be read, then closes;
         // one that failed stays until it's dismissed, and so does one that
@@ -274,6 +277,8 @@ async fn tui_loop(
             maybe_event = event_stream.next() => {
                 match maybe_event {
                     Some(Ok(Event::Key(key))) if key.kind == KeyEventKind::Press => {
+                        // Pressing on is moving on from whatever was highlighted.
+                        app.selection = None;
                         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
                         // A question that has been opened takes the keyboard,
                         // `q` included, since it may be part of the answer. Esc
@@ -356,12 +361,27 @@ async fn tui_loop(
                             app.browsing = true;
                             app.prompt_open = !app.prompt_open;
                         }
+                        MouseEventKind::Down(MouseButton::Left) => {
+                            let at = Position { x: mouse.column, y: mouse.row };
+                            app.selection = Selection::start(&[app.log_area], at);
+                        }
+                        MouseEventKind::Drag(MouseButton::Left) => {
+                            if let Some(selection) = app.selection.as_mut() {
+                                app.browsing = true;
+                                selection.extend(Position { x: mouse.column, y: mouse.row });
+                            }
+                        }
+                        MouseEventKind::Up(MouseButton::Left) => app.copy_selection(),
+                        // Scrolling moves the text out from under a highlight,
+                        // which would then mark the wrong words.
                         MouseEventKind::ScrollUp => {
                             app.browsing = true;
+                            app.selection = None;
                             app.scroll_up(WHEEL_ROWS);
                         }
                         MouseEventKind::ScrollDown => {
                             app.browsing = true;
+                            app.selection = None;
                             app.scroll_down(WHEEL_ROWS);
                         }
                         _ => {}

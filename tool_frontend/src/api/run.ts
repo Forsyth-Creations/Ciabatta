@@ -351,7 +351,9 @@ export interface RunSummary extends Timed {
   resumed_from?: string | null;
   filter: string[];
   only: string[];
-  isolated: boolean;
+  solo: boolean;
+  /** Runs recorded before 0.9.3 called `solo` this. */
+  isolated?: boolean;
   /** Custom arguments, as typed after `...`. */
   args?: string[];
   /** The env profile it ran under. */
@@ -480,7 +482,7 @@ export interface StartRunBody {
   /** With `workflow`: start only from these sub-workspaces. */
   only?: string[];
   /** With `workflow`: don't follow dependencies into other sub-workspaces. */
-  isolated?: boolean;
+  solo?: boolean;
   /** With `workflow`: run only the steps these terms select (CLI `--filter`). */
   filter?: string[];
   /** Custom arguments, as after `...` on the CLI: each becomes a variable of its own name. */

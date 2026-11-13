@@ -472,10 +472,10 @@ fn inherit_from_outside_the_graph(
 ///
 /// A named step has to be upstream — reached through `needs`, directly or by
 /// way of its workflow — or its outputs could still be being written while
-/// this step's inputs are hashed. With `isolated` the steps it names may
+/// this step's inputs are hashed. With `solo` the steps it names may
 /// not be in the graph at all; those are skipped, since what isn't run
 /// can't be read from here.
-fn resolve_inputs_from(steps: &mut [RunStep], isolated: bool) -> Result<()> {
+fn resolve_inputs_from(steps: &mut [RunStep], solo: bool) -> Result<()> {
     let outputs: HashMap<String, Vec<String>> = steps
         .iter()
         .map(|s| {
@@ -562,7 +562,7 @@ fn resolve_inputs_from(steps: &mut [RunStep], isolated: bool) -> Result<()> {
                         .collect::<Vec<_>>()
                         .join(", ")
                 ),
-                None if isolated => continue,
+                None if solo => continue,
                 None => bail!(
                     "Step '{}' reads `inputs_from: {reference}`, which names no step in this \
                      graph. Use a step's cache id, `<member>:<workflow>:<step>`.",
@@ -606,7 +606,7 @@ pub struct Selection {
     pub only: Vec<String>,
     /// Don't follow dependencies into other sub-workspaces — run just what was
     /// selected, for when you know the rest is already built.
-    pub isolated: bool,
+    pub solo: bool,
     /// Variables this run sets beyond the environment ciabatta runs in — its
     /// `-e` flags and custom arguments — which satisfy a `required_env` like
     /// any other.
@@ -661,7 +661,7 @@ pub fn build_many(
         if deps.contains_key(&unit) {
             continue;
         }
-        let direct = if selection.isolated {
+        let direct = if selection.solo {
             Vec::new()
         } else {
             unit_dependencies(workspace, &unit)?
@@ -749,7 +749,7 @@ pub fn build_many(
         &selection.provided,
         selection.skip_env_check,
     )?;
-    resolve_inputs_from(&mut graph.steps, selection.isolated)?;
+    resolve_inputs_from(&mut graph.steps, selection.solo)?;
     Ok(graph)
 }
 
@@ -1769,14 +1769,14 @@ mod tests {
     }
 
     #[test]
-    fn isolated_runs_only_what_was_asked_for() {
-        let (root, ws) = api_and_proto("isolated");
+    fn solo_runs_only_what_was_asked_for() {
+        let (root, ws) = api_and_proto("solo");
         let graph = build(
             &ws,
             "build",
             &Selection {
                 only: vec!["api".into()],
-                isolated: true,
+                solo: true,
                 ..Default::default()
             },
         )

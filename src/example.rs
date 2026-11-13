@@ -941,7 +941,7 @@ ciabatta build test             # both, compiled into ONE graph
 ciabatta smoke                  # a workflow written inline at the root
 ciabatta greet                  # a step that stops and asks you a question
 ciabatta build --only api       # start from api (its dependencies still run)
-ciabatta build --only api --isolated   # just api, nothing upstream
+ciabatta build --only api --solo   # just api, nothing upstream
 ciabatta build --dry-run        # walk every step, execute nothing
 ciabatta build --gui            # watch it live in a browser
 ```

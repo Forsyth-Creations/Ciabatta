@@ -725,8 +725,8 @@ pub struct EnvShowArgs {
     pub filter: Vec<String>,
 
     /// Don't follow dependencies into other sub-workspaces.
-    #[arg(long)]
-    pub isolated: bool,
+    #[arg(long, alias = "isolated")]
+    pub solo: bool,
 
     /// Set an environment variable (KEY=VALUE), as a run would.
     #[arg(short = 'e', long = "env", value_name = "KEY=VALUE")]
@@ -1008,7 +1008,7 @@ pub struct WorkflowArgs {
     pub also: Vec<String>,
 
     /// Start only from these sub-workspaces (repeatable). Their dependencies
-    /// still come along unless --isolated is given.
+    /// still come along unless --solo is given.
     #[arg(long, value_name = "MEMBER")]
     pub only: Vec<String>,
 
@@ -1027,8 +1027,8 @@ pub struct WorkflowArgs {
 
     /// Don't follow dependencies into other sub-workspaces — run just what was
     /// selected, for when everything upstream is already built.
-    #[arg(long)]
-    pub isolated: bool,
+    #[arg(long, alias = "isolated")]
+    pub solo: bool,
 
     /// Print the graph and exit without running anything.
     #[arg(long)]

@@ -230,6 +230,9 @@ pub struct Broker {
     addr: SocketAddr,
     token: String,
     task: tokio::task::JoinHandle<()>,
+    /// The password helpers that route `sudo`/`ssh`/`git` prompts here, when
+    /// they could be written. See [`super::askpass`].
+    askpass: Option<super::askpass::Helpers>,
 }
 
 impl Drop for Broker {
@@ -277,7 +280,19 @@ impl Broker {
                 });
             }
         });
-        Ok(Self { addr, token, task })
+        // Without them a password prompt fails the step, as it always did —
+        // not a reason to refuse the run.
+        let askpass = std::env::current_exe()
+            .context("Failed to find the running ciabatta")
+            .and_then(|exe| super::askpass::Helpers::write(addr, &token, &exe))
+            .inspect_err(|e| tracing::debug!("no password helpers for this run: {e:#}"))
+            .ok();
+        Ok(Self {
+            addr,
+            token,
+            task,
+            askpass,
+        })
     }
 
     /// The variables a step needs to reach this broker.
@@ -301,6 +316,11 @@ impl Broker {
             .and_then(|exe| exe.parent().map(|d| d.to_path_buf()))
         {
             prepend_path(&mut env, dir);
+        }
+        // Ahead of everything, so `sudo` is the wrapper that adds `-A`.
+        if let Some(helpers) = &self.askpass {
+            prepend_path(&mut env, helpers.dir().to_path_buf());
+            helpers.extend(&mut env);
         }
         env
     }

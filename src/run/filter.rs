@@ -15,7 +15,7 @@
 //! exactly the nodes that matched, on the assumption that whatever they used to
 //! depend on is already built. That is the whole point — it's the fast loop you
 //! reach for when the slow, complete graph has already run once. Use
-//! `--filter` with no `--isolated` on a cold tree at your own risk; the pruned
+//! `--filter` with no `--solo` on a cold tree at your own risk; the pruned
 //! edges are reported so it's never a silent surprise.
 
 use std::collections::HashSet;

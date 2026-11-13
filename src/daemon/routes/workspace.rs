@@ -152,8 +152,8 @@ pub struct GraphQuery {
     /// Comma-separated sub-workspace names to start from.
     #[serde(default)]
     only: String,
-    #[serde(default)]
-    isolated: bool,
+    #[serde(default, alias = "isolated")]
+    solo: bool,
 }
 
 /// Every sub-workspace, its workflows, and who owns them.
@@ -246,7 +246,7 @@ async fn graph(
             .filter(|s| !s.is_empty())
             .map(str::to_string)
             .collect(),
-        isolated: query.isolated,
+        solo: query.solo,
         // A drawing, not a run: variables this daemon can't see don't stop it.
         skip_env_check: true,
         ..Default::default()

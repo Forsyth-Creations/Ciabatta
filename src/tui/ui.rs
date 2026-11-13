@@ -735,10 +735,12 @@ fn render_help(f: &mut Frame, area: Rect, app: &App) {
             format!(" {answer}Selecting — drag to select, then copy as usual · ↑↓ scroll · c back")
         }
         (false, Pane::Env) => {
-            format!(" {state}{answer}e back to output · wheel scrolls · drag copies · q quit")
+            format!(
+                " {state}{answer}e back to output · wheel scrolls · drag copies · c plain text · q quit"
+            )
         }
         (false, Pane::Output) => format!(
-            " {state}{answer}↑↓ step · wheel scrolls · drag copies · f follow · s sort · \
+            " {state}{answer}↑↓ step · wheel scrolls · drag copies · c plain text · f follow · s sort · \
              n next failure · e .env · q quit"
         ),
     };

@@ -20,6 +20,7 @@ mod registry;
 mod remote_cache;
 mod run;
 mod runner;
+mod shell;
 mod todo;
 mod tui;
 mod watch;

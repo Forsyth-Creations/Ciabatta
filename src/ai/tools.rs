@@ -1702,13 +1702,18 @@ fn npm_has_build_script(root: &Path) -> bool {
 }
 
 /// The user's login shell, honoring `$SHELL` (as their terminal does) and
-/// falling back to `sh`. Used so `run_command` sees the same PATH the user has
+/// falling back to the shell steps run with (`sh`, or Git Bash on Windows). Used so `run_command` sees the same PATH the user has
 /// interactively — the fix for tools like `yarn` not being found.
 fn login_shell() -> String {
     std::env::var("SHELL")
         .ok()
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
+        .or_else(|| {
+            crate::shell::program()
+                .ok()
+                .map(|p| p.to_string_lossy().into_owned())
+        })
         .unwrap_or_else(|| "sh".to_string())
 }
 

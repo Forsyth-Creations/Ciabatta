@@ -38,7 +38,7 @@ const EDITORS = [
 
 const INSTALL_TABS = [
   { id: "quick", label: "Linux / macOS", cmd: "curl -fsSL https://forsyth-creations.github.io/Ciabatta/install.sh | sh", note: "Detects your OS and CPU, then installs the matching prebuilt binary. No Rust toolchain needed. Pin a version with <code>| sh -s -- --version 0.3.0</code>, or list them with <code>--list</code>." },
-  { id: "windows", label: "Windows", cmd: "irm https://forsyth-creations.github.io/Ciabatta/install.ps1 | iex", note: "Run in PowerShell — downloads the binary and adds it to your PATH. To pin a version: <code>&amp; ([scriptblock]::Create((irm …install.ps1))) -Version 0.3.0</code>." },
+  { id: "windows", label: "Windows", cmd: "irm https://forsyth-creations.github.io/Ciabatta/install.ps1 | iex", note: "Run in PowerShell — downloads the binary and adds it to your PATH. Workflows run with Git Bash; if it's missing, the installer offers to fetch it. To pin a version: <code>&amp; ([scriptblock]::Create((irm …install.ps1))) -Version 0.3.0</code>." },
   { id: "cargo", label: "cargo", cmd: "cargo install ciabatta", note: "From crates.io — needs a Rust toolchain." },
   { id: "source", label: "source", cmd: `cargo install --git ${REPO}`, note: "Build straight from the main branch." },
 ];

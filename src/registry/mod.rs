@@ -605,7 +605,8 @@ pub(super) async fn tag_image(
     run_command(opts.container_cmd, &["tag", from, to], opts.env_vars, log).await
 }
 
-/// Run an arbitrary shell command (`sh -e -c <cmd>`) from `cwd`, with the given
+/// Run an arbitrary shell command (`sh -e -c <cmd>`; Git Bash on Windows, see
+/// [`crate::shell`]) from `cwd`, with the given
 /// environment variables injected. Used by the stage-override mechanism.
 ///
 /// The shell runs with `errexit`: a multi-line `run:` stops at the first line
@@ -639,7 +640,8 @@ pub async fn run_shell_command_opts(
     use std::process::Stdio;
     use tokio::process::Command;
 
-    let mut command = Command::new("sh");
+    let shell = crate::shell::program()?;
+    let mut command = Command::new(&shell);
     // The command's stdout is a pipe, so it will assume nobody is watching and
     // turn colour off. Tell it otherwise — before `envs`, so a step that asked
     // for plain output keeps it.
@@ -656,6 +658,9 @@ pub async fn run_shell_command_opts(
         .stdin(process::stdin())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    if let Some((key, path)) = crate::shell::child_path(&shell, env_vars) {
+        command.env(key, path);
+    }
 
     // Tokio's `kill_on_drop` signals only the pid it spawned, which is never
     // enough on its own — see [`ProcessGroup`]. On Windows it's actively
@@ -672,9 +677,12 @@ pub async fn run_shell_command_opts(
         command.process_group(0);
     }
 
-    let child = command
-        .spawn()
-        .with_context(|| format!("Failed to spawn shell for command: {cmd}"))?;
+    let child = command.spawn().with_context(|| {
+        format!(
+            "Failed to start the shell ({}) for command: {cmd}",
+            shell.display()
+        )
+    })?;
 
     let group = ProcessGroup::new(child.id(), kill_on_drop);
     let status = stream_child_output(child, cmd, sink).await?;
@@ -696,8 +704,8 @@ pub async fn run_shell_command_opts(
 /// and signalling the group is what actually stops it.
 ///
 /// Windows has no process groups, and the gap is worse there rather than
-/// better: `sh` is Git Bash, which runs the script in a `bash` child of its
-/// own. Terminating the pid we hold leaves that `bash` — and the dev server or
+/// better: the shell is Git Bash, whose `bin\bash.exe` runs the script in a
+/// `bash` child of its own. Terminating the pid we hold leaves that `bash` — and the dev server or
 /// compiler under it — running. Because the survivors inherited the stdout and
 /// stderr pipe handles, the read end never reaches EOF either, so anything
 /// still reading the abandoned command's output waits forever. `taskkill /T`

@@ -835,7 +835,7 @@ const COMMANDS: CommandGroup[] = [
       "Running a workflow on another machine through the remote cache. One machine runs an executor; everyone else adds --offload. See Offload a run to another machine.",
     commands: [
       {
-        usage: "ciabatta oven executor",
+        usage: "ciabatta executor start",
         note: "Run workflows for other machines: announce this one on the network, print its address and pairing code, and take jobs from the cache it is paired with, one at a time.",
         flags: [
           [
@@ -855,8 +855,13 @@ const COMMANDS: CommandGroup[] = [
         ],
       },
       {
-        usage: "ciabatta offload <list|logs|fetch|cancel|executors>",
-        note: "Look after offloaded jobs: list this project's recent ones, follow one's log, download its outputs again, stop it, or see the executors and what each is doing.",
+        usage: "ciabatta executor <list|status|stop|remove> [NAME]",
+        note: "The executors the remote cache manages: list what's online and what each is doing, show one's job and when it was last online, cancel the job it's running, or unpair it.",
+        flags: [["list --all", "Offline executors too."]],
+      },
+      {
+        usage: "ciabatta offload <list|logs|fetch|cancel>",
+        note: "Look after offloaded jobs: list this project's recent ones, follow one's log, download its outputs again, or stop it.",
         flags: [["list --all", "Every project's jobs, not only this one's."]],
       },
     ],
@@ -4504,7 +4509,7 @@ steps:
           your checkout when it&apos;s done.
         </P>
         <Pre>{`# On the build machine
-ciabatta oven executor
+ciabatta executor start
 
 # Anywhere that uses the same remote cache
 ciabatta build --offload
@@ -4521,11 +4526,11 @@ ciabatta build --offload-to gpu-box -e MODE=release`}</Pre>
 
         <SubHeading>Start an executor and pair it</SubHeading>
         <P>
-          <C>ciabatta oven executor</C> checks the network, announces itself on
+          <C>ciabatta executor start</C> checks the network, announces itself on
           it over mDNS (the way a Chromecast does), and prints what a person
           needs to add it:
         </P>
-        <Pre>{`ciabatta oven executor gpu-box
+        <Pre>{`ciabatta executor gpu-box
   id            2eb21170-c42e-4bb2-b4f2-b23bf2e662d6
   address       http://192.168.1.20:8381
   pairing code  418-907
@@ -4678,8 +4683,12 @@ workspace:
         <Pre>{`ciabatta offload list            # this project's recent jobs (--all for every project's)
 ciabatta offload logs 12         # follow its log, and fetch its outputs when it ends
 ciabatta offload fetch 12        # download a finished job's outputs again
-ciabatta offload cancel 12       # stop it
-ciabatta offload executors       # what there is to run on, and what each is doing`}</Pre>
+ciabatta offload cancel 12       # stop it`}</Pre>
+        <P>And the executors themselves, from any machine that uses the cache:</P>
+        <Pre>{`ciabatta executor list           # what there is to run on, and what each is doing
+ciabatta executor status gpu-box # its job, and when it was last online
+ciabatta executor stop gpu-box   # cancel the job it's running
+ciabatta executor remove gpu-box # unpair it from the cache`}</Pre>
         <P>
           After every job, however it ended, the executor cleans up: it stops
           anything still running, deletes the checkout, and tidies its copy of

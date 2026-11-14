@@ -132,7 +132,7 @@ export function Executors({ refreshKey }: { refreshKey: number }) {
       <Section
         title="Executors"
         sub={
-          <Prose text="Machines that run workflows offloaded with `--offload`. Start one with `ciabatta oven executor`: it prints an address and a pairing code, and shows up below when it's on this network." />
+          <Prose text="Machines that run workflows offloaded with `--offload`. Start one with `ciabatta executor start`: it prints an address and a pairing code, and shows up below when it's on this network." />
         }
       >
         {actionError && (

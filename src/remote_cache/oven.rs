@@ -395,7 +395,7 @@ impl Oven {
         if inner.executors.is_empty() {
             return Err(
                 "No executors are paired with this remote cache. Start one with \
-                 `ciabatta oven executor` and add it on the cache's Executors page."
+                 `ciabatta executor start` and add it on the cache's Executors page."
                     .to_string(),
             );
         }

@@ -1,4 +1,4 @@
-//! `ciabatta oven executor`: a machine that runs other people's workflows.
+//! `ciabatta executor start`: a machine that runs other people's workflows.
 //!
 //! It starts unpaired. It advertises itself over mDNS, prints its address and
 //! a pairing code, and waits. An admin adds it on the remote cache's
@@ -488,7 +488,7 @@ fn announce(shared: &Shared, port: u16, work_dir: &Path, options: &Options) {
         None => format!("http://<this machine>:{port}"),
     };
     let info = &shared.info;
-    println!("{} {}", "ciabatta oven executor".bold(), info.name.bold());
+    println!("{} {}", "ciabatta executor".bold(), info.name.bold());
     println!("  id            {}", info.id);
     println!("  address       {address}");
     println!(

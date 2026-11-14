@@ -1,7 +1,7 @@
 //! Offloading: running a workflow on another machine, through the remote cache.
 //!
 //! ```text
-//! ciabatta oven executor            on the build box: advertise, pair, take jobs
+//! ciabatta executor start           on the build box: advertise, pair, take jobs
 //! ciabatta build --offload          anywhere: run `build` on an executor instead
 //! ciabatta offload cancel <job>     and the commands that look after a job
 //! ```
@@ -33,6 +33,7 @@
 //! drift apart.
 
 pub mod executor;
+pub mod executors;
 pub mod offload;
 
 /// The mDNS service type executors advertise and the cache browses for.

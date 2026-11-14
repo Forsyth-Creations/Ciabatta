@@ -347,12 +347,8 @@ async fn main() -> Result<()> {
             cmd_remote_cache(subcommand).await?;
         }
 
-        Commands::Oven { subcommand } => match subcommand {
-            cli::OvenCommand::List { all } => {
-                let cwd = env::current_dir().context("Failed to get current directory")?;
-                oven::offload::executors(&cwd, all).await?;
-            }
-            cli::OvenCommand::Executor {
+        Commands::Executor { subcommand } => match subcommand {
+            cli::ExecutorCommand::Start {
                 name,
                 port,
                 dir,
@@ -374,6 +370,22 @@ async fn main() -> Result<()> {
                 })
                 .await?;
             }
+            cli::ExecutorCommand::List { all } => {
+                let cwd = env::current_dir().context("Failed to get current directory")?;
+                oven::executors::list(&cwd, all).await?;
+            }
+            cli::ExecutorCommand::Status { name } => {
+                let cwd = env::current_dir().context("Failed to get current directory")?;
+                oven::executors::status(&cwd, &name).await?;
+            }
+            cli::ExecutorCommand::Stop { name } => {
+                let cwd = env::current_dir().context("Failed to get current directory")?;
+                oven::executors::stop(&cwd, &name).await?;
+            }
+            cli::ExecutorCommand::Remove { name } => {
+                let cwd = env::current_dir().context("Failed to get current directory")?;
+                oven::executors::remove(&cwd, &name).await?;
+            }
         },
 
         Commands::Offload { subcommand } => {
@@ -383,7 +395,6 @@ async fn main() -> Result<()> {
                 cli::OffloadCommand::Logs { id } => oven::offload::logs(&cwd, id).await?,
                 cli::OffloadCommand::Fetch { id } => oven::offload::fetch(&cwd, id).await?,
                 cli::OffloadCommand::Cancel { id } => oven::offload::cancel(&cwd, id).await?,
-                cli::OffloadCommand::Executors => oven::offload::executors(&cwd, true).await?,
             }
         }
 
@@ -2238,8 +2249,14 @@ async fn execute_workflow(
     vars: &HashMap<String, String>,
     dry_run: bool,
     use_tui: bool,
-    ctl: runner::RunCtl,
+    mut ctl: runner::RunCtl,
 ) -> Result<()> {
+    // Ctrl-C, a closed terminal or a `kill` stops the run rather than killing
+    // ciabatta out from under it — which would leave every step running. See
+    // [`runner::stop_on_signals`]. Both runners reuse this switch.
+    let cancel = ctl.cancel.get_or_insert_with(Default::default).clone();
+    let _signals = runner::stop_on_signals(cancel);
+
     // What the run depends on, environment-wise, before a step touches it. It
     // goes to stderr when the TUI is about to take the screen, so it survives
     // in the scrollback the same way the graph drawing does.

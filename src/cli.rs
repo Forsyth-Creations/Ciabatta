@@ -336,12 +336,13 @@ pub enum Commands {
         stdio: bool,
     },
 
-    /// Run a command and stream its logs into a live, searchable web view.
+    /// Run a command and stream its logs into a live, searchable web view
     ///
     /// The command runs through your shell, so pipes, &&, and redirects work —
     /// quote the whole thing when you use them:
     ///   ciabatta watch "npm run dev | grep -i error"
     /// Set trigger phrases with -t to get notified when a matching line appears.
+    #[command(verbatim_doc_comment)]
     Watch {
         /// The command to run (and its arguments). Everything after `watch` is
         /// captured, including the command's own flags.
@@ -453,7 +454,7 @@ pub enum Commands {
         subcommand: Option<ConfigureCommand>,
     },
 
-    /// Explain one target: where it lives, and everything it depends on.
+    /// Explain one target: where it lives, and everything it depends on
     ///
     /// The two questions a monorepo makes hard to answer, together — *where was
     /// this written down?* and *why did it rebuild?* Prints the file the target
@@ -465,6 +466,7 @@ pub enum Commands {
     ///   ciabatta why build           every step of the workflow called build
     ///   ciabatta why api:build --all  ...naming every input file
     ///   ciabatta why api:build --json
+    #[command(verbatim_doc_comment)]
     Why {
         /// The target: a graph node (`api:build`), a bare step name, or a whole
         /// workflow or workflow.
@@ -493,7 +495,7 @@ pub enum Commands {
         local: bool,
     },
 
-    /// Show what a run would reuse from the cache and what it would rebuild.
+    /// Show what a run would reuse from the cache and what it would rebuild
     ///
     /// Runs nothing. For every step it prints the decision — up to date, a
     /// cache hit, or a rebuild — and for a rebuild, exactly what changed:
@@ -502,7 +504,7 @@ pub enum Commands {
     ///
     ///   ciabatta dry-run build           what would this build actually do?
     ///   ciabatta dry-run build --diff    …and show me the lines
-    #[command(name = "dry-run", visible_alias = "dryrun")]
+    #[command(verbatim_doc_comment, name = "dry-run", visible_alias = "dryrun")]
     DryRun {
         /// Workflows and/or workflows to plan. With none, plans every
         /// run-capable workflow in this project.
@@ -543,34 +545,37 @@ pub enum Commands {
         subcommand: CacheCommand,
     },
 
-    /// Run this machine as an executor that other machines can offload
-    /// workflows to, through a remote cache.
+    /// Executors: machines that run offloaded workflows, managed by the project's remote cache
     ///
-    ///   ciabatta oven executor                     advertise, pair, take jobs
-    ///   ciabatta oven list                         executors that are online now
-    Oven {
+    ///   ciabatta executor start                    run this machine as one: advertise, pair, take jobs
+    ///   ciabatta executor list                     the executors paired with the cache, online now
+    ///   ciabatta executor status <NAME>            what one is doing, and when it was online
+    ///   ciabatta executor stop <NAME>              cancel the job it's running
+    ///   ciabatta executor remove <NAME>            unpair it from the cache
+    #[command(verbatim_doc_comment)]
+    Executor {
         #[command(subcommand)]
-        subcommand: OvenCommand,
+        subcommand: ExecutorCommand,
     },
 
-    /// Look after jobs started with --offload.
+    /// Look after jobs started with --offload
     ///
     ///   ciabatta offload list                      recent jobs for this project
     ///   ciabatta offload logs <N>                  follow a job's log
     ///   ciabatta offload fetch <N>                 download a finished job's outputs
     ///   ciabatta offload cancel <N>                stop a job
-    ///   ciabatta offload executors                 what there is to run on
+    #[command(verbatim_doc_comment)]
     Offload {
         #[command(subcommand)]
         subcommand: OffloadCommand,
     },
 
-    /// Run or connect to a shared remote cache.
+    /// Run or connect to a shared remote cache
     ///
     ///   ciabatta remote-cache init                 write a server config
     ///   ciabatta remote-cache start                run the server
     ///   ciabatta remote-cache login <URL>          connect this machine to one
-    #[command(name = "remote-cache", visible_alias = "rc")]
+    #[command(verbatim_doc_comment, name = "remote-cache", visible_alias = "rc")]
     RemoteCache {
         #[command(subcommand)]
         subcommand: RemoteCacheCommand,
@@ -583,13 +588,14 @@ pub enum Commands {
         subcommand: SelfCommand,
     },
 
-    /// Turn an existing script into a ciabatta workflow.
+    /// Turn an existing script into a ciabatta workflow
     ///
     /// A workflow *is* a script — this reads one, works out what it needs and
     /// what it produces, and writes the workflow into this workspace's
     /// `.ciabatta/` so it can join the graph like everything else.
     ///
     ///   ciabatta convert --script scripts/build.sh
+    #[command(verbatim_doc_comment)]
     Convert {
         /// The script to convert.
         #[arg(long, short, value_name = "PATH")]
@@ -866,7 +872,7 @@ pub enum RemoteCacheCommand {
         url: Option<String>,
     },
 
-    /// Upload a new ciabatta binary to a remote cache.
+    /// Upload a new ciabatta binary to a remote cache
     ///
     /// The cache hands it out from then on: clients on that platform are told
     /// a newer ciabatta is available, and `ciabatta self update` installs it.
@@ -878,6 +884,7 @@ pub enum RemoteCacheCommand {
     ///
     ///   ciabatta remote-cache upload ./ciabatta --apply
     ///   ciabatta remote-cache upload ciabatta.exe --platform windows --version 0.7.1
+    #[command(verbatim_doc_comment)]
     Upload {
         /// The binary — the executable itself, not the release archive.
         #[arg(name = "BINARY")]
@@ -941,7 +948,7 @@ pub enum SelfCommand {
         force: bool,
     },
 
-    /// Check every workflow in the workspace for what would stop it running.
+    /// Check every workflow in the workspace for what would stop it running
     ///
     /// Compiles each sub-workspace's every workflow the way a run would, and
     /// lists each one that's broken: a config file that doesn't parse, a
@@ -952,14 +959,14 @@ pub enum SelfCommand {
     ///
     ///   ciabatta self lint
     ///   ciabatta self lint --json
+    #[command(verbatim_doc_comment)]
     Lint {
         /// Print the report as JSON.
         #[arg(long)]
         json: bool,
     },
 
-    /// Stop everything ciabatta has running on this machine and free every
-    /// run slot.
+    /// Stop everything ciabatta has running on this machine and free every run slot
     ///
     /// For when a run waits for a slot that nothing should be holding. Stops
     /// the daemon — and the runs and watch sessions it keeps — kills every run
@@ -968,10 +975,10 @@ pub enum SelfCommand {
     /// needed.
     ///
     ///   ciabatta self reset
+    #[command(verbatim_doc_comment)]
     Reset,
 
-    /// Draw every workflow and step in the workspace as one graph, to find
-    /// the dangling ones.
+    /// Draw every workflow and step in the workspace as one graph, to find the dangling ones
     ///
     /// Prints which workflows nothing connects to — nothing needs them, they
     /// need nothing, and no other sub-workspace shares their name — and which
@@ -983,6 +990,7 @@ pub enum SelfCommand {
     ///   ciabatta self graph
     ///   ciabatta self graph --no-open
     ///   ciabatta self graph --json
+    #[command(verbatim_doc_comment)]
     Graph {
         /// Print the dangling report as JSON and don't open the web app.
         #[arg(long)]
@@ -1123,7 +1131,7 @@ pub struct WorkflowArgs {
     pub offload: bool,
 
     /// Offload to the executor of this name, rather than the first free one.
-    /// Implies --offload. `ciabatta offload executors` lists them.
+    /// Implies --offload. `ciabatta executor list` lists them.
     #[arg(long = "offload-to", value_name = "EXECUTOR")]
     pub offload_to: Option<String>,
 
@@ -1810,15 +1818,7 @@ pub enum PythonCommand {
 }
 
 #[derive(Subcommand, Debug)]
-pub enum OvenCommand {
-    /// The executors paired with this project's remote cache that are online
-    /// now, with what each is doing and for how long.
-    #[command(visible_alias = "ls")]
-    List {
-        /// Offline executors too.
-        #[arg(long)]
-        all: bool,
-    },
+pub enum ExecutorCommand {
     /// Run workflows for other machines.
     ///
     /// Advertises this machine on the local network (mDNS) and prints its
@@ -1828,7 +1828,7 @@ pub enum OvenCommand {
     /// one at a time: clones the repository at the job's commit, runs the
     /// workflow, streams the log back, and returns the steps' declared
     /// outputs. The pairing is remembered across restarts.
-    Executor {
+    Start {
         /// What the executor is called on the cache (and what --offload-to
         /// names). Defaults to the host name.
         #[arg(long)]
@@ -1866,6 +1866,32 @@ pub enum OvenCommand {
         #[arg(long)]
         unpair: bool,
     },
+    /// The executors paired with this project's remote cache that are online
+    /// now, with what each is doing and for how long.
+    #[command(visible_alias = "ls")]
+    List {
+        /// Offline executors too.
+        #[arg(long)]
+        all: bool,
+    },
+    /// What an executor is doing — its job, if it has one — and when it was
+    /// last online.
+    Status {
+        /// Its name on the cache (or the start of its id).
+        name: String,
+    },
+    /// Cancel the job an executor is running. It stays paired and takes the
+    /// next one.
+    Stop {
+        /// Its name on the cache (or the start of its id).
+        name: String,
+    },
+    /// Unpair an executor from the cache. It waits to be paired again.
+    #[command(visible_alias = "rm")]
+    Remove {
+        /// Its name on the cache (or the start of its id).
+        name: String,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -1883,6 +1909,4 @@ pub enum OffloadCommand {
     Fetch { id: u32 },
     /// Stop a job: a queued one at once, a running one within seconds.
     Cancel { id: u32 },
-    /// The executors paired with this project's remote cache.
-    Executors,
 }

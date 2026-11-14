@@ -327,6 +327,17 @@ impl Client {
         parse(response).await
     }
 
+    /// `DELETE` an API path, with this client's credential.
+    pub async fn delete_json<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T> {
+        let response = self
+            .authed(self.http.delete(self.url(path)))
+            .timeout(TIMEOUT)
+            .send()
+            .await
+            .with_context(|| format!("Could not reach the remote cache at {}", self.base))?;
+        parse(response).await
+    }
+
     /// `GET` raw bytes from an API path, for a file of any size.
     pub async fn get_bytes(&self, path: &str) -> Result<Vec<u8>> {
         let response = self

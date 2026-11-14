@@ -31,7 +31,7 @@ steps:
     # Its own identity and pairing in .ciabatta/dev-oven/ (gitignored), so it
     # never touches a real executor's in ~/.ciabatta/oven. Pair it once on the
     # cache's Executors page with the code it prints; it stays paired.
-    run: cargo run -- oven executor --name dev --port 8381 --dir .ciabatta/dev-oven
+    run: cargo run -- executor start --name dev --port 8381 --dir .ciabatta/dev-oven
     description: An oven executor on 8381 for the dev cache, built from this checkout
 
   - name: daemon

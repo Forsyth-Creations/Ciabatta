@@ -234,7 +234,7 @@ artifacts are published from. For workflows it goes one level further out: the
 | `ciabatta dry-run [TARGET...]`                                         | What a run would reuse from the cache and what it would rebuild — and for a rebuild, exactly what changed. Runs nothing. `--diff` for the lines.                                                                                                                        |
 | `ciabatta cache <init\|status\|prune\|clean>`                          | Set up and inspect the build cache. `init [WORKFLOW]` proposes inputs and outputs from what's actually in the directory and writes them into that workflow's file.                                                                                                      |
 | `ciabatta remote-cache <init\|start\|login\|logout\|status\|add-user>` | Run or connect to a shared cache the whole team reads from.                                                                                                                                                                                                             |
-| `ciabatta oven executor`                                               | Run workflows for other machines: announce this one, pair it with a remote cache, and take offloaded jobs one at a time. See [Offloading](#offloading).                                                                                                                 |
+| `ciabatta executor <start\|list\|status\|stop\|remove>`                | Run workflows for other machines (`start`: announce this one, pair it with a remote cache, take offloaded jobs one at a time), and look after the executors the cache manages. See [Offloading](#offloading).                                                           |
 | `ciabatta offload <list\|logs\|fetch\|cancel\|executors>`              | Look after jobs started with `--offload`.                                                                                                                                                                                                                               |
 | `ciabatta releases <list\|push\|pull>`                                 | Versioned releases: list what's been published, or push and pull one by hand. See [Releases](#releases).                                                                                                                                                                |
 | `ciabatta self update`                                                 | Update this binary from the remote cache that serves it, verified against the SHA-256 it advertises.                                                                                                                                                                    |
@@ -1846,7 +1846,7 @@ files it built land in your checkout.
 
 ```bash
 # On the build machine
-ciabatta oven executor
+ciabatta executor start
 
 # Anywhere that uses the same remote cache
 ciabatta build --offload
@@ -1861,7 +1861,7 @@ pair.
 
 ### Pairing an executor
 
-`ciabatta oven executor` checks the firewall, announces the machine over mDNS
+`ciabatta executor start` checks the firewall, announces the machine over mDNS
 (the way a Chromecast does), and prints its address and a six-digit pairing
 code. On the cache's page, **Executors** lists it under _On this network_ —
 press **Add** and enter the code — or add it by address and code by hand.
@@ -1906,7 +1906,15 @@ ciabatta offload list         # this project's recent jobs (--all: every project
 ciabatta offload logs 12      # follow a job's log, then fetch its outputs
 ciabatta offload fetch 12     # download a finished job's outputs again
 ciabatta offload cancel 12    # stop it — Ctrl-C only stops watching
-ciabatta offload executors    # what there is to run on
+```
+
+The executors themselves, from any machine that uses the cache:
+
+```bash
+ciabatta executor list               # what's online to run on (--all: offline ones too)
+ciabatta executor status gpu-box     # what it's doing, and when it was last online
+ciabatta executor stop gpu-box       # cancel the job it's running; it takes the next one
+ciabatta executor remove gpu-box     # unpair it from the cache
 ```
 
 A cancelled job stops within seconds, including anything it started in the

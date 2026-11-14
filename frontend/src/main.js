@@ -72,7 +72,7 @@ const INSTALL_TABS = [
     id: "windows",
     label: "Windows",
     cmd: "irm https://forsyth-creations.github.io/Ciabatta/install.ps1 | iex",
-    note: "Run in PowerShell — downloads the binary and adds it to your PATH. To pin a version: <code>&amp; ([scriptblock]::Create((irm …install.ps1))) -Version 0.3.0</code>.",
+    note: "Run in PowerShell — downloads the binary and adds it to your PATH. Workflows run with Git Bash; if it's missing, the installer offers to fetch it. To pin a version: <code>&amp; ([scriptblock]::Create((irm …install.ps1))) -Version 0.3.0</code>.",
   },
   {
     id: "cargo",

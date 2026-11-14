@@ -108,6 +108,7 @@ block so you can call it with arguments:
 | `--dir DIR` / `-Dir`             | Install there instead of the default.                                  |
 | `--move`                         | Move an install you can't write to into `~/.local/bin` without asking. |
 | `--list` / `-List`               | Print the available versions and exit.                                 |
+| `-Unattended`                    | Windows: don't prompt; fetch PortableGit if there's no Git Bash.       |
 | `--help`                         | Usage.                                                                 |
 
 `CIABATTA_VERSION` and `CIABATTA_INSTALL_DIR` do the same thing for callers that
@@ -150,6 +151,29 @@ Expand-Archive ciabatta-windows-x86_64.zip
 
 Builds are published for Linux (x86_64 / aarch64, static), macOS
 (x86_64 / aarch64), and Windows (x86_64).
+
+### Windows: Git Bash
+
+Workflow steps are POSIX shell, so on Windows ciabatta runs them with **Git
+Bash**. It finds one without it having to be on `PATH`, looking in this order:
+
+1. `CIABATTA_SHELL`, if set, the full path of the `bash.exe` to use;
+2. `git\bin\bash.exe` beside `ciabatta.exe`, a private PortableGit;
+3. the Git Bash belonging to the `git` on your `PATH`;
+4. Git for Windows' usual install locations (`%ProgramFiles%\Git`,
+   `%LOCALAPPDATA%\Programs\Git`);
+5. any other `bash.exe` / `sh.exe` on `PATH`, except WSL's
+   `System32\bash.exe`, which would run the step inside Linux.
+
+Steps run with Git's `usr\bin` and `bin` first on `PATH`, as in a Git Bash
+terminal, so `bash`, `grep` and `find` are the Unix ones.
+
+When neither installer finds one, it offers to install Git for Windows with
+`winget` or to download a private [PortableGit](https://github.com/git-for-windows/git/releases)
+(about 60 MB, checksum-verified) into the install directory, where nothing else
+sees it. `-Unattended` (or `CIABATTA_UNATTENDED=1`) skips the question and
+takes PortableGit. PortableGit is Git for Windows, distributed under the GPLv2
+with its source at the link above.
 
 ## Quick start
 

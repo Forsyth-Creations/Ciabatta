@@ -461,7 +461,9 @@ pub async fn executors(cwd: &Path, all: bool) -> Result<()> {
             .and_then(|h| h.changes.last().map(|c| c.at.clone()))
             .and_then(|at| chrono::DateTime::parse_from_rfc3339(&at).ok())
             .map(|at| {
-                let ms = (now - at.with_timezone(&chrono::Utc)).num_milliseconds().max(0);
+                let ms = (now - at.with_timezone(&chrono::Utc))
+                    .num_milliseconds()
+                    .max(0);
                 format!("for {}", crate::cache::cli::humanize_ms(ms as u64))
             })
             .unwrap_or_default();

@@ -61,14 +61,22 @@ export function search(chunks: Chunk[], query: string, limit = 30): Hit[] {
 
 function occurrences(haystack: string, needle: string): number {
   let count = 0;
-  for (let at = haystack.indexOf(needle); at !== -1; at = haystack.indexOf(needle, at + 1)) {
+  for (
+    let at = haystack.indexOf(needle);
+    at !== -1;
+    at = haystack.indexOf(needle, at + 1)
+  ) {
     count += 1;
   }
   return count;
 }
 
 /** A line of context around the first term found in the prose. */
-export function snippet(text: string, words: string[], width = 120): Hit["snippet"] {
+export function snippet(
+  text: string,
+  words: string[],
+  width = 120,
+): Hit["snippet"] {
   const lower = text.toLowerCase();
   let at = -1;
   let found = "";
@@ -106,8 +114,11 @@ function clip(text: string, width: number): string {
  */
 export function readChunks(root: HTMLElement): Chunk[] {
   const chunks: Chunk[] = [];
-  for (const section of Array.from(root.querySelectorAll<HTMLElement>("section[id]"))) {
-    const sectionTitle = section.querySelector("h2")?.textContent?.trim() ?? section.id;
+  for (const section of Array.from(
+    root.querySelectorAll<HTMLElement>("section[id]"),
+  )) {
+    const sectionTitle =
+      section.querySelector("h2")?.textContent?.trim() ?? section.id;
     let current: Chunk = {
       sectionId: section.id,
       sectionTitle,
@@ -126,7 +137,8 @@ export function readChunks(root: HTMLElement): Chunk[] {
     for (let node = walker.nextNode(); node; node = walker.nextNode()) {
       const text = node as Text;
       const parent = text.parentElement;
-      if (!parent || parent.closest("h2, button, [aria-hidden='true']")) continue;
+      if (!parent || parent.closest("h2, button, [aria-hidden='true']"))
+        continue;
       const heading = parent.closest("h3");
       if (heading) {
         // The first text of a new sub-heading starts a chunk.

@@ -820,9 +820,7 @@ async fn pair_executor(
     let identity = state.identify_admin(&headers)?;
     let address = normalize_address(&payload.address).map_err(ApiError::bad_request)?;
     let chosen = match payload.name.as_deref().map(str::trim) {
-        Some(name) if !name.is_empty() => {
-            Some(executor_name(name).map_err(ApiError::bad_request)?)
-        }
+        Some(name) if !name.is_empty() => Some(executor_name(name).map_err(ApiError::bad_request)?),
         _ => None,
     };
     let server = match payload.server.filter(|s| !s.trim().is_empty()) {
@@ -1332,7 +1330,13 @@ mod tests {
         // Silent for longer than the grace: offline, dated from when it was
         // last heard from rather than from when the sweep noticed.
         let seen = chrono::Utc::now() - chrono::Duration::seconds(OFFLINE_AFTER_SECONDS * 3);
-        oven.inner.lock().unwrap().live.get_mut("a").unwrap().last_seen = Some(seen);
+        oven.inner
+            .lock()
+            .unwrap()
+            .live
+            .get_mut("a")
+            .unwrap()
+            .last_seen = Some(seen);
         oven.sweep();
         oven.sweep();
         let changes = oven.history("a").unwrap().changes;

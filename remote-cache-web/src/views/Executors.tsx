@@ -70,13 +70,18 @@ export function Executors({ refreshKey }: { refreshKey: number }) {
     () => api<ExecutorList>("/api/oven/executors"),
     `${refreshKey}:${tick}`,
   );
-  const jobs = useLoad(() => api<JobList>("/api/oven/jobs?limit=50"), `${refreshKey}:${tick}`);
+  const jobs = useLoad(
+    () => api<JobList>("/api/oven/jobs?limit=50"),
+    `${refreshKey}:${tick}`,
+  );
 
   const [pairing, setPairing] = useState<PairTarget | null>(null);
   const [manualAddress, setManualAddress] = useState("");
   const [manualCode, setManualCode] = useState("");
   const [manualName, setManualName] = useState("");
-  const [removing, setRemoving] = useState<{ id: string; name: string } | null>(null);
+  const [removing, setRemoving] = useState<{ id: string; name: string } | null>(
+    null,
+  );
   const [viewing, setViewing] = useState<number | null>(null);
   const [inspecting, setInspecting] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -94,7 +99,9 @@ export function Executors({ refreshKey }: { refreshKey: number }) {
         method: "POST",
         body: JSON.stringify(request),
       });
-      setNotice(`Paired with ${result.executor?.name ?? address}. It takes jobs from now on.`);
+      setNotice(
+        `Paired with ${result.executor?.name ?? address}. It takes jobs from now on.`,
+      );
       setActionError(null);
       setPairing(null);
       setManualAddress("");
@@ -112,7 +119,8 @@ export function Executors({ refreshKey }: { refreshKey: number }) {
         {executors.error}
       </Alert>
     );
-  if (!executors.data) return executors.loading ? <LinearProgress sx={{ mt: 3 }} /> : null;
+  if (!executors.data)
+    return executors.loading ? <LinearProgress sx={{ mt: 3 }} /> : null;
 
   // The ones paired here are in the table already.
   const nearby = executors.data.discovered.filter(
@@ -128,12 +136,20 @@ export function Executors({ refreshKey }: { refreshKey: number }) {
         }
       >
         {actionError && (
-          <Alert severity="error" sx={{ mb: 2 }} onClose={() => setActionError(null)}>
+          <Alert
+            severity="error"
+            sx={{ mb: 2 }}
+            onClose={() => setActionError(null)}
+          >
             {actionError}
           </Alert>
         )}
         {notice && (
-          <Alert severity="success" sx={{ mb: 2 }} onClose={() => setNotice(null)}>
+          <Alert
+            severity="success"
+            sx={{ mb: 2 }}
+            onClose={() => setNotice(null)}
+          >
             {notice}
           </Alert>
         )}
@@ -194,7 +210,9 @@ export function Executors({ refreshKey }: { refreshKey: number }) {
         {nearby.length > 0 && (
           <Card sx={{ mb: 2 }}>
             <CardContent>
-              <Typography sx={{ fontWeight: 600, mb: 1 }}>On this network</Typography>
+              <Typography sx={{ fontWeight: 600, mb: 1 }}>
+                On this network
+              </Typography>
               {nearby.map((d: Discovered) => (
                 <Box
                   key={d.id}
@@ -209,7 +227,8 @@ export function Executors({ refreshKey }: { refreshKey: number }) {
                   <Availability found={d} />
                   <Mono>{d.name}</Mono>
                   <Typography variant="body2" color="text.secondary">
-                    {d.address} · {[d.platform, d.version].filter(Boolean).join(" · ")}
+                    {d.address} ·{" "}
+                    {[d.platform, d.version].filter(Boolean).join(" · ")}
                   </Typography>
                   <Box sx={{ flex: 1 }} />
                   {taken(d) ? (
@@ -231,7 +250,9 @@ export function Executors({ refreshKey }: { refreshKey: number }) {
                     <Button
                       size="small"
                       variant="contained"
-                      onClick={() => setPairing({ address: d.address, name: d.name })}
+                      onClick={() =>
+                        setPairing({ address: d.address, name: d.name })
+                      }
                     >
                       Add
                     </Button>
@@ -244,7 +265,9 @@ export function Executors({ refreshKey }: { refreshKey: number }) {
 
         <Card>
           <CardContent>
-            <Typography sx={{ fontWeight: 600, mb: 1 }}>Add manually</Typography>
+            <Typography sx={{ fontWeight: 600, mb: 1 }}>
+              Add manually
+            </Typography>
             <Box
               component="form"
               sx={{
@@ -328,8 +351,12 @@ export function Executors({ refreshKey }: { refreshKey: number }) {
                       {j.spec?.commit.slice(0, 10)}
                     </Mono>
                   </TableCell>
-                  <TableCell>{j.executor ?? j.spec?.executor ?? "any"}</TableCell>
-                  <TableCell sx={{ color: "text.secondary" }}>{j.requested_by}</TableCell>
+                  <TableCell>
+                    {j.executor ?? j.spec?.executor ?? "any"}
+                  </TableCell>
+                  <TableCell sx={{ color: "text.secondary" }}>
+                    {j.requested_by}
+                  </TableCell>
                   <TableCell sx={{ color: "text.secondary" }}>
                     <When at={j.created_at} />
                   </TableCell>
@@ -343,14 +370,17 @@ export function Executors({ refreshKey }: { refreshKey: number }) {
       <PairDialog
         target={pairing}
         onClose={() => setPairing(null)}
-        onPair={(code, name) => pairing && void pair(pairing.address, code, name)}
+        onPair={(code, name) =>
+          pairing && void pair(pairing.address, code, name)
+        }
       />
 
       <Dialog open={removing !== null} onClose={() => setRemoving(null)}>
         <DialogTitle>Remove {removing?.name}?</DialogTitle>
         <DialogContent>
           <DialogContentText>
-            Its token stops working at once. It can be paired again with a new code.
+            Its token stops working at once. It can be paired again with a new
+            code.
           </DialogContentText>
         </DialogContent>
         <DialogActions>
@@ -362,9 +392,12 @@ export function Executors({ refreshKey }: { refreshKey: number }) {
               const target = removing!;
               setRemoving(null);
               try {
-                await api(`/api/oven/executors/${encodeURIComponent(target.id)}`, {
-                  method: "DELETE",
-                });
+                await api(
+                  `/api/oven/executors/${encodeURIComponent(target.id)}`,
+                  {
+                    method: "DELETE",
+                  },
+                );
                 setActionError(null);
                 executors.reload();
               } catch (e) {
@@ -379,7 +412,9 @@ export function Executors({ refreshKey }: { refreshKey: number }) {
 
       {inspecting !== null && (
         <ExecutorDialog
-          executor={executors.data.executors.find((e) => e.id === inspecting) ?? null}
+          executor={
+            executors.data.executors.find((e) => e.id === inspecting) ?? null
+          }
           tick={tick}
           onClose={() => setInspecting(null)}
           onJob={setViewing}
@@ -387,7 +422,11 @@ export function Executors({ refreshKey }: { refreshKey: number }) {
       )}
 
       {viewing !== null && (
-        <JobDialog id={viewing} onClose={() => setViewing(null)} onError={setActionError} />
+        <JobDialog
+          id={viewing}
+          onClose={() => setViewing(null)}
+          onError={setActionError}
+        />
       )}
     </>
   );
@@ -490,7 +529,11 @@ function ExecutorStatus({
       head = (
         <>
           <CloudOffIcon color="disabled" sx={icon} />
-          <Typography component="span" sx={{ fontWeight: 600 }} color="text.secondary">
+          <Typography
+            component="span"
+            sx={{ fontWeight: 600 }}
+            color="text.secondary"
+          >
             Offline
           </Typography>
         </>
@@ -506,7 +549,9 @@ function ExecutorStatus({
   }
   return (
     <Box>
-      <Box sx={{ display: "flex", alignItems: "center", gap: 0.75 }}>{head}</Box>
+      <Box sx={{ display: "flex", alignItems: "center", gap: 0.75 }}>
+        {head}
+      </Box>
       <Typography variant="caption" color="text.secondary">
         {note}
       </Typography>
@@ -571,7 +616,9 @@ function ExecutorDialog({
   const history = useLoad(
     () =>
       id
-        ? api<ExecutorHistory>(`/api/oven/executors/${encodeURIComponent(id)}/history`)
+        ? api<ExecutorHistory>(
+            `/api/oven/executors/${encodeURIComponent(id)}/history`,
+          )
         : Promise.resolve(null),
     `${id}:${tick}`,
   );
@@ -583,7 +630,9 @@ function ExecutorDialog({
   const start = now - WINDOWS[range];
   const parts = history.data ? spans(history.data, start, now) : [];
   const total = (online: boolean | null) =>
-    parts.filter((p) => p.online === online).reduce((sum, p) => sum + (p.to - p.from), 0);
+    parts
+      .filter((p) => p.online === online)
+      .reduce((sum, p) => sum + (p.to - p.from), 0);
   const up = total(true);
   const down = total(false);
   const watched = up + down;
@@ -682,7 +731,9 @@ function ExecutorDialog({
                 </Tooltip>
               ))}
             </Box>
-            <Box sx={{ display: "flex", justifyContent: "space-between", mt: 0.5 }}>
+            <Box
+              sx={{ display: "flex", justifyContent: "space-between", mt: 0.5 }}
+            >
               <Typography variant="caption" color="text.secondary">
                 {range} ago
               </Typography>
@@ -691,11 +742,13 @@ function ExecutorDialog({
               </Typography>
             </Box>
 
-            <Typography sx={{ fontWeight: 600, mt: 3, mb: 1 }}>Recent changes</Typography>
+            <Typography sx={{ fontWeight: 600, mt: 3, mb: 1 }}>
+              Recent changes
+            </Typography>
             {recent.length === 0 ? (
               <Typography variant="body2" color="text.secondary">
-                Nothing yet: the cache records a change when the executor checks in or goes quiet
-                for a minute.
+                Nothing yet: the cache records a change when the executor checks
+                in or goes quiet for a minute.
               </Typography>
             ) : (
               <Table size="small">
@@ -714,7 +767,11 @@ function ExecutorDialog({
                                 gap: 0.75,
                               }}
                             >
-                              <CheckCircleIcon color="success" sx={{ fontSize: 18 }} /> Came online
+                              <CheckCircleIcon
+                                color="success"
+                                sx={{ fontSize: 18 }}
+                              />{" "}
+                              Came online
                             </Box>
                           ) : (
                             <Box
@@ -724,7 +781,11 @@ function ExecutorDialog({
                                 gap: 0.75,
                               }}
                             >
-                              <CloudOffIcon color="error" sx={{ fontSize: 18 }} /> Went offline
+                              <CloudOffIcon
+                                color="error"
+                                sx={{ fontSize: 18 }}
+                              />{" "}
+                              Went offline
                             </Box>
                           )}
                         </TableCell>
@@ -779,8 +840,9 @@ function PairDialog({
         <DialogContent>
           {target?.taken && (
             <Alert severity="warning" sx={{ mb: 2 }}>
-              This executor is paired with another cache. Pairing it here moves it: that cache stops
-              reaching it, and any job it's running for that cache is lost.
+              This executor is paired with another cache. Pairing it here moves
+              it: that cache stops reaching it, and any job it's running for
+              that cache is lost.
             </Alert>
           )}
           <DialogContentText sx={{ mb: 2 }}>
@@ -851,7 +913,9 @@ function JobDialog({
     const step = async () => {
       try {
         const current = await api<Job>(`/api/oven/jobs/${id}`);
-        const page = await api<LogPage>(`/api/oven/jobs/${id}/log?from=${next.current}`);
+        const page = await api<LogPage>(
+          `/api/oven/jobs/${id}/log?from=${next.current}`,
+        );
         if (!live) return;
         setJob(current);
         if (page.lines.length) {
@@ -871,7 +935,10 @@ function JobDialog({
     };
   }, [id, onError]);
 
-  useEffect(() => bottom.current?.scrollIntoView({ block: "end" }), [lines.length]);
+  useEffect(
+    () => bottom.current?.scrollIntoView({ block: "end" }),
+    [lines.length],
+  );
 
   const running = job !== null && !isDone(job.state);
 
@@ -889,7 +956,8 @@ function JobDialog({
         {job && <Tag kind={word(job.state)} />}
         {job && (
           <Typography variant="body2" color="text.secondary">
-            {job.spec?.workflows.join(" ")} at <Mono>{job.spec?.commit.slice(0, 12)}</Mono>
+            {job.spec?.workflows.join(" ")} at{" "}
+            <Mono>{job.spec?.commit.slice(0, 12)}</Mono>
             {job.executor ? ` on ${job.executor}` : ""}
             {job.cancel_requested && running ? " · stopping…" : ""}
           </Typography>
@@ -898,7 +966,9 @@ function JobDialog({
       <DialogContent dividers>
         {job?.message && (
           <Alert
-            severity={job.state === "JOB_STATE_SUCCEEDED" ? "success" : "warning"}
+            severity={
+              job.state === "JOB_STATE_SUCCEEDED" ? "success" : "warning"
+            }
             sx={{ mb: 1.5 }}
           >
             {job.message}
@@ -919,7 +989,9 @@ function JobDialog({
         >
           {lines.length === 0 ? (
             <Typography variant="body2" color="text.secondary">
-              {job?.state === "JOB_STATE_QUEUED" ? "Waiting for an executor…" : "No output yet."}
+              {job?.state === "JOB_STATE_QUEUED"
+                ? "Waiting for an executor…"
+                : "No output yet."}
             </Typography>
           ) : (
             lines.join("\n")

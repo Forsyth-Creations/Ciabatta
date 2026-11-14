@@ -838,7 +838,10 @@ const COMMANDS: CommandGroup[] = [
         usage: "ciabatta oven executor",
         note: "Run workflows for other machines: announce this one on the network, print its address and pairing code, and take jobs from the cache it is paired with, one at a time.",
         flags: [
-          ["--name NAME", "What the cache calls it. Defaults to the host name."],
+          [
+            "--name NAME",
+            "What the cache calls it. Defaults to the host name.",
+          ],
           [
             "--allow-repo URL",
             "Only build repositories whose URL matches. Repeatable; globs allowed.",
@@ -4508,11 +4511,11 @@ ciabatta build --offload
 ciabatta build --offload-to gpu-box -e MODE=release`}</Pre>
         <P>
           It goes through the <a href="#remote-cache">remote cache</a>, which
-          has to be set up first: the cache queues the jobs, hands each one to an
-          executor, and keeps its log and its outputs until you collect them.
+          has to be set up first: the cache queues the jobs, hands each one to
+          an executor, and keeps its log and its outputs until you collect them.
           The executor <em>pulls</em> — it asks the cache for work rather than
-          the cache reaching in — so an executor behind a NAT or a firewall works
-          as well as one in the next rack. The cache only connects to the
+          the cache reaching in — so an executor behind a NAT or a firewall
+          works as well as one in the next rack. The cache only connects to the
           executor once, to pair with it.
         </P>
 
@@ -4531,11 +4534,11 @@ ciabatta build --offload-to gpu-box -e MODE=release`}</Pre>
   listens on    8381/tcp for pairing · advertises on 5353/udp (mDNS)`}</Pre>
         <P>
           On the cache&apos;s own page, open <strong>Executors</strong>. A cache
-          on the same network lists the executor under{" "}
-          <em>On this network</em>; press <strong>Add</strong> and enter the
-          code. From anywhere else, use <em>Add manually</em> with the address
-          and the code. Pairing takes a cache admin. The executor remembers the
-          pairing across restarts, so this happens once.
+          on the same network lists the executor under <em>On this network</em>;
+          press <strong>Add</strong> and enter the code. From anywhere else, use{" "}
+          <em>Add manually</em> with the address and the code. Pairing takes a
+          cache admin. The executor remembers the pairing across restarts, so
+          this happens once.
         </P>
         <P>
           Each executor on the page says whether it is active. <em>Ready</em>{" "}
@@ -4577,10 +4580,7 @@ ciabatta build --offload-to gpu-box -e MODE=release`}</Pre>
               "--unpair",
               "Forget the cache it was paired with, and wait to be paired again.",
             ],
-            [
-              "--insecure",
-              "Don't verify the cache's TLS certificate.",
-            ],
+            ["--insecure", "Don't verify the cache's TLS certificate."],
           ]}
         />
 
@@ -4599,8 +4599,8 @@ ciabatta build --offload-to gpu-box -e MODE=release`}</Pre>
             </>,
             <>
               <strong>5353/udp</strong> — mDNS, so a cache on the same network
-              finds it, on both machines. Without it everything still works;
-              you add the executor by address.
+              finds it, on both machines. Without it everything still works; you
+              add the executor by address.
             </>,
             <>
               <strong>The cache&apos;s port, outbound</strong> — the executor
@@ -4617,8 +4617,8 @@ ciabatta build --offload-to gpu-box -e MODE=release`}</Pre>
           would have locally — <C>--only</C>, <C>--solo</C>, <C>--filter</C>,{" "}
           <C>-e</C>, <C>--force</C> and the arguments after <C>...</C> all go
           with it. <C>--offload-to NAME</C> picks the executor; without it the
-          first free one takes the job. Executors run one job at a time, so
-          when they are all busy, the job waits in the queue.
+          first free one takes the job. Executors run one job at a time, so when
+          they are all busy, the job waits in the queue.
         </P>
         <Pre>{`$ ciabatta build --offload -e MODE=release
 Offloaded as job 12 — build at 3f9c2a1e04b7 on the first free executor
@@ -4630,20 +4630,19 @@ Offloaded as job 12 — build at 3f9c2a1e04b7 on the first free executor
           The executor builds a <em>commit</em>, not your working tree, so it
           has to be able to fetch it. ciabatta refuses to offload when tracked
           files have uncommitted changes, or when the commit isn&apos;t on any
-          remote branch yet, and says which: commit, or{" "}
-          <C>git push</C>. It sends the URL of the remote your branch tracks,
-          and the executor clones that with its own git credentials — so give
-          the build machine an SSH key or a credential helper that can read the
-          repository. It never prompts.
+          remote branch yet, and says which: commit, or <C>git push</C>. It
+          sends the URL of the remote your branch tracks, and the executor
+          clones that with its own git credentials — so give the build machine
+          an SSH key or a credential helper that can read the repository. It
+          never prompts.
         </P>
         <P>
-          The run checks the commit out on its branch, so{" "}
-          <C>CIABATTA_BRANCH</C>, <C>CIABATTA_COMMIT</C> and{" "}
-          <C>CIABATTA_PATH</C> are what they would have been on your machine.
-          Your local <C>.env</C> is not sent: the run sees the executor&apos;s
-          own environment, the env files committed to the repository, and the{" "}
-          <C>-e</C> flags you typed. A step that needs a secret needs it set on
-          the executor.
+          The run checks the commit out on its branch, so <C>CIABATTA_BRANCH</C>
+          , <C>CIABATTA_COMMIT</C> and <C>CIABATTA_PATH</C> are what they would
+          have been on your machine. Your local <C>.env</C> is not sent: the run
+          sees the executor&apos;s own environment, the env files committed to
+          the repository, and the <C>-e</C> flags you typed. A step that needs a
+          secret needs it set on the executor.
         </P>
 
         <SubHeading>What comes back</SubHeading>
@@ -4672,9 +4671,9 @@ workspace:
         <P>
           Ctrl-C stops <em>watching</em>; the job carries on, and you can come
           back to it. Cancelling stops it on the executor within a few seconds —
-          everything the run started, including anything it left running in
-          the background. The cache&apos;s Executors page lists the same jobs,
-          with each one&apos;s live log and a Cancel button.
+          everything the run started, including anything it left running in the
+          background. The cache&apos;s Executors page lists the same jobs, with
+          each one&apos;s live log and a Cancel button.
         </P>
         <Pre>{`ciabatta offload list            # this project's recent jobs (--all for every project's)
 ciabatta offload logs 12         # follow its log, and fetch its outputs when it ends
@@ -4691,12 +4690,12 @@ ciabatta offload executors       # what there is to run on, and what each is doi
         </P>
 
         <Alert severity="warning" sx={{ my: 2, maxWidth: "78ch" }}>
-          An executor runs whatever workflow it is sent, as the user it runs
-          as. Anyone who can write to the cache can send it one — read-only
-          users can&apos;t — so on a cache in <C>open</C> mode that is anyone
-          who can reach it. Run executors under an account of their own, and
-          use <C>--allow-repo</C> to limit what they will build. Pairing hands
-          the executor its credential over plain HTTP, so pair on a network you
+          An executor runs whatever workflow it is sent, as the user it runs as.
+          Anyone who can write to the cache can send it one — read-only users
+          can&apos;t — so on a cache in <C>open</C> mode that is anyone who can
+          reach it. Run executors under an account of their own, and use{" "}
+          <C>--allow-repo</C> to limit what they will build. Pairing hands the
+          executor its credential over plain HTTP, so pair on a network you
           trust.
         </Alert>
       </>
@@ -5160,7 +5159,9 @@ export function DocsPage() {
         styles={{
           "::highlight(ciabatta-docs-search)": {
             backgroundColor:
-              theme.palette.mode === "dark" ? "rgba(255, 200, 0, 0.35)" : "rgba(255, 200, 0, 0.45)",
+              theme.palette.mode === "dark"
+                ? "rgba(255, 200, 0, 0.35)"
+                : "rgba(255, 200, 0, 0.45)",
             color: "inherit",
           },
           "::highlight(ciabatta-docs-search-current)": {

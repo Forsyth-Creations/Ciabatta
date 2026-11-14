@@ -16,7 +16,10 @@ export function hasToken() {
   return token !== null;
 }
 
-export async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
+export async function api<T>(
+  path: string,
+  options: RequestInit = {},
+): Promise<T> {
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
   };
@@ -282,11 +285,14 @@ export async function uploadBinary(
     "X-Ciabatta-Update-Password": password,
   };
   if (token) headers["Authorization"] = "Bearer " + token;
-  const response = await fetch(`/api/release/${encodeURIComponent(platform)}?${query}`, {
-    method: "PUT",
-    headers,
-    body: file,
-  });
+  const response = await fetch(
+    `/api/release/${encodeURIComponent(platform)}?${query}`,
+    {
+      method: "PUT",
+      headers,
+      body: file,
+    },
+  );
   const text = await response.text();
   let body: unknown = null;
   try {

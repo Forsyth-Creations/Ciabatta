@@ -24,7 +24,13 @@ import {
 import SearchIcon from "@mui/icons-material/Search";
 
 import { monoFontStack } from "../theme";
-import { readChunks, search, terms, type Chunk, type Hit } from "./docsSearchIndex";
+import {
+  readChunks,
+  search,
+  terms,
+  type Chunk,
+  type Hit,
+} from "./docsSearchIndex";
 
 /** Ranges covering every occurrence of every term in the given text nodes. */
 function rangesFor(nodes: Text[], words: string[]): Range[] {
@@ -32,7 +38,11 @@ function rangesFor(nodes: Text[], words: string[]): Range[] {
   for (const node of nodes) {
     const lower = node.data.toLowerCase();
     for (const w of words) {
-      for (let at = lower.indexOf(w); at !== -1; at = lower.indexOf(w, at + w.length)) {
+      for (
+        let at = lower.indexOf(w);
+        at !== -1;
+        at = lower.indexOf(w, at + w.length)
+      ) {
         const range = document.createRange();
         range.setStart(node, at);
         range.setEnd(node, at + w.length);
@@ -64,8 +74,9 @@ function paint(name: string, ranges: Range[]) {
     highlights.delete(name);
     return;
   }
-  const Highlight = (globalThis as unknown as { Highlight: new (...r: Range[]) => unknown })
-    .Highlight;
+  const Highlight = (
+    globalThis as unknown as { Highlight: new (...r: Range[]) => unknown }
+  ).Highlight;
   highlights.set(name, new Highlight(...ranges));
 }
 
@@ -104,7 +115,15 @@ export function DocsSearch({
   // Every match on the page, painted while there's a query.
   useEffect(() => {
     const words = terms(query);
-    paint(HIGHLIGHT, words.length ? rangesFor(chunks.flatMap((c) => c.nodes), words) : []);
+    paint(
+      HIGHLIGHT,
+      words.length
+        ? rangesFor(
+            chunks.flatMap((c) => c.nodes),
+            words,
+          )
+        : [],
+    );
     return () => paint(HIGHLIGHT, []);
   }, [chunks, query]);
   useEffect(() => () => paint(CURRENT, []), []);
@@ -114,7 +133,8 @@ export function DocsSearch({
       const words = terms(query);
       const first = rangesFor(hit.chunk.nodes, words)[0];
       const target = first?.startContainer.parentElement ?? hit.chunk.anchor;
-      const top = target.getBoundingClientRect().top + window.scrollY - offset - 24;
+      const top =
+        target.getBoundingClientRect().top + window.scrollY - offset - 24;
       window.scrollTo({ top, behavior: "smooth" });
       paint(CURRENT, first ? [first] : []);
       history.replaceState(null, "", `#${hit.chunk.sectionId}`);
@@ -126,7 +146,8 @@ export function DocsSearch({
   useEffect(() => {
     if (!autoFocusKey) return;
     const onKey = (event: KeyboardEvent) => {
-      if (event.key !== "/" || event.metaKey || event.ctrlKey || event.altKey) return;
+      if (event.key !== "/" || event.metaKey || event.ctrlKey || event.altKey)
+        return;
       const target = event.target as HTMLElement | null;
       if (target?.closest("input, textarea, [contenteditable='true']")) return;
       event.preventDefault();
@@ -212,7 +233,11 @@ export function DocsSearch({
                 <Typography variant="body2" sx={{ fontWeight: 600 }} noWrap>
                   {hit.chunk.sectionTitle}
                   {hit.chunk.heading && (
-                    <Typography component="span" variant="body2" color="text.secondary">
+                    <Typography
+                      component="span"
+                      variant="body2"
+                      color="text.secondary"
+                    >
                       {" › "}
                       {hit.chunk.heading}
                     </Typography>
@@ -232,7 +257,11 @@ export function DocsSearch({
                   {hit.snippet.match && (
                     <Box
                       component="mark"
-                      sx={{ bgcolor: "warning.light", color: "inherit", borderRadius: 0.5 }}
+                      sx={{
+                        bgcolor: "warning.light",
+                        color: "inherit",
+                        borderRadius: 0.5,
+                      }}
                     >
                       {hit.snippet.match}
                     </Box>

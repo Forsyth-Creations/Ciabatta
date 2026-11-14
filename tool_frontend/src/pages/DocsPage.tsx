@@ -25,6 +25,7 @@ import {
   Button,
   Chip,
   Divider,
+  GlobalStyles,
   Grid2 as Grid,
   List,
   ListItemButton,
@@ -36,11 +37,14 @@ import {
   TableHead,
   TableRow,
   Typography,
+  useMediaQuery,
+  useTheme,
 } from "@mui/material";
 import { Link } from "@tanstack/react-router";
-import { Fragment, useState } from "react";
+import { Fragment, useRef, useState } from "react";
 import type { ReactNode } from "react";
 
+import { DocsSearch } from "../components/DocsSearch";
 import { PageHeader } from "../components/Page";
 import { useEditorExtensions, useHealth } from "../api/queries";
 import { monoFontStack } from "../theme";
@@ -595,6 +599,14 @@ const COMMANDS: CommandGroup[] = [
             "Leave the prefetch node out, even though workspace.prefetch: true asks for it.",
           ],
           [
+            "--offload",
+            "Run it on an oven executor instead of here, through the remote cache: at this commit, with these flags, its log streamed back and its outputs in offloaded/<job>/. See Offload a run to another machine.",
+          ],
+          [
+            "--offload-to EXECUTOR",
+            "Offload to the executor of this name rather than the first free one.",
+          ],
+          [
             "--start-anyway",
             "Start now, even when the workspace already has as many runs going as workspace.max_concurrent_runs allows. The run takes no slot. Also works with --gui.",
           ],
@@ -814,6 +826,35 @@ const COMMANDS: CommandGroup[] = [
             "Don't verify the certificate at all. Prefer --ca-cert.",
           ],
         ],
+      },
+    ],
+  },
+  {
+    name: "Offloading",
+    blurb:
+      "Running a workflow on another machine through the remote cache. One machine runs an executor; everyone else adds --offload. See Offload a run to another machine.",
+    commands: [
+      {
+        usage: "ciabatta oven executor",
+        note: "Run workflows for other machines: announce this one on the network, print its address and pairing code, and take jobs from the cache it is paired with, one at a time.",
+        flags: [
+          ["--name NAME", "What the cache calls it. Defaults to the host name."],
+          [
+            "--allow-repo URL",
+            "Only build repositories whose URL matches. Repeatable; globs allowed.",
+          ],
+          [
+            "--dir DIR",
+            "Keep its identity and pairing here rather than ~/.ciabatta/oven.",
+          ],
+          ["--port PORT", "The port it pairs on. Defaults to 8381."],
+          ["--unpair", "Forget its cache and wait to be paired again."],
+        ],
+      },
+      {
+        usage: "ciabatta offload <list|logs|fetch|cancel|executors>",
+        note: "Look after offloaded jobs: list this project's recent ones, follow one's log, download its outputs again, stop it, or see the executors and what each is doing.",
+        flags: [["list --all", "Every project's jobs, not only this one's."]],
       },
     ],
   },
@@ -4445,6 +4486,223 @@ steps:
     ),
   },
   {
+    id: "offload",
+    group: "Reference",
+    title: "Offload a run to another machine",
+    body: (
+      <>
+        <P>
+          Some builds belong on a bigger machine, or a different one — the
+          workstation under the desk, the box with the GPU, the Mac that can
+          sign. An <strong>oven executor</strong> is ciabatta running on that
+          machine, waiting for work. Add <C>--offload</C> to any workflow and it
+          runs there instead of here: at your commit, with your flags, its log
+          streaming back to your terminal, and the files it built landing in
+          your checkout when it&apos;s done.
+        </P>
+        <Pre>{`# On the build machine
+ciabatta oven executor
+
+# Anywhere that uses the same remote cache
+ciabatta build --offload
+ciabatta build --offload-to gpu-box -e MODE=release`}</Pre>
+        <P>
+          It goes through the <a href="#remote-cache">remote cache</a>, which
+          has to be set up first: the cache queues the jobs, hands each one to an
+          executor, and keeps its log and its outputs until you collect them.
+          The executor <em>pulls</em> — it asks the cache for work rather than
+          the cache reaching in — so an executor behind a NAT or a firewall works
+          as well as one in the next rack. The cache only connects to the
+          executor once, to pair with it.
+        </P>
+
+        <SubHeading>Start an executor and pair it</SubHeading>
+        <P>
+          <C>ciabatta oven executor</C> checks the network, announces itself on
+          it over mDNS (the way a Chromecast does), and prints what a person
+          needs to add it:
+        </P>
+        <Pre>{`ciabatta oven executor gpu-box
+  id            2eb21170-c42e-4bb2-b4f2-b23bf2e662d6
+  address       http://192.168.1.20:8381
+  pairing code  418-907
+  platform      linux-x86_64 · ciabatta 0.10.0
+  work dir      ~/.ciabatta/oven/work
+  listens on    8381/tcp for pairing · advertises on 5353/udp (mDNS)`}</Pre>
+        <P>
+          On the cache&apos;s own page, open <strong>Executors</strong>. A cache
+          on the same network lists the executor under{" "}
+          <em>On this network</em>; press <strong>Add</strong> and enter the
+          code. From anywhere else, use <em>Add manually</em> with the address
+          and the code. Pairing takes a cache admin. The executor remembers the
+          pairing across restarts, so this happens once.
+        </P>
+        <P>
+          Each executor on the page says whether it is active. <em>Ready</em>{" "}
+          means it is checking in and waiting for work; <em>Running job N</em>{" "}
+          links to that job&apos;s log; <em>Offline</em> means it hasn&apos;t
+          been heard from for a minute — it was stopped, or the machine is
+          asleep. Click an executor for when it was online over the last day,
+          week or month. An executor found on the network is either{" "}
+          <em>available</em> or <em>paired with another cache</em>; pairing that
+          one here moves it, and the other cache stops reaching it.
+        </P>
+        <FieldTable
+          rows={[
+            [
+              "--name NAME",
+              "What the cache calls it, and what --offload-to names. Defaults to the host name. Two executors on one cache can't share a name.",
+            ],
+            [
+              "--port PORT",
+              "The port it listens on for pairing. Defaults to 8381, the cache's port plus one.",
+            ],
+            [
+              "--allow-repo URL",
+              "Only build repositories whose URL matches. Repeatable, globs allowed: --allow-repo 'git@github.com:my-org/*'. Without it, any repository a cache user offloads is built.",
+            ],
+            [
+              "--dir DIR",
+              "Keep its identity, pairing and checkouts here instead of ~/.ciabatta/oven. A second executor on the same machine needs its own.",
+            ],
+            [
+              "--work-dir DIR",
+              "Where repositories and job checkouts go, if not <dir>/work. Put it on the big disk.",
+            ],
+            [
+              "--no-mdns",
+              "Don't announce it on the network. Add it by address instead.",
+            ],
+            [
+              "--unpair",
+              "Forget the cache it was paired with, and wait to be paired again.",
+            ],
+            [
+              "--insecure",
+              "Don't verify the cache's TLS certificate.",
+            ],
+          ]}
+        />
+
+        <SubHeading>The ports it needs</SubHeading>
+        <P>
+          Before it announces itself, the executor checks for a firewall that
+          would hide it — ufw, firewalld, the macOS application firewall,
+          Windows Firewall — and for a network where multicast doesn&apos;t
+          work, and says what to open:
+        </P>
+        <Bullets
+          items={[
+            <>
+              <strong>8381/tcp, inbound</strong> — so the cache can pair with
+              it. Only needed while pairing.
+            </>,
+            <>
+              <strong>5353/udp</strong> — mDNS, so a cache on the same network
+              finds it, on both machines. Without it everything still works;
+              you add the executor by address.
+            </>,
+            <>
+              <strong>The cache&apos;s port, outbound</strong> — the executor
+              asks the cache for work, so this is the connection that matters
+              day to day.
+            </>,
+          ]}
+        />
+        <Pre>{`sudo ufw allow 8381/tcp && sudo ufw allow 5353/udp`}</Pre>
+
+        <SubHeading>Offload a run</SubHeading>
+        <P>
+          <C>--offload</C> goes on any workflow run, with the same flags it
+          would have locally — <C>--only</C>, <C>--solo</C>, <C>--filter</C>,{" "}
+          <C>-e</C>, <C>--force</C> and the arguments after <C>...</C> all go
+          with it. <C>--offload-to NAME</C> picks the executor; without it the
+          first free one takes the job. Executors run one job at a time, so
+          when they are all busy, the job waits in the queue.
+        </P>
+        <Pre>{`$ ciabatta build --offload -e MODE=release
+Offloaded as job 12 — build at 3f9c2a1e04b7 on the first free executor
+  Ctrl-C stops watching, not the job · \`ciabatta offload cancel 12\` stops it
+…the run's log, as it happens…
+✓ job 12 succeeded
+3 output files → offloaded/12/`}</Pre>
+        <P>
+          The executor builds a <em>commit</em>, not your working tree, so it
+          has to be able to fetch it. ciabatta refuses to offload when tracked
+          files have uncommitted changes, or when the commit isn&apos;t on any
+          remote branch yet, and says which: commit, or{" "}
+          <C>git push</C>. It sends the URL of the remote your branch tracks,
+          and the executor clones that with its own git credentials — so give
+          the build machine an SSH key or a credential helper that can read the
+          repository. It never prompts.
+        </P>
+        <P>
+          The run checks the commit out on its branch, so{" "}
+          <C>CIABATTA_BRANCH</C>, <C>CIABATTA_COMMIT</C> and{" "}
+          <C>CIABATTA_PATH</C> are what they would have been on your machine.
+          Your local <C>.env</C> is not sent: the run sees the executor&apos;s
+          own environment, the env files committed to the repository, and the{" "}
+          <C>-e</C> flags you typed. A step that needs a secret needs it set on
+          the executor.
+        </P>
+
+        <SubHeading>What comes back</SubHeading>
+        <P>
+          When the job ends, every file its steps declare as cache{" "}
+          <C>outputs</C> (and, for a Cargo step, the binaries Cargo names) is
+          sent back and lands under <C>offloaded/</C>, in a folder named after
+          the job&apos;s number — so two variants of the same commit built with
+          different flags land side by side, not on top of each other:
+        </P>
+        <Pre>{`offloaded/
+  12/out/app            # ciabatta build --offload
+  13/out/app            # ciabatta build --offload -e MODE=debug`}</Pre>
+        <P>
+          A step without declared outputs still runs; nothing of it comes back.
+          The run sees its number as <C>CIABATTA_EXECUTION_NUMBER</C>, for a
+          step that wants to name what it builds after it too. Move the folder
+          with <C>offload_dir</C> in the workspace root&apos;s config — and add
+          it to <C>.gitignore</C>:
+        </P>
+        <Pre>{`# .ciabatta/ciabatta.yaml, at the workspace root
+workspace:
+  offload_dir: build/offloaded`}</Pre>
+
+        <SubHeading>Look after a job</SubHeading>
+        <P>
+          Ctrl-C stops <em>watching</em>; the job carries on, and you can come
+          back to it. Cancelling stops it on the executor within a few seconds —
+          everything the run started, including anything it left running in
+          the background. The cache&apos;s Executors page lists the same jobs,
+          with each one&apos;s live log and a Cancel button.
+        </P>
+        <Pre>{`ciabatta offload list            # this project's recent jobs (--all for every project's)
+ciabatta offload logs 12         # follow its log, and fetch its outputs when it ends
+ciabatta offload fetch 12        # download a finished job's outputs again
+ciabatta offload cancel 12       # stop it
+ciabatta offload executors       # what there is to run on, and what each is doing`}</Pre>
+        <P>
+          After every job, however it ended, the executor cleans up: it stops
+          anything still running, deletes the checkout, and tidies its copy of
+          the repository. Repositories nobody has offloaded for 30 days are
+          deleted. The cache keeps the last 200 jobs, with their logs and
+          outputs; a job whose executor goes silent for five minutes is marked
+          failed.
+        </P>
+
+        <Alert severity="warning" sx={{ my: 2, maxWidth: "78ch" }}>
+          An executor runs whatever workflow it is sent, as the user it runs
+          as. Anyone who can write to the cache can send it one — read-only
+          users can&apos;t — so on a cache in <C>open</C> mode that is anyone
+          who can reach it. Run executors under an account of their own, and
+          use <C>--allow-repo</C> to limit what they will build. Pairing hands
+          the executor its credential over plain HTTP, so pair on a network you
+          trust.
+        </Alert>
+      </>
+    ),
+  },
+  {
     id: "remote-cache-ldap",
     group: "Reference",
     title: "LDAP for the remote cache",
@@ -4884,6 +5142,12 @@ curl -N -H "Authorization: Bearer $TOKEN" \\
 
 export function DocsPage() {
   const { data: health } = useHealth();
+  const theme = useTheme();
+  // One search box, wherever there's room for it: at the top of the contents
+  // rail on a wide screen, above the sections where the rail is hidden.
+  const wide = useMediaQuery(theme.breakpoints.up("lg"));
+  const sections = useRef<HTMLDivElement>(null);
+  const search = <DocsSearch root={sections} offset={ANCHOR_OFFSET} />;
 
   return (
     <Box>
@@ -4892,8 +5156,24 @@ export function DocsPage() {
         description="Ciabatta cares about everything that goes into a step — the files it reads, the variables it reads, and what had to happen first. This is how to tell it: set a project up, declare those inputs, and run the thing. Shipped in the same binary as the app, so it always matches what you're running."
       />
 
+      <GlobalStyles
+        styles={{
+          "::highlight(ciabatta-docs-search)": {
+            backgroundColor:
+              theme.palette.mode === "dark" ? "rgba(255, 200, 0, 0.35)" : "rgba(255, 200, 0, 0.45)",
+            color: "inherit",
+          },
+          "::highlight(ciabatta-docs-search-current)": {
+            backgroundColor: theme.palette.warning.main,
+            color: theme.palette.getContrastText(theme.palette.warning.main),
+          },
+        }}
+      />
+
+      {!wide && <Box sx={{ mb: 3 }}>{search}</Box>}
+
       <Grid container spacing={4}>
-        <Grid size={{ xs: 12, lg: 9 }}>
+        <Grid size={{ xs: 12, lg: 9 }} ref={sections}>
           {SECTIONS.map((section, index) => (
             <Box
               key={section.id}
@@ -4927,7 +5207,16 @@ export function DocsPage() {
         {/* On narrower screens the nav rail already competes for width, and the
             sections are short enough to scroll. */}
         <Grid size={{ lg: 3 }} sx={{ display: { xs: "none", lg: "block" } }}>
-          <Box sx={{ position: "sticky", top: ANCHOR_OFFSET }}>
+          <Box
+            sx={{
+              position: "sticky",
+              top: ANCHOR_OFFSET,
+              // Results can outgrow the window; the rail scrolls on its own.
+              maxHeight: `calc(100vh - ${ANCHOR_OFFSET + 16}px)`,
+              overflowY: "auto",
+            }}
+          >
+            {wide && <Box sx={{ mb: 2 }}>{search}</Box>}
             <List dense disablePadding>
               {SECTIONS.map((section, index) => (
                 <Fragment key={section.id}>

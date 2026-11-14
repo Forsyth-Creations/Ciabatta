@@ -210,6 +210,8 @@ artifacts are published from. For workflows it goes one level further out: the
 | `ciabatta dry-run [TARGET...]`                                         | What a run would reuse from the cache and what it would rebuild — and for a rebuild, exactly what changed. Runs nothing. `--diff` for the lines.                                                                                                                        |
 | `ciabatta cache <init\|status\|prune\|clean>`                          | Set up and inspect the build cache. `init [WORKFLOW]` proposes inputs and outputs from what's actually in the directory and writes them into that workflow's file.                                                                                                      |
 | `ciabatta remote-cache <init\|start\|login\|logout\|status\|add-user>` | Run or connect to a shared cache the whole team reads from.                                                                                                                                                                                                             |
+| `ciabatta oven executor`                                               | Run workflows for other machines: announce this one, pair it with a remote cache, and take offloaded jobs one at a time. See [Offloading](#offloading).                                                                                                                 |
+| `ciabatta offload <list\|logs\|fetch\|cancel\|executors>`              | Look after jobs started with `--offload`.                                                                                                                                                                                                                               |
 | `ciabatta releases <list\|push\|pull>`                                 | Versioned releases: list what's been published, or push and pull one by hand. See [Releases](#releases).                                                                                                                                                                |
 | `ciabatta self update`                                                 | Update this binary from the remote cache that serves it, verified against the SHA-256 it advertises.                                                                                                                                                                    |
 | `ciabatta self lint`                                                   | Compile every workflow in the workspace and list each one that's broken — a file that won't parse, a `needs`/`depends_on`/`on_error` naming something that doesn't exist, a dependency cycle, a push to an undefined registry. Exits non-zero on any (`--json` for CI). |
@@ -252,6 +254,8 @@ ciabatta build` is `ciabatta build --only api`, as long as that package
 - `--solo` — don't follow dependencies out of what you selected, for when
   everything upstream is already built.
 - `-e, --env KEY=VALUE` — set a variable for every step. Repeatable.
+- `--offload` — run it on an oven executor instead, through the remote cache;
+  `--offload-to NAME` picks the executor. See [Offloading](#offloading).
 - `--release VERSION` — the release a `kind: release-pull` step fetches (and a
   push publishes, unless the step names a version). Sets `CIABATTA_RELEASE`.
 - `--viz terminal|tui|gui` — how to show the run. Defaults to `CIABATTA_VIZ`,
@@ -1808,6 +1812,91 @@ ciabatta releases pull v1.4.2 --into ./out     # what a release-pull step does
 
 The remote cache's page lists every project's releases under **Releases**
 (also at `/releases`).
+
+## Offloading
+
+Run a workflow on another machine — the workstation under the desk, the box
+with the GPU, the Mac that can sign — by adding `--offload`. It runs there at
+your commit, with your flags; its log streams back to your terminal, and the
+files it built land in your checkout.
+
+```bash
+# On the build machine
+ciabatta oven executor
+
+# Anywhere that uses the same remote cache
+ciabatta build --offload
+ciabatta build --offload-to gpu-box -e MODE=release
+```
+
+It goes through [the remote cache](#the-remote-cache), which queues the jobs,
+hands each to an executor, and keeps its log and outputs until you collect
+them. The executor **pulls**: it asks the cache for work, so one behind a NAT
+works as well as one next to the server. The cache connects to it once, to
+pair.
+
+### Pairing an executor
+
+`ciabatta oven executor` checks the firewall, announces the machine over mDNS
+(the way a Chromecast does), and prints its address and a six-digit pairing
+code. On the cache's page, **Executors** lists it under _On this network_ —
+press **Add** and enter the code — or add it by address and code by hand.
+Pairing takes a cache admin and is remembered across restarts.
+
+The page shows whether each executor is _Ready_, _Running job N_ (with a link to
+its log) or _Offline_, and when it was online over the last day, week or month.
+
+| Flag               | What it does                                                                                      |
+| ------------------ | ------------------------------------------------------------------------------------------------- |
+| `--name NAME`      | What the cache calls it, and what `--offload-to` names. Defaults to the host name.                |
+| `--allow-repo URL` | Only build repositories whose URL matches. Repeatable; globs allowed (`git@github.com:my-org/*`). |
+| `--dir DIR`        | Keep its identity, pairing and checkouts here instead of `~/.ciabatta/oven`.                      |
+| `--work-dir DIR`   | Where repositories and job checkouts go, if not `<dir>/work`.                                     |
+| `--port PORT`      | The port it pairs on. Defaults to 8381.                                                           |
+| `--no-mdns`        | Don't announce it on the network; add it by address.                                              |
+| `--unpair`         | Forget its cache and wait to be paired again.                                                     |
+| `--insecure`       | Don't verify the cache's TLS certificate.                                                         |
+
+It needs **8381/tcp** inbound (only while pairing), **5353/udp** for mDNS (only
+to be found automatically), and outbound access to the cache's port. On ufw:
+`sudo ufw allow 8381/tcp && sudo ufw allow 5353/udp`.
+
+### What runs, and what comes back
+
+The executor builds a **commit**, so ciabatta refuses to offload uncommitted
+changes to tracked files, or a commit that isn't on a remote branch yet. The
+executor clones the URL of the remote your branch tracks, with its own git
+credentials (it never prompts), and checks the commit out on its branch — so
+`CIABATTA_BRANCH`, `CIABATTA_COMMIT` and `CIABATTA_PATH` match a local run.
+`--only`, `--solo`, `--filter`, `-e`, `--force` and arguments after `...` go
+with it. Your local `.env` doesn't: the run sees the executor's environment,
+the repository's committed env files, and your `-e` flags.
+
+When the job ends, every file its steps declare as cache `outputs` comes back
+into `offloaded/<job number>/`, so variants of one commit land side by side.
+The run sees that number as `CIABATTA_EXECUTION_NUMBER`. Set
+`workspace.offload_dir` in the root config to put them elsewhere.
+
+```bash
+ciabatta offload list         # this project's recent jobs (--all: every project's)
+ciabatta offload logs 12      # follow a job's log, then fetch its outputs
+ciabatta offload fetch 12     # download a finished job's outputs again
+ciabatta offload cancel 12    # stop it — Ctrl-C only stops watching
+ciabatta offload executors    # what there is to run on
+```
+
+A cancelled job stops within seconds, including anything it started in the
+background. After every job the executor deletes the checkout and tidies its
+copy of the repository; copies unused for 30 days are removed.
+
+> **Security.** An executor runs whatever it is sent, as the user it runs as.
+> Anyone with write access to the cache can send it a job (read-only tokens
+> can't) — on an `open` cache, that's anyone who can reach it. Run executors
+> under their own account, use `--allow-repo`, and pair on a network you trust:
+> the executor's credential is handed over in plain HTTP at pairing.
+
+The messages between the three are defined once, in
+[`proto/oven.proto`](proto/oven.proto), and sent as JSON.
 
 ## Environment files
 

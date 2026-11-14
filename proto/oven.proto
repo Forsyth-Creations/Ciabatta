@@ -134,6 +134,20 @@ enum Availability {
   AVAILABILITY_PAIRED_ELSEWHERE = 3;
 }
 
+// A change in whether an executor could be reached: online when it checks in,
+// offline once it has been silent for OFFLINE_AFTER_SECONDS.
+message StatusChange {
+  // When it changed (RFC 3339).
+  string at = 1;
+  bool online = 2;
+}
+
+// GET /api/oven/executors/{id}/history: the cache's record of an executor
+// coming and going, oldest first. Only the most recent changes are kept.
+message ExecutorHistory {
+  repeated StatusChange changes = 1;
+}
+
 // An executor the cache can see on the network, paired or not.
 message Discovered {
   string id = 1;
@@ -175,6 +189,8 @@ message PairRequest {
   string server = 2;
   // The executor's credential for that cache. The cache keeps only its hash.
   string token = 3;
+  // What the cache calls it, when that's not the name it gave itself.
+  optional string name = 4;
 }
 
 // What a person asks the cache to pair with: POST /api/oven/executors.
@@ -185,6 +201,9 @@ message PairWith {
   // The URL the executor should use for the cache: where the page was loaded
   // from, unless set.
   optional string server = 3;
+  // What to call it on this cache (and what --offload-to names). Unset keeps
+  // the name it already has here, or else the one it gave itself.
+  optional string name = 4;
 }
 
 // The answer to a pairing.

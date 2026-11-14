@@ -312,6 +312,7 @@ export async function uploadBinary(
 
 export type {
   Discovered,
+  ExecutorHistory,
   ExecutorList,
   ExecutorState,
   ExecutorView,
@@ -321,6 +322,7 @@ export type {
   LogPage,
   Paired,
   PairWith,
+  StatusChange,
 } from "./gen/oven";
 
 import type { ExecutorState, JobState } from "./gen/oven";

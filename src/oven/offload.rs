@@ -413,8 +413,9 @@ pub async fn list(cwd: &Path, all: bool) -> Result<()> {
     Ok(())
 }
 
-/// `ciabatta offload executors`: what this cache has to run jobs on.
-pub async fn executors(cwd: &Path) -> Result<()> {
+/// `ciabatta offload executors` (everything paired) and `ciabatta oven list`
+/// (only what's online unless `all`): what this cache has to run jobs on.
+pub async fn executors(cwd: &Path, all: bool) -> Result<()> {
     let remote = Remote::discover(cwd)?;
     let body: serde_json::Value = remote.client.get_json("/api/oven/executors").await?;
     let paired: Vec<super::ExecutorView> =
@@ -427,7 +428,22 @@ pub async fn executors(cwd: &Path) -> Result<()> {
         );
         return Ok(());
     }
-    for e in paired {
+    let total = paired.len();
+    let shown: Vec<_> = paired
+        .into_iter()
+        .filter(|e| all || e.state() != super::ExecutorState::Offline)
+        .collect();
+    if shown.is_empty() {
+        println!(
+            "None of the {total} executor{} paired with {} {} online. `--all` lists them anyway.",
+            if total == 1 { "" } else { "s" },
+            remote.url,
+            if total == 1 { "is" } else { "are" },
+        );
+        return Ok(());
+    }
+    let now = chrono::Utc::now();
+    for e in &shown {
         let state = match e.state() {
             super::ExecutorState::Idle => "idle".to_string(),
             super::ExecutorState::Busy => format!("busy (job {})", e.job.unwrap_or_default()),
@@ -435,10 +451,28 @@ pub async fn executors(cwd: &Path) -> Result<()> {
                 "offline".to_string()
             }
         };
+        // How long it has been in its current state, from the cache's record.
+        // An older cache doesn't keep one; that's not worth failing over.
+        let since = remote
+            .client
+            .get_json::<super::ExecutorHistory>(&format!("/api/oven/executors/{}/history", e.id))
+            .await
+            .ok()
+            .and_then(|h| h.changes.last().map(|c| c.at.clone()))
+            .and_then(|at| chrono::DateTime::parse_from_rfc3339(&at).ok())
+            .map(|at| {
+                let ms = (now - at.with_timezone(&chrono::Utc)).num_milliseconds().max(0);
+                format!("for {}", crate::cache::cli::humanize_ms(ms as u64))
+            })
+            .unwrap_or_default();
         println!(
-            "{:<20}  {:<16}  {}  {}",
-            e.name, state, e.platform, e.version
+            "{:<20}  {:<16}  {:<14}  {}  {}",
+            e.name, state, since, e.platform, e.version
         );
+    }
+    if !all && shown.len() < total {
+        let offline = total - shown.len();
+        println!("({offline} offline; `--all` lists them too)");
     }
     Ok(())
 }

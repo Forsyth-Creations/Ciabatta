@@ -43,5 +43,7 @@ steps:
     # so while this runs it is the daemon every ciabatta command finds, and
     # what tool_frontend's dev server proxies to. Once it stops, the next
     # command that needs a daemon starts a fresh one.
-    run: cargo run -- daemon serve --port 9999
+    run: |
+      cargo run -- daemon stop
+      cargo run -- daemon serve --port 9999
     description: The daemon serving the web app on 9999, built from this checkout

@@ -8,6 +8,9 @@
 //! * **The jobs**, one directory each under `storage/oven/jobs/<id>/`: the job
 //!   as JSON, its log as lines, and the files it sent back under `outputs/`.
 //!   The newest [`MAX_JOBS`] are kept.
+//! * **When each executor came and went**, in `storage/oven/history.json`: the
+//!   last [`MAX_HISTORY`] changes between online and offline, for the page's
+//!   uptime view.
 //! * **What is on the network**, from mDNS, so the page can offer an executor
 //!   nobody has typed an address for.
 //!
@@ -35,9 +38,10 @@ use serde_json::json;
 
 use super::server::{ApiError, ApiResult, AppState};
 use crate::oven::{
-    Availability, Discovered, ExecutorInfo, ExecutorList, ExecutorState, ExecutorView, Finish,
-    Heartbeat, HeartbeatReply, Job, JobList, JobSpec, JobState, LogBatch, LogPage,
-    OFFLINE_AFTER_SECONDS, OutputFile, POLL_SECONDS, PairRequest, PairWith, Paired, Poll,
+    Availability, Discovered, ExecutorHistory, ExecutorInfo, ExecutorList, ExecutorState,
+    ExecutorView, Finish, Heartbeat, HeartbeatReply, Job, JobList, JobSpec, JobState, LogBatch,
+    LogPage, OFFLINE_AFTER_SECONDS, OutputFile, POLL_SECONDS, PairRequest, PairWith, Paired, Poll,
+    StatusChange,
 };
 
 /// How many jobs are kept, with their logs and outputs. Older ones go when a
@@ -46,6 +50,9 @@ pub const MAX_JOBS: usize = 200;
 
 /// A log longer than this stops growing; the executor is told so once.
 const MAX_LOG_LINES: usize = 200_000;
+
+/// How many online/offline changes are kept per executor; older ones drop off.
+pub const MAX_HISTORY: usize = 200;
 
 /// A running job whose executor has been silent this long is given up on.
 const ABANDONED_AFTER_SECONDS: i64 = 300;
@@ -77,6 +84,8 @@ struct Live {
 struct Inner {
     executors: Vec<PairedExecutor>,
     live: HashMap<String, Live>,
+    /// Each executor's online/offline changes, oldest first.
+    history: BTreeMap<String, Vec<StatusChange>>,
     jobs: BTreeMap<u32, Job>,
     next_id: u32,
 }
@@ -91,6 +100,8 @@ pub struct Oven {
     work: tokio::sync::Notify,
     /// What mDNS has found, by service name.
     discovered: Mutex<HashMap<String, Discovered>>,
+    /// When this cache started: it can't know about anything before.
+    started: chrono::DateTime<chrono::Utc>,
 }
 
 impl Oven {
@@ -105,6 +116,11 @@ impl Oven {
                 Ok(text) => serde_json::from_str(&text).context("executors.json is malformed")?,
                 Err(_) => Vec::new(),
             };
+        // Only a nicety: a history that won't load starts again.
+        let history = std::fs::read_to_string(dir.join("history.json"))
+            .ok()
+            .and_then(|text| serde_json::from_str(&text).ok())
+            .unwrap_or_default();
 
         let mut jobs = BTreeMap::new();
         // Counted from the directories, not the jobs that load: a number is
@@ -137,11 +153,13 @@ impl Oven {
             inner: Mutex::new(Inner {
                 executors,
                 live: HashMap::new(),
+                history,
                 jobs,
                 next_id,
             }),
             work: tokio::sync::Notify::new(),
             discovered: Mutex::new(HashMap::new()),
+            started: chrono::Utc::now(),
         };
         // A job that was running when the server stopped has nobody left to
         // report on it — its executor will have been told the server is gone.
@@ -156,6 +174,59 @@ impl Oven {
     fn save_executors(&self, inner: &Inner) -> Result<()> {
         let text = serde_json::to_string_pretty(&inner.executors)?;
         write_atomic(&self.dir.join("executors.json"), text.as_bytes())
+    }
+
+    fn save_history(&self, inner: &Inner) -> Result<()> {
+        let text = serde_json::to_string(&inner.history)?;
+        write_atomic(&self.dir.join("history.json"), text.as_bytes())
+    }
+
+    /// Note any executor that has come online or gone offline since last
+    /// looked at. Going offline is dated when it was last heard from plus
+    /// [`OFFLINE_AFTER_SECONDS`], not when this noticed.
+    fn note_status(&self, inner: &mut Inner) {
+        let now = chrono::Utc::now();
+        let grace = chrono::Duration::seconds(OFFLINE_AFTER_SECONDS);
+        let mut changed = false;
+        for e in &inner.executors {
+            let last_seen = inner.live.get(&e.id).and_then(|l| l.last_seen);
+            let online = last_seen.is_some_and(|at| now - at < grace);
+            let history = inner.history.entry(e.id.clone()).or_default();
+            if history.last().map(|c| c.online) == Some(online) {
+                continue;
+            }
+            let at = match (online, last_seen) {
+                (true, _) => now,
+                (false, Some(seen)) => seen + grace,
+                // Not heard from since this cache started. Give it the same
+                // grace from the start before calling it gone, so a restart
+                // of the cache doesn't read as the executor going down.
+                (false, None) if now - self.started < grace => continue,
+                (false, None) => self.started,
+            };
+            history.push(StatusChange {
+                at: at.to_rfc3339(),
+                online,
+            });
+            if history.len() > MAX_HISTORY {
+                history.drain(..history.len() - MAX_HISTORY);
+            }
+            changed = true;
+        }
+        if changed && let Err(e) = self.save_history(inner) {
+            tracing::warn!("couldn't save executor history: {e:#}");
+        }
+    }
+
+    /// An executor's online/offline changes, oldest first; `None` if it isn't
+    /// paired.
+    pub fn history(&self, id: &str) -> Option<ExecutorHistory> {
+        let mut inner = self.inner.lock().unwrap();
+        inner.executors.iter().any(|e| e.id == id).then_some(())?;
+        self.note_status(&mut inner);
+        Some(ExecutorHistory {
+            changes: inner.history.get(id).cloned().unwrap_or_default(),
+        })
     }
 
     fn save_job(&self, job: &Job) -> Result<()> {
@@ -246,6 +317,17 @@ impl Oven {
         found
     }
 
+    /// The name `id` already has here, if it's paired.
+    fn name_of(&self, id: &str) -> Option<String> {
+        self.inner
+            .lock()
+            .unwrap()
+            .executors
+            .iter()
+            .find(|e| e.id == id)
+            .map(|e| e.name.clone())
+    }
+
     /// Whether `name` would collide with a different executor's.
     fn name_taken(&self, id: &str, name: &str) -> bool {
         self.inner
@@ -285,6 +367,9 @@ impl Oven {
             return Ok(false);
         }
         self.save_executors(&inner)?;
+        if inner.history.remove(id).is_some() {
+            self.save_history(&inner)?;
+        }
         Ok(true)
     }
 
@@ -298,6 +383,7 @@ impl Oven {
             .find(|e| e.id == id && super::auth::constant_time_eq(&e.token_sha256, &hash))
             .map(|e| e.name.clone())?;
         inner.live.entry(id.to_string()).or_default().last_seen = Some(chrono::Utc::now());
+        self.note_status(&mut inner);
         Some(name)
     }
 
@@ -537,6 +623,7 @@ impl Oven {
     pub fn sweep(&self) {
         let now = chrono::Utc::now();
         let mut inner = self.inner.lock().unwrap();
+        self.note_status(&mut inner);
         let silent: Vec<(String, u32)> = inner
             .live
             .iter()
@@ -649,7 +736,8 @@ pub async fn discover(oven: Arc<Oven>) {
     }
 }
 
-/// Every half-minute: give up on jobs whose executor has gone.
+/// Every half-minute: give up on jobs whose executor has gone, and note which
+/// executors have come or gone.
 pub async fn sweeper(oven: Arc<Oven>) {
     let mut every = tokio::time::interval(Duration::from_secs(30));
     loop {
@@ -670,6 +758,7 @@ pub fn routes() -> Router<AppState> {
             "/api/oven/executors/{id}",
             axum::routing::delete(remove_executor),
         )
+        .route("/api/oven/executors/{id}/history", get(executor_history))
         .route("/api/oven/executors/{id}/poll", post(poll))
         .route("/api/oven/executors/{id}/heartbeat", post(heartbeat))
         .route("/api/oven/jobs", get(list_jobs).post(submit_job))
@@ -730,6 +819,12 @@ async fn pair_executor(
 ) -> ApiResult<Json<Paired>> {
     let identity = state.identify_admin(&headers)?;
     let address = normalize_address(&payload.address).map_err(ApiError::bad_request)?;
+    let chosen = match payload.name.as_deref().map(str::trim) {
+        Some(name) if !name.is_empty() => {
+            Some(executor_name(name).map_err(ApiError::bad_request)?)
+        }
+        _ => None,
+    };
     let server = match payload.server.filter(|s| !s.trim().is_empty()) {
         Some(server) => server.trim_end_matches('/').to_string(),
         None => own_url(&state, &headers),
@@ -739,7 +834,7 @@ async fn pair_executor(
         .timeout(Duration::from_secs(10))
         .build()
         .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    let info: ExecutorInfo = http
+    let mut info: ExecutorInfo = http
         .get(format!("{address}/oven/info"))
         .send()
         .await
@@ -759,12 +854,18 @@ async fn pair_executor(
             )
         })?;
 
+    // A name asked for wins; then the one it has here already, so pairing it
+    // again doesn't undo a rename; then whatever it calls itself.
+    let own_name = info.name.clone();
+    info.name = chosen
+        .or_else(|| state.oven.name_of(&info.id))
+        .unwrap_or(own_name.clone());
     if state.oven.name_taken(&info.id, &info.name) {
         return Err(ApiError::new(
             StatusCode::CONFLICT,
             format!(
-                "Another executor is already called '{}'. Start this one with a different \
-                 --name, or remove the other first.",
+                "Another executor is already called '{}'. Give this one a different name, or \
+                 remove the other first.",
                 info.name
             ),
         ));
@@ -777,6 +878,7 @@ async fn pair_executor(
             code: payload.code.trim().to_string(),
             server: server.clone(),
             token: token.clone(),
+            name: (info.name != own_name).then(|| info.name.clone()),
         })
         .send()
         .await
@@ -812,6 +914,19 @@ async fn pair_executor(
     }))
 }
 
+/// A name a person gave an executor, checked: it's typed after
+/// `--offload-to` and shown in tables, so short and printable.
+fn executor_name(raw: &str) -> Result<String, String> {
+    let name = raw.trim();
+    if name.chars().count() > 64 {
+        return Err("An executor's name can be at most 64 characters.".to_string());
+    }
+    if name.chars().any(char::is_control) {
+        return Err("An executor's name can't contain control characters.".to_string());
+    }
+    Ok(name.to_string())
+}
+
 /// `host:port` or a URL, as `http://host:port` with nothing after it.
 fn normalize_address(raw: &str) -> Result<String, String> {
     let raw = raw.trim().trim_end_matches('/');
@@ -845,6 +960,19 @@ fn own_url(state: &AppState, headers: &HeaderMap) -> String {
         .map(str::to_string)
         .unwrap_or_else(|| format!("localhost:{}", state.config.server.port));
     format!("{scheme}://{host}")
+}
+
+async fn executor_history(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    UrlPath(id): UrlPath<String>,
+) -> ApiResult<Json<ExecutorHistory>> {
+    state.identify(&headers)?;
+    state
+        .oven
+        .history(&id)
+        .map(Json)
+        .ok_or_else(|| ApiError::not_found("No executor has that id."))
 }
 
 async fn remove_executor(
@@ -922,14 +1050,16 @@ async fn list_jobs(
     Ok(Json(JobList { jobs }))
 }
 
-/// Submit a job. Anyone who may use the cache may offload to it; what an
-/// executor will clone is the executor's own decision (`--allow-repo`).
+/// Submit a job. Anyone who may write to the cache may offload to it — not a
+/// read-only token, which is what a fork's CI is given, because a job is code
+/// that runs on the executor. What an executor will clone is the executor's own
+/// decision (`--allow-repo`).
 async fn submit_job(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(spec): Json<JobSpec>,
 ) -> ApiResult<Json<Job>> {
-    let identity = state.identify(&headers)?;
+    let identity = state.identify_writer(&headers)?;
     super::server::require_project(&state, &spec.project)?;
     let job = state
         .oven
@@ -996,7 +1126,7 @@ async fn cancel_job(
     headers: HeaderMap,
     UrlPath(id): UrlPath<u32>,
 ) -> ApiResult<Json<Job>> {
-    let identity = state.identify(&headers)?;
+    let identity = state.identify_writer(&headers)?;
     let job = state
         .oven
         .cancel(id, &identity.name)
@@ -1185,6 +1315,45 @@ mod tests {
     }
 
     #[test]
+    fn an_executor_coming_and_going_is_remembered() {
+        let (dir, oven) = oven();
+        oven.add(&info("a", "box"), "http://x:1", "t", "admin")
+            .unwrap();
+        assert!(oven.history("nope").is_none());
+        // Not heard from yet, but the cache has only just started: no verdict.
+        assert!(oven.history("a").unwrap().changes.is_empty());
+
+        oven.authenticate("a", "t").unwrap();
+        oven.heartbeat("a", None);
+        let changes = oven.history("a").unwrap().changes;
+        assert_eq!(changes.len(), 1);
+        assert!(changes[0].online);
+
+        // Silent for longer than the grace: offline, dated from when it was
+        // last heard from rather than from when the sweep noticed.
+        let seen = chrono::Utc::now() - chrono::Duration::seconds(OFFLINE_AFTER_SECONDS * 3);
+        oven.inner.lock().unwrap().live.get_mut("a").unwrap().last_seen = Some(seen);
+        oven.sweep();
+        oven.sweep();
+        let changes = oven.history("a").unwrap().changes;
+        assert_eq!(changes.len(), 2);
+        assert!(!changes[1].online);
+        assert_eq!(
+            changes[1].at,
+            (seen + chrono::Duration::seconds(OFFLINE_AFTER_SECONDS)).to_rfc3339()
+        );
+
+        oven.authenticate("a", "t").unwrap();
+        assert_eq!(oven.history("a").unwrap().changes.len(), 3);
+        drop(oven);
+
+        let oven = Oven::open(&dir).unwrap();
+        assert_eq!(oven.history("a").unwrap().changes.len(), 3);
+        oven.remove("a").unwrap();
+        assert!(oven.inner.lock().unwrap().history.is_empty());
+    }
+
+    #[test]
     fn jobs_and_executors_survive_a_restart_but_running_jobs_do_not() {
         let (dir, oven) = oven();
         oven.add(&info("a", "box"), "http://x:1", "t", "admin")
@@ -1224,6 +1393,13 @@ mod tests {
         let next = oven.submit(spec(None), "me").unwrap();
         assert_eq!(next.id, first.id + 1);
         assert!(oven.log(next.id, 0).lines.is_empty());
+    }
+
+    #[test]
+    fn executor_names_are_short_and_printable() {
+        assert_eq!(executor_name("  gpu box ").unwrap(), "gpu box");
+        assert!(executor_name(&"x".repeat(65)).is_err());
+        assert!(executor_name("a\nb").is_err());
     }
 
     #[test]

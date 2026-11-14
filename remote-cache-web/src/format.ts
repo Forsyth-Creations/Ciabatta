@@ -29,7 +29,9 @@ export function duration(ms: number | null | undefined): string {
   if (s < 60) return `${(ms / 1000).toFixed(1)}s`;
   if (s < 3600)
     return `${Math.floor(s / 60)}m${String(s % 60).padStart(2, "0")}s`;
-  return `${Math.floor(s / 3600)}h${String(Math.floor(s / 60) % 60).padStart(2, "0")}m`;
+  if (s < 172800)
+    return `${Math.floor(s / 3600)}h${String(Math.floor(s / 60) % 60).padStart(2, "0")}m`;
+  return `${Math.floor(s / 86400)}d${String(Math.floor(s / 3600) % 24).padStart(2, "0")}h`;
 }
 
 export function compact(n: number): string {

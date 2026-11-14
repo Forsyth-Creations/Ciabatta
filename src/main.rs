@@ -347,6 +347,10 @@ async fn main() -> Result<()> {
         }
 
         Commands::Oven { subcommand } => match subcommand {
+            cli::OvenCommand::List { all } => {
+                let cwd = env::current_dir().context("Failed to get current directory")?;
+                oven::offload::executors(&cwd, all).await?;
+            }
             cli::OvenCommand::Executor {
                 name,
                 port,
@@ -378,7 +382,7 @@ async fn main() -> Result<()> {
                 cli::OffloadCommand::Logs { id } => oven::offload::logs(&cwd, id).await?,
                 cli::OffloadCommand::Fetch { id } => oven::offload::fetch(&cwd, id).await?,
                 cli::OffloadCommand::Cancel { id } => oven::offload::cancel(&cwd, id).await?,
-                cli::OffloadCommand::Executors => oven::offload::executors(&cwd).await?,
+                cli::OffloadCommand::Executors => oven::offload::executors(&cwd, true).await?,
             }
         }
 

@@ -547,6 +547,7 @@ pub enum Commands {
     /// workflows to, through a remote cache.
     ///
     ///   ciabatta oven executor                     advertise, pair, take jobs
+    ///   ciabatta oven list                         executors that are online now
     Oven {
         #[command(subcommand)]
         subcommand: OvenCommand,
@@ -1810,6 +1811,14 @@ pub enum PythonCommand {
 
 #[derive(Subcommand, Debug)]
 pub enum OvenCommand {
+    /// The executors paired with this project's remote cache that are online
+    /// now, with what each is doing and for how long.
+    #[command(visible_alias = "ls")]
+    List {
+        /// Offline executors too.
+        #[arg(long)]
+        all: bool,
+    },
     /// Run workflows for other machines.
     ///
     /// Advertises this machine on the local network (mDNS) and prints its

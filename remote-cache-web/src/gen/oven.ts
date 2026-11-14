@@ -162,6 +162,26 @@ export interface ExecutorView {
 }
 
 /**
+ * A change in whether an executor could be reached: online when it checks in,
+ * offline once it has been silent for OFFLINE_AFTER_SECONDS.
+ */
+export interface StatusChange {
+  /**
+   * When it changed (RFC 3339).
+   */
+  at: string;
+  online: boolean;
+}
+
+/**
+ * GET /api/oven/executors/{id}/history: the cache's record of an executor
+ * coming and going, oldest first. Only the most recent changes are kept.
+ */
+export interface ExecutorHistory {
+  changes: StatusChange[];
+}
+
+/**
  * An executor the cache can see on the network, paired or not.
  */
 export interface Discovered {
@@ -224,6 +244,10 @@ export interface PairRequest {
    * The executor's credential for that cache. The cache keeps only its hash.
    */
   token: string;
+  /**
+   * What the cache calls it, when that's not the name it gave itself.
+   */
+  name?: string | null;
 }
 
 /**
@@ -240,6 +264,11 @@ export interface PairWith {
    * from, unless set.
    */
   server?: string | null;
+  /**
+   * What to call it on this cache (and what --offload-to names). Unset keeps
+   * the name it already has here, or else the one it gave itself.
+   */
+  name?: string | null;
 }
 
 /**

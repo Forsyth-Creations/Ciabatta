@@ -25,6 +25,8 @@ import {
   TableHead,
   TableRow,
   TextField,
+  ToggleButton,
+  ToggleButtonGroup,
   Tooltip,
   Typography,
 } from "@mui/material";
@@ -34,6 +36,7 @@ import {
   isDone,
   word,
   type Discovered,
+  type ExecutorHistory,
   type ExecutorList,
   type ExecutorView,
   type Job,
@@ -43,7 +46,7 @@ import {
   type PairWith,
 } from "../api";
 import { EmptyRow, Mono, Prose, Section, Tag, When } from "../components/ui";
-import { ago } from "../format";
+import { ago, duration } from "../format";
 import { monoFontStack } from "../theme";
 import { useLoad } from "../useLoad";
 
@@ -72,16 +75,21 @@ export function Executors({ refreshKey }: { refreshKey: number }) {
   const [pairing, setPairing] = useState<PairTarget | null>(null);
   const [manualAddress, setManualAddress] = useState("");
   const [manualCode, setManualCode] = useState("");
+  const [manualName, setManualName] = useState("");
   const [removing, setRemoving] = useState<{ id: string; name: string } | null>(null);
   const [viewing, setViewing] = useState<number | null>(null);
+  const [inspecting, setInspecting] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
-  const pair = async (address: string, code: string) => {
+  const pair = async (address: string, code: string, name: string) => {
     try {
       // The address the executor should use for this cache: the one this
       // page was loaded from, which a machine on the same network can reach.
+      // Left out when blank: the cache keeps its name for it, or uses the one it
+      // gave itself.
       const request: PairWith = { address, code, server: location.origin };
+      if (name.trim()) request.name = name.trim();
       const result = await api<Paired>("/api/oven/executors", {
         method: "POST",
         body: JSON.stringify(request),
@@ -91,6 +99,7 @@ export function Executors({ refreshKey }: { refreshKey: number }) {
       setPairing(null);
       setManualAddress("");
       setManualCode("");
+      setManualName("");
       executors.reload();
     } catch (e) {
       setActionError((e as Error).message);
@@ -145,7 +154,12 @@ export function Executors({ refreshKey }: { refreshKey: number }) {
                 <EmptyRow colSpan={5}>No executors are paired yet.</EmptyRow>
               )}
               {executors.data.executors.map((e) => (
-                <TableRow key={e.id} hover>
+                <TableRow
+                  key={e.id}
+                  hover
+                  sx={{ cursor: "pointer" }}
+                  onClick={() => setInspecting(e.id)}
+                >
                   <TableCell>
                     <Mono title={e.address}>{e.name}</Mono>
                   </TableCell>
@@ -163,7 +177,10 @@ export function Executors({ refreshKey }: { refreshKey: number }) {
                     <Button
                       size="small"
                       color="error"
-                      onClick={() => setRemoving({ id: e.id, name: e.name })}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        setRemoving({ id: e.id, name: e.name });
+                      }}
                     >
                       Remove
                     </Button>
@@ -200,7 +217,13 @@ export function Executors({ refreshKey }: { refreshKey: number }) {
                       size="small"
                       variant="outlined"
                       color="warning"
-                      onClick={() => setPairing({ address: d.address, name: d.name, taken: true })}
+                      onClick={() =>
+                        setPairing({
+                          address: d.address,
+                          name: d.name,
+                          taken: true,
+                        })
+                      }
                     >
                       Move here
                     </Button>
@@ -232,7 +255,7 @@ export function Executors({ refreshKey }: { refreshKey: number }) {
               }}
               onSubmit={(event) => {
                 event.preventDefault();
-                void pair(manualAddress, manualCode);
+                void pair(manualAddress, manualCode, manualName);
               }}
             >
               <TextField
@@ -250,6 +273,14 @@ export function Executors({ refreshKey }: { refreshKey: number }) {
                 required
                 value={manualCode}
                 onChange={(e) => setManualCode(e.target.value)}
+              />
+              <TextField
+                size="small"
+                label="Name (optional)"
+                placeholder="what it calls itself"
+                inputProps={{ maxLength: 64 }}
+                value={manualName}
+                onChange={(e) => setManualName(e.target.value)}
               />
               <Button type="submit" variant="contained">
                 Pair
@@ -312,7 +343,7 @@ export function Executors({ refreshKey }: { refreshKey: number }) {
       <PairDialog
         target={pairing}
         onClose={() => setPairing(null)}
-        onPair={(code) => pairing && void pair(pairing.address, code)}
+        onPair={(code, name) => pairing && void pair(pairing.address, code, name)}
       />
 
       <Dialog open={removing !== null} onClose={() => setRemoving(null)}>
@@ -345,6 +376,15 @@ export function Executors({ refreshKey }: { refreshKey: number }) {
           </Button>
         </DialogActions>
       </Dialog>
+
+      {inspecting !== null && (
+        <ExecutorDialog
+          executor={executors.data.executors.find((e) => e.id === inspecting) ?? null}
+          tick={tick}
+          onClose={() => setInspecting(null)}
+          onJob={setViewing}
+        />
+      )}
 
       {viewing !== null && (
         <JobDialog id={viewing} onClose={() => setViewing(null)} onError={setActionError} />
@@ -417,7 +457,14 @@ function ExecutorStatus({
           <AutorenewIcon color="warning" sx={{ ...icon, ...SPIN }} />
           <Typography component="span" sx={{ fontWeight: 600 }}>
             {e.job ? (
-              <Link component="button" variant="body2" onClick={() => onJob(e.job!)}>
+              <Link
+                component="button"
+                variant="body2"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onJob(e.job!);
+                }}
+              >
                 Running job {e.job}
               </Link>
             ) : (
@@ -467,6 +514,243 @@ function ExecutorStatus({
   );
 }
 
+const WINDOWS = {
+  "24h": 24 * 3600 * 1000,
+  "7d": 7 * 24 * 3600 * 1000,
+  "30d": 30 * 24 * 3600 * 1000,
+} as const;
+type Range = keyof typeof WINDOWS;
+
+/** A stretch of time an executor was up, down, or not yet watched. */
+interface Span {
+  from: number;
+  to: number;
+  online: boolean | null;
+}
+
+/** The changes cut into spans covering `[start, now]`. */
+function spans(history: ExecutorHistory, start: number, now: number): Span[] {
+  const changes = history.changes.map((c) => ({
+    at: Date.parse(c.at),
+    online: c.online,
+  }));
+  const out: Span[] = [];
+  let at = start;
+  let online: boolean | null = null;
+  for (const c of changes) {
+    if (c.at <= start) {
+      online = c.online;
+      continue;
+    }
+    if (c.at > now) break;
+    out.push({ from: at, to: c.at, online });
+    at = c.at;
+    online = c.online;
+  }
+  out.push({ from: at, to: now, online });
+  return out.filter((s) => s.to > s.from);
+}
+
+/**
+ * One executor's comings and goings, as the cache saw them: how much of the
+ * chosen window it was reachable, a strip of up and down, and the changes.
+ */
+function ExecutorDialog({
+  executor,
+  tick,
+  onClose,
+  onJob,
+}: {
+  executor: ExecutorView | null;
+  tick: number;
+  onClose: () => void;
+  onJob: (job: number) => void;
+}) {
+  const [range, setRange] = useState<Range>("24h");
+  const id = executor?.id;
+  const history = useLoad(
+    () =>
+      id
+        ? api<ExecutorHistory>(`/api/oven/executors/${encodeURIComponent(id)}/history`)
+        : Promise.resolve(null),
+    `${id}:${tick}`,
+  );
+
+  // Removed while open.
+  if (!executor) return null;
+
+  const now = Date.now();
+  const start = now - WINDOWS[range];
+  const parts = history.data ? spans(history.data, start, now) : [];
+  const total = (online: boolean | null) =>
+    parts.filter((p) => p.online === online).reduce((sum, p) => sum + (p.to - p.from), 0);
+  const up = total(true);
+  const down = total(false);
+  const watched = up + down;
+  const recent = [...(history.data?.changes ?? [])].reverse().slice(0, 20);
+
+  return (
+    <Dialog open onClose={onClose} fullWidth maxWidth="md">
+      <DialogTitle
+        sx={{
+          display: "flex",
+          alignItems: "center",
+          gap: 1.5,
+          flexWrap: "wrap",
+        }}
+      >
+        <Mono>{executor.name}</Mono>
+        <Typography variant="body2" color="text.secondary">
+          {executor.address} · {executor.platform} · {executor.version}
+        </Typography>
+      </DialogTitle>
+      <DialogContent dividers>
+        <Box sx={{ mb: 2 }}>
+          <ExecutorStatus executor={executor} onJob={onJob} />
+        </Box>
+        {history.error && (
+          <Alert severity="error" sx={{ mb: 2 }}>
+            {history.error}
+          </Alert>
+        )}
+        {!history.data && history.loading && <LinearProgress />}
+        {history.data && (
+          <>
+            <Box
+              sx={{
+                display: "flex",
+                alignItems: "center",
+                gap: 2,
+                mb: 1,
+                flexWrap: "wrap",
+              }}
+            >
+              <Typography sx={{ fontWeight: 600 }}>
+                {watched > 0
+                  ? `${((100 * up) / watched).toFixed(watched === up ? 0 : 1)}% up`
+                  : "No record yet"}
+              </Typography>
+              {watched > 0 && (
+                <Typography variant="body2" color="text.secondary">
+                  up {duration(up)} · down {duration(down)}
+                  {watched < WINDOWS[range] - 1000 &&
+                    ` · not watched for ${duration(WINDOWS[range] - watched)}`}
+                </Typography>
+              )}
+              <Box sx={{ flex: 1 }} />
+              <ToggleButtonGroup
+                size="small"
+                exclusive
+                value={range}
+                onChange={(_, value: Range | null) => value && setRange(value)}
+              >
+                {(Object.keys(WINDOWS) as Range[]).map((w) => (
+                  <ToggleButton key={w} value={w} sx={{ py: 0.25, px: 1.25 }}>
+                    {w}
+                  </ToggleButton>
+                ))}
+              </ToggleButtonGroup>
+            </Box>
+
+            <Box
+              sx={{
+                display: "flex",
+                height: 22,
+                borderRadius: 1,
+                overflow: "hidden",
+                bgcolor: "action.hover",
+              }}
+            >
+              {parts.map((p) => (
+                <Tooltip
+                  key={p.from}
+                  title={`${p.online === null ? "Not watched" : p.online ? "Online" : "Offline"} · ${new Date(p.from).toLocaleString()} → ${p.to >= now ? "now" : new Date(p.to).toLocaleString()} (${duration(p.to - p.from)})`}
+                >
+                  <Box
+                    sx={{
+                      flex: `${p.to - p.from} 0 0`,
+                      minWidth: 2,
+                      bgcolor:
+                        p.online === null
+                          ? "transparent"
+                          : p.online
+                            ? "success.main"
+                            : "error.main",
+                      opacity: p.online === false ? 0.8 : 1,
+                    }}
+                  />
+                </Tooltip>
+              ))}
+            </Box>
+            <Box sx={{ display: "flex", justifyContent: "space-between", mt: 0.5 }}>
+              <Typography variant="caption" color="text.secondary">
+                {range} ago
+              </Typography>
+              <Typography variant="caption" color="text.secondary">
+                now
+              </Typography>
+            </Box>
+
+            <Typography sx={{ fontWeight: 600, mt: 3, mb: 1 }}>Recent changes</Typography>
+            {recent.length === 0 ? (
+              <Typography variant="body2" color="text.secondary">
+                Nothing yet: the cache records a change when the executor checks in or goes quiet
+                for a minute.
+              </Typography>
+            ) : (
+              <Table size="small">
+                <TableBody>
+                  {recent.map((c, i) => {
+                    // The next change (newer) ends this one.
+                    const until = i === 0 ? now : Date.parse(recent[i - 1].at);
+                    return (
+                      <TableRow key={c.at + c.online}>
+                        <TableCell sx={{ width: 140 }}>
+                          {c.online ? (
+                            <Box
+                              sx={{
+                                display: "flex",
+                                alignItems: "center",
+                                gap: 0.75,
+                              }}
+                            >
+                              <CheckCircleIcon color="success" sx={{ fontSize: 18 }} /> Came online
+                            </Box>
+                          ) : (
+                            <Box
+                              sx={{
+                                display: "flex",
+                                alignItems: "center",
+                                gap: 0.75,
+                              }}
+                            >
+                              <CloudOffIcon color="error" sx={{ fontSize: 18 }} /> Went offline
+                            </Box>
+                          )}
+                        </TableCell>
+                        <TableCell sx={{ color: "text.secondary" }}>
+                          <When at={c.at} />
+                        </TableCell>
+                        <TableCell sx={{ color: "text.secondary" }}>
+                          {i === 0 ? "for " : "lasted "}
+                          {duration(until - Date.parse(c.at))}
+                        </TableCell>
+                      </TableRow>
+                    );
+                  })}
+                </TableBody>
+              </Table>
+            )}
+          </>
+        )}
+      </DialogContent>
+      <DialogActions>
+        <Button onClick={onClose}>Close</Button>
+      </DialogActions>
+    </Dialog>
+  );
+}
+
 function PairDialog({
   target,
   onClose,
@@ -474,17 +758,21 @@ function PairDialog({
 }: {
   target: PairTarget | null;
   onClose: () => void;
-  onPair: (code: string) => void;
+  onPair: (code: string, name: string) => void;
 }) {
   const [code, setCode] = useState("");
-  useEffect(() => setCode(""), [target]);
+  const [name, setName] = useState("");
+  useEffect(() => {
+    setCode("");
+    setName(target?.name ?? "");
+  }, [target]);
   return (
     <Dialog open={target !== null} onClose={onClose}>
       <Box
         component="form"
         onSubmit={(event) => {
           event.preventDefault();
-          onPair(code);
+          onPair(code, name);
         }}
       >
         <DialogTitle>Pair with {target?.name ?? target?.address}</DialogTitle>
@@ -506,6 +794,16 @@ function PairDialog({
             placeholder="123-456"
             value={code}
             onChange={(e) => setCode(e.target.value)}
+          />
+          <TextField
+            fullWidth
+            size="small"
+            label="Name"
+            helperText="What it's called on this cache, and what --offload-to takes."
+            inputProps={{ maxLength: 64 }}
+            sx={{ mt: 2 }}
+            value={name}
+            onChange={(e) => setName(e.target.value)}
           />
         </DialogContent>
         <DialogActions>

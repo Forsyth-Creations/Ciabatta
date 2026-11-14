@@ -571,7 +571,13 @@ async fn pair(
     // A code is good for one pairing.
     *shared.code.lock().unwrap() = new_code();
     shared.attempts.store(0, Ordering::Relaxed);
-    println!("Paired with {} — waiting for jobs.", pairing.server);
+    match request.name.as_deref() {
+        Some(name) => println!(
+            "Paired with {} as {name} — waiting for jobs.",
+            pairing.server
+        ),
+        None => println!("Paired with {} — waiting for jobs.", pairing.server),
+    }
     shared.paired.notify_waiters();
     Json(shared.info.clone()).into_response()
 }

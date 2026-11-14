@@ -8,7 +8,14 @@
  * scrolls to one, are the log's business.
  */
 
-import { IconButton, InputAdornment, Stack, TextField, Tooltip, Typography } from "@mui/material";
+import {
+  IconButton,
+  InputAdornment,
+  Stack,
+  TextField,
+  Tooltip,
+  Typography,
+} from "@mui/material";
 import CloseIcon from "@mui/icons-material/Close";
 import KeyboardArrowDownIcon from "@mui/icons-material/KeyboardArrowDown";
 import KeyboardArrowUpIcon from "@mui/icons-material/KeyboardArrowUp";

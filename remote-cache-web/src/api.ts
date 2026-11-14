@@ -16,8 +16,13 @@ export function hasToken() {
   return token !== null;
 }
 
-export async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
-  const headers: Record<string, string> = { "Content-Type": "application/json" };
+export async function api<T>(
+  path: string,
+  options: RequestInit = {},
+): Promise<T> {
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+  };
   if (token) headers["Authorization"] = "Bearer " + token;
   const response = await fetch(path, { ...options, headers });
   const text = await response.text();
@@ -138,7 +143,12 @@ export interface Stats {
     last_saved_at: string | null;
     last_eviction: { at: string; removed: number; freed: number } | null;
     /** The last "clear all". Absent until somebody has cleared the cache. */
-    last_clear?: { at: string; by: string; removed: number; freed: number } | null;
+    last_clear?: {
+      at: string;
+      by: string;
+      removed: number;
+      freed: number;
+    } | null;
     /** Older servers don't send this; the charts say so rather than break. */
     daily?: Record<string, Day>;
     recent: Event[];
@@ -262,7 +272,11 @@ export async function uploadBinary(
   file: File,
   password: string,
   options: { version?: string; apply?: boolean } = {},
-): Promise<{ version: string | null; applied: boolean; sha256: string | null }> {
+): Promise<{
+  version: string | null;
+  applied: boolean;
+  sha256: string | null;
+}> {
   const query = new URLSearchParams();
   if (options.version) query.set("version", options.version);
   if (options.apply) query.set("apply", "true");
@@ -271,11 +285,14 @@ export async function uploadBinary(
     "X-Ciabatta-Update-Password": password,
   };
   if (token) headers["Authorization"] = "Bearer " + token;
-  const response = await fetch(`/api/release/${encodeURIComponent(platform)}?${query}`, {
-    method: "PUT",
-    headers,
-    body: file,
-  });
+  const response = await fetch(
+    `/api/release/${encodeURIComponent(platform)}?${query}`,
+    {
+      method: "PUT",
+      headers,
+      body: file,
+    },
+  );
   const text = await response.text();
   let body: unknown = null;
   try {
@@ -287,5 +304,45 @@ export async function uploadBinary(
     const message = (body as { error?: string } | null)?.error;
     throw new Error(message || text || response.statusText);
   }
-  return body as { version: string | null; applied: boolean; sha256: string | null };
+  return body as {
+    version: string | null;
+    applied: boolean;
+    sha256: string | null;
+  };
+}
+
+// ─── Offloading ─────────────────────────────────────────────────────────────
+//
+// Generated from proto/oven.proto, the same definition the server's Rust is
+// generated from — so a field renamed there fails this app's typecheck too.
+
+export type {
+  Discovered,
+  ExecutorHistory,
+  ExecutorList,
+  ExecutorState,
+  ExecutorView,
+  Job,
+  JobList,
+  JobState,
+  LogPage,
+  Paired,
+  PairWith,
+  StatusChange,
+} from "./gen/oven";
+
+import type { ExecutorState, JobState } from "./gen/oven";
+
+/** `JOB_STATE_RUNNING` → `running`: an enum value as a person reads it. */
+export function word(state: JobState | ExecutorState): string {
+  return state.replace(/^(JOB|EXECUTOR)_STATE_/, "").toLowerCase();
+}
+
+/** Whether a job is over, one way or another. */
+export function isDone(state: JobState): boolean {
+  return (
+    state === "JOB_STATE_SUCCEEDED" ||
+    state === "JOB_STATE_FAILED" ||
+    state === "JOB_STATE_CANCELLED"
+  );
 }

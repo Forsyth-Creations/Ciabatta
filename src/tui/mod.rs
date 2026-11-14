@@ -397,8 +397,10 @@ async fn tui_loop(
                     None => {
                         open = false;
                         app.finish();
-                        // Stopped on request: there's nothing left to watch.
-                        if app.stopping {
+                        // Stopped on request — from the keyboard, or by a
+                        // signal (see `runner::stop_on_signals`): there's
+                        // nothing left to watch.
+                        if app.stopping || cancel.is_stopped() {
                             break;
                         }
                     }

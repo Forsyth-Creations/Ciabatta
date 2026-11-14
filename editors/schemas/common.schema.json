@@ -117,7 +117,9 @@
           "description": "The profile the step builds with, named by the target/ directory its artifacts land in: `debug` (the default) or `release`. Or an environment variable holding one of the two — `$CARGO_PROFILE`, `${CARGO_PROFILE}`, or `${CARGO_PROFILE:-release}` for a default when it's unset or empty (otherwise `debug`). The value comes from the step's .env, the elected env profile, or the shell, and the variable keys the cache.",
           "anyOf": [
             { "enum": ["debug", "release"] },
-            { "pattern": "^\\$([A-Za-z_][A-Za-z0-9_]*|\\{[A-Za-z_][A-Za-z0-9_]*(:-(debug|release))?\\})$" }
+            {
+              "pattern": "^\\$([A-Za-z_][A-Za-z0-9_]*|\\{[A-Za-z_][A-Za-z0-9_]*(:-(debug|release))?\\})$"
+            }
           ],
           "examples": ["release", "debug", "${CARGO_PROFILE:-release}"]
         },
@@ -177,9 +179,18 @@
       "additionalProperties": false,
       "required": ["label"],
       "properties": {
-        "label": { "type": "string", "description": "Human-readable label shown in the UI." },
-        "script": { "type": "string", "description": "A bash script to run as the fix, relative to the project root." },
-        "run": { "type": "string", "description": "An inline shell command, as an alternative to `script`." },
+        "label": {
+          "type": "string",
+          "description": "Human-readable label shown in the UI."
+        },
+        "script": {
+          "type": "string",
+          "description": "A bash script to run as the fix, relative to the project root."
+        },
+        "run": {
+          "type": "string",
+          "description": "An inline shell command, as an alternative to `script`."
+        },
         "default": {
           "type": "boolean",
           "default": false,
@@ -197,17 +208,31 @@
         {
           "label": "step",
           "description": "A step that runs a shell command.",
-          "body": { "name": "${1:build}", "description": "${2}", "run": "${3:make}" }
+          "body": {
+            "name": "${1:build}",
+            "description": "${2}",
+            "run": "${3:make}"
+          }
         },
         {
           "label": "step with needs",
           "description": "A step that waits for others in this workflow.",
-          "body": { "name": "${1:test}", "needs": ["${2}"], "run": "${3:make test}" }
+          "body": {
+            "name": "${1:test}",
+            "needs": ["${2}"],
+            "run": "${3:make test}"
+          }
         },
         {
           "label": "push step",
           "description": "Publish an artifact to a configured registry.",
-          "body": { "name": "${1:publish}", "kind": "push", "registry": "${2}", "artifact": "${3:dist/app.tar.gz}", "publish_path": "${4:app/{CIABATTA_COMMIT\\}/app.tar.gz}" }
+          "body": {
+            "name": "${1:publish}",
+            "kind": "push",
+            "registry": "${2}",
+            "artifact": "${3:dist/app.tar.gz}",
+            "publish_path": "${4:app/{CIABATTA_COMMIT\\}/app.tar.gz}"
+          }
         },
         {
           "label": "pull step",
@@ -217,7 +242,12 @@
         {
           "label": "release push step",
           "description": "Publish build outputs as a versioned release — by default under the git tag on HEAD.",
-          "body": { "name": "${1:release}", "kind": "release-push", "needs": ["${2:build}"], "release": { "files": ["${3:dist/**}"] } }
+          "body": {
+            "name": "${1:release}",
+            "kind": "release-push",
+            "needs": ["${2:build}"],
+            "release": { "files": ["${3:dist/**}"] }
+          }
         },
         {
           "label": "release pull step",
@@ -227,7 +257,12 @@
         {
           "label": "recovery node",
           "description": "Offer fixes when a step fails; reach it with that step's `on_error`.",
-          "body": { "name": "${1:fix}", "recover": true, "message": "${2:What should happen?}", "options": [{ "label": "${3:Retry}", "run": "${4}" }] }
+          "body": {
+            "name": "${1:fix}",
+            "recover": true,
+            "message": "${2:What should happen?}",
+            "options": [{ "label": "${3:Retry}", "run": "${4}" }]
+          }
         }
       ],
       "properties": {
@@ -285,7 +320,16 @@
         "kind": {
           "type": "string",
           "description": "The phase this step belongs to. Free-form and cosmetic (it labels the node on the graph) except for `push` and `pull`, which select the built-in registry action, and `release-push` and `release-pull`, which publish or fetch a versioned release (see `release`).",
-          "examples": ["setup", "build", "test", "deploy", "push", "pull", "release-push", "release-pull"]
+          "examples": [
+            "setup",
+            "build",
+            "test",
+            "deploy",
+            "push",
+            "pull",
+            "release-push",
+            "release-pull"
+          ]
         },
         "registry": {
           "type": "string",
@@ -302,7 +346,10 @@
         "publish_path": {
           "description": "Destination path in the registry, with {CIABATTA_*} substitution — or a list of local globs, each uploaded under {CIABATTA_PATH} keeping its relative path.",
           "anyOf": [
-            { "type": "string", "examples": ["team/app/{CIABATTA_COMMIT}/app.tar.gz"] },
+            {
+              "type": "string",
+              "examples": ["team/app/{CIABATTA_COMMIT}/app.tar.gz"]
+            },
             { "type": "array", "items": { "type": "string" } }
           ]
         },
@@ -321,7 +368,10 @@
               "publish_path": {
                 "type": "string",
                 "description": "What to fetch, as a single pull's publish_path: a path in a raw repository (a file or a folder), or an npm/PyPI package spec. {VAR} substitution works.",
-                "examples": ["shared/proto/{CIABATTA_COMMIT}/proto", "@acme/sdk@1.2.3"]
+                "examples": [
+                  "shared/proto/{CIABATTA_COMMIT}/proto",
+                  "@acme/sdk@1.2.3"
+                ]
               },
               "artifact": {
                 "type": "string",
@@ -422,7 +472,10 @@
       },
       "allOf": [
         {
-          "if": { "properties": { "recover": { "const": true } }, "required": ["recover"] },
+          "if": {
+            "properties": { "recover": { "const": true } },
+            "required": ["recover"]
+          },
           "then": { "required": ["options"] },
           "else": {
             "anyOf": [
@@ -433,11 +486,17 @@
           }
         },
         {
-          "if": { "properties": { "kind": { "enum": ["push", "pull"] } }, "required": ["kind"] },
+          "if": {
+            "properties": { "kind": { "enum": ["push", "pull"] } },
+            "required": ["kind"]
+          },
           "then": { "required": ["registry"] }
         },
         {
-          "if": { "properties": { "kind": { "const": "release-push" } }, "required": ["kind"] },
+          "if": {
+            "properties": { "kind": { "const": "release-push" } },
+            "required": ["kind"]
+          },
           "then": { "required": ["release"] }
         }
       ]

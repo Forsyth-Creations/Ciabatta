@@ -1,5 +1,13 @@
 import { useState } from "react";
-import { Alert, Box, Button, Card, CardContent, TextField, Typography } from "@mui/material";
+import {
+  Alert,
+  Box,
+  Button,
+  Card,
+  CardContent,
+  TextField,
+  Typography,
+} from "@mui/material";
 
 import { api, login, type Users } from "../api";
 import { useLoad } from "../useLoad";
@@ -22,13 +30,14 @@ export function Login({ onSignedIn }: { onSignedIn: () => void }) {
             Sign in
           </Typography>
           <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-            This cache authenticates. Sign in to see its activity and manage users.
+            This cache authenticates. Sign in to see its activity and manage
+            users.
           </Typography>
           {users.data?.locked_out && (
             <Alert severity="warning" sx={{ mb: 2 }}>
-              This cache requires credentials but has none, so nobody can sign in. Add a user with{" "}
-              <code>admin: true</code> under <code>auth.users</code> in the server's config and
-              restart.
+              This cache requires credentials but has none, so nobody can sign
+              in. Add a user with <code>admin: true</code> under{" "}
+              <code>auth.users</code> in the server's config and restart.
             </Alert>
           )}
           {error && (

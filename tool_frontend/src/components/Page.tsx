@@ -26,7 +26,11 @@ export function PageHeader({ title, description, actions }: PageHeaderProps) {
       <Box>
         <Typography variant="h1">{title}</Typography>
         {description && (
-          <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5, maxWidth: "60ch" }}>
+          <Typography
+            variant="body2"
+            color="text.secondary"
+            sx={{ mt: 0.5, maxWidth: "60ch" }}
+          >
             {description}
           </Typography>
         )}
@@ -65,7 +69,11 @@ export function ErrorNote({ error }: { error: unknown }) {
  * Gate for pages whose data is per-project. Shows a useful prompt instead of
  * firing a request that would fail when nothing is registered yet.
  */
-export function RequireProject({ children }: { children: (projectId: string) => ReactNode }) {
+export function RequireProject({
+  children,
+}: {
+  children: (projectId: string) => ReactNode;
+}) {
   const { projectId, isLoading } = useProjectContext();
 
   if (isLoading) return <Loading label="Finding your projects…" />;
@@ -73,8 +81,8 @@ export function RequireProject({ children }: { children: (projectId: string) => 
   if (!projectId) {
     return (
       <Alert severity="info">
-        No project is registered yet. Run any ciabatta command inside a checkout —
-        for example <code>ciabatta analyze</code> — and it will appear in the
+        No project is registered yet. Run any ciabatta command inside a checkout
+        — for example <code>ciabatta analyze</code> — and it will appear in the
         switcher above.
       </Alert>
     );

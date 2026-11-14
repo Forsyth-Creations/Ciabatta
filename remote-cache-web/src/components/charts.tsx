@@ -23,15 +23,21 @@ import { compact, lastDays, rate, saved, shortDay, timeUnit } from "../format";
 import { NoData, useChartColors } from "./ui";
 
 const count = (v: number | null) => (v === null ? "" : v.toLocaleString());
-const percent = (v: number | null) => (v === null ? "no lookups" : `${v.toFixed(0)}%`);
+const percent = (v: number | null) =>
+  v === null ? "no lookups" : `${v.toFixed(0)}%`;
 
 /** Recessive gridlines and axes, so the marks carry the chart. */
 function useAxisSx() {
   const theme = useTheme();
   return {
-    "& .MuiChartsAxis-line, & .MuiChartsAxis-tick": { stroke: theme.palette.divider },
+    "& .MuiChartsAxis-line, & .MuiChartsAxis-tick": {
+      stroke: theme.palette.divider,
+    },
     "& .MuiChartsAxis-tickLabel": { fill: theme.palette.text.secondary },
-    "& .MuiChartsGrid-line": { stroke: theme.palette.divider, strokeDasharray: "2 4" },
+    "& .MuiChartsGrid-line": {
+      stroke: theme.palette.divider,
+      strokeDasharray: "2 4",
+    },
   };
 }
 
@@ -136,7 +142,11 @@ export function DailyHitRate({
     return lookups ? (r!.hits * 100) / lookups : null;
   });
   if (!daily || data.every((v) => v === null)) {
-    return <NoData height={height}>The hit rate appears here once there are lookups.</NoData>;
+    return (
+      <NoData height={height}>
+        The hit rate appears here once there are lookups.
+      </NoData>
+    );
   }
   return (
     <LineChart
@@ -203,9 +213,15 @@ export function RateGauge({
           fontWeight: 600,
           transform: "translate(0px, 6px)",
         },
-        [`& .${gaugeClasses.valueText} text`]: { fill: theme.palette.text.primary },
-        [`& .${gaugeClasses.valueArc}`]: { fill: value === null ? "transparent" : colors.hit },
-        [`& .${gaugeClasses.referenceArc}`]: { fill: theme.palette.action.selected },
+        [`& .${gaugeClasses.valueText} text`]: {
+          fill: theme.palette.text.primary,
+        },
+        [`& .${gaugeClasses.valueArc}`]: {
+          fill: value === null ? "transparent" : colors.hit,
+        },
+        [`& .${gaugeClasses.referenceArc}`]: {
+          fill: theme.palette.action.selected,
+        },
       }}
     />
   );
@@ -244,16 +260,21 @@ export function CapacityGauge({
           fontWeight: 600,
           transform: "translate(0px, 6px)",
         },
-        [`& .${gaugeClasses.valueText} text`]: { fill: theme.palette.text.primary },
+        [`& .${gaugeClasses.valueText} text`]: {
+          fill: theme.palette.text.primary,
+        },
         [`& .${gaugeClasses.valueArc}`]: { fill },
-        [`& .${gaugeClasses.referenceArc}`]: { fill: theme.palette.action.selected },
+        [`& .${gaugeClasses.referenceArc}`]: {
+          fill: theme.palette.action.selected,
+        },
       }}
     />
   );
 }
 
 /** Truncate a long axis label; the tooltip carries the full name. */
-const clip = (max: number) => (s: string) => (s.length > max ? `${s.slice(0, max - 1)}…` : s);
+const clip = (max: number) => (s: string) =>
+  s.length > max ? `${s.slice(0, max - 1)}…` : s;
 
 /** Each project's hits and misses side by side, busiest first. */
 export function ProjectLookups({ projects }: { projects: ProjectStats[] }) {
@@ -261,7 +282,12 @@ export function ProjectLookups({ projects }: { projects: ProjectStats[] }) {
   const sx = useAxisSx();
   const busy = projects
     .filter((p) => p.counters.hits + p.counters.misses > 0)
-    .sort((a, b) => b.counters.hits + b.counters.misses - (a.counters.hits + a.counters.misses))
+    .sort(
+      (a, b) =>
+        b.counters.hits +
+        b.counters.misses -
+        (a.counters.hits + a.counters.misses),
+    )
     .slice(0, 10);
   const height = Math.max(160, 56 + busy.length * 34);
   if (busy.length === 0) {
@@ -279,7 +305,8 @@ export function ProjectLookups({ projects }: { projects: ProjectStats[] }) {
         {
           scaleType: "band" as const,
           data: busy.map((p) => p.project.name),
-          valueFormatter: (name: string, ctx) => (ctx.location === "tick" ? clip(18)(name) : name),
+          valueFormatter: (name: string, ctx) =>
+            ctx.location === "tick" ? clip(18)(name) : name,
         },
       ]}
       xAxis={[{ valueFormatter: (v: number) => compact(v) }]}
@@ -320,13 +347,19 @@ export function MissingTargets({ projects }: { projects: ProjectStats[] }) {
   const sx = useAxisSx();
   const targets = projects
     .flatMap((p) =>
-      (p.targets ?? []).map((t) => ({ ...t, label: `${t.name}`, project: p.project.name })),
+      (p.targets ?? []).map((t) => ({
+        ...t,
+        label: `${t.name}`,
+        project: p.project.name,
+      })),
     )
     .filter((t) => t.misses > 0)
     .sort((a, b) => b.misses - a.misses)
     .slice(0, 10);
   if (targets.length === 0) {
-    return <NoData height={160}>No target has missed. Nothing to chase.</NoData>;
+    return (
+      <NoData height={160}>No target has missed. Nothing to chase.</NoData>
+    );
   }
   const height = Math.max(160, 40 + targets.length * 30);
   // Two projects can share a target name; the band axis needs distinct keys.
@@ -346,7 +379,9 @@ export function MissingTargets({ projects }: { projects: ProjectStats[] }) {
             scaleType: "band" as const,
             data: keys,
             valueFormatter: (key: string, ctx) =>
-              ctx.location === "tick" ? clip(24)(name(key).split(" · ")[1] ?? "") : name(key),
+              ctx.location === "tick"
+                ? clip(24)(name(key).split(" · ")[1] ?? "")
+                : name(key),
           },
         ]}
         xAxis={[{ valueFormatter: (v: number) => compact(v) }]}
@@ -412,7 +447,8 @@ export function DailySaved({
           label: "Build time saved",
           color: colors.hit,
           data: ms.map((v) => v / unit.ms),
-          valueFormatter: (v: number | null) => (v === null ? "" : saved(v * unit.ms)),
+          valueFormatter: (v: number | null) =>
+            v === null ? "" : saved(v * unit.ms),
         },
       ]}
       slotProps={{ legend: { hidden: true } }}
@@ -429,7 +465,11 @@ export function ProjectSaved({ projects }: { projects: ProjectStats[] }) {
     .sort((a, b) => (b.counters.saved_ms ?? 0) - (a.counters.saved_ms ?? 0))
     .slice(0, 10);
   if (top.length === 0) {
-    return <NoData height={160}>No project has been saved any build time yet.</NoData>;
+    return (
+      <NoData height={160}>
+        No project has been saved any build time yet.
+      </NoData>
+    );
   }
   const height = Math.max(160, 40 + top.length * 34);
   const unit = timeUnit(Math.max(...top.map((p) => p.counters.saved_ms ?? 0)));
@@ -445,7 +485,8 @@ export function ProjectSaved({ projects }: { projects: ProjectStats[] }) {
         {
           scaleType: "band" as const,
           data: top.map((p) => p.project.name),
-          valueFormatter: (name: string, ctx) => (ctx.location === "tick" ? clip(18)(name) : name),
+          valueFormatter: (name: string, ctx) =>
+            ctx.location === "tick" ? clip(18)(name) : name,
         },
       ]}
       xAxis={[{ valueFormatter: (v: number) => `${compact(v)}${unit.suffix}` }]}
@@ -455,7 +496,8 @@ export function ProjectSaved({ projects }: { projects: ProjectStats[] }) {
           label: "Build time saved",
           color: colors.hit,
           data: top.map((p) => (p.counters.saved_ms ?? 0) / unit.ms),
-          valueFormatter: (v: number | null) => (v === null ? "" : saved(v * unit.ms)),
+          valueFormatter: (v: number | null) =>
+            v === null ? "" : saved(v * unit.ms),
         },
       ]}
       slotProps={{ legend: { hidden: true } }}

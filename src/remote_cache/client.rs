@@ -300,6 +300,62 @@ impl Client {
         }
     }
 
+    /// `GET` a JSON API path, with this client's credential.
+    pub async fn get_json<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T> {
+        let response = self
+            .authed(self.http.get(self.url(path)))
+            .timeout(TIMEOUT)
+            .send()
+            .await
+            .with_context(|| format!("Could not reach the remote cache at {}", self.base))?;
+        parse(response).await
+    }
+
+    /// `POST` JSON to an API path, with this client's credential.
+    pub async fn post_json<B: serde::Serialize + ?Sized, T: serde::de::DeserializeOwned>(
+        &self,
+        path: &str,
+        body: &B,
+    ) -> Result<T> {
+        let response = self
+            .authed(self.http.post(self.url(path)))
+            .timeout(TIMEOUT)
+            .json(body)
+            .send()
+            .await
+            .with_context(|| format!("Could not reach the remote cache at {}", self.base))?;
+        parse(response).await
+    }
+
+    /// `DELETE` an API path, with this client's credential.
+    pub async fn delete_json<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T> {
+        let response = self
+            .authed(self.http.delete(self.url(path)))
+            .timeout(TIMEOUT)
+            .send()
+            .await
+            .with_context(|| format!("Could not reach the remote cache at {}", self.base))?;
+        parse(response).await
+    }
+
+    /// `GET` raw bytes from an API path, for a file of any size.
+    pub async fn get_bytes(&self, path: &str) -> Result<Vec<u8>> {
+        let response = self
+            .authed(self.http.get(self.url(path)))
+            .send()
+            .await
+            .with_context(|| format!("Could not reach the remote cache at {}", self.base))?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(anyhow::Error::new(ServerError {
+                message: error_message(status, &body),
+                code: error_code(&body),
+            }));
+        }
+        Ok(response.bytes().await?.to_vec())
+    }
+
     /// The server's health, which carries the version it advertises.
     pub async fn health(&self) -> Result<Health> {
         let response = self

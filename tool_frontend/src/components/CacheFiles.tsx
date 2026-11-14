@@ -84,22 +84,39 @@ export function FilePanel({
 
   return (
     <Paper variant="outlined" sx={{ p: 1.5 }}>
-      <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
+      <Stack
+        direction="row"
+        spacing={1}
+        alignItems="center"
+        flexWrap="wrap"
+        useFlexGap
+      >
         <Box sx={{ color: "text.secondary", display: "flex" }}>{icon}</Box>
         <Typography variant="body2" sx={{ fontWeight: 600 }}>
           {title}
         </Typography>
-        <Chip size="small" label={`${files.length} file${files.length === 1 ? "" : "s"}`} />
+        <Chip
+          size="small"
+          label={`${files.length} file${files.length === 1 ? "" : "s"}`}
+        />
         <Typography variant="caption" color="text.secondary">
           {humanizeBytes(bytes)}
         </Typography>
         <Box sx={{ flexGrow: 1 }} />
-        <Link component="button" variant="caption" onClick={() => setOpen(!open)}>
+        <Link
+          component="button"
+          variant="caption"
+          onClick={() => setOpen(!open)}
+        >
           {open ? "hide" : "show"}
         </Link>
       </Stack>
 
-      <Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: 0.5 }}>
+      <Typography
+        variant="caption"
+        color="text.secondary"
+        sx={{ display: "block", mt: 0.5 }}
+      >
         {hint}
       </Typography>
 
@@ -125,7 +142,11 @@ export function FilePanel({
               >
                 {file.path}
               </Typography>
-              <Typography variant="caption" color="text.disabled" sx={{ flexShrink: 0 }}>
+              <Typography
+                variant="caption"
+                color="text.disabled"
+                sx={{ flexShrink: 0 }}
+              >
                 {humanizeBytes(file.size)}
               </Typography>
             </Stack>
@@ -175,7 +196,13 @@ export function StageCacheBadge({ step }: { step: PlannedStep }) {
 
   return (
     <Box sx={{ mt: 1 }}>
-      <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
+      <Stack
+        direction="row"
+        spacing={1}
+        alignItems="center"
+        flexWrap="wrap"
+        useFlexGap
+      >
         <Chip
           size="small"
           icon={summary.icon}
@@ -187,7 +214,11 @@ export function StageCacheBadge({ step }: { step: PlannedStep }) {
           {step.inputs.length} in → {step.outputs.length} out
         </Typography>
         {step.diff && (
-          <Link component="button" variant="caption" onClick={() => setOpen(!open)}>
+          <Link
+            component="button"
+            variant="caption"
+            onClick={() => setOpen(!open)}
+          >
             {open ? "hide what changed" : "what changed?"}
           </Link>
         )}
@@ -204,9 +235,11 @@ export function StageCacheBadge({ step }: { step: PlannedStep }) {
   );
 }
 
-function summarize(
-  decision: Decision,
-): { icon: React.ReactElement; color: "success" | "warning" | "default"; label: string } | null {
+function summarize(decision: Decision): {
+  icon: React.ReactElement;
+  color: "success" | "warning" | "default";
+  label: string;
+} | null {
   switch (decision.outcome) {
     case "fresh":
       return {
@@ -218,7 +251,10 @@ function summarize(
       return {
         icon: <ReplayIcon />,
         color: "success",
-        label: decision.source === "remote" ? "from the remote cache" : "from the cache",
+        label:
+          decision.source === "remote"
+            ? "from the remote cache"
+            : "from the cache",
       };
     case "rebuild":
       return { icon: <BuildIcon />, color: "warning", label: "will run" };

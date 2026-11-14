@@ -33,7 +33,8 @@ interface Readme {
 }
 
 /** Whether `url` points somewhere of its own, rather than into the repo. */
-const isAbsolute = (url: string) => /^[a-z][a-z0-9+.-]*:/i.test(url) || url.startsWith("//");
+const isAbsolute = (url: string) =>
+  /^[a-z][a-z0-9+.-]*:/i.test(url) || url.startsWith("//");
 
 export function ReadmePage() {
   const { project, projectId } = useProjectContext();
@@ -59,12 +60,14 @@ export function useReadme(projectId: string | undefined) {
     queryFn: () => api.get<Readme>(`/api/projects/${projectId}/readme`),
     enabled: projectId !== undefined,
     // A missing README is an answer, not a failure to retry.
-    retry: (count, error) => !(error instanceof ApiError && error.status === 404) && count < 2,
+    retry: (count, error) =>
+      !(error instanceof ApiError && error.status === 404) && count < 2,
   });
 }
 
 /** Whether a README query failed only because there isn't one. */
-export const noReadme = (error: unknown) => error instanceof ApiError && error.status === 404;
+export const noReadme = (error: unknown) =>
+  error instanceof ApiError && error.status === 404;
 
 /**
  * A project's README, rendered — on its own tab, and on the project's
@@ -83,7 +86,8 @@ export function ReadmeView({
   if (noReadme(readme.error)) {
     return (
       <Typography color="text.secondary">
-        {projectName ?? "This project"} has no <code>README.md</code> at its root.
+        {projectName ?? "This project"} has no <code>README.md</code> at its
+        root.
       </Typography>
     );
   }
@@ -101,7 +105,11 @@ export function ReadmeView({
         );
       }
       return (
-        <Box component="span" title={`${href} — a file in the repository`} sx={{ textDecoration: "underline dotted" }}>
+        <Box
+          component="span"
+          title={`${href} — a file in the repository`}
+          sx={{ textDecoration: "underline dotted" }}
+        >
           {children}
         </Box>
       );
@@ -111,16 +119,29 @@ export function ReadmeView({
       if (!src) return null;
       const url = isAbsolute(src)
         ? src
-        : streamUrl(`/api/projects/${projectId}/readme/asset`, { path: src.replace(/^\.\//, "") });
+        : streamUrl(`/api/projects/${projectId}/readme/asset`, {
+            path: src.replace(/^\.\//, ""),
+          });
       return (
-        <img src={url} alt={alt ?? ""} width={width} height={height} title={title} loading="lazy" />
+        <img
+          src={url}
+          alt={alt ?? ""}
+          width={width}
+          height={height}
+          title={title}
+          loading="lazy"
+        />
       );
     },
   };
 
   return (
     <Box>
-      <Typography variant="caption" color="text.secondary" sx={{ fontFamily: monoFontStack }}>
+      <Typography
+        variant="caption"
+        color="text.secondary"
+        sx={{ fontFamily: monoFontStack }}
+      >
         {projectName}/{readme.data.file}
       </Typography>
       <Box
@@ -137,8 +158,18 @@ export function ReadmeView({
           },
           "& h1": { ...theme.typography.h1, textTransform: "none" },
           "& h2": { ...theme.typography.h2, textTransform: "none" },
-          "& h3": { ...theme.typography.h3, textTransform: "none", mt: 2.5, mb: 1 },
-          "& h4, & h5, & h6": { ...theme.typography.h4, textTransform: "none", mt: 2, mb: 1 },
+          "& h3": {
+            ...theme.typography.h3,
+            textTransform: "none",
+            mt: 2.5,
+            mb: 1,
+          },
+          "& h4, & h5, & h6": {
+            ...theme.typography.h4,
+            textTransform: "none",
+            mt: 2,
+            mb: 1,
+          },
           "& > :first-child": { mt: 0 },
           "& p, & ul, & ol, & table, & pre, & blockquote": { my: 1.25 },
           "& li + li": { mt: 0.5 },
@@ -169,8 +200,18 @@ export function ReadmeView({
             borderColor: "divider",
             color: "text.secondary",
           },
-          "& table": { borderCollapse: "collapse", display: "block", overflowX: "auto" },
-          "& th, & td": { border: 1, borderColor: "divider", px: 1.25, py: 0.5, textAlign: "left" },
+          "& table": {
+            borderCollapse: "collapse",
+            display: "block",
+            overflowX: "auto",
+          },
+          "& th, & td": {
+            border: 1,
+            borderColor: "divider",
+            px: 1.25,
+            py: 0.5,
+            textAlign: "left",
+          },
           "& th": { bgcolor: alpha(theme.palette.text.primary, 0.05) },
           "& img": { maxWidth: "100%" },
           "& hr": { border: 0, borderTop: 1, borderColor: "divider", my: 3 },

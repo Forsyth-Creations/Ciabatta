@@ -335,6 +335,109 @@ impl Cancel {
     }
 }
 
+/// Turn the signals that end a terminal process — SIGINT, SIGTERM, SIGHUP — into
+/// a [`Cancel::stop`] for as long as the returned guard is held.
+///
+/// Every step runs as the leader of its own process group, so that stopping it
+/// can take down everything it spawned. The price is that the terminal's
+/// Ctrl-C, closing the terminal, or a `kill` reaches only ciabatta, never the
+/// steps — and a process ended by a signal runs no destructors, so the
+/// `killpg` that was meant to clean up never happens and every dev server is
+/// left holding its port. Catching the signal and stopping the run instead lets
+/// the engine unwind the way the TUI's stop key does.
+///
+/// A second signal while the run is still unwinding, or any signal once it has
+/// finished, exits at once: somebody who asks twice means it.
+pub fn stop_on_signals(cancel: std::sync::Arc<Cancel>) -> SignalGuard {
+    let finished = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let done = finished.clone();
+    tokio::spawn(async move {
+        let Some(mut signals) = TerminatingSignals::listen() else {
+            return;
+        };
+        loop {
+            let code = signals.next().await;
+            if done.load(std::sync::atomic::Ordering::SeqCst) || cancel.is_stopped() {
+                force_exit(code);
+            }
+            crate::tui::note("Stopping the run…".to_string());
+            cancel.stop();
+        }
+    });
+    SignalGuard { finished }
+}
+
+/// Held for the life of a run started under [`stop_on_signals`]. Dropping it
+/// marks the run finished, so a later signal exits rather than stopping a run
+/// that is no longer there to stop.
+pub struct SignalGuard {
+    finished: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl Drop for SignalGuard {
+    fn drop(&mut self) {
+        self.finished
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// The signals that should end a run. `listen` is `None` if they can't be
+/// listened for, in which case the default behaviour stands.
+#[cfg(unix)]
+struct TerminatingSignals([tokio::signal::unix::Signal; 3]);
+
+#[cfg(unix)]
+impl TerminatingSignals {
+    fn listen() -> Option<Self> {
+        use tokio::signal::unix::{SignalKind, signal};
+        Some(Self([
+            signal(SignalKind::interrupt()).ok()?,
+            signal(SignalKind::terminate()).ok()?,
+            signal(SignalKind::hangup()).ok()?,
+        ]))
+    }
+
+    /// The next one to arrive, as the exit code it conventionally maps to.
+    async fn next(&mut self) -> i32 {
+        let [int, term, hup] = &mut self.0;
+        tokio::select! {
+            _ = int.recv() => 128 + libc::SIGINT,
+            _ = term.recv() => 128 + libc::SIGTERM,
+            _ = hup.recv() => 128 + libc::SIGHUP,
+        }
+    }
+}
+
+#[cfg(not(unix))]
+struct TerminatingSignals;
+
+#[cfg(not(unix))]
+impl TerminatingSignals {
+    fn listen() -> Option<Self> {
+        Some(Self)
+    }
+
+    async fn next(&mut self) -> i32 {
+        // Errors only if the handler can't be installed; treat it as asked.
+        let _ = tokio::signal::ctrl_c().await;
+        130
+    }
+}
+
+/// Leave now, giving the terminal back first if the TUI had it.
+fn force_exit(code: i32) -> ! {
+    if crate::tui::owns_screen() {
+        let _ = crossterm::terminal::disable_raw_mode();
+        let _ = crossterm::execute!(
+            std::io::stdout(),
+            crossterm::event::DisableMouseCapture,
+            crossterm::terminal::LeaveAlternateScreen,
+            crossterm::cursor::Show
+        );
+    }
+    std::process::exit(code);
+}
+
 /// The policy a run is executed under: how it resolves recovery choices, what it
 /// carries over from an earlier run, and how strictly it holds steps to what they
 /// declared. Push/pull ignore this entirely.

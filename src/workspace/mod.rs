@@ -119,6 +119,11 @@ pub struct WorkspaceMeta {
     /// the monorepo root. `--no-prefetch` turns it off for one run.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prefetch: Option<bool>,
+    /// Where the outputs of an offloaded run land, relative to the root: each
+    /// job's in a folder of its own, named for its execution number. Read
+    /// from the monorepo root. Unset is `offloaded`. See [`crate::oven`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub offload_dir: Option<String>,
     /// `.env` file path(s), relative to this sub-workspace, sourced before any
     /// of its workflows run.
     ///

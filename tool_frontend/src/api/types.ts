@@ -21,13 +21,7 @@ export interface Project {
 
 /** Where an environment variable's effective value comes from. */
 export type EnvOrigin =
-  | "environment"
-  | "env_file"
-  | "default"
-  | "config"
-  | "argument"
-  | "unset";
-
+  "environment" | "env_file" | "default" | "config" | "argument" | "unset";
 
 /**
  * One environment variable a graph depends on.
@@ -248,7 +242,12 @@ export interface RemoteTarget {
 }
 
 export interface RemoteProject {
-  project: { id: string; name: string; created_at: string; created_by: string | null };
+  project: {
+    id: string;
+    name: string;
+    created_at: string;
+    created_by: string | null;
+  };
   counters: RemoteCounters;
   hit_rate: number | null;
   entries: number;

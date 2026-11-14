@@ -30,14 +30,23 @@ export function revealCacheFiles(): boolean {
   if (!tree) return false;
   tree.scrollIntoView({ behavior: "smooth", block: "start" });
   tree.animate?.(
-    [{ boxShadow: "0 0 0 2px rgba(255, 167, 38, 0.9)" }, { boxShadow: "0 0 0 2px transparent" }],
+    [
+      { boxShadow: "0 0 0 2px rgba(255, 167, 38, 0.9)" },
+      { boxShadow: "0 0 0 2px transparent" },
+    ],
     { duration: 1400, easing: "ease-out" },
   );
   return true;
 }
 
 /** "… and 12 more — see files": to the tree when there is one, else open in place. */
-export function SeeMore({ hidden, onExpand }: { hidden: number; onExpand: () => void }) {
+export function SeeMore({
+  hidden,
+  onExpand,
+}: {
+  hidden: number;
+  onExpand: () => void;
+}) {
   return (
     <Link
       component="button"
@@ -57,7 +66,13 @@ export function SeeMore({ hidden, onExpand }: { hidden: number; onExpand: () => 
 }
 
 /** `items` joined with commas, at most [`SHORT_LIST_MAX`] of them. */
-export function ShortList({ items, mono = false }: { items: string[]; mono?: boolean }) {
+export function ShortList({
+  items,
+  mono = false,
+}: {
+  items: string[];
+  mono?: boolean;
+}) {
   const [open, setOpen] = useState(false);
   const shown = open ? items : items.slice(0, SHORT_LIST_MAX);
   const hidden = items.length - shown.length;

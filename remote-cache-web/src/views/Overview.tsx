@@ -37,14 +37,28 @@ import {
 } from "../components/charts";
 import { ClearCache } from "../components/ClearCache";
 import { UpdateServer } from "../components/UpdateServer";
-import { ChartCard, EmptyRow, Mono, Prose, Section, StatTile, Tag, When } from "../components/ui";
+import {
+  ChartCard,
+  EmptyRow,
+  Mono,
+  Prose,
+  Section,
+  StatTile,
+  Tag,
+  When,
+} from "../components/ui";
 import { ago, human, rate, saved } from "../format";
 import { useLoad } from "../useLoad";
 
 const SPANS = [7, 30, 90] as const;
 
 export function Overview({ refreshKey }: { refreshKey: number }) {
-  const { data: s, error, loading, reload } = useLoad(() => api<Stats>("/api/stats"), refreshKey);
+  const {
+    data: s,
+    error,
+    loading,
+    reload,
+  } = useLoad(() => api<Stats>("/api/stats"), refreshKey);
   const [span, setSpan] = useState<number>(30);
 
   if (error)
@@ -64,7 +78,8 @@ export function Overview({ refreshKey }: { refreshKey: number }) {
     <Box>
       {a.since && (
         <Typography variant="body2" color="text.secondary" sx={{ mt: 3 }}>
-          Counted since {new Date(a.since).toLocaleDateString()} — these survive restarts.
+          Counted since {new Date(a.since).toLocaleDateString()} — these survive
+          restarts.
         </Typography>
       )}
 
@@ -92,10 +107,15 @@ export function Overview({ refreshKey }: { refreshKey: number }) {
             </Typography>
             <RateGauge value={s.hit_rate} height={170} />
             <Typography variant="body2" color="text.secondary">
-              {s.counters.hits.toLocaleString()} of {lookups.toLocaleString()} lookups reused a
-              build
+              {s.counters.hits.toLocaleString()} of {lookups.toLocaleString()}{" "}
+              lookups reused a build
             </Typography>
-            <Stack direction="row" spacing={3} justifyContent="center" sx={{ mt: 2 }}>
+            <Stack
+              direction="row"
+              spacing={3}
+              justifyContent="center"
+              sx={{ mt: 2 }}
+            >
               <Box>
                 <Typography sx={{ fontSize: "1.3rem", fontWeight: 600 }}>
                   {s.counters.hits.toLocaleString()}
@@ -123,11 +143,19 @@ export function Overview({ refreshKey }: { refreshKey: number }) {
             </Stack>
             {/* What the hit rate is worth: the build time nobody had to sit through. */}
             <Box sx={{ mt: 2.5, pt: 2, borderTop: 1, borderColor: "divider" }}>
-              <Typography variant="overline" color="text.secondary" component="div">
+              <Typography
+                variant="overline"
+                color="text.secondary"
+                component="div"
+              >
                 Build time saved
               </Typography>
-              <Typography sx={{ fontSize: "2rem", fontWeight: 600, lineHeight: 1.1 }}>
-                {s.counters.saved_ms === undefined ? "—" : saved(s.counters.saved_ms)}
+              <Typography
+                sx={{ fontSize: "2rem", fontWeight: 600, lineHeight: 1.1 }}
+              >
+                {s.counters.saved_ms === undefined
+                  ? "—"
+                  : saved(s.counters.saved_ms)}
               </Typography>
               <Typography variant="caption" color="text.secondary">
                 {s.counters.saved_ms === undefined
@@ -158,7 +186,12 @@ export function Overview({ refreshKey }: { refreshKey: number }) {
           }
         >
           <DailyLookups daily={a.daily} span={span} />
-          <Typography variant="overline" color="text.secondary" component="div" sx={{ mt: 1 }}>
+          <Typography
+            variant="overline"
+            color="text.secondary"
+            component="div"
+            sx={{ mt: 1 }}
+          >
             Daily hit rate
           </Typography>
           <DailyHitRate daily={a.daily} span={span} height={150} />
@@ -177,13 +210,19 @@ export function Overview({ refreshKey }: { refreshKey: number }) {
         <StatTile
           label="Last used"
           value={ago(a.last_used_at)}
-          detail={a.last_used_at ? new Date(a.last_used_at).toLocaleString() : "nothing yet"}
+          detail={
+            a.last_used_at
+              ? new Date(a.last_used_at).toLocaleString()
+              : "nothing yet"
+          }
         />
         <StatTile
           label="Last saved to"
           value={ago(a.last_saved_at)}
           detail={
-            a.last_saved_at ? new Date(a.last_saved_at).toLocaleString() : "nothing uploaded yet"
+            a.last_saved_at
+              ? new Date(a.last_saved_at).toLocaleString()
+              : "nothing uploaded yet"
           }
         />
         <StatTile
@@ -196,7 +235,9 @@ export function Overview({ refreshKey }: { refreshKey: number }) {
           value={s.storage.human}
           detail={
             `${s.storage.entries.toLocaleString()} entries` +
-            (s.storage.max_bytes ? ` · limit ${human(s.storage.max_bytes)}` : "")
+            (s.storage.max_bytes
+              ? ` · limit ${human(s.storage.max_bytes)}`
+              : "")
           }
         >
           {s.storage.percent != null && (
@@ -204,7 +245,11 @@ export function Overview({ refreshKey }: { refreshKey: number }) {
               variant="determinate"
               value={Math.min(100, s.storage.percent)}
               color={
-                s.storage.percent >= 100 ? "error" : s.storage.percent >= 80 ? "warning" : "primary"
+                s.storage.percent >= 100
+                  ? "error"
+                  : s.storage.percent >= 80
+                    ? "warning"
+                    : "primary"
               }
               sx={{ mt: 1, height: 6, borderRadius: 3 }}
             />
@@ -223,7 +268,10 @@ export function Overview({ refreshKey }: { refreshKey: number }) {
         <StatTile
           label="Connection"
           value={
-            <Box component="span" sx={{ color: s.tls ? "success.main" : "text.primary" }}>
+            <Box
+              component="span"
+              sx={{ color: s.tls ? "success.main" : "text.primary" }}
+            >
               {s.tls ? "HTTPS" : "HTTP"}
             </Box>
           }
@@ -237,7 +285,11 @@ export function Overview({ refreshKey }: { refreshKey: number }) {
       >
         <Stack spacing={1}>
           {s.insights.length === 0 ? (
-            <Alert icon={<CheckCircleIcon />} severity="success" variant="outlined">
+            <Alert
+              icon={<CheckCircleIcon />}
+              severity="success"
+              variant="outlined"
+            >
               Nothing needs attention.
             </Alert>
           ) : (
@@ -249,7 +301,11 @@ export function Overview({ refreshKey }: { refreshKey: number }) {
                 icon={i.severity === "warn" ? <WarningIcon /> : <InfoIcon />}
               >
                 {i.project && (
-                  <Typography variant="caption" color="text.secondary" sx={{ mr: 1 }}>
+                  <Typography
+                    variant="caption"
+                    color="text.secondary"
+                    sx={{ mr: 1 }}
+                  >
                     {i.project}
                     {i.target ? ` · ${i.target}` : ""}
                   </Typography>
@@ -270,8 +326,17 @@ export function Overview({ refreshKey }: { refreshKey: number }) {
         title="Time saved"
         sub="Every hit hands back a build somebody would otherwise have waited for. Summed across every runner, so it can outpace the clock."
       >
-        <Box sx={{ display: "grid", gap: 2, gridTemplateColumns: { xs: "1fr", lg: "3fr 2fr" } }}>
-          <ChartCard title="Build time saved per day" sub={`Last ${span} days, by UTC day`}>
+        <Box
+          sx={{
+            display: "grid",
+            gap: 2,
+            gridTemplateColumns: { xs: "1fr", lg: "3fr 2fr" },
+          }}
+        >
+          <ChartCard
+            title="Build time saved per day"
+            sub={`Last ${span} days, by UTC day`}
+          >
             <DailySaved daily={a.daily} span={span} />
           </ChartCard>
           <ChartCard title="By project" sub="Since counting began">
@@ -284,7 +349,13 @@ export function Overview({ refreshKey }: { refreshKey: number }) {
         title="Where the misses are"
         sub="Lookups per project, and the targets that missed most."
       >
-        <Box sx={{ display: "grid", gap: 2, gridTemplateColumns: { xs: "1fr", lg: "1fr 1fr" } }}>
+        <Box
+          sx={{
+            display: "grid",
+            gap: 2,
+            gridTemplateColumns: { xs: "1fr", lg: "1fr 1fr" },
+          }}
+        >
           <ChartCard title="Projects" sub="Busiest ten, by lookups">
             <ProjectLookups projects={s.projects} />
           </ChartCard>
@@ -304,7 +375,10 @@ export function Overview({ refreshKey }: { refreshKey: number }) {
         <ProjectsTable projects={s.projects} />
       </Section>
 
-      <Section title="Recent activity" sub="The latest lookups and uploads, newest first.">
+      <Section
+        title="Recent activity"
+        sub="The latest lookups and uploads, newest first."
+      >
         <TableContainer component={Card}>
           <Table size="small">
             <TableHead>
@@ -318,7 +392,9 @@ export function Overview({ refreshKey }: { refreshKey: number }) {
               </TableRow>
             </TableHead>
             <TableBody>
-              {a.recent.length === 0 && <EmptyRow colSpan={6}>Nothing yet.</EmptyRow>}
+              {a.recent.length === 0 && (
+                <EmptyRow colSpan={6}>Nothing yet.</EmptyRow>
+              )}
               {a.recent.map((e, n) => (
                 <TableRow key={n} hover>
                   <TableCell>
@@ -328,14 +404,18 @@ export function Overview({ refreshKey }: { refreshKey: number }) {
                   <TableCell>
                     <Tag
                       kind={e.kind}
-                      label={e.kind === "touch" ? `kept ${e.count} alive` : e.kind}
+                      label={
+                        e.kind === "touch" ? `kept ${e.count} alive` : e.kind
+                      }
                     />
                   </TableCell>
                   <TableCell>
                     <Mono>{e.target ?? ""}</Mono>
                   </TableCell>
                   <TableCell>{e.user ?? ""}</TableCell>
-                  <TableCell align="right">{e.bytes ? human(e.bytes) : ""}</TableCell>
+                  <TableCell align="right">
+                    {e.bytes ? human(e.bytes) : ""}
+                  </TableCell>
                 </TableRow>
               ))}
             </TableBody>
@@ -367,7 +447,10 @@ export function Overview({ refreshKey }: { refreshKey: number }) {
           }}
         >
           {s.storage.percent != null && (
-            <ChartCard title="Capacity" sub={`${s.storage.human} of ${human(s.storage.max_bytes)}`}>
+            <ChartCard
+              title="Capacity"
+              sub={`${s.storage.human} of ${human(s.storage.max_bytes)}`}
+            >
               <CapacityGauge percent={s.storage.percent} />
             </ChartCard>
           )}
@@ -379,7 +462,10 @@ export function Overview({ refreshKey }: { refreshKey: number }) {
         </Box>
       </Section>
 
-      <Section title="ciabatta" sub="The build this cache hands out to its clients, and runs itself.">
+      <Section
+        title="ciabatta"
+        sub="The build this cache hands out to its clients, and runs itself."
+      >
         <UpdateServer stats={s} onUpdated={reload} />
       </Section>
     </Box>
@@ -423,15 +509,26 @@ function ProjectsTable({ projects }: { projects: ProjectStats[] }) {
             const open = expanded.has(id);
             return (
               <Fragment key={id}>
-                <TableRow hover onClick={() => toggle(id)} sx={{ cursor: "pointer" }}>
+                <TableRow
+                  hover
+                  onClick={() => toggle(id)}
+                  sx={{ cursor: "pointer" }}
+                >
                   <TableCell padding="checkbox">
-                    <IconButton size="small" aria-label={open ? "Collapse" : "Expand"}>
+                    <IconButton
+                      size="small"
+                      aria-label={open ? "Collapse" : "Expand"}
+                    >
                       {open ? <ExpandLessIcon /> : <ExpandMoreIcon />}
                     </IconButton>
                   </TableCell>
                   <TableCell>
                     <b>{p.project.name}</b>{" "}
-                    <Typography component="span" variant="caption" color="text.secondary">
+                    <Typography
+                      component="span"
+                      variant="caption"
+                      color="text.secondary"
+                    >
                       <Mono>{id.slice(0, 8)}</Mono>
                     </Typography>
                     {p.stale_workflows > 0 && (
@@ -448,14 +545,21 @@ function ProjectsTable({ projects }: { projects: ProjectStats[] }) {
                     <HitBar rate={p.hit_rate} />
                   </TableCell>
                   <TableCell align="right">
-                    {p.counters.hits.toLocaleString()} / {p.counters.misses.toLocaleString()}
+                    {p.counters.hits.toLocaleString()} /{" "}
+                    {p.counters.misses.toLocaleString()}
                   </TableCell>
                   <TableCell align="right">
-                    {p.counters.saved_ms === undefined ? "—" : saved(p.counters.saved_ms)}
+                    {p.counters.saved_ms === undefined
+                      ? "—"
+                      : saved(p.counters.saved_ms)}
                   </TableCell>
                   <TableCell align="right">
                     {human(p.bytes)}{" "}
-                    <Typography component="span" variant="caption" color="text.secondary">
+                    <Typography
+                      component="span"
+                      variant="caption"
+                      color="text.secondary"
+                    >
                       · {p.entries}
                     </Typography>
                   </TableCell>
@@ -468,11 +572,14 @@ function ProjectsTable({ projects }: { projects: ProjectStats[] }) {
                 </TableRow>
                 {open && (
                   <TableRow>
-                    <TableCell colSpan={8} sx={{ bgcolor: "action.hover", py: 1.5 }}>
+                    <TableCell
+                      colSpan={8}
+                      sx={{ bgcolor: "action.hover", py: 1.5 }}
+                    >
                       {p.targets.length === 0 ? (
                         <Typography variant="body2" color="text.secondary">
-                          No per-target traffic yet — clients older than this server don't name
-                          their targets.
+                          No per-target traffic yet — clients older than this
+                          server don't name their targets.
                         </Typography>
                       ) : (
                         <Table size="small">
@@ -543,7 +650,13 @@ function HitBar({ rate: value }: { rate: number | null }) {
   );
 }
 
-function EntryTable({ title, entries }: { title: string; entries: EntrySummary[] }) {
+function EntryTable({
+  title,
+  entries,
+}: {
+  title: string;
+  entries: EntrySummary[];
+}) {
   return (
     <TableContainer component={Card}>
       <Typography variant="h3" sx={{ px: 2, pt: 2, pb: 1 }}>
@@ -556,7 +669,11 @@ function EntryTable({ title, entries }: { title: string; entries: EntrySummary[]
             <TableRow key={n}>
               <TableCell>
                 <Mono>{e.target}</Mono>
-                <Typography variant="caption" color="text.secondary" component="div">
+                <Typography
+                  variant="caption"
+                  color="text.secondary"
+                  component="div"
+                >
                   {e.project}
                 </Typography>
               </TableCell>

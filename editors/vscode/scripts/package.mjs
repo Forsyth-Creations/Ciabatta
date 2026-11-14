@@ -53,7 +53,12 @@ await mkdir(outDir, { recursive: true });
 // step. When the graph in `.ciabatta/workflows/build.yaml` ran the bundle
 // already, this finds it and skips.
 const bundled = join(here, "..", "dist", "extension.js");
-if (!(await access(bundled).then(() => true, () => false))) {
+if (
+  !(await access(bundled).then(
+    () => true,
+    () => false,
+  ))
+) {
   console.log("no bundle yet — building one first");
   await build();
 }
@@ -62,11 +67,15 @@ if (!(await access(bundled).then(() => true, () => false))) {
 // imports into dist/extension.js; vsce would otherwise walk node_modules and
 // pack a second, unused copy of vscode-languageclient.
 await new Promise((resolve, reject) => {
-  const vsce = spawn("yarn", ["vsce", "package", "--no-dependencies", "--out", outFile], {
-    cwd: join(here, ".."),
-    stdio: "inherit",
-    shell: process.platform === "win32",
-  });
+  const vsce = spawn(
+    "yarn",
+    ["vsce", "package", "--no-dependencies", "--out", outFile],
+    {
+      cwd: join(here, ".."),
+      stdio: "inherit",
+      shell: process.platform === "win32",
+    },
+  );
   vsce.on("error", reject);
   vsce.on("exit", (code) =>
     code === 0 ? resolve() : reject(new Error(`vsce exited with ${code}`)),
@@ -100,7 +109,9 @@ async function normaliseTimestamps(path) {
 
   for (let i = 0; i < entries; i += 1) {
     if (zip.readUInt32LE(cursor) !== SIG_CENTRAL) {
-      throw new Error(`${path}: central directory entry ${i} is not where the archive says`);
+      throw new Error(
+        `${path}: central directory entry ${i} is not where the archive says`,
+      );
     }
 
     // Central directory entry: time at +12, date at +14.
@@ -113,7 +124,9 @@ async function normaliseTimestamps(path) {
     const localOffset = zip.readUInt32LE(cursor + 42);
 
     if (zip.readUInt32LE(localOffset) !== SIG_LOCAL) {
-      throw new Error(`${path}: entry ${i} does not point at a local file header`);
+      throw new Error(
+        `${path}: entry ${i} does not point at a local file header`,
+      );
     }
     // Local file header: time at +10, date at +12.
     zip.writeUInt16LE(DOS_TIME, localOffset + 10);

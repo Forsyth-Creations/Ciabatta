@@ -77,14 +77,21 @@ function buildTree(dirs: string[], files: string[]): TreeNode[] {
     const cut = path.lastIndexOf("/");
     const parentPath = cut < 0 ? "" : path.slice(0, cut);
     if (!index.has(parentPath)) place(parentPath, true);
-    const node: TreeNode = { name: path.slice(cut + 1), path, dir, children: [] };
+    const node: TreeNode = {
+      name: path.slice(cut + 1),
+      path,
+      dir,
+      children: [],
+    };
     index.get(parentPath)!.children.push(node);
     index.set(path, node);
   };
   for (const dir of dirs) place(dir, true);
   for (const file of files) place(file, false);
   const sort = (node: TreeNode) => {
-    node.children.sort((a, b) => Number(b.dir) - Number(a.dir) || a.name.localeCompare(b.name));
+    node.children.sort(
+      (a, b) => Number(b.dir) - Number(a.dir) || a.name.localeCompare(b.name),
+    );
     node.children.forEach(sort);
   };
   sort(root);
@@ -166,19 +173,33 @@ export function CacheFilePicker({
   const sources = useMemo(() => {
     const seen = new Set<string>();
     return earlier.filter((s) => {
-      if (!s.cache_id || s.recover || workflowOf(s.cache_id) === own || seen.has(s.cache_id)) return false;
+      if (
+        !s.cache_id ||
+        s.recover ||
+        workflowOf(s.cache_id) === own ||
+        seen.has(s.cache_id)
+      )
+        return false;
       seen.add(s.cache_id);
       return true;
     });
   }, [earlier, own]);
   // Named in the file but not among this run's earlier steps: kept, and shown.
-  const unlisted = inputsFrom.filter((id) => !sources.some((s) => s.cache_id === id));
+  const unlisted = inputsFrom.filter(
+    (id) => !sources.some((s) => s.cache_id === id),
+  );
 
-  const tree = useMemo(() => (data ? buildTree(data.dirs, data.files) : []), [data]);
+  const tree = useMemo(
+    () => (data ? buildTree(data.dirs, data.files) : []),
+    [data],
+  );
   const matches = useMemo(() => {
     const needle = filter.trim().toLowerCase();
     if (!data || !needle) return null;
-    return [...data.dirs.map((p) => ({ path: p, dir: true })), ...data.files.map((p) => ({ path: p, dir: false }))]
+    return [
+      ...data.dirs.map((p) => ({ path: p, dir: true })),
+      ...data.files.map((p) => ({ path: p, dir: false })),
+    ]
       .filter((entry) => entry.path.toLowerCase().includes(needle))
       .sort((a, b) => a.path.localeCompare(b.path));
   }, [data, filter]);
@@ -210,11 +231,24 @@ export function CacheFilePicker({
         direction="row"
         alignItems="center"
         spacing={0.25}
-        sx={{ pl: depth * 2, minWidth: 0, "&:hover": { bgcolor: "action.hover" } }}
+        sx={{
+          pl: depth * 2,
+          minWidth: 0,
+          "&:hover": { bgcolor: "action.hover" },
+        }}
       >
         {dir && matches === null ? (
-          <IconButton size="small" onClick={() => expand(path)} aria-label={`open ${path}`} sx={{ p: 0.25 }}>
-            {expanded.has(path) ? <ExpandMoreIcon fontSize="small" /> : <ChevronRightIcon fontSize="small" />}
+          <IconButton
+            size="small"
+            onClick={() => expand(path)}
+            aria-label={`open ${path}`}
+            sx={{ p: 0.25 }}
+          >
+            {expanded.has(path) ? (
+              <ExpandMoreIcon fontSize="small" />
+            ) : (
+              <ChevronRightIcon fontSize="small" />
+            )}
           </IconButton>
         ) : (
           <Box sx={{ width: 26, flexShrink: 0 }} />
@@ -224,19 +258,25 @@ export function CacheFilePicker({
           checked={ticked || covered !== null}
           disabled={covered !== null}
           onChange={() => toggle(path)}
-          inputProps={{ "aria-label": `use ${path} as ${side === "inputs" ? "an input" : "an output"}` }}
+          inputProps={{
+            "aria-label": `use ${path} as ${side === "inputs" ? "an input" : "an output"}`,
+          }}
           sx={{ p: 0.25 }}
         />
         {dir ? (
           <FolderIcon sx={{ fontSize: 16, color: "text.secondary" }} />
         ) : (
-          <InsertDriveFileOutlinedIcon sx={{ fontSize: 16, color: "text.disabled" }} />
+          <InsertDriveFileOutlinedIcon
+            sx={{ fontSize: 16, color: "text.disabled" }}
+          />
         )}
         <Typography
           variant="body2"
           noWrap
           title={path}
-          onClick={() => (dir && matches === null ? expand(path) : toggle(path))}
+          onClick={() =>
+            dir && matches === null ? expand(path) : toggle(path)
+          }
           sx={{
             fontFamily: monoFontStack,
             fontSize: 12,
@@ -265,14 +305,18 @@ export function CacheFilePicker({
   const rows = (nodes: TreeNode[], depth: number): React.ReactNode[] =>
     nodes.flatMap((node) => [
       row(node.path, node.dir, depth, node.name),
-      ...(node.dir && expanded.has(node.path) ? rows(node.children, depth + 1) : []),
+      ...(node.dir && expanded.has(node.path)
+        ? rows(node.children, depth + 1)
+        : []),
     ]);
 
   const target = step.cache_id ?? null;
   const changed =
     inputsFrom.join("\n") !== declaredFrom.join("\n") ||
-    picked.inputs.join("\n") !== declared.inputs.map((e) => (isPattern(e) ? e : plain(e))).join("\n") ||
-    picked.outputs.join("\n") !== declared.outputs.map((e) => (isPattern(e) ? e : plain(e))).join("\n");
+    picked.inputs.join("\n") !==
+      declared.inputs.map((e) => (isPattern(e) ? e : plain(e))).join("\n") ||
+    picked.outputs.join("\n") !==
+      declared.outputs.map((e) => (isPattern(e) ? e : plain(e))).join("\n");
 
   return (
     <Dialog open={open} onClose={onClose} fullWidth maxWidth="md">
@@ -285,26 +329,42 @@ export function CacheFilePicker({
       </DialogTitle>
       <DialogContent>
         <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
-          Tick what the step reads as its inputs and what it writes as its outputs. Paths are from
-          the workspace root, which is what every cache path is relative to; a ticked folder means
-          everything in it. Saving replaces both lists with exactly what is ticked here.
+          Tick what the step reads as its inputs and what it writes as its
+          outputs. Paths are from the workspace root, which is what every cache
+          path is relative to; a ticked folder means everything in it. Saving
+          replaces both lists with exactly what is ticked here.
         </Typography>
         {(step.deps.cargo?.length ?? 0) > 0 && (
           <Alert severity="info" sx={{ mb: 1, py: 0.25 }}>
             <Typography variant="caption">
-              This target also uses <code>cache.cargo</code>, which adds its crates' files by
-              itself. Only what you tick here is written; the Cargo closure stays resolved.
+              This target also uses <code>cache.cargo</code>, which adds its
+              crates' files by itself. Only what you tick here is written; the
+              Cargo closure stays resolved.
             </Typography>
           </Alert>
         )}
-        <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
-          <Tabs value={side} onChange={(_, value) => setSide(value)} sx={{ minHeight: 36 }}>
+        <Stack
+          direction="row"
+          spacing={1}
+          alignItems="center"
+          flexWrap="wrap"
+          useFlexGap
+        >
+          <Tabs
+            value={side}
+            onChange={(_, value) => setSide(value)}
+            sx={{ minHeight: 36 }}
+          >
             <Tab
               value="inputs"
               label={`Inputs (${picked.inputs.length + inputsFrom.length})`}
               sx={{ minHeight: 36 }}
             />
-            <Tab value="outputs" label={`Outputs (${picked.outputs.length})`} sx={{ minHeight: 36 }} />
+            <Tab
+              value="outputs"
+              label={`Outputs (${picked.outputs.length})`}
+              sx={{ minHeight: 36 }}
+            />
           </Tabs>
           <Box sx={{ flexGrow: 1 }} />
           <TextField
@@ -317,28 +377,56 @@ export function CacheFilePicker({
         </Stack>
 
         {side === "inputs" && (sources.length > 0 || inputsFrom.length > 0) && (
-          <Box sx={{ mt: 1, p: 1, border: 1, borderColor: "divider", borderRadius: 1 }}>
-            <Typography variant="caption" color="text.secondary" sx={{ display: "block", mb: 0.5 }}>
-              Read an earlier step's outputs: ticking one makes whatever it writes an input of this
-              workflow, and follows its outputs if they change.
+          <Box
+            sx={{
+              mt: 1,
+              p: 1,
+              border: 1,
+              borderColor: "divider",
+              borderRadius: 1,
+            }}
+          >
+            <Typography
+              variant="caption"
+              color="text.secondary"
+              sx={{ display: "block", mb: 0.5 }}
+            >
+              Read an earlier step's outputs: ticking one makes whatever it
+              writes an input of this workflow, and follows its outputs if they
+              change.
             </Typography>
             {sources.map((source) => {
               const id = source.cache_id!;
               const outputs = source.deps?.declared_outputs ?? [];
               const ticked = inputsFrom.includes(id);
               return (
-                <Stack key={id} direction="row" alignItems="center" spacing={0.5} sx={{ minWidth: 0 }}>
+                <Stack
+                  key={id}
+                  direction="row"
+                  alignItems="center"
+                  spacing={0.5}
+                  sx={{ minWidth: 0 }}
+                >
                   <Checkbox
                     size="small"
                     checked={ticked}
                     disabled={!ticked && outputs.length === 0}
                     onChange={() =>
-                      setInputsFrom((all) => (ticked ? all.filter((x) => x !== id) : [...all, id]))
+                      setInputsFrom((all) =>
+                        ticked ? all.filter((x) => x !== id) : [...all, id],
+                      )
                     }
                     inputProps={{ "aria-label": `read the outputs of ${id}` }}
                     sx={{ p: 0.25 }}
                   />
-                  <Typography variant="body2" sx={{ fontFamily: monoFontStack, fontSize: 12, flexShrink: 0 }}>
+                  <Typography
+                    variant="body2"
+                    sx={{
+                      fontFamily: monoFontStack,
+                      fontSize: 12,
+                      flexShrink: 0,
+                    }}
+                  >
                     {id}
                   </Typography>
                   <Typography
@@ -348,7 +436,9 @@ export function CacheFilePicker({
                     title={outputs.join(", ")}
                     sx={{ fontFamily: monoFontStack, minWidth: 0 }}
                   >
-                    {outputs.length > 0 ? `→ ${outputs.join(", ")}` : "declares no outputs"}
+                    {outputs.length > 0
+                      ? `→ ${outputs.join(", ")}`
+                      : "declares no outputs"}
                   </Typography>
                 </Stack>
               );
@@ -360,7 +450,9 @@ export function CacheFilePicker({
                 label={id}
                 variant="outlined"
                 title="Named in the workflow file, but not an earlier step of this run"
-                onDelete={() => setInputsFrom((all) => all.filter((x) => x !== id))}
+                onDelete={() =>
+                  setInputsFrom((all) => all.filter((x) => x !== id))
+                }
                 sx={{ fontFamily: monoFontStack, fontSize: 12, mr: 0.5 }}
               />
             ))}
@@ -368,7 +460,13 @@ export function CacheFilePicker({
         )}
 
         {picked[side].length > 0 && (
-          <Stack direction="row" spacing={0.5} flexWrap="wrap" useFlexGap sx={{ my: 1 }}>
+          <Stack
+            direction="row"
+            spacing={0.5}
+            flexWrap="wrap"
+            useFlexGap
+            sx={{ my: 1 }}
+          >
             {picked[side].map((entry) => (
               <Chip
                 key={entry}
@@ -377,7 +475,10 @@ export function CacheFilePicker({
                 variant={isPattern(entry) ? "outlined" : "filled"}
                 title={isPattern(entry) ? "A glob, kept as written" : undefined}
                 onDelete={() =>
-                  setPicked((all) => ({ ...all, [side]: all[side].filter((p) => p !== entry) }))
+                  setPicked((all) => ({
+                    ...all,
+                    [side]: all[side].filter((p) => p !== entry),
+                  }))
                 }
                 sx={{ fontFamily: monoFontStack, fontSize: 12 }}
               />
@@ -396,7 +497,11 @@ export function CacheFilePicker({
           }}
         >
           {isLoading && (
-            <Typography variant="caption" color="text.secondary" sx={{ p: 1, display: "block" }}>
+            <Typography
+              variant="caption"
+              color="text.secondary"
+              sx={{ p: 1, display: "block" }}
+            >
               Listing the checkout…
             </Typography>
           )}
@@ -405,32 +510,51 @@ export function CacheFilePicker({
               {(error as Error).message}
             </Alert>
           )}
-          {matches === null ? rows(tree, 0) : matches.slice(0, FILTER_ROWS).map((m) => row(m.path, m.dir, 0, m.path))}
+          {matches === null
+            ? rows(tree, 0)
+            : matches
+                .slice(0, FILTER_ROWS)
+                .map((m) => row(m.path, m.dir, 0, m.path))}
           {matches !== null && matches.length > FILTER_ROWS && (
-            <Typography variant="caption" color="text.secondary" sx={{ p: 1, display: "block" }}>
+            <Typography
+              variant="caption"
+              color="text.secondary"
+              sx={{ p: 1, display: "block" }}
+            >
               …and {matches.length - FILTER_ROWS} more. Narrow the filter.
             </Typography>
           )}
           {matches !== null && matches.length === 0 && (
-            <Typography variant="caption" color="text.secondary" sx={{ p: 1, display: "block" }}>
+            <Typography
+              variant="caption"
+              color="text.secondary"
+              sx={{ p: 1, display: "block" }}
+            >
               Nothing matches “{filter}”.
             </Typography>
           )}
         </Box>
         {data?.truncated && (
           <Typography variant="caption" color="text.secondary">
-            A big checkout: not every file is listed. Everything git keeps comes first.
+            A big checkout: not every file is listed. Everything git keeps comes
+            first.
           </Typography>
         )}
-        <Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: 0.5 }}>
-          Everything is listed, including what git ignores — tick the folder an output lands in,
-          such as <code>target/release</code>. An ignored input is skipped when the workflow sets{" "}
-          <code>gitignore: true</code>; read another step's build output through its step above.
+        <Typography
+          variant="caption"
+          color="text.secondary"
+          sx={{ display: "block", mt: 0.5 }}
+        >
+          Everything is listed, including what git ignores — tick the folder an
+          output lands in, such as <code>target/release</code>. An ignored input
+          is skipped when the workflow sets <code>gitignore: true</code>; read
+          another step's build output through its step above.
         </Typography>
 
         {save.isSuccess && (
           <Alert severity="success" sx={{ mt: 1.5 }}>
-            Saved to <code>{save.data.path}</code>. The next run of this workflow uses them.
+            Saved to <code>{save.data.path}</code>. The next run of this
+            workflow uses them.
           </Alert>
         )}
         {save.error && (
@@ -440,8 +564,9 @@ export function CacheFilePicker({
         )}
         {!target && (
           <Alert severity="warning" sx={{ mt: 1.5 }}>
-            This step wasn't declared in a sub-workspace's workflow file, so there is nowhere to save
-            to. Add these paths to its <code>cache:</code> by hand.
+            This step wasn't declared in a sub-workspace's workflow file, so
+            there is nowhere to save to. Add these paths to its{" "}
+            <code>cache:</code> by hand.
           </Alert>
         )}
       </DialogContent>

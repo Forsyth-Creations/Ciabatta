@@ -120,11 +120,23 @@ export function Piece({ code, size }: { code: string; size: number }) {
           <path key={d} d={d} />
         ))}
         {letter === "Q" &&
-          QUEEN_BALLS.map(([cx, cy]) => <circle key={cx} cx={cx} cy={cy} r={5} />)}
+          QUEEN_BALLS.map(([cx, cy]) => (
+            <circle key={cx} cx={cx} cy={cy} r={5} />
+          ))}
       </g>
-      <g fill="none" stroke={detail} strokeWidth={3.2} strokeLinecap="round" strokeLinejoin="round">
+      <g
+        fill="none"
+        stroke={detail}
+        strokeWidth={3.2}
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
         {DETAILS[letter].map((d) => (
-          <path key={d} d={d} fill={letter === "N" && d.startsWith("M43") ? detail : "none"} />
+          <path
+            key={d}
+            d={d}
+            fill={letter === "N" && d.startsWith("M43") ? detail : "none"}
+          />
         ))}
       </g>
     </svg>

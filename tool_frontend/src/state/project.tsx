@@ -25,7 +25,9 @@ interface ProjectContextValue {
   isLoading: boolean;
 }
 
-const ProjectContext = createContext<ProjectContextValue | undefined>(undefined);
+const ProjectContext = createContext<ProjectContextValue | undefined>(
+  undefined,
+);
 
 export function ProjectProvider({ children }: { children: ReactNode }) {
   const { data: projects, isLoading } = useProjects();
@@ -59,14 +61,18 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
     () => ({
       projects: projects ?? [],
       project: projects?.find((p) => p.id === selected),
-      projectId: projects?.some((p) => p.id === selected) ? selected : undefined,
+      projectId: projects?.some((p) => p.id === selected)
+        ? selected
+        : undefined,
       setProjectId,
       isLoading,
     }),
     [projects, selected, isLoading],
   );
 
-  return <ProjectContext.Provider value={value}>{children}</ProjectContext.Provider>;
+  return (
+    <ProjectContext.Provider value={value}>{children}</ProjectContext.Provider>
+  );
 }
 
 export function useProjectContext(): ProjectContextValue {

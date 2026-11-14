@@ -33,7 +33,12 @@ import {
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { api } from "../api/client";
-import { ErrorNote, Loading, PageHeader, RequireProject } from "../components/Page";
+import {
+  ErrorNote,
+  Loading,
+  PageHeader,
+  RequireProject,
+} from "../components/Page";
 import { monoFontStack } from "../theme";
 
 interface Node {
@@ -51,7 +56,10 @@ interface Graph {
   edges?: { from: string; to: string }[];
 }
 
-const CATEGORY_COLOR: Record<string, "primary" | "secondary" | "success" | "default"> = {
+const CATEGORY_COLOR: Record<
+  string,
+  "primary" | "secondary" | "success" | "default"
+> = {
   internal: "primary",
   external: "secondary",
   publish: "success",
@@ -64,7 +72,9 @@ export function AnalyzePage() {
         title="Analyze"
         description="The dependency graph for this project — internal packages, external dependencies, and where artifacts get published."
       />
-      <RequireProject>{(project) => <GraphView project={project} />}</RequireProject>
+      <RequireProject>
+        {(project) => <GraphView project={project} />}
+      </RequireProject>
     </>
   );
 }
@@ -77,15 +87,25 @@ function GraphView({ project }: { project: string }) {
 
   const graphKey = ["analyze", "graph", project];
 
-  const { data: graph, isLoading, error } = useQuery({
+  const {
+    data: graph,
+    isLoading,
+    error,
+  } = useQuery({
     queryKey: graphKey,
-    queryFn: () => api.get<Graph>(`/api/analyze/graph?project=${encodeURIComponent(project)}`),
+    queryFn: () =>
+      api.get<Graph>(
+        `/api/analyze/graph?project=${encodeURIComponent(project)}`,
+      ),
   });
 
   // While a scan runs, poll so the table refreshes on its own when it lands.
   const { data: status } = useQuery({
     queryKey: ["analyze", "status", project],
-    queryFn: () => api.get<{ running: boolean }>(`/api/analyze/status?project=${encodeURIComponent(project)}`),
+    queryFn: () =>
+      api.get<{ running: boolean }>(
+        `/api/analyze/status?project=${encodeURIComponent(project)}`,
+      ),
     refetchInterval: (query) => (query.state.data?.running ? 1_000 : false),
   });
 
@@ -98,7 +118,9 @@ function GraphView({ project }: { project: string }) {
         check_vulns: checkVulns,
       }),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["analyze", "status", project] });
+      queryClient.invalidateQueries({
+        queryKey: ["analyze", "status", project],
+      });
     },
   });
 
@@ -128,7 +150,14 @@ function GraphView({ project }: { project: string }) {
 
   return (
     <>
-      <Stack direction="row" spacing={2} alignItems="center" sx={{ mb: 2 }} flexWrap="wrap" useFlexGap>
+      <Stack
+        direction="row"
+        spacing={2}
+        alignItems="center"
+        sx={{ mb: 2 }}
+        flexWrap="wrap"
+        useFlexGap
+      >
         <Button
           variant="contained"
           startIcon={<RefreshIcon />}
@@ -170,19 +199,31 @@ function GraphView({ project }: { project: string }) {
         </Box>
       )}
 
-      {scan.data?.ok === false && <Alert severity="warning" sx={{ mb: 2 }}>{scan.data.error}</Alert>}
+      {scan.data?.ok === false && (
+        <Alert severity="warning" sx={{ mb: 2 }}>
+          {scan.data.error}
+        </Alert>
+      )}
       {scan.error && <ErrorNote error={scan.error} />}
 
       {!graph?.scanned && !scanning && !wasScanning ? (
         <Alert severity="info">
-          This project hasn't been analyzed yet. Run a scan to build the dependency graph.
+          This project hasn't been analyzed yet. Run a scan to build the
+          dependency graph.
         </Alert>
       ) : (
         <>
           <Grid container spacing={2} sx={{ mb: 3 }}>
             {(["internal", "external", "publish"] as const).map((category) => (
               <Grid key={category} size={{ xs: 6, sm: 3 }}>
-                <Box sx={{ border: 1, borderColor: "divider", borderRadius: 1, p: 1.5 }}>
+                <Box
+                  sx={{
+                    border: 1,
+                    borderColor: "divider",
+                    borderRadius: 1,
+                    p: 1.5,
+                  }}
+                >
                   <Typography variant="h2">{counts[category] ?? 0}</Typography>
                   <Typography variant="caption" color="text.secondary">
                     {category}
@@ -191,8 +232,17 @@ function GraphView({ project }: { project: string }) {
               </Grid>
             ))}
             <Grid size={{ xs: 6, sm: 3 }}>
-              <Box sx={{ border: 1, borderColor: "divider", borderRadius: 1, p: 1.5 }}>
-                <Typography variant="h2">{graph?.edges?.length ?? 0}</Typography>
+              <Box
+                sx={{
+                  border: 1,
+                  borderColor: "divider",
+                  borderRadius: 1,
+                  p: 1.5,
+                }}
+              >
+                <Typography variant="h2">
+                  {graph?.edges?.length ?? 0}
+                </Typography>
                 <Typography variant="caption" color="text.secondary">
                   edges
                 </Typography>
@@ -200,8 +250,18 @@ function GraphView({ project }: { project: string }) {
             </Grid>
           </Grid>
 
-          <Box sx={{ overflowX: "auto", border: 1, borderColor: "divider", borderRadius: 1 }}>
-            <Box component="table" sx={{ width: "100%", borderCollapse: "collapse", minWidth: 640 }}>
+          <Box
+            sx={{
+              overflowX: "auto",
+              border: 1,
+              borderColor: "divider",
+              borderRadius: 1,
+            }}
+          >
+            <Box
+              component="table"
+              sx={{ width: "100%", borderCollapse: "collapse", minWidth: 640 }}
+            >
               <Box component="thead">
                 {table.getHeaderGroups().map((group) => (
                   <Box component="tr" key={group.id}>
@@ -223,8 +283,13 @@ function GraphView({ project }: { project: string }) {
                           whiteSpace: "nowrap",
                         }}
                       >
-                        {flexRender(header.column.columnDef.header, header.getContext())}
-                        {{ asc: " ↑", desc: " ↓" }[header.column.getIsSorted() as string] ?? ""}
+                        {flexRender(
+                          header.column.columnDef.header,
+                          header.getContext(),
+                        )}
+                        {{ asc: " ↑", desc: " ↓" }[
+                          header.column.getIsSorted() as string
+                        ] ?? ""}
                       </Box>
                     ))}
                   </Box>
@@ -241,9 +306,18 @@ function GraphView({ project }: { project: string }) {
                       <Box
                         component="td"
                         key={cell.id}
-                        sx={{ px: 1.5, py: 0.75, borderBottom: 1, borderColor: "divider", fontSize: 13 }}
+                        sx={{
+                          px: 1.5,
+                          py: 0.75,
+                          borderBottom: 1,
+                          borderColor: "divider",
+                          fontSize: 13,
+                        }}
                       >
-                        {flexRender(cell.column.columnDef.cell, cell.getContext())}
+                        {flexRender(
+                          cell.column.columnDef.cell,
+                          cell.getContext(),
+                        )}
                       </Box>
                     ))}
                   </Box>
@@ -252,7 +326,11 @@ function GraphView({ project }: { project: string }) {
             </Box>
           </Box>
 
-          <Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: 1.5 }}>
+          <Typography
+            variant="caption"
+            color="text.secondary"
+            sx={{ display: "block", mt: 1.5 }}
+          >
             {table.getRowModel().rows.length} of {nodes.length} nodes
           </Typography>
         </>
@@ -296,7 +374,11 @@ function buildColumns() {
       header: "Vulns",
       cell: (info) => {
         const count = info.getValue();
-        return count > 0 ? <Chip size="small" color="error" label={count} /> : "—";
+        return count > 0 ? (
+          <Chip size="small" color="error" label={count} />
+        ) : (
+          "—"
+        );
       },
     }),
   ];

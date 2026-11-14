@@ -32,17 +32,29 @@ export interface DanglingReport {
 
 /** A need, as the `<member>:<workflow>` it means from `member`'s `workflow`:
  *  a bare member names its workflow of the same name, `self` names `member`. */
-export function resolveNeed(need: string, member: string, workflow: string): string {
+export function resolveNeed(
+  need: string,
+  member: string,
+  workflow: string,
+): string {
   const [who, what] = need.includes(":")
-    ? [need.slice(0, need.indexOf(":")).trim(), need.slice(need.indexOf(":") + 1).trim()]
+    ? [
+        need.slice(0, need.indexOf(":")).trim(),
+        need.slice(need.indexOf(":") + 1).trim(),
+      ]
     : [need.trim(), workflow];
   return `${who === "self" ? member : who}:${what}`;
 }
 
-const keyOf = (u: { member: string; workflow: string }) => `${u.member}:${u.workflow}`;
+const keyOf = (u: { member: string; workflow: string }) =>
+  `${u.member}:${u.workflow}`;
 
 /** Every existing workflow `unit` names, with its draft's `needs`. */
-export function linksOut(unit: DeclaredUnit, draft: GraphDraft, known: Set<string>): string[] {
+export function linksOut(
+  unit: DeclaredUnit,
+  draft: GraphDraft,
+  known: Set<string>,
+): string[] {
   const own = keyOf(unit);
   return [
     ...new Set(
@@ -59,7 +71,9 @@ export function findDangling(
 ): DanglingReport {
   const known = new Set(units.map(keyOf));
   const outs = new Map(
-    units.filter((u) => drafts[keyOf(u)]).map((u) => [keyOf(u), linksOut(u, drafts[keyOf(u)], known)]),
+    units
+      .filter((u) => drafts[keyOf(u)])
+      .map((u) => [keyOf(u), linksOut(u, drafts[keyOf(u)], known)]),
   );
   const reached = new Set([...outs.values()].flat());
 
@@ -69,8 +83,11 @@ export function findDangling(
     const key = keyOf(unit);
     const draft = drafts[key];
     if (!draft) continue;
-    const sharesName = units.some((o) => o.workflow === unit.workflow && o.member !== unit.member);
-    if ((outs.get(key) ?? []).length === 0 && !reached.has(key) && !sharesName) dangling.add(key);
+    const sharesName = units.some(
+      (o) => o.workflow === unit.workflow && o.member !== unit.member,
+    );
+    if ((outs.get(key) ?? []).length === 0 && !reached.has(key) && !sharesName)
+      dangling.add(key);
 
     const stray = looseSteps(unit, draft);
     if (stray.length) loose.set(key, stray);

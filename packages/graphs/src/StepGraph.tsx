@@ -14,7 +14,13 @@ import type { Edge, Node, NodeMouseHandler } from "@xyflow/react";
 import { GraphCanvas } from "./GraphCanvas";
 import { ROUTED_EDGE, layeredLayout, routeKey, type Placement } from "./layout";
 import { statusColour } from "./StatusIcon";
-import { STEP_LAYOUT, StepLine, StepNodeBody, stepNodeHeight, stepNodeStyle } from "./StepNode";
+import {
+  STEP_LAYOUT,
+  StepLine,
+  StepNodeBody,
+  stepNodeHeight,
+  stepNodeStyle,
+} from "./StepNode";
 
 export interface GraphStep {
   /** Unique: what `needs` refer to it by. */
@@ -67,7 +73,9 @@ export function StepGraph({
       return stepNodeHeight(Boolean(step.workspace), step.note ? 1 : 0);
     };
     const links = steps.flatMap((s) =>
-      (s.needs ?? []).filter((n) => byName.has(n)).map((n) => ({ source: n, target: s.name })),
+      (s.needs ?? [])
+        .filter((n) => byName.has(n))
+        .map((n) => ({ source: n, target: s.name })),
     );
 
     const {
@@ -87,7 +95,9 @@ export function StepGraph({
               workspace={s.workspace}
               status={s.status}
               detail={s.detail ?? s.status}
-              extra={s.note ? <StepLine mono={false}>{s.note}</StepLine> : undefined}
+              extra={
+                s.note ? <StepLine mono={false}>{s.note}</StepLine> : undefined
+              }
             />
           ),
         };
@@ -147,11 +157,15 @@ export function StepGraph({
       keepView={holdLayout}
       // Refit when the shape changes, not just the set of nodes: an edited
       // graph that gains an edge can push a node off the canvas.
-      fitKey={steps.map((s) => `${s.name}<${(s.needs ?? []).join(",")}`).join("\u0000")}
+      fitKey={steps
+        .map((s) => `${s.name}<${(s.needs ?? []).join(",")}`)
+        .join("\u0000")}
       nodeColor={(node) => {
         const s = steps.find((x) => x.name === node.id);
         if (!s) return theme.palette.divider;
-        return s.reused ? theme.palette.success.main : statusColour(s.status, theme);
+        return s.reused
+          ? theme.palette.success.main
+          : statusColour(s.status, theme);
       }}
     />
   );

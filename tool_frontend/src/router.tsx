@@ -8,7 +8,12 @@
  * Each of the six tools ciabatta used to serve on its own port is a route here.
  */
 
-import { createRootRoute, createRoute, createRouter, Outlet } from "@tanstack/react-router";
+import {
+  createRootRoute,
+  createRoute,
+  createRouter,
+  Outlet,
+} from "@tanstack/react-router";
 
 import { AppShell } from "./components/AppShell";
 import { AnalyzePage } from "./pages/AnalyzePage";

@@ -13,7 +13,8 @@ import { api } from "./client";
 
 export type Color = "white" | "black";
 export type Kind = "pawn" | "knight" | "bishop" | "rook" | "queen" | "king";
-export type Variant = "standard" | "chess960" | "king_of_the_hill" | "three_check";
+export type Variant =
+  "standard" | "chess960" | "king_of_the_hill" | "three_check";
 export type ColorChoice = Color | "random";
 
 export interface TimeControl {
@@ -68,7 +69,12 @@ export interface GameView {
   last_move: [string, string] | null;
   moves: string[];
   legal: LegalMove[];
-  clock: { white_ms: number; black_ms: number; running: Color | null; increment_ms: number } | null;
+  clock: {
+    white_ms: number;
+    black_ms: number;
+    running: Color | null;
+    increment_ms: number;
+  } | null;
   offers: { draw: Color | null; takeback: Color | null; rematch: Color | null };
   checks: { white: number; black: number };
   role: "host" | "guest";
@@ -132,12 +138,18 @@ export function useLobby() {
 
 export const chessApi = {
   create: (rules: Rules) => api.post<GameView>("/api/chess/games", rules),
-  act: (id: string, action: Action) => api.post<GameView>(`/api/chess/games/${id}/action`, action),
+  act: (id: string, action: Action) =>
+    api.post<GameView>(`/api/chess/games/${id}/action`, action),
   remove: (id: string) => api.delete<{ ok: boolean }>(`/api/chess/games/${id}`),
-  join: (address: string, game: string) => api.post<GameView>("/api/chess/join", { address, game }),
+  join: (address: string, game: string) =>
+    api.post<GameView>("/api/chess/join", { address, game }),
   browse: (address: string) =>
-    api.post<{ name: string; address: string; games: OpenGame[] }>("/api/chess/browse", { address }),
-  setName: (name: string) => api.post<{ name: string }>("/api/chess/name", { name }),
+    api.post<{ name: string; address: string; games: OpenGame[] }>(
+      "/api/chess/browse",
+      { address },
+    ),
+  setName: (name: string) =>
+    api.post<{ name: string }>("/api/chess/name", { name }),
 };
 
 /**
@@ -166,7 +178,9 @@ export function useGame(id: string) {
       while (!cancelled) {
         try {
           const since = rev.current === null ? "" : `?since=${rev.current}`;
-          const next = await api.get<GameView>(`/api/chess/games/${id}${since}`);
+          const next = await api.get<GameView>(
+            `/api/chess/games/${id}${since}`,
+          );
           if (cancelled) return;
           if (next.rev !== rev.current) accept(next);
         } catch (e) {
@@ -194,7 +208,9 @@ export const VARIANT_LABEL: Record<Variant, string> = {
 export function timeLabel(time: TimeControl | null): string {
   if (!time) return "Unlimited";
   const minutes = time.initial_secs / 60;
-  const base = Number.isInteger(minutes) ? `${minutes}` : `${time.initial_secs}s`;
+  const base = Number.isInteger(minutes)
+    ? `${minutes}`
+    : `${time.initial_secs}s`;
   return `${base}+${time.increment_secs}`;
 }
 

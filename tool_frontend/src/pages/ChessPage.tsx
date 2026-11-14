@@ -154,7 +154,9 @@ function NameCard({ lobby }: { lobby: Lobby }) {
               {saved ? "Saved" : "Save"}
             </Button>
             {lobby.name !== lobby.hostname && (
-              <Button onClick={() => void save(lobby.hostname)}>Use hostname</Button>
+              <Button onClick={() => void save(lobby.hostname)}>
+                Use hostname
+              </Button>
             )}
           </Stack>
         </Stack>
@@ -221,7 +223,11 @@ function NewGameCard() {
               ))}
             </Select>
           </FormControl>
-          <Typography variant="caption" color="text.secondary" sx={{ mt: "6px !important" }}>
+          <Typography
+            variant="caption"
+            color="text.secondary"
+            sx={{ mt: "6px !important" }}
+          >
             {VARIANT_HINT[variant]}
           </Typography>
 
@@ -253,7 +259,9 @@ function NewGameCard() {
                   type="number"
                   size="small"
                   value={minutes}
-                  onChange={(e) => setMinutes(Math.max(0, Number(e.target.value)))}
+                  onChange={(e) =>
+                    setMinutes(Math.max(0, Number(e.target.value)))
+                  }
                   inputProps={{ min: 0.5, max: 180, step: 0.5 }}
                 />
                 <TextField
@@ -261,7 +269,11 @@ function NewGameCard() {
                   type="number"
                   size="small"
                   value={increment}
-                  onChange={(e) => setIncrement(Math.max(0, Math.round(Number(e.target.value))))}
+                  onChange={(e) =>
+                    setIncrement(
+                      Math.max(0, Math.round(Number(e.target.value))),
+                    )
+                  }
                   inputProps={{ min: 0, max: 180 }}
                 />
               </Stack>
@@ -286,16 +298,31 @@ function NewGameCard() {
 
           <Stack>
             <FormControlLabel
-              control={<Switch checked={takebacks} onChange={(e) => setTakebacks(e.target.checked)} />}
+              control={
+                <Switch
+                  checked={takebacks}
+                  onChange={(e) => setTakebacks(e.target.checked)}
+                />
+              }
               label="Allow takeback requests"
             />
             <FormControlLabel
-              control={<Switch checked={drawOffers} onChange={(e) => setDrawOffers(e.target.checked)} />}
+              control={
+                <Switch
+                  checked={drawOffers}
+                  onChange={(e) => setDrawOffers(e.target.checked)}
+                />
+              }
               label="Allow draw offers"
             />
           </Stack>
 
-          <Button variant="contained" size="large" onClick={() => void create()} disabled={busy}>
+          <Button
+            variant="contained"
+            size="large"
+            onClick={() => void create()}
+            disabled={busy}
+          >
             Open game
           </Button>
           {error !== null && <ErrorNote error={error} />}
@@ -307,7 +334,8 @@ function NewGameCard() {
 
 const VARIANT_HINT: Record<Variant, string> = {
   standard: "Regular chess.",
-  chess960: "The back rank is shuffled — the same for both sides. Castle by dropping the king on its rook.",
+  chess960:
+    "The back rank is shuffled — the same for both sides. Castle by dropping the king on its rook.",
   king_of_the_hill: "Also win by walking your king onto d4, e4, d5 or e5.",
   three_check: "Also win by giving check three times.",
 };
@@ -326,7 +354,11 @@ function OpenGameRow({
   const [busy, setBusy] = useState(false);
   const hostColor = game.rules.host_color;
   const youPlay =
-    hostColor === "random" ? "random colour" : hostColor === "white" ? "you play black" : "you play white";
+    hostColor === "random"
+      ? "random colour"
+      : hostColor === "white"
+        ? "you play black"
+        : "you play white";
 
   const join = async () => {
     setBusy(true);
@@ -341,7 +373,12 @@ function OpenGameRow({
 
   return (
     <Box>
-      <Stack direction="row" spacing={2} alignItems="center" justifyContent="space-between">
+      <Stack
+        direction="row"
+        spacing={2}
+        alignItems="center"
+        justifyContent="space-between"
+      >
         <Box sx={{ minWidth: 0 }}>
           <Typography variant="body1" sx={{ fontWeight: 600 }}>
             {host}
@@ -371,13 +408,18 @@ function NearbyCard({ lobby }: { lobby: Lobby }) {
         </Typography>
         {open.length === 0 ? (
           <Typography variant="body2" color="text.secondary">
-            Nobody on the network has a game open right now. This list updates by itself — or open
-            one yourself and wait for a challenger.
+            Nobody on the network has a game open right now. This list updates
+            by itself — or open one yourself and wait for a challenger.
           </Typography>
         ) : (
           <Stack spacing={2} divider={<Divider flexItem />}>
             {open.map(({ peer, game }) => (
-              <OpenGameRow key={game.id} game={game} host={peer.name} address={peer.address} />
+              <OpenGameRow
+                key={game.id}
+                game={game}
+                host={peer.name}
+                address={peer.address}
+              />
             ))}
           </Stack>
         )}
@@ -388,9 +430,11 @@ function NearbyCard({ lobby }: { lobby: Lobby }) {
 
 function JoinByAddressCard() {
   const [address, setAddress] = useState("");
-  const [found, setFound] = useState<{ name: string; address: string; games: OpenGame[] } | null>(
-    null,
-  );
+  const [found, setFound] = useState<{
+    name: string;
+    address: string;
+    games: OpenGame[];
+  } | null>(null);
   const [error, setError] = useState<unknown>(null);
   const [busy, setBusy] = useState(false);
 
@@ -414,8 +458,8 @@ function JoinByAddressCard() {
           Join by address
         </Typography>
         <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-          If a host doesn&apos;t show up above (some networks block broadcasts), ask them for the
-          address on their chess page.
+          If a host doesn&apos;t show up above (some networks block broadcasts),
+          ask them for the address on their chess page.
         </Typography>
         <Stack
           direction="row"
@@ -433,7 +477,11 @@ function JoinByAddressCard() {
             onChange={(e) => setAddress(e.target.value)}
             sx={{ flex: 1 }}
           />
-          <Button type="submit" variant="outlined" disabled={busy || !address.trim()}>
+          <Button
+            type="submit"
+            variant="outlined"
+            disabled={busy || !address.trim()}
+          >
             Look
           </Button>
         </Stack>
@@ -446,7 +494,12 @@ function JoinByAddressCard() {
               </Typography>
             )}
             {found.games.map((game) => (
-              <OpenGameRow key={game.id} game={game} host={found.name} address={found.address} />
+              <OpenGameRow
+                key={game.id}
+                game={game}
+                host={found.name}
+                address={found.address}
+              />
             ))}
           </Stack>
         )}
@@ -459,7 +512,11 @@ function statusLine(game: GameView): string {
   if (game.status === "waiting") return "Waiting for someone to join";
   if (game.status === "finished") {
     const outcome =
-      game.winner === null ? "Draw" : game.winner === game.you ? "You won" : "You lost";
+      game.winner === null
+        ? "Draw"
+        : game.winner === game.you
+          ? "You won"
+          : "You lost";
     return `${outcome} — ${game.reason ? REASON_LABEL[game.reason] : ""}`;
   }
   return game.turn === game.you ? "Your move" : "Their move";
@@ -495,7 +552,10 @@ function YourGames({ lobby }: { lobby: Lobby }) {
                   <Typography variant="body1" sx={{ fontWeight: 600 }}>
                     {game.opponent ? `vs ${game.opponent}` : "Open game"}
                   </Typography>
-                  <Chip size="small" label={game.role === "host" ? "Hosting" : "Joined"} />
+                  <Chip
+                    size="small"
+                    label={game.role === "host" ? "Hosting" : "Joined"}
+                  />
                   {game.status === "playing" && game.turn === game.you && (
                     <Chip size="small" color="warning" label="Your move" />
                   )}
@@ -508,12 +568,21 @@ function YourGames({ lobby }: { lobby: Lobby }) {
               <Stack direction="row" spacing={1}>
                 <Button
                   variant="contained"
-                  onClick={() => void navigate({ to: "/chess/$gameId", params: { gameId: game.id } })}
+                  onClick={() =>
+                    void navigate({
+                      to: "/chess/$gameId",
+                      params: { gameId: game.id },
+                    })
+                  }
                 >
                   Open
                 </Button>
                 <Button color="inherit" onClick={() => void leave(game)}>
-                  {game.status === "playing" ? "Resign & leave" : game.status === "waiting" ? "Cancel" : "Remove"}
+                  {game.status === "playing"
+                    ? "Resign & leave"
+                    : game.status === "waiting"
+                      ? "Cancel"
+                      : "Remove"}
                 </Button>
               </Stack>
             </Stack>
@@ -534,29 +603,36 @@ function HowItWorks({ lobby }: { lobby: Lobby }) {
       <Collapse in={open}>
         <Stack spacing={1} sx={{ mt: 1, maxWidth: "75ch" }}>
           <Typography variant="body2">
-            Opening a game makes this daemon announce it on the local network (UDP broadcast on port{" "}
-            {lobby.discovery_port}) and accept connections on TCP port{" "}
-            {lobby.port ?? "— chosen when you open your first game"}. Nothing is announced or listened
-            for until this page is used.
+            Opening a game makes this daemon announce it on the local network
+            (UDP broadcast on port {lobby.discovery_port}) and accept
+            connections on TCP port{" "}
+            {lobby.port ?? "— chosen when you open your first game"}. Nothing is
+            announced or listened for until this page is used.
           </Typography>
           <Typography variant="body2">
-            The first player to join gets a private seat: the host hands them a secret, the game stops
-            being announced, and anyone else who tries to join is turned away. If the connection drops,
-            the guest&apos;s daemon reconnects with that secret on its own.
+            The first player to join gets a private seat: the host hands them a
+            secret, the game stops being announced, and anyone else who tries to
+            join is turned away. If the connection drops, the guest&apos;s
+            daemon reconnects with that secret on its own.
           </Typography>
           <Typography variant="body2">
-            The host&apos;s daemon keeps the board and the clocks; the clocks start once both sides
-            have moved, and a game can be aborted until then. Threefold repetition, the fifty-move rule
-            and insufficient material end a game as a draw automatically. Games live in the daemon&apos;s
-            memory, so restarting it ends them. Set <code>CIABATTA_CHESS_PORT</code>,{" "}
-            <code>CIABATTA_CHESS_DISCOVERY_PORT</code> or <code>CIABATTA_CHESS_BROADCAST</code> (a
-            comma-separated list of broadcast addresses) before the daemon starts to change the defaults.
+            The host&apos;s daemon keeps the board and the clocks; the clocks
+            start once both sides have moved, and a game can be aborted until
+            then. Threefold repetition, the fifty-move rule and insufficient
+            material end a game as a draw automatically. Games live in the
+            daemon&apos;s memory, so restarting it ends them. Set{" "}
+            <code>CIABATTA_CHESS_PORT</code>,{" "}
+            <code>CIABATTA_CHESS_DISCOVERY_PORT</code> or{" "}
+            <code>CIABATTA_CHESS_BROADCAST</code> (a comma-separated list of
+            broadcast addresses) before the daemon starts to change the
+            defaults.
           </Typography>
           <Typography variant="body2">
-            Nobody can see your games? A firewall is the usual reason. On Linux with ufw, for
-            example: <code>sudo ufw allow {lobby.discovery_port}/udp</code> and{" "}
-            <code>sudo ufw allow {lobby.port ?? 47652}/tcp</code>. Joining by address only needs the
-            TCP port.
+            Nobody can see your games? A firewall is the usual reason. On Linux
+            with ufw, for example:{" "}
+            <code>sudo ufw allow {lobby.discovery_port}/udp</code> and{" "}
+            <code>sudo ufw allow {lobby.port ?? 47652}/tcp</code>. Joining by
+            address only needs the TCP port.
           </Typography>
           <Typography variant="caption" color="text.secondary">
             ciabatta {lobby.version}

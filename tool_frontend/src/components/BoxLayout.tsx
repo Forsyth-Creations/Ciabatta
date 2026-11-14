@@ -24,7 +24,12 @@ import {
 } from "react";
 import { Box, Stack, Typography } from "@mui/material";
 import DragIndicatorIcon from "@mui/icons-material/DragIndicator";
-import { Responsive, WidthProvider, type Layout, type Layouts } from "react-grid-layout";
+import {
+  Responsive,
+  WidthProvider,
+  type Layout,
+  type Layouts,
+} from "react-grid-layout";
 import "react-grid-layout/css/styles.css";
 import "react-resizable/css/styles.css";
 
@@ -105,7 +110,12 @@ export function useBoxLayout(storageKey: string, defaults: DefaultLayouts) {
         // A fitted box's height is its content's, so only its width is
         // anybody's to drag.
         return fitted[item.i] !== undefined
-          ? { ...box, h: fitted[item.i], minH: 1, resizeHandles: ["e" as const, "w" as const] }
+          ? {
+              ...box,
+              h: fitted[item.i],
+              minH: 1,
+              resizeHandles: ["e" as const, "w" as const],
+            }
           : box;
       });
     }
@@ -113,7 +123,9 @@ export function useBoxLayout(storageKey: string, defaults: DefaultLayouts) {
   }, [saved, defaults, fitted]);
 
   const fit = useCallback((id: string, rows: number) => {
-    setFitted((current) => (current[id] === rows ? current : { ...current, [id]: rows }));
+    setFitted((current) =>
+      current[id] === rows ? current : { ...current, [id]: rows },
+    );
   }, []);
 
   const onChange = useCallback(
@@ -161,7 +173,13 @@ export interface BoxItem {
 }
 
 /** Report `children`'s height whenever it changes. */
-function Measured({ onHeight, children }: { onHeight: (px: number) => void; children: ReactNode }) {
+function Measured({
+  onHeight,
+  children,
+}: {
+  onHeight: (px: number) => void;
+  children: ReactNode;
+}) {
   const ref = useRef<HTMLDivElement>(null);
   // Through a ref, so a new callback each render doesn't re-subscribe.
   const report = useRef(onHeight);
@@ -169,7 +187,9 @@ function Measured({ onHeight, children }: { onHeight: (px: number) => void; chil
   useLayoutEffect(() => {
     const element = ref.current;
     if (!element) return;
-    const observer = new ResizeObserver(() => report.current(element.offsetHeight));
+    const observer = new ResizeObserver(() =>
+      report.current(element.offsetHeight),
+    );
     observer.observe(element);
     report.current(element.offsetHeight);
     return () => observer.disconnect();
@@ -247,26 +267,32 @@ export function BoxLayout({
               width: CORNER,
               height: CORNER,
             },
-            "&.react-grid-item > .react-resizable-handle::after": { display: "none" },
-            "&.react-grid-item > .react-resizable-handle.react-resizable-handle-e, &.react-grid-item > .react-resizable-handle.react-resizable-handle-w": {
-              ...grip,
-              top: "50%",
-              bottom: "auto",
-              width: GRIP_THICKNESS,
-              height: GRIP_LENGTH,
-              marginTop: `${-GRIP_LENGTH / 2}px`,
+            "&.react-grid-item > .react-resizable-handle::after": {
+              display: "none",
             },
-            "&.react-grid-item > .react-resizable-handle.react-resizable-handle-e": { right: 1 },
-            "&.react-grid-item > .react-resizable-handle.react-resizable-handle-w": { left: 1 },
-            "&.react-grid-item > .react-resizable-handle.react-resizable-handle-s": {
-              ...grip,
-              left: "50%",
-              right: "auto",
-              bottom: 1,
-              width: GRIP_LENGTH,
-              height: GRIP_THICKNESS,
-              marginLeft: `${-GRIP_LENGTH / 2}px`,
-            },
+            "&.react-grid-item > .react-resizable-handle.react-resizable-handle-e, &.react-grid-item > .react-resizable-handle.react-resizable-handle-w":
+              {
+                ...grip,
+                top: "50%",
+                bottom: "auto",
+                width: GRIP_THICKNESS,
+                height: GRIP_LENGTH,
+                marginTop: `${-GRIP_LENGTH / 2}px`,
+              },
+            "&.react-grid-item > .react-resizable-handle.react-resizable-handle-e":
+              { right: 1 },
+            "&.react-grid-item > .react-resizable-handle.react-resizable-handle-w":
+              { left: 1 },
+            "&.react-grid-item > .react-resizable-handle.react-resizable-handle-s":
+              {
+                ...grip,
+                left: "50%",
+                right: "auto",
+                bottom: 1,
+                width: GRIP_LENGTH,
+                height: GRIP_THICKNESS,
+                marginLeft: `${-GRIP_LENGTH / 2}px`,
+              },
           }}
         >
           <Stack
@@ -286,9 +312,17 @@ export function BoxLayout({
               userSelect: "none",
             }}
           >
-            <DragIndicatorIcon fontSize="small" sx={{ color: "text.disabled" }} />
+            <DragIndicatorIcon
+              fontSize="small"
+              sx={{ color: "text.disabled" }}
+            />
             {/* Never squeezed to nothing by a wide search field beside it. */}
-            <Typography variant="h4" component="h2" noWrap sx={{ flexGrow: 1, minWidth: 64 }}>
+            <Typography
+              variant="h4"
+              component="h2"
+              noWrap
+              sx={{ flexGrow: 1, minWidth: 64 }}
+            >
               {box.title}
             </Typography>
             {box.actions && (
@@ -308,7 +342,9 @@ export function BoxLayout({
               flex: 1,
               minHeight: 0,
               position: "relative",
-              ...(box.body === "fill" ? {} : { overflow: "auto", px: 1.5, py: 1 }),
+              ...(box.body === "fill"
+                ? {}
+                : { overflow: "auto", px: 1.5, py: 1 }),
             }}
           >
             {box.body === "fill" ? (
@@ -334,7 +370,12 @@ export function BoxLayout({
                   onFit(
                     box.id,
                     // Rounded up: a row short and the last line is cut off.
-                    Math.max(1, Math.ceil((px + BOX_CHROME + MARGIN) / (ROW_HEIGHT + MARGIN))),
+                    Math.max(
+                      1,
+                      Math.ceil(
+                        (px + BOX_CHROME + MARGIN) / (ROW_HEIGHT + MARGIN),
+                      ),
+                    ),
                   )
                 }
               >

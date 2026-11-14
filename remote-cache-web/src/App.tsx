@@ -26,23 +26,28 @@ import { api, hasToken, type Health } from "./api";
 import { buildTheme } from "./theme";
 import { useLoad } from "./useLoad";
 import { Builds } from "./views/Builds";
+import { Executors } from "./views/Executors";
 import { Login } from "./views/Login";
 import { Overview } from "./views/Overview";
 import { Releases } from "./views/Releases";
 import { Users } from "./views/Users";
 
-type View = "overview" | "builds" | "releases" | "users";
+type View = "overview" | "builds" | "executors" | "releases" | "users";
 
 const VIEWS: { view: View; path: string; label: string }[] = [
   { view: "overview", path: "/", label: "Cache" },
   { view: "builds", path: "/builds", label: "Builds" },
+  { view: "executors", path: "/executors", label: "Executors" },
   { view: "releases", path: "/releases", label: "Releases" },
   { view: "users", path: "/users", label: "Users" },
 ];
 
 function viewFromPath(): View {
   const path = location.pathname.replace(/\/+$/, "") || "/";
-  return VIEWS.find((v) => v.path !== "/" && path.endsWith(v.path))?.view ?? "overview";
+  return (
+    VIEWS.find((v) => v.path !== "/" && path.endsWith(v.path))?.view ??
+    "overview"
+  );
 }
 
 // ─── Theme choice ───────────────────────────────────────────────────────────
@@ -87,7 +92,8 @@ export function App() {
   }, []);
 
   const health = useLoad(() => api<Health>("/api/health"), refreshKey);
-  const open = health.data && (health.data.auth === "open" || health.data.auth === "none");
+  const open =
+    health.data && (health.data.auth === "open" || health.data.auth === "none");
   const ready = Boolean(open || (signedIn && hasToken()));
 
   useEffect(() => {
@@ -111,7 +117,9 @@ export function App() {
         `ciabatta ${health.data.version}`,
         `auth: ${health.data.auth}`,
         location.protocol === "https:" ? "HTTPS" : "HTTP",
-        health.data.release?.version ? `serving ciabatta ${health.data.release.version}` : null,
+        health.data.release?.version
+          ? `serving ciabatta ${health.data.release.version}`
+          : null,
       ]
         .filter(Boolean)
         .join(" · ")
@@ -126,13 +134,27 @@ export function App() {
         <Container maxWidth="xl">
           <Toolbar
             disableGutters
-            sx={{ minHeight: { xs: 48 }, columnGap: 1.5, flexWrap: { xs: "wrap", md: "nowrap" } }}
+            sx={{
+              minHeight: { xs: 48 },
+              columnGap: 1.5,
+              flexWrap: { xs: "wrap", md: "nowrap" },
+            }}
           >
-            <Box component="img" src="/favicon.svg" alt="" sx={{ width: 24, height: 24 }} />
+            <Box
+              component="img"
+              src="/favicon.svg"
+              alt=""
+              sx={{ width: 24, height: 24 }}
+            />
             <Typography
               variant="h1"
               noWrap
-              sx={{ fontSize: "1.1rem", lineHeight: 1, mr: { md: 2 }, flexShrink: 0 }}
+              sx={{
+                fontSize: "1.1rem",
+                lineHeight: 1,
+                mr: { md: 2 },
+                flexShrink: 0,
+              }}
             >
               ciabatta remote cache
             </Typography>
@@ -228,6 +250,7 @@ export function App() {
         )}
         {ready && view === "overview" && <Overview refreshKey={refreshKey} />}
         {ready && view === "builds" && <Builds refreshKey={refreshKey} />}
+        {ready && view === "executors" && <Executors refreshKey={refreshKey} />}
         {ready && view === "releases" && <Releases refreshKey={refreshKey} />}
         {ready && view === "users" && <Users refreshKey={refreshKey} />}
       </Container>

@@ -143,7 +143,9 @@ export function useWorkspace(project: string) {
   return useQuery({
     queryKey: workspaceKeys.catalogue(project),
     queryFn: () =>
-      api.get<WorkspaceCatalogue>(`/api/workspace?project=${encodeURIComponent(project)}`),
+      api.get<WorkspaceCatalogue>(
+        `/api/workspace?project=${encodeURIComponent(project)}`,
+      ),
     // Declarations change when someone edits a TOML, not continuously.
     staleTime: 30_000,
     retry: false,
@@ -182,7 +184,9 @@ export function useEnvDrift(project: string) {
   return useQuery({
     queryKey: ["workspace", "env-drift", project] as const,
     queryFn: () =>
-      api.get<EnvDrift>(`/api/workspace/env-drift?project=${encodeURIComponent(project)}`),
+      api.get<EnvDrift>(
+        `/api/workspace/env-drift?project=${encodeURIComponent(project)}`,
+      ),
     // A pull happens while you're looking at another window, so this is worth
     // re-checking on focus rather than only on mount.
     refetchOnWindowFocus: true,

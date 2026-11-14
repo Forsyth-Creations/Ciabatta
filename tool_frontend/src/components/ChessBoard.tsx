@@ -57,7 +57,14 @@ interface Drag {
   wasSelected: boolean;
 }
 
-export function ChessBoard({ view, orientation, canMove, onMove, size, colors }: Props) {
+export function ChessBoard({
+  view,
+  orientation,
+  canMove,
+  onMove,
+  size,
+  colors,
+}: Props) {
   const boardRef = useRef<HTMLDivElement>(null);
   const [selected, setSelected] = useState<string | null>(null);
   const [drag, setDragState] = useState<Drag | null>(null);
@@ -68,7 +75,10 @@ export function ChessBoard({ view, orientation, canMove, onMove, size, colors }:
     dragRef.current = next;
     setDragState(next);
   };
-  const [promotion, setPromotion] = useState<{ from: string; to: string } | null>(null);
+  const [promotion, setPromotion] = useState<{
+    from: string;
+    to: string;
+  } | null>(null);
 
   const cell = size / 8;
   const you = view.you;
@@ -89,7 +99,9 @@ export function ChessBoard({ view, orientation, canMove, onMove, size, colors }:
   const place = (index: number) => {
     const file = index % 8;
     const rank = Math.floor(index / 8);
-    return orientation === "white" ? { col: file, row: 7 - rank } : { col: 7 - file, row: rank };
+    return orientation === "white"
+      ? { col: file, row: 7 - rank }
+      : { col: 7 - file, row: rank };
   };
 
   const squareFromPoint = (clientX: number, clientY: number): string | null => {
@@ -149,7 +161,8 @@ export function ChessBoard({ view, orientation, canMove, onMove, size, colors }:
     const drag = dragRef.current;
     if (!drag) return;
     const moved =
-      drag.moved || Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY) > 4;
+      drag.moved ||
+      Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY) > 4;
     setDrag({ ...drag, x: event.clientX, y: event.clientY, moved });
   };
 
@@ -178,7 +191,9 @@ export function ChessBoard({ view, orientation, canMove, onMove, size, colors }:
   const glyph = (code: string, px: number) => <Piece code={code} size={px} />;
 
   return (
-    <Box sx={{ position: "relative", width: size, height: size, flexShrink: 0 }}>
+    <Box
+      sx={{ position: "relative", width: size, height: size, flexShrink: 0 }}
+    >
       <PieceDefs />
       <Box
         ref={boardRef}
@@ -226,10 +241,22 @@ export function ChessBoard({ view, orientation, canMove, onMove, size, colors }:
               }}
             >
               {lastMove.has(sq) && (
-                <Box sx={{ position: "absolute", inset: 0, bgcolor: "rgba(240,195,65,0.42)" }} />
+                <Box
+                  sx={{
+                    position: "absolute",
+                    inset: 0,
+                    bgcolor: "rgba(240,195,65,0.42)",
+                  }}
+                />
               )}
               {selected === sq && (
-                <Box sx={{ position: "absolute", inset: 0, bgcolor: "rgba(32,77,113,0.45)" }} />
+                <Box
+                  sx={{
+                    position: "absolute",
+                    inset: 0,
+                    bgcolor: "rgba(32,77,113,0.45)",
+                  }}
+                />
               )}
               {index === checkedKing && (
                 <Box
@@ -275,10 +302,14 @@ export function ChessBoard({ view, orientation, canMove, onMove, size, colors }:
                 </Box>
               )}
               {occupied && draggingFrom !== sq && (
-                <Box sx={{ position: "relative", display: "flex" }}>{glyph(code, cell * 0.96)}</Box>
+                <Box sx={{ position: "relative", display: "flex" }}>
+                  {glyph(code, cell * 0.96)}
+                </Box>
               )}
               {occupied && draggingFrom === sq && (
-                <Box sx={{ position: "relative", display: "flex", opacity: 0.3 }}>
+                <Box
+                  sx={{ position: "relative", display: "flex", opacity: 0.3 }}
+                >
                   {glyph(code, cell * 0.96)}
                 </Box>
               )}
@@ -341,7 +372,11 @@ export function ChessBoard({ view, orientation, canMove, onMove, size, colors }:
             zIndex: 2,
           }}
         >
-          <Paper elevation={8} sx={{ p: 1 }} onClick={(e) => e.stopPropagation()}>
+          <Paper
+            elevation={8}
+            sx={{ p: 1 }}
+            onClick={(e) => e.stopPropagation()}
+          >
             <Stack direction="row" spacing={1}>
               {PROMOTION_CHOICES.map(({ kind, letter }) => (
                 <ButtonBase

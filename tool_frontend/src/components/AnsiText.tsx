@@ -62,7 +62,8 @@ const EMPTY: SegmentStyle = {
  * for them to move.
  */
 // eslint-disable-next-line no-control-regex
-const ESCAPE = /\u001b(?:\[([0-9;:?]*)([ -/]*)([@-~])|\][^\u0007\u001b]*(?:\u0007|\u001b\\)|[@-Z\\-_])/g;
+const ESCAPE =
+  /\u001b(?:\[([0-9;:?]*)([ -/]*)([@-~])|\][^\u0007\u001b]*(?:\u0007|\u001b\\)|[@-Z\\-_])/g;
 
 /** Split `input` into runs of text that share one style. */
 export function parseAnsi(input: string): AnsiSegment[] {
@@ -104,7 +105,9 @@ export function stripAnsi(input: string): string {
 function applySgr(style: SegmentStyle, params: string): SegmentStyle {
   // An empty parameter list means 0, and `4:3` (curly underline) is a colon
   // form whose sub-parameters only refine an attribute we render plainly.
-  const codes = (params === "" ? "0" : params).split(";").map((p) => Number(p.split(":")[0]) || 0);
+  const codes = (params === "" ? "0" : params)
+    .split(";")
+    .map((p) => Number(p.split(":")[0]) || 0);
 
   let next = { ...style };
   for (let i = 0; i < codes.length; i++) {
@@ -172,10 +175,14 @@ function applySgr(style: SegmentStyle, params: string): SegmentStyle {
         break;
       }
       default:
-        if (code >= 30 && code <= 37) next.fg = { kind: "indexed", index: code - 30 };
-        else if (code >= 90 && code <= 97) next.fg = { kind: "indexed", index: code - 90 + 8 };
-        else if (code >= 40 && code <= 47) next.bg = { kind: "indexed", index: code - 40 };
-        else if (code >= 100 && code <= 107) next.bg = { kind: "indexed", index: code - 100 + 8 };
+        if (code >= 30 && code <= 37)
+          next.fg = { kind: "indexed", index: code - 30 };
+        else if (code >= 90 && code <= 97)
+          next.fg = { kind: "indexed", index: code - 90 + 8 };
+        else if (code >= 40 && code <= 47)
+          next.bg = { kind: "indexed", index: code - 40 };
+        else if (code >= 100 && code <= 107)
+          next.bg = { kind: "indexed", index: code - 100 + 8 };
         break;
     }
   }
@@ -299,7 +306,10 @@ export const AnsiText = memo(function AnsiText({
   return (
     <>
       {segments.map((segment, index) => (
-        <span key={index} style={cssFor(segment.style, mode, defaultFg, defaultBg)}>
+        <span
+          key={index}
+          style={cssFor(segment.style, mode, defaultFg, defaultBg)}
+        >
           {segment.text}
         </span>
       ))}
@@ -331,7 +341,10 @@ function cssFor(
     [fg, bg] = [bg ?? defaultBg, fg ?? defaultFg];
   }
 
-  const decoration = [style.underline && "underline", style.strike && "line-through"]
+  const decoration = [
+    style.underline && "underline",
+    style.strike && "line-through",
+  ]
     .filter(Boolean)
     .join(" ");
 

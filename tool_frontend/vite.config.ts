@@ -12,7 +12,9 @@ import react from "@vitejs/plugin-react";
 function daemonPort(): string {
   if (process.env.CIABATTA_DAEMON_PORT) return process.env.CIABATTA_DAEMON_PORT;
   try {
-    const record = JSON.parse(readFileSync(join(homedir(), ".ciabatta", "daemon.json"), "utf8"));
+    const record = JSON.parse(
+      readFileSync(join(homedir(), ".ciabatta", "daemon.json"), "utf8"),
+    );
     if (record.port) return String(record.port);
   } catch {
     // No daemon recorded yet: the fallback port.
@@ -36,7 +38,13 @@ export default defineConfig({
   resolve: {
     // `@ciabatta/graphs` is linked source shared with the other app; one copy
     // of each of these, or react-flow and MUI each see two Reacts/themes.
-    dedupe: ["react", "react-dom", "@mui/material", "@emotion/react", "@xyflow/react"],
+    dedupe: [
+      "react",
+      "react-dom",
+      "@mui/material",
+      "@emotion/react",
+      "@xyflow/react",
+    ],
   },
   build: {
     outDir: "dist",

@@ -88,7 +88,11 @@ export function TodoList({
   const queryKey = todoKey(projectId);
 
   const params = projectId ? `?project=${encodeURIComponent(projectId)}` : "";
-  const { data: todos, isLoading, error } = useQuery({
+  const {
+    data: todos,
+    isLoading,
+    error,
+  } = useQuery({
     queryKey,
     queryFn: () => api.get<Todo[]>(`/api/todos${params}`),
   });
@@ -97,11 +101,36 @@ export function TodoList({
   // *is* the new cache value — no refetch round trip. It also means a task
   // promoted to global vanishes from the project view in the same reply.
   const add = useTodoMutation("/api/todos", projectId, queryKey, queryClient);
-  const toggle = useTodoMutation("/api/todos/toggle", projectId, queryKey, queryClient);
-  const remove = useTodoMutation("/api/todos/delete", projectId, queryKey, queryClient);
-  const setPriority = useTodoMutation("/api/todos/priority", projectId, queryKey, queryClient);
-  const edit = useTodoMutation("/api/todos/edit", projectId, queryKey, queryClient);
-  const setScope = useTodoMutation("/api/todos/scope", projectId, queryKey, queryClient);
+  const toggle = useTodoMutation(
+    "/api/todos/toggle",
+    projectId,
+    queryKey,
+    queryClient,
+  );
+  const remove = useTodoMutation(
+    "/api/todos/delete",
+    projectId,
+    queryKey,
+    queryClient,
+  );
+  const setPriority = useTodoMutation(
+    "/api/todos/priority",
+    projectId,
+    queryKey,
+    queryClient,
+  );
+  const edit = useTodoMutation(
+    "/api/todos/edit",
+    projectId,
+    queryKey,
+    queryClient,
+  );
+  const setScope = useTodoMutation(
+    "/api/todos/scope",
+    projectId,
+    queryKey,
+    queryClient,
+  );
 
   const ship = useMutation({
     mutationFn: (id: number) =>
@@ -116,7 +145,9 @@ export function TodoList({
     setDraft("");
   };
 
-  const matching = (todos ?? []).filter((todo) => (filter ? filter(todo) : true));
+  const matching = (todos ?? []).filter((todo) =>
+    filter ? filter(todo) : true,
+  );
   const visible = limit ? matching.slice(0, limit) : matching;
   const hidden = matching.length - visible.length;
 
@@ -133,7 +164,11 @@ export function TodoList({
             input: {
               endAdornment: (
                 <InputAdornment position="end">
-                  <Button type="submit" startIcon={<AddIcon />} disabled={!draft.trim()}>
+                  <Button
+                    type="submit"
+                    startIcon={<AddIcon />}
+                    disabled={!draft.trim()}
+                  >
                     Add
                   </Button>
                 </InputAdornment>
@@ -149,7 +184,8 @@ export function TodoList({
       {ship.error && <ErrorNote error={ship.error} />}
       {ship.isSuccess && (
         <Typography variant="body2" color="success.main" sx={{ mb: 2 }}>
-          Shipped to the assistant as job #{ship.data.job}. Watch it on the AI page.
+          Shipped to the assistant as job #{ship.data.job}. Watch it on the AI
+          page.
         </Typography>
       )}
 
@@ -191,7 +227,10 @@ export function TodoList({
                   size="small"
                   value={todo.priority}
                   onChange={(e) =>
-                    setPriority.mutate({ id: todo.id, priority: e.target.value as Priority })
+                    setPriority.mutate({
+                      id: todo.id,
+                      priority: e.target.value as Priority,
+                    })
                   }
                   sx={{ width: 132, flexShrink: 0 }}
                   renderValue={(value) => (
@@ -265,7 +304,10 @@ function ScopeButton({
     if (!moveTarget) {
       return (
         <Tooltip title="On the global list. Select a project above to move it there.">
-          <PublicIcon fontSize="small" sx={{ color: "text.disabled", mt: 0.75, flexShrink: 0 }} />
+          <PublicIcon
+            fontSize="small"
+            sx={{ color: "text.disabled", mt: 0.75, flexShrink: 0 }}
+          />
         </Tooltip>
       );
     }
@@ -310,7 +352,13 @@ function ScopeButton({
  * Cmd/Ctrl+Enter — and to clicking away, because after typing that means "keep
  * it" far more often than it means the opposite. Escape abandons.
  */
-function EditableText({ todo, onSave }: { todo: Todo; onSave: (text: string) => void }) {
+function EditableText({
+  todo,
+  onSave,
+}: {
+  todo: Todo;
+  onSave: (text: string) => void;
+}) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(todo.text);
   const input = useRef<HTMLTextAreaElement>(null);

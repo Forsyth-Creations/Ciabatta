@@ -28,7 +28,12 @@ import { useTheme } from "@mui/material/styles";
 import type { Theme } from "@mui/material/styles";
 import type { Edge, Node } from "@xyflow/react";
 
-import { GraphCanvas, ROUTED_EDGE, layeredLayout, routeKey } from "@ciabatta/graphs";
+import {
+  GraphCanvas,
+  ROUTED_EDGE,
+  layeredLayout,
+  routeKey,
+} from "@ciabatta/graphs";
 import { PageHeader } from "../components/Page";
 import { monoFontStack } from "../theme";
 
@@ -41,10 +46,34 @@ interface DraftStep {
 }
 
 const STARTER: DraftStep[] = [
-  { name: "build", run: "cargo build --release", needs: [], onError: "", recover: false },
-  { name: "test", run: "cargo test", needs: ["build"], onError: "notify", recover: false },
-  { name: "notify", run: "echo 'run failed' | mail -s ci team@example.com", needs: [], onError: "", recover: true },
-  { name: "publish", run: "./scripts/publish.sh", needs: ["test"], onError: "", recover: false },
+  {
+    name: "build",
+    run: "cargo build --release",
+    needs: [],
+    onError: "",
+    recover: false,
+  },
+  {
+    name: "test",
+    run: "cargo test",
+    needs: ["build"],
+    onError: "notify",
+    recover: false,
+  },
+  {
+    name: "notify",
+    run: "echo 'run failed' | mail -s ci team@example.com",
+    needs: [],
+    onError: "",
+    recover: true,
+  },
+  {
+    name: "publish",
+    run: "./scripts/publish.sh",
+    needs: ["test"],
+    onError: "",
+    recover: false,
+  },
 ];
 
 export function RunBuilderPage() {
@@ -54,12 +83,20 @@ export function RunBuilderPage() {
   const [copied, setCopied] = useState(false);
 
   const update = (index: number, patch: Partial<DraftStep>) =>
-    setSteps((current) => current.map((s, i) => (i === index ? { ...s, ...patch } : s)));
+    setSteps((current) =>
+      current.map((s, i) => (i === index ? { ...s, ...patch } : s)),
+    );
 
   const addStep = () =>
     setSteps((current) => [
       ...current,
-      { name: `step_${current.length + 1}`, run: "", needs: [], onError: "", recover: false },
+      {
+        name: `step_${current.length + 1}`,
+        run: "",
+        needs: [],
+        onError: "",
+        recover: false,
+      },
     ]);
 
   const removeStep = (index: number) =>
@@ -76,8 +113,14 @@ export function RunBuilderPage() {
         }));
     });
 
-  const { nodes, edges } = useMemo(() => buildPreview(steps, theme), [steps, theme]);
-  const yaml = useMemo(() => emitWorkflow(workflowName, steps), [workflowName, steps]);
+  const { nodes, edges } = useMemo(
+    () => buildPreview(steps, theme),
+    [steps, theme],
+  );
+  const yaml = useMemo(
+    () => emitWorkflow(workflowName, steps),
+    [workflowName, steps],
+  );
 
   return (
     <>
@@ -98,8 +141,21 @@ export function RunBuilderPage() {
 
           <Stack spacing={2}>
             {steps.map((step, index) => (
-              <Box key={index} sx={{ p: 2, border: 1, borderColor: "divider", borderRadius: 1 }}>
-                <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 1.5 }}>
+              <Box
+                key={index}
+                sx={{
+                  p: 2,
+                  border: 1,
+                  borderColor: "divider",
+                  borderRadius: 1,
+                }}
+              >
+                <Stack
+                  direction="row"
+                  spacing={1}
+                  alignItems="center"
+                  sx={{ mb: 1.5 }}
+                >
                   <TextField
                     size="small"
                     label="Step name"
@@ -113,7 +169,9 @@ export function RunBuilderPage() {
                       <Checkbox
                         size="small"
                         checked={step.recover}
-                        onChange={(e) => update(index, { recover: e.target.checked })}
+                        onChange={(e) =>
+                          update(index, { recover: e.target.checked })
+                        }
                       />
                     }
                     label="Recovery step"
@@ -129,7 +187,9 @@ export function RunBuilderPage() {
                   label="Command"
                   value={step.run}
                   onChange={(e) => update(index, { run: e.target.value })}
-                  slotProps={{ htmlInput: { style: { fontFamily: monoFontStack } } }}
+                  slotProps={{
+                    htmlInput: { style: { fontFamily: monoFontStack } },
+                  }}
                   sx={{ mb: 1.5 }}
                 />
 
@@ -210,7 +270,11 @@ export function RunBuilderPage() {
             </Button>
           </Stack>
           {copied && (
-            <Alert severity="success" sx={{ mb: 1 }} onClose={() => setCopied(false)}>
+            <Alert
+              severity="success"
+              sx={{ mb: 1 }}
+              onClose={() => setCopied(false)}
+            >
               Copied — paste it into your .ciabatta/ciabatta.yaml.
             </Alert>
           )}
@@ -259,7 +323,11 @@ function buildPreview(steps: DraftStep[], theme: Theme) {
       ...errorEdges.map((e) => ({ ...e, group: "error" })),
     ],
     (id) => ({ label: id }),
-    { columnWidth: NODE_WIDTH + 110, nodeWidth: NODE_WIDTH, nodeHeight: NODE_HEIGHT },
+    {
+      columnWidth: NODE_WIDTH + 110,
+      nodeWidth: NODE_WIDTH,
+      nodeHeight: NODE_HEIGHT,
+    },
   );
 
   const byName = new Map(steps.map((s) => [s.name, s]));
@@ -269,7 +337,9 @@ function buildPreview(steps: DraftStep[], theme: Theme) {
       background: theme.palette.background.paper,
       color: theme.palette.text.primary,
       border: `2px ${byName.get(node.id)?.recover ? "dashed" : "solid"} ${
-        byName.get(node.id)?.recover ? theme.palette.warning.main : theme.palette.divider
+        byName.get(node.id)?.recover
+          ? theme.palette.warning.main
+          : theme.palette.divider
       }`,
       borderRadius: 8,
       fontSize: 12,

@@ -88,7 +88,7 @@ mod tests {
 
     #[tokio::test]
     async fn app_routes_fall_back_to_the_entry_point() {
-        for path in ["/", "/builds", "/releases", "/users"] {
+        for path in ["/", "/builds", "/executors", "/releases", "/users"] {
             let response = get(path).await;
             assert_eq!(response.status(), StatusCode::OK, "{path}");
             assert_eq!(

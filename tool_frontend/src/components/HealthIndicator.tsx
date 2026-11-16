@@ -33,7 +33,9 @@ export function HealthIndicator() {
   }
 
   return (
-    <Tooltip title={`pid ${data.pid} · up since ${new Date(data.started_at).toLocaleString()}`}>
+    <Tooltip
+      title={`pid ${data.pid} · up since ${new Date(data.started_at).toLocaleString()}`}
+    >
       <Chip
         size="small"
         color="success"

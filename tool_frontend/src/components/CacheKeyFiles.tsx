@@ -55,7 +55,13 @@ function copy(text: string) {
 }
 
 /** A hash or key, shortened, with the full value a hover and a click away. */
-export function HashText({ value, chars = 12 }: { value: string; chars?: number }) {
+export function HashText({
+  value,
+  chars = 12,
+}: {
+  value: string;
+  chars?: number;
+}) {
   if (!value) {
     return (
       <Typography component="span" variant="caption" color="text.disabled">
@@ -68,7 +74,12 @@ export function HashText({ value, chars = 12 }: { value: string; chars?: number 
       <Box
         component="span"
         onClick={() => copy(value)}
-        sx={{ fontFamily: monoFontStack, fontSize: 12, cursor: "copy", color: "text.secondary" }}
+        sx={{
+          fontFamily: monoFontStack,
+          fontSize: 12,
+          cursor: "copy",
+          color: "text.secondary",
+        }}
       >
         {value.slice(0, chars)}
       </Box>
@@ -80,7 +91,11 @@ function FileRows({ files, filter }: { files: FileHash[]; filter: string }) {
   const shown = useMemo(() => {
     const needle = filter.trim().toLowerCase();
     return needle
-      ? files.filter((f) => f.path.toLowerCase().includes(needle) || f.sha256.startsWith(needle))
+      ? files.filter(
+          (f) =>
+            f.path.toLowerCase().includes(needle) ||
+            f.sha256.startsWith(needle),
+        )
       : files;
   }, [files, filter]);
 
@@ -117,7 +132,11 @@ function FileRows({ files, filter }: { files: FileHash[]; filter: string }) {
           >
             {file.path}
           </Typography>
-          <Typography variant="caption" color="text.disabled" sx={{ flexShrink: 0 }}>
+          <Typography
+            variant="caption"
+            color="text.disabled"
+            sx={{ flexShrink: 0 }}
+          >
             {humanizeBytes(file.size)}
           </Typography>
           <Box sx={{ flexShrink: 0 }}>
@@ -126,7 +145,11 @@ function FileRows({ files, filter }: { files: FileHash[]; filter: string }) {
         </Stack>
       ))}
       {shown.length > MAX_ROWS && (
-        <Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: 0.5 }}>
+        <Typography
+          variant="caption"
+          color="text.secondary"
+          sx={{ display: "block", mt: 0.5 }}
+        >
           …and {shown.length - MAX_ROWS} more. Filter to narrow the list.
         </Typography>
       )}
@@ -177,8 +200,9 @@ export function CacheKeyFilesView({
       <Alert severity="info" sx={{ py: 0.25 }}>
         <Typography variant="caption">
           No file list is recorded for this key on this machine
-          {error ? ` (${(error as Error).message})` : ""}. It is written when a run decides
-          what to do with the step, so runs from older versions of ciabatta don't have one.
+          {error ? ` (${(error as Error).message})` : ""}. It is written when a
+          run decides what to do with the step, so runs from older versions of
+          ciabatta don't have one.
         </Typography>
       </Alert>
     );
@@ -189,12 +213,23 @@ export function CacheKeyFilesView({
 
   return (
     <Box>
-      <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
-        <Typography variant="overline" color="text.secondary" sx={{ lineHeight: 1.5 }}>
+      <Stack
+        direction="row"
+        spacing={1}
+        alignItems="center"
+        flexWrap="wrap"
+        useFlexGap
+      >
+        <Typography
+          variant="overline"
+          color="text.secondary"
+          sx={{ lineHeight: 1.5 }}
+        >
           Files &amp; hashes
         </Typography>
         <Typography variant="caption" color="text.secondary">
-          {data.algorithm.toUpperCase()} — the value <code>{data.algorithm}sum</code> prints
+          {data.algorithm.toUpperCase()} — the value{" "}
+          <code>{data.algorithm}sum</code> prints
         </Typography>
         <Tooltip title="Copy the whole list as `hash  path` lines, the format sha256sum -c checks">
           <IconButton
@@ -214,17 +249,30 @@ export function CacheKeyFilesView({
         <HashText value={data.key} chars={24} />
       </Stack>
       {!data.stored && (
-        <Typography variant="caption" color="text.secondary" sx={{ display: "block", mb: 0.5 }}>
-          Nothing is stored under this key yet: the inputs are what the run keyed the step on, and
-          the outputs are what's on disk right now{live ? " (refreshing while it builds)" : ""}.
+        <Typography
+          variant="caption"
+          color="text.secondary"
+          sx={{ display: "block", mb: 0.5 }}
+        >
+          Nothing is stored under this key yet: the inputs are what the run
+          keyed the step on, and the outputs are what's on disk right now
+          {live ? " (refreshing while it builds)" : ""}.
         </Typography>
       )}
-      <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
+      <Stack
+        direction="row"
+        spacing={1}
+        alignItems="center"
+        flexWrap="wrap"
+        useFlexGap
+      >
         <ToggleButtonGroup
           size="small"
           exclusive
           value={view}
-          onChange={(_, next: "tree" | "list" | null) => next && chooseView(next)}
+          onChange={(_, next: "tree" | "list" | null) =>
+            next && chooseView(next)
+          }
           sx={{ "& .MuiToggleButton-root": { py: 0.25, px: 0.75 } }}
         >
           <ToggleButton value="tree" aria-label="file tree">

@@ -48,7 +48,8 @@ interface Draft {
   steps: { name: string; needs: string[] }[];
 }
 
-const unitKey = (u: { member: string; workflow: string }) => `${u.member}:${u.workflow}`;
+const unitKey = (u: { member: string; workflow: string }) =>
+  `${u.member}:${u.workflow}`;
 const nodeId = (unit: string, step: string) => `${unit}:${step}`;
 
 function draftOf(unit: DeclaredUnit): Draft {
@@ -132,7 +133,9 @@ export function GraphEditor({
   useEffect(() => {
     if (!declared.data) return;
     setDrafts(
-      Object.fromEntries(declared.data.units.map((u) => [unitKey(u), draftOf(u)])),
+      Object.fromEntries(
+        declared.data.units.map((u) => [unitKey(u), draftOf(u)]),
+      ),
     );
   }, [declared.data]);
 
@@ -142,7 +145,10 @@ export function GraphEditor({
   );
 
   const report = useMemo(
-    () => (showDangling && declared.data ? findDangling(declared.data.units, drafts) : null),
+    () =>
+      showDangling && declared.data
+        ? findDangling(declared.data.units, drafts)
+        : null,
     [showDangling, declared.data, drafts],
   );
 
@@ -165,10 +171,14 @@ export function GraphEditor({
       // Another loaded workflow this one waits for hands it its exits — and
       // so does one that runs this one as an after action.
       const runsAfter = [...byKey.entries()]
-        .filter(([, u]) => u.after.some((a) => resolveNeed(a, u.member, u.workflow) === key))
+        .filter(([, u]) =>
+          u.after.some((a) => resolveNeed(a, u.member, u.workflow) === key),
+        )
         .map(([k]) => k);
       const upstream = [
-        ...[...draft.needs, ...unit.depends_on].map((need) => resolveNeed(need, unit.member, unit.workflow)),
+        ...[...draft.needs, ...unit.depends_on].map((need) =>
+          resolveNeed(need, unit.member, unit.workflow),
+        ),
         ...runsAfter,
       ].flatMap(exitsOf);
       const dangles = report?.dangling.has(key) ?? false;
@@ -180,7 +190,10 @@ export function GraphEditor({
           name: id,
           label: step.name,
           workspace: key,
-          status: dangles || loose.includes(step.name) ? "warning" : (status[id] ?? "pending"),
+          status:
+            dangles || loose.includes(step.name)
+              ? "warning"
+              : (status[id] ?? "pending"),
           needs: [
             ...step.needs.map((n) => nodeId(key, n)),
             ...(step.needs.length === 0 && !info.recover ? upstream : []),
@@ -188,7 +201,11 @@ export function GraphEditor({
           recover: info.recover,
           background: info.background,
           highlight: id === selected,
-          detail: info.recover ? "recovery" : step.needs.length ? `needs ${step.needs.join(", ")}` : "",
+          detail: info.recover
+            ? "recovery"
+            : step.needs.length
+              ? `needs ${step.needs.join(", ")}`
+              : "",
           note: dangles
             ? "dangling: nothing connects to this workflow"
             : loose.includes(step.name)
@@ -204,7 +221,9 @@ export function GraphEditor({
   if (!declared.data) return <Loading label="Reading the workflow files…" />;
 
   const changes = [...byKey.entries()].flatMap(([key, unit]) =>
-    drafts[key] ? describeChanges(unit, drafts[key]).map((c) => `${key}: ${c}`) : [],
+    drafts[key]
+      ? describeChanges(unit, drafts[key]).map((c) => `${key}: ${c}`)
+      : [],
   );
 
   const update = (key: string, change: (draft: Draft) => Draft) => {
@@ -217,14 +236,21 @@ export function GraphEditor({
     : undefined;
   const unit = pick ? byKey.get(pick) : undefined;
   const draft = pick ? drafts[pick] : undefined;
-  const stepName = pick && selected ? selected.slice(pick.length + 1) : undefined;
+  const stepName =
+    pick && selected ? selected.slice(pick.length + 1) : undefined;
   const step = draft?.steps.find((s) => s.name === stepName);
   const info = unit?.steps.find((s) => s.name === stepName);
 
   const onSave = () => {
     const edits: UnitEdit[] = [...byKey.entries()]
-      .filter(([key, u]) => drafts[key] && describeChanges(u, drafts[key]).length > 0)
-      .map(([key, u]) => ({ member: u.member, workflow: u.workflow, ...drafts[key] }));
+      .filter(
+        ([key, u]) => drafts[key] && describeChanges(u, drafts[key]).length > 0,
+      )
+      .map(([key, u]) => ({
+        member: u.member,
+        workflow: u.workflow,
+        ...drafts[key],
+      }));
     save.mutate(
       { project, units: edits },
       {
@@ -238,10 +264,17 @@ export function GraphEditor({
 
   return (
     <Stack spacing={1.5}>
-      <Stack direction="row" alignItems="center" spacing={1} flexWrap="wrap" useFlexGap>
+      <Stack
+        direction="row"
+        alignItems="center"
+        spacing={1}
+        flexWrap="wrap"
+        useFlexGap
+      >
         <Typography variant="subtitle2">{title}</Typography>
         <Typography variant="caption" color="text.secondary">
-          Click a step to prune it or change what it needs. Nothing is written until you save.
+          Click a step to prune it or change what it needs. Nothing is written
+          until you save.
         </Typography>
         <Box sx={{ flexGrow: 1 }} />
         <Button
@@ -250,7 +283,9 @@ export function GraphEditor({
           disabled={changes.length === 0}
           onClick={() => {
             setDrafts(
-              Object.fromEntries(declared.data.units.map((u) => [unitKey(u), draftOf(u)])),
+              Object.fromEntries(
+                declared.data.units.map((u) => [unitKey(u), draftOf(u)]),
+              ),
             );
             setSelected(null);
           }}
@@ -287,7 +322,11 @@ export function GraphEditor({
           </Alert>
         ))}
 
-      <Stack direction={{ xs: "column", md: "row" }} spacing={1.5} alignItems="stretch">
+      <Stack
+        direction={{ xs: "column", md: "row" }}
+        spacing={1.5}
+        alignItems="stretch"
+      >
         <Box sx={{ flex: 1, minWidth: 0 }}>
           <StepGraph
             steps={steps}
@@ -296,7 +335,10 @@ export function GraphEditor({
             onStepClick={(name) => setSelected(name === selected ? null : name)}
           />
         </Box>
-        <Paper variant="outlined" sx={{ width: { md: 360 }, p: 1.5, flexShrink: 0 }}>
+        <Paper
+          variant="outlined"
+          sx={{ width: { md: 360 }, p: 1.5, flexShrink: 0 }}
+        >
           {step && unit && draft && info && pick ? (
             <StepPanel
               unitKey={pick}
@@ -337,7 +379,12 @@ export function GraphEditor({
           ) : (
             <Box component="ul" sx={{ m: 0, pl: 2.5 }}>
               {changes.map((c) => (
-                <Typography component="li" variant="body2" key={c} sx={{ fontFamily: monoFontStack, fontSize: 12 }}>
+                <Typography
+                  component="li"
+                  variant="body2"
+                  key={c}
+                  sx={{ fontFamily: monoFontStack, fontSize: 12 }}
+                >
                   {c}
                 </Typography>
               ))}
@@ -375,9 +422,15 @@ function DanglingList({
           <Typography variant="overline" color="text.secondary">
             Dangling workflows ({dangling.length})
           </Typography>
-          <Typography variant="caption" color="text.secondary" component="p" sx={{ mb: 0.5 }}>
-            Nothing needs them, they need nothing, and no other package shares their name. Connect
-            them, or remove them if they&apos;re no longer used.
+          <Typography
+            variant="caption"
+            color="text.secondary"
+            component="p"
+            sx={{ mb: 0.5 }}
+          >
+            Nothing needs them, they need nothing, and no other package shares
+            their name. Connect them, or remove them if they&apos;re no longer
+            used.
           </Typography>
           <Stack direction="row" spacing={0.5} flexWrap="wrap" useFlexGap>
             {dangling.map((key) => (
@@ -402,7 +455,12 @@ function DanglingList({
           <Typography variant="overline" color="text.secondary">
             Loose steps
           </Typography>
-          <Typography variant="caption" color="text.secondary" component="p" sx={{ mb: 0.5 }}>
+          <Typography
+            variant="caption"
+            color="text.secondary"
+            component="p"
+            sx={{ mb: 0.5 }}
+          >
             Their workflow orders its other steps, but nothing orders these.
           </Typography>
           <Stack direction="row" spacing={0.5} flexWrap="wrap" useFlexGap>
@@ -479,11 +537,20 @@ function StepPanel({
     .filter(([k]) => k !== key && byKey.has(k))
     .flatMap(([k, d]) =>
       d.needs
-        .filter((n) => resolveNeed(n, k.split(":")[0], byKey.get(k)!.workflow) === key)
+        .filter(
+          (n) =>
+            resolveNeed(n, k.split(":")[0], byKey.get(k)!.workflow) === key,
+        )
         .map((n) => ({ key: k, need: n })),
     );
   const runsAfterOrBeside = [...byKey.entries()]
-    .filter(([k, u]) => k !== key && [...u.after, ...u.background].some((a) => resolveNeed(a, u.member, u.workflow) === key))
+    .filter(
+      ([k, u]) =>
+        k !== key &&
+        [...u.after, ...u.background].some(
+          (a) => resolveNeed(a, u.member, u.workflow) === key,
+        ),
+    )
     .map(([k]) => k);
   // Loaded, editable workflows that could be made to wait for this one
   // without a cycle.
@@ -494,7 +561,9 @@ function StepPanel({
   const locked = Boolean(unit.locked);
   // A step another step routes to (on_error / retry) can't go on its own.
   const routedFrom = draft.steps
-    .filter((s) => unit.steps.find((d) => d.name === s.name)?.routes.includes(step.name))
+    .filter((s) =>
+      unit.steps.find((d) => d.name === s.name)?.routes.includes(step.name),
+    )
     .map((s) => s.name);
 
   const options: Option[] = [
@@ -520,7 +589,11 @@ function StepPanel({
             ? {
                 ...s,
                 needs: [
-                  ...new Set(s.needs.flatMap((n) => (n === step.name ? step.needs : [n]))),
+                  ...new Set(
+                    s.needs.flatMap((n) =>
+                      n === step.name ? step.needs : [n],
+                    ),
+                  ),
                 ],
               }
             : s,
@@ -561,7 +634,9 @@ function StepPanel({
                 onChange((d) => ({
                   ...d,
                   steps: d.steps.map((s) =>
-                    s.name === step.name ? { ...s, needs: s.needs.filter((x) => x !== n) } : s,
+                    s.name === step.name
+                      ? { ...s, needs: s.needs.filter((x) => x !== n) }
+                      : s,
                   ),
                 }))
               }
@@ -587,12 +662,24 @@ function StepPanel({
               variant="outlined"
               label={n}
               disabled={locked}
-              onDelete={() => onChange((d) => ({ ...d, needs: d.needs.filter((x) => x !== n) }))}
+              onDelete={() =>
+                onChange((d) => ({
+                  ...d,
+                  needs: d.needs.filter((x) => x !== n),
+                }))
+              }
             />
           ))}
           {unit.depends_on.map((n) => (
-            <Tooltip key={n} title="From [workspace] depends_on in the sub-workspace's config — edit it there.">
-              <Chip size="small" variant="outlined" label={`${n} (depends_on)`} />
+            <Tooltip
+              key={n}
+              title="From [workspace] depends_on in the sub-workspace's config — edit it there."
+            >
+              <Chip
+                size="small"
+                variant="outlined"
+                label={`${n} (depends_on)`}
+              />
             </Tooltip>
           ))}
         </Stack>
@@ -616,13 +703,23 @@ function StepPanel({
               label={other}
               disabled={Boolean(byKey.get(other)?.locked)}
               onDelete={() =>
-                onChangeOther(other, (d) => ({ ...d, needs: d.needs.filter((x) => x !== need) }))
+                onChangeOther(other, (d) => ({
+                  ...d,
+                  needs: d.needs.filter((x) => x !== need),
+                }))
               }
             />
           ))}
           {runsAfterOrBeside.map((other) => (
-            <Tooltip key={other} title="Runs it as an after action or in the background — edit that in its workflow file.">
-              <Chip size="small" variant="outlined" label={`${other} (after/background)`} />
+            <Tooltip
+              key={other}
+              title="Runs it as an after action or in the background — edit that in its workflow file."
+            >
+              <Chip
+                size="small"
+                variant="outlined"
+                label={`${other} (after/background)`}
+              />
             </Tooltip>
           ))}
         </Stack>
@@ -640,7 +737,11 @@ function StepPanel({
           onChangeOther(other, (d) => ({ ...d, needs: [...d.needs, key] }));
         }}
         renderInput={(params) => (
-          <TextField {...params} label="Make a workflow wait for this one" placeholder="Search workflows" />
+          <TextField
+            {...params}
+            label="Make a workflow wait for this one"
+            placeholder="Search workflows"
+          />
         )}
       />
 
@@ -649,7 +750,9 @@ function StepPanel({
         disabled={locked}
         options={options}
         groupBy={(o) =>
-          o.kind === "step" ? "A step of this workflow" : "Another workflow (the whole workflow waits)"
+          o.kind === "step"
+            ? "A step of this workflow"
+            : "Another workflow (the whole workflow waits)"
         }
         getOptionLabel={(o) => o.value}
         inputValue={query}
@@ -663,13 +766,21 @@ function StepPanel({
               ? {
                   ...d,
                   steps: d.steps.map((s) =>
-                    s.name === step.name ? { ...s, needs: [...s.needs, option.value] } : s,
+                    s.name === step.name
+                      ? { ...s, needs: [...s.needs, option.value] }
+                      : s,
                   ),
                 }
               : { ...d, needs: [...d.needs, option.value] },
           );
         }}
-        renderInput={(params) => <TextField {...params} label="Add a dependency" placeholder="Search targets" />}
+        renderInput={(params) => (
+          <TextField
+            {...params}
+            label="Add a dependency"
+            placeholder="Search targets"
+          />
+        )}
       />
 
       <Tooltip
@@ -686,7 +797,9 @@ function StepPanel({
             size="small"
             color="error"
             startIcon={<DeleteIcon />}
-            disabled={locked || routedFrom.length > 0 || draft.steps.length === 1}
+            disabled={
+              locked || routedFrom.length > 0 || draft.steps.length === 1
+            }
             onClick={remove}
           >
             Remove step

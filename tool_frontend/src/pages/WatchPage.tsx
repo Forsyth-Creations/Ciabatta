@@ -31,8 +31,17 @@ import { styled } from "@mui/material/styles";
 import CompareArrowsIcon from "@mui/icons-material/CompareArrows";
 import { Link, useNavigate } from "@tanstack/react-router";
 
-import { useCloseSession, useStopSession, useWatchSessions } from "../api/watch";
-import { ErrorNote, Loading, PageHeader, RequireProject } from "../components/Page";
+import {
+  useCloseSession,
+  useStopSession,
+  useWatchSessions,
+} from "../api/watch";
+import {
+  ErrorNote,
+  Loading,
+  PageHeader,
+  RequireProject,
+} from "../components/Page";
 import { monoFontStack } from "../theme";
 
 /**
@@ -101,8 +110,10 @@ function SessionList() {
       ) : !sessions?.length ? (
         <Typography variant="body2" color="text.secondary">
           No watch sessions. Start one with{" "}
-          <code style={{ fontFamily: monoFontStack }}>ciabatta watch "npm run dev"</code> in a
-          terminal — it appears here as soon as it's running.
+          <code style={{ fontFamily: monoFontStack }}>
+            ciabatta watch "npm run dev"
+          </code>{" "}
+          in a terminal — it appears here as soon as it's running.
         </Typography>
       ) : (
         <Stack spacing={1} sx={{ maxWidth: 1100 }}>
@@ -156,22 +167,31 @@ function SessionList() {
                         {session.label}
                       </Typography>
                     )}
-                    <CommandLink to={`/watch/${session.id}`}>{session.command}</CommandLink>
+                    <CommandLink to={`/watch/${session.id}`}>
+                      {session.command}
+                    </CommandLink>
                     <Typography variant="caption" color="text.secondary">
-                      #{session.id} · {session.lines.toLocaleString()} lines · started{" "}
+                      #{session.id} · {session.lines.toLocaleString()} lines ·
+                      started{" "}
                       {new Date(session.created_at).toLocaleTimeString()}
                     </Typography>
                   </Box>
 
                   {session.running && (
                     <Tooltip title="Stop the command">
-                      <IconButton size="small" onClick={() => stop.mutate(session.id)}>
+                      <IconButton
+                        size="small"
+                        onClick={() => stop.mutate(session.id)}
+                      >
                         <StopIcon fontSize="small" />
                       </IconButton>
                     </Tooltip>
                   )}
                   <Tooltip title="Discard this session and its output">
-                    <IconButton size="small" onClick={() => close.mutate(session.id)}>
+                    <IconButton
+                      size="small"
+                      onClick={() => close.mutate(session.id)}
+                    >
                       <DeleteOutlineIcon fontSize="small" />
                     </IconButton>
                   </Tooltip>

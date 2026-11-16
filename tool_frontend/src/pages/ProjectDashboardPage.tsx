@@ -64,7 +64,12 @@ export function ProjectDashboardPage() {
           <WatchSection projectId={projectId} />
         </Grid>
         <Grid size={{ xs: 12, lg: 6 }}>
-          <Section icon={<ChecklistIcon />} title="Todo" to="/todo" action="All todos">
+          <Section
+            icon={<ChecklistIcon />}
+            title="Todo"
+            to="/todo"
+            action="All todos"
+          >
             <TodoList
               projectId={projectId}
               filter={(todo) => !todo.done}
@@ -86,7 +91,12 @@ export function ProjectDashboardPage() {
           <CacheSection projectId={projectId} />
         </Grid>
         <Grid size={12}>
-          <Section icon={<ArticleIcon />} title="README" to="/readme" action="Open">
+          <Section
+            icon={<ArticleIcon />}
+            title="README"
+            to="/readme"
+            action="Open"
+          >
             <ReadmeView projectId={projectId} projectName={project.name} />
           </Section>
         </Grid>
@@ -140,12 +150,21 @@ function Row({
       direction="row"
       spacing={1.25}
       alignItems="center"
-      sx={{ py: 0.5, px: 0.5, borderRadius: 0.5, "&:hover": { bgcolor: "action.hover" } }}
+      sx={{
+        py: 0.5,
+        px: 0.5,
+        borderRadius: 0.5,
+        "&:hover": { bgcolor: "action.hover" },
+      }}
     >
       <Box sx={{ display: "flex", flexShrink: 0 }}>{icon}</Box>
       <Box sx={{ flexGrow: 1, minWidth: 0 }}>{children}</Box>
       {note && (
-        <Typography variant="caption" color="text.secondary" sx={{ flexShrink: 0 }}>
+        <Typography
+          variant="caption"
+          color="text.secondary"
+          sx={{ flexShrink: 0 }}
+        >
           {note}
         </Typography>
       )}
@@ -161,9 +180,18 @@ function RunsSection({ projectId }: { projectId: string }) {
   const shown = active.length > 0 ? active : all.slice(0, 4);
 
   return (
-    <Section icon={<RocketLaunchIcon />} title="Runs" to="/run" action="All runs">
+    <Section
+      icon={<RocketLaunchIcon />}
+      title="Runs"
+      to="/run"
+      action="All runs"
+    >
       {runs.error && <ErrorNote error={runs.error} />}
-      <Typography variant="caption" color="text.secondary" sx={{ display: "block", mb: 0.5 }}>
+      <Typography
+        variant="caption"
+        color="text.secondary"
+        sx={{ display: "block", mb: 0.5 }}
+      >
         {active.length > 0
           ? `${active.length} in progress`
           : all.length > 0
@@ -180,13 +208,19 @@ function RunsSection({ projectId }: { projectId: string }) {
           sx={{ display: "block" }}
         >
           <Row
-            icon={<StatusIcon status={run.status} title={statusLabel(run.status)} />}
+            icon={
+              <StatusIcon status={run.status} title={statusLabel(run.status)} />
+            }
             note={ago(run.started_at ?? run.created_at, true)}
           >
             <Typography variant="body2" noWrap>
               #{run.id} {run.workflows.join(", ")}
               {run.dry_run && (
-                <Typography component="span" variant="caption" color="text.secondary">
+                <Typography
+                  component="span"
+                  variant="caption"
+                  color="text.secondary"
+                >
                   {" "}
                   · dry run
                 </Typography>
@@ -208,9 +242,18 @@ function WatchSection({ projectId }: { projectId: string }) {
   const running = mine.filter((session) => session.running).length;
 
   return (
-    <Section icon={<MonitorHeartIcon />} title="Watch" to="/watch" action="All sessions">
+    <Section
+      icon={<MonitorHeartIcon />}
+      title="Watch"
+      to="/watch"
+      action="All sessions"
+    >
       {sessions.error && <ErrorNote error={sessions.error} />}
-      <Typography variant="caption" color="text.secondary" sx={{ display: "block", mb: 0.5 }}>
+      <Typography
+        variant="caption"
+        color="text.secondary"
+        sx={{ display: "block", mb: 0.5 }}
+      >
         {mine.length === 0
           ? "No watch sessions. Start one with ciabatta watch <command>."
           : `${running} running · ${mine.length - running} finished`}
@@ -236,7 +279,11 @@ function WatchSection({ projectId }: { projectId: string }) {
             }
             note={`${session.lines.toLocaleString()} lines`}
           >
-            <Typography variant="body2" noWrap sx={{ fontFamily: monoFontStack, fontSize: 13 }}>
+            <Typography
+              variant="body2"
+              noWrap
+              sx={{ fontFamily: monoFontStack, fontSize: 13 }}
+            >
               {session.label ?? session.command}
             </Typography>
           </Row>
@@ -252,14 +299,19 @@ function CacheSection({ projectId }: { projectId: string }) {
   const status = cache.data;
 
   return (
-    <Section icon={<InventoryIcon />} title="Cache" to="/cache" action="Open cache">
+    <Section
+      icon={<InventoryIcon />}
+      title="Cache"
+      to="/cache"
+      action="Open cache"
+    >
       {cache.error && <ErrorNote error={cache.error} />}
       {cache.isLoading && <Loading label="Reading the cache…" />}
       {status && !status.enabled && (
         <Typography variant="body2" color="text.secondary">
           {/* The daemon's reason is already a sentence ("caching is off (set …)"). */}
-          {status.why_disabled ?? "Caching is off."} <code>ciabatta cache init</code> sets it up
-          for a workflow.
+          {status.why_disabled ?? "Caching is off."}{" "}
+          <code>ciabatta cache init</code> sets it up for a workflow.
         </Typography>
       )}
       {status?.enabled && (
@@ -268,13 +320,20 @@ function CacheSection({ projectId }: { projectId: string }) {
           <Stat label="on disk" value={status.human} />
           <Stat
             label="build time stored"
-            value={status.build_time_ms > 0 ? humanizeMs(status.build_time_ms) : "—"}
+            value={
+              status.build_time_ms > 0 ? humanizeMs(status.build_time_ms) : "—"
+            }
           />
-          <Stat label="last stored" value={status.newest ? ago(status.newest, true) : "never"} />
+          <Stat
+            label="last stored"
+            value={status.newest ? ago(status.newest, true) : "never"}
+          />
           {status.remote && (
             <Stat
               label="remote"
-              value={status.remote.enabled ? (status.remote.name ?? "on") : "off"}
+              value={
+                status.remote.enabled ? (status.remote.name ?? "on") : "off"
+              }
             />
           )}
         </Stack>

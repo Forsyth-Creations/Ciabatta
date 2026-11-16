@@ -25,9 +25,21 @@ name = "migrate_db"
 run  = "echo migrating $DB_URL"   # DB_URL comes from .env`)}
         <div>
           ${cards([
-            { icon: "📄", title: "One file or many", body: "<code>env_file</code> takes a single path or a list. Files are sourced left to right; a later file overrides an earlier one." },
-            { icon: "👁", title: "Seen everywhere", body: "Sourced values reach every phase (<code>login → pre → deploy → post</code>) and every step's <code>script</code> / <code>run</code>." },
-            { icon: "🧩", title: "Also on the flowchart", body: "Set <code>env_file</code> on the flowchart entry too; recipe-level files layer on top of it." },
+            {
+              icon: "📄",
+              title: "One file or many",
+              body: "<code>env_file</code> takes a single path or a list. Files are sourced left to right; a later file overrides an earlier one.",
+            },
+            {
+              icon: "👁",
+              title: "Seen everywhere",
+              body: "Sourced values reach every phase (<code>login → pre → deploy → post</code>) and every step's <code>script</code> / <code>run</code>.",
+            },
+            {
+              icon: "🧩",
+              title: "Also on the flowchart",
+              body: "Set <code>env_file</code> on the flowchart entry too; recipe-level files layer on top of it.",
+            },
           ])}
         </div>
       </div>`,
@@ -51,11 +63,31 @@ run  = "echo migrating $DB_URL"   # DB_URL comes from .env`)}
       ${table(
         ["Source", "Beats a .env value?", "Notes"],
         [
-          ["<code>-e KEY=VALUE</code> flag", "<span class='yes'>✓ wins</span>", "Explicit CLI overrides always take priority."],
-          ["CI / git-resolved <code>CIABATTA_*</code>", "<span class='yes'>✓ wins</span>", "Anything already resolved for the run is kept."],
-          ["Ambient environment", "<span class='yes'>✓ wins</span>", "A non-empty exported var is left untouched."],
-          ["Later <code>env_file</code> in the list", "<span class='yes'>✓</span> over earlier", "Files apply in order; the last one wins among files."],
-          ["Earlier <code>env_file</code> in the list", "—", "Provides a value only if nothing above set it."],
+          [
+            "<code>-e KEY=VALUE</code> flag",
+            "<span class='yes'>✓ wins</span>",
+            "Explicit CLI overrides always take priority.",
+          ],
+          [
+            "CI / git-resolved <code>CIABATTA_*</code>",
+            "<span class='yes'>✓ wins</span>",
+            "Anything already resolved for the run is kept.",
+          ],
+          [
+            "Ambient environment",
+            "<span class='yes'>✓ wins</span>",
+            "A non-empty exported var is left untouched.",
+          ],
+          [
+            "Later <code>env_file</code> in the list",
+            "<span class='yes'>✓</span> over earlier",
+            "Files apply in order; the last one wins among files.",
+          ],
+          [
+            "Earlier <code>env_file</code> in the list",
+            "—",
+            "Provides a value only if nothing above set it.",
+          ],
         ],
       )}
       ${note(
@@ -89,9 +121,21 @@ REGION='us-east-1'
 FEATURE_FLAG=`)}
         <div>
           ${cards([
-            { icon: "#️⃣", title: "Comments & blanks", body: "Lines starting with <code>#</code> and empty lines are skipped." },
-            { icon: "📦", title: "export prefix", body: "A leading <code>export </code> is accepted and ignored, so a shell-style file works as-is." },
-            { icon: "❝", title: "Quotes", body: "Single or double quotes around a value are stripped; the rest is taken verbatim (trimmed)." },
+            {
+              icon: "#️⃣",
+              title: "Comments & blanks",
+              body: "Lines starting with <code>#</code> and empty lines are skipped.",
+            },
+            {
+              icon: "📦",
+              title: "export prefix",
+              body: "A leading <code>export </code> is accepted and ignored, so a shell-style file works as-is.",
+            },
+            {
+              icon: "❝",
+              title: "Quotes",
+              body: "Single or double quotes around a value are stripped; the rest is taken verbatim (trimmed).",
+            },
           ])}
         </div>
       </div>`,

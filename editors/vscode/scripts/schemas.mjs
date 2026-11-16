@@ -44,14 +44,18 @@ export function forVscode(file, schema) {
       .split("/")
       .slice(1)
       .reduce((n, key) => n?.[key], schema);
-    if (!node) throw new Error(`${file} has no ${pointer} — update SERVED_BY_LSP`);
+    if (!node)
+      throw new Error(`${file} has no ${pointer} — update SERVED_BY_LSP`);
     delete node.examples;
   }
 
   const visit = (node) => {
     if (Array.isArray(node)) return node.forEach(visit);
     if (!node || typeof node !== "object") return;
-    if (typeof node.description === "string" && node.markdownDescription === undefined) {
+    if (
+      typeof node.description === "string" &&
+      node.markdownDescription === undefined
+    ) {
       node.markdownDescription = node.description;
     }
     // Snippet bodies are the YAML to insert, not schema; leave them alone.
@@ -70,7 +74,10 @@ export async function copySchemas() {
   for (const file of await readdir(source)) {
     if (!file.endsWith(".json")) continue;
     const schema = JSON.parse(await readFile(join(source, file), "utf8"));
-    await writeFile(join(target, file), `${JSON.stringify(forVscode(file, schema), null, 2)}\n`);
+    await writeFile(
+      join(target, file),
+      `${JSON.stringify(forVscode(file, schema), null, 2)}\n`,
+    );
   }
 }
 

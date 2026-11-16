@@ -31,7 +31,13 @@ const PLATFORMS = ["linux", "macos", "windows"];
  * server refuses every upload, so the panel says how to turn it on instead of
  * offering a button that can only fail.
  */
-export function UpdateServer({ stats, onUpdated }: { stats: Stats; onUpdated: () => void }) {
+export function UpdateServer({
+  stats,
+  onUpdated,
+}: {
+  stats: Stats;
+  onUpdated: () => void;
+}) {
   const enabled = stats.update?.enabled ?? false;
   const here = stats.update?.platform ?? "linux";
   const [release, setRelease] = useState<Release | null>(null);
@@ -68,7 +74,8 @@ export function UpdateServer({ stats, onUpdated }: { stats: Stats; onUpdated: ()
     setError(null);
     try {
       // When the server last started, to tell when it has restarted.
-      const before = (await api<{ started_at: string }>("/api/health")).started_at;
+      const before = (await api<{ started_at: string }>("/api/health"))
+        .started_at;
       const result = await uploadBinary(platform, file, password, {
         version: platform === here ? undefined : version || undefined,
         apply: apply && platform === here,
@@ -77,7 +84,9 @@ export function UpdateServer({ stats, onUpdated }: { stats: Stats; onUpdated: ()
       close();
       setDone(
         `This cache now hands out ciabatta ${result.version ?? "(version unchanged)"} for ${platform}.` +
-          (restarting ? " It is restarting on it — the page reconnects in a few seconds." : ""),
+          (restarting
+            ? " It is restarting on it — the page reconnects in a few seconds."
+            : ""),
       );
       if (restarting) {
         // Wait for it to come back — a new start time — before reloading
@@ -104,13 +113,20 @@ export function UpdateServer({ stats, onUpdated }: { stats: Stats; onUpdated: ()
   const builds = Object.entries(release?.builds ?? {});
   return (
     <Box>
-      <Stack direction={{ xs: "column", sm: "row" }} spacing={2} alignItems={{ sm: "center" }}>
+      <Stack
+        direction={{ xs: "column", sm: "row" }}
+        spacing={2}
+        alignItems={{ sm: "center" }}
+      >
         <Typography variant="body2" color="text.secondary" sx={{ flexGrow: 1 }}>
           {builds.length === 0
             ? "This cache hands out no ciabatta builds yet."
             : "Handing out ciabatta " +
               builds
-                .map(([p, b]) => `${b.version ?? release?.version} for ${p} (${human(b.size)})`)
+                .map(
+                  ([p, b]) =>
+                    `${b.version ?? release?.version} for ${p} (${human(b.size)})`,
+                )
                 .join(", ") +
               ". Clients on an older build are told, and `ciabatta self update` installs it."}
         </Typography>
@@ -129,26 +145,48 @@ export function UpdateServer({ stats, onUpdated }: { stats: Stats; onUpdated: ()
       </Stack>
       {!enabled && (
         <Alert severity="info" sx={{ mt: 1.5 }}>
-          Uploading is off: it needs an <code>update</code> password in the server's config (
-          <code>update: {"{"} password_sha256: … {"}"}</code> or <code>password_env</code>).
+          Uploading is off: it needs an <code>update</code> password in the
+          server's config (
+          <code>
+            update: {"{"} password_sha256: … {"}"}
+          </code>{" "}
+          or <code>password_env</code>).
         </Alert>
       )}
       {done && (
-        <Alert severity="success" onClose={() => setDone(null)} sx={{ mt: 1.5 }}>
+        <Alert
+          severity="success"
+          onClose={() => setDone(null)}
+          sx={{ mt: 1.5 }}
+        >
           {done}
         </Alert>
       )}
 
-      <Dialog open={open} onClose={busy ? undefined : close} maxWidth="xs" fullWidth>
+      <Dialog
+        open={open}
+        onClose={busy ? undefined : close}
+        maxWidth="xs"
+        fullWidth
+      >
         <DialogTitle>Upload a new ciabatta</DialogTitle>
         <DialogContent>
           <DialogContentText sx={{ mb: 2 }}>
-            The executable itself, not the release archive. Clients on its platform are offered it
-            from then on.
+            The executable itself, not the release archive. Clients on its
+            platform are offered it from then on.
           </DialogContentText>
-          <Button variant="outlined" component="label" size="small" disabled={busy}>
+          <Button
+            variant="outlined"
+            component="label"
+            size="small"
+            disabled={busy}
+          >
             {file ? `${file.name} (${human(file.size)})` : "Choose the binary…"}
-            <input hidden type="file" onChange={(e) => setFile(e.target.files?.[0] ?? null)} />
+            <input
+              hidden
+              type="file"
+              onChange={(e) => setFile(e.target.files?.[0] ?? null)}
+            />
           </Button>
           <TextField
             select
@@ -211,7 +249,11 @@ export function UpdateServer({ stats, onUpdated }: { stats: Stats; onUpdated: ()
           <Button onClick={close} disabled={busy}>
             Cancel
           </Button>
-          <Button variant="contained" disabled={!file || !password || busy} onClick={upload}>
+          <Button
+            variant="contained"
+            disabled={!file || !password || busy}
+            onClick={upload}
+          >
             {busy ? "Uploading…" : "Upload"}
           </Button>
         </DialogActions>

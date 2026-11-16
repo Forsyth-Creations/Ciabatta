@@ -1,6 +1,6 @@
 The modern monorepo is plagued by a number of issues:
 
-- Packages published somewhere that someone needs 
+- Packages published somewhere that someone needs
 - Unknown scripts that can be run in the monorepo that no one really maintains/knows what they do
 - Redundant scripts that basically do the same thing, but are implemented in different ways across different packages
 - Lack of clear ownership of packages and scripts, leading to confusion about who is responsible for maintaining them
@@ -17,5 +17,4 @@ Here's what we're going to do. Ciabatta will be the monorepo orchestration tool.
 - When you init a sub workspace, or make a "run" file, you should be encouraged to add a description and your name, so that there is ownership and accountability for the script being created
 - When the graph is shown, it should be clear which node came from which sub-workspace
 - The "push" command should also be able to have the same dependencies. In fact, make the "push" just a special step option in a "run" command, kind of like how in Github you have a "setup AWS" phase. "push" is just a special, identifiable step
-- It should be noted that some steps could be persistent. In this case, their nodes would hang and make for graphs that hang or get stuck. In this case, the user should be able to specify a "timeout" for a step, and if it exceeds that time, it will be marked as failed and the graph will continue to run. This ensures that long-running or potentially hanging steps do not block the entire build process, allowing for more efficient and reliable builds. Additionally, Ciabatta will provide options for retrying failed steps, allowing users to easily recover from transient errors without having to manually intervene in the build process. Users can allow a job to be persistent, and click a button to begin tailing it's logs through a `ciabatta watch`. 
-
+- It should be noted that some steps could be persistent. In this case, their nodes would hang and make for graphs that hang or get stuck. In this case, the user should be able to specify a "timeout" for a step, and if it exceeds that time, it will be marked as failed and the graph will continue to run. This ensures that long-running or potentially hanging steps do not block the entire build process, allowing for more efficient and reliable builds. Additionally, Ciabatta will provide options for retrying failed steps, allowing users to easily recover from transient errors without having to manually intervene in the build process. Users can allow a job to be persistent, and click a button to begin tailing it's logs through a `ciabatta watch`.

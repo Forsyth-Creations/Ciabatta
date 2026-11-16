@@ -16,7 +16,15 @@
  */
 
 import { useMemo, useState } from "react";
-import { Box, Chip, Stack, ToggleButton, ToggleButtonGroup, Tooltip, Typography } from "@mui/material";
+import {
+  Box,
+  Chip,
+  Stack,
+  ToggleButton,
+  ToggleButtonGroup,
+  Tooltip,
+  Typography,
+} from "@mui/material";
 import type { Theme } from "@mui/material/styles";
 import ChevronRightIcon from "@mui/icons-material/ChevronRight";
 import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
@@ -71,7 +79,12 @@ export function buildTree(inputs: FileHash[], outputs: FileHash[]): TreeNode {
     files.set(
       f.path,
       seen
-        ? { ...seen, role: "both", outputHash: f.sha256, size: Math.max(seen.size, f.size) }
+        ? {
+            ...seen,
+            role: "both",
+            outputHash: f.sha256,
+            size: Math.max(seen.size, f.size),
+          }
         : { role: "output", size: f.size, outputHash: f.sha256 },
     );
   }
@@ -146,10 +159,11 @@ const ROLE_LABEL: Record<FileRole, string> = {
 };
 
 const ROLE_HINT: Record<FileRole, string> = {
-  input: "Read by the build: part of the cache key, so a change here means a rebuild.",
-  output: "Written by the build: stored on a hit's behalf, and verified before one is granted.",
-  both:
-    "Both read and written. A build that rewrites one of its own inputs changes its key every time it runs — exclude it from inputs, or stop writing it.",
+  input:
+    "Read by the build: part of the cache key, so a change here means a rebuild.",
+  output:
+    "Written by the build: stored on a hit's behalf, and verified before one is granted.",
+  both: "Both read and written. A build that rewrites one of its own inputs changes its key every time it runs — exclude it from inputs, or stop writing it.",
 };
 
 type Show = "all" | "inputs" | "outputs";
@@ -178,7 +192,9 @@ export function FileTree({
 
   const tree = useMemo(() => {
     const keep = (f: FileHash) =>
-      !needle || f.path.toLowerCase().includes(needle) || f.sha256.startsWith(needle);
+      !needle ||
+      f.path.toLowerCase().includes(needle) ||
+      f.sha256.startsWith(needle);
     return buildTree(
       show === "outputs" ? [] : inputs.filter(keep),
       show === "inputs" ? [] : outputs.filter(keep),
@@ -213,13 +229,27 @@ export function FileTree({
 
   return (
     <Box>
-      <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap sx={{ mb: 0.75 }}>
+      <Stack
+        direction="row"
+        spacing={1}
+        alignItems="center"
+        flexWrap="wrap"
+        useFlexGap
+        sx={{ mb: 0.75 }}
+      >
         <ToggleButtonGroup
           size="small"
           exclusive
           value={show}
           onChange={(_, value: Show | null) => value && setShow(value)}
-          sx={{ "& .MuiToggleButton-root": { py: 0.25, px: 1, fontSize: 12, textTransform: "none" } }}
+          sx={{
+            "& .MuiToggleButton-root": {
+              py: 0.25,
+              px: 1,
+              fontSize: 12,
+              textTransform: "none",
+            },
+          }}
         >
           <ToggleButton value="all">all</ToggleButton>
           <ToggleButton value="inputs">
@@ -257,22 +287,34 @@ export function FileTree({
             py: 0.5,
           }}
         >
-          {rows.slice(0, MAX_ROWS).map(({ node, depth }) =>
-            node.file ? (
-              <FileRow key={node.path} node={node} depth={depth} renderHash={renderHash} />
-            ) : (
-              <DirRow
-                key={node.path}
-                node={node}
-                depth={depth}
-                open={isOpen(node, depth)}
-                onToggle={() => toggle(node, depth)}
-              />
-            ),
-          )}
+          {rows
+            .slice(0, MAX_ROWS)
+            .map(({ node, depth }) =>
+              node.file ? (
+                <FileRow
+                  key={node.path}
+                  node={node}
+                  depth={depth}
+                  renderHash={renderHash}
+                />
+              ) : (
+                <DirRow
+                  key={node.path}
+                  node={node}
+                  depth={depth}
+                  open={isOpen(node, depth)}
+                  onToggle={() => toggle(node, depth)}
+                />
+              ),
+            )}
           {rows.length > MAX_ROWS && (
-            <Typography variant="caption" color="text.secondary" sx={{ display: "block", px: 1, py: 0.5 }}>
-              …the tree is larger than this. Filter, or collapse a directory, to see the rest.
+            <Typography
+              variant="caption"
+              color="text.secondary"
+              sx={{ display: "block", px: 1, py: 0.5 }}
+            >
+              …the tree is larger than this. Filter, or collapse a directory, to
+              see the rest.
             </Typography>
           )}
         </Box>
@@ -333,24 +375,48 @@ function DirRow({
       <Typography
         variant="body2"
         title={node.path}
-        sx={{ fontFamily: monoFontStack, fontSize: 12, flexGrow: 1, minWidth: 0, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}
+        sx={{
+          fontFamily: monoFontStack,
+          fontSize: 12,
+          flexGrow: 1,
+          minWidth: 0,
+          whiteSpace: "nowrap",
+          overflow: "hidden",
+          textOverflow: "ellipsis",
+        }}
       >
         {node.name}/
       </Typography>
       {node.inputs > 0 && <Count role="input" n={node.inputs} label="in" />}
       {node.outputs > 0 && <Count role="output" n={node.outputs} label="out" />}
-      <Typography variant="caption" color="text.disabled" sx={{ flexShrink: 0, minWidth: 56, textAlign: "right" }}>
+      <Typography
+        variant="caption"
+        color="text.disabled"
+        sx={{ flexShrink: 0, minWidth: 56, textAlign: "right" }}
+      >
         {humanizeBytes(node.bytes)}
       </Typography>
     </Stack>
   );
 }
 
-function Count({ role, n, label }: { role: FileRole; n: number; label: string }) {
+function Count({
+  role,
+  n,
+  label,
+}: {
+  role: FileRole;
+  n: number;
+  label: string;
+}) {
   return (
     <Typography
       variant="caption"
-      sx={(theme) => ({ flexShrink: 0, color: roleColour(role, theme), fontVariantNumeric: "tabular-nums" })}
+      sx={(theme) => ({
+        flexShrink: 0,
+        color: roleColour(role, theme),
+        fontVariantNumeric: "tabular-nums",
+      })}
     >
       {n} {label}
     </Typography>
@@ -369,7 +435,11 @@ function FileRow({
   const file = node.file!;
   const hash = file.outputHash ?? file.inputHash ?? "";
   return (
-    <Tooltip title={`${ROLE_LABEL[file.role]} — ${ROLE_HINT[file.role]}`} placement="left" enterDelay={600}>
+    <Tooltip
+      title={`${ROLE_LABEL[file.role]} — ${ROLE_HINT[file.role]}`}
+      placement="left"
+      enterDelay={600}
+    >
       <Stack
         role="treeitem"
         direction="row"
@@ -391,22 +461,41 @@ function FileRow({
         })}
       >
         <InsertDriveFileOutlinedIcon
-          sx={(theme) => ({ fontSize: 15, color: roleColour(file.role, theme) })}
+          sx={(theme) => ({
+            fontSize: 15,
+            color: roleColour(file.role, theme),
+          })}
         />
         <Typography
           variant="body2"
           title={node.path}
-          sx={{ fontFamily: monoFontStack, fontSize: 12, flexGrow: 1, minWidth: 0, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}
+          sx={{
+            fontFamily: monoFontStack,
+            fontSize: 12,
+            flexGrow: 1,
+            minWidth: 0,
+            whiteSpace: "nowrap",
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+          }}
         >
           {node.name}
         </Typography>
         <Typography
           variant="caption"
-          sx={(theme) => ({ flexShrink: 0, color: roleColour(file.role, theme), fontSize: 11 })}
+          sx={(theme) => ({
+            flexShrink: 0,
+            color: roleColour(file.role, theme),
+            fontSize: 11,
+          })}
         >
           {ROLE_LABEL[file.role]}
         </Typography>
-        <Typography variant="caption" color="text.disabled" sx={{ flexShrink: 0, minWidth: 56, textAlign: "right" }}>
+        <Typography
+          variant="caption"
+          color="text.disabled"
+          sx={{ flexShrink: 0, minWidth: 56, textAlign: "right" }}
+        >
           {humanizeBytes(file.size)}
         </Typography>
         {renderHash && <Box sx={{ flexShrink: 0 }}>{renderHash(hash)}</Box>}

@@ -13,7 +13,14 @@
  */
 
 import { useState } from "react";
-import { Alert, AlertTitle, Box, Collapse, Link as MuiLink, Typography } from "@mui/material";
+import {
+  Alert,
+  AlertTitle,
+  Box,
+  Collapse,
+  Link as MuiLink,
+  Typography,
+} from "@mui/material";
 
 import { useEnvDrift, type EnvChange } from "../api/workspace";
 import { monoFontStack } from "../theme";
@@ -37,7 +44,9 @@ function describe(change: EnvChange): string {
 /** The marker before each line: what kind of move it was, at a glance. */
 function marker(change: EnvChange): string {
   if (change.kind === "changed") return "~";
-  return change.kind === "removed" || change.kind === "file_removed" ? "−" : "+";
+  return change.kind === "removed" || change.kind === "file_removed"
+    ? "−"
+    : "+";
 }
 
 export function EnvDriftBanner({ project }: { project: string }) {
@@ -50,9 +59,14 @@ export function EnvDriftBanner({ project }: { project: string }) {
 
   return (
     <Collapse in>
-      <Alert severity="warning" onClose={() => setDismissed(true)} sx={{ mb: 2, maxWidth: 1100 }}>
+      <Alert
+        severity="warning"
+        onClose={() => setDismissed(true)}
+        sx={{ mb: 2, maxWidth: 1100 }}
+      >
         <AlertTitle>
-          {count} environment variable{count === 1 ? "" : "s"} changed since ciabatta last ran here
+          {count} environment variable{count === 1 ? "" : "s"} changed since
+          ciabatta last ran here
         </AlertTitle>
         <Box sx={{ mb: 1 }}>
           {data.changes.map((change, index) => (
@@ -66,14 +80,20 @@ export function EnvDriftBanner({ project }: { project: string }) {
           ))}
         </Box>
         <Typography variant="body2">
-          A run started now will use the new values. If you didn&apos;t make these changes, a{" "}
+          A run started now will use the new values. If you didn&apos;t make
+          these changes, a{" "}
           <MuiLink
             component="span"
-            sx={{ fontFamily: monoFontStack, fontSize: "0.9em", cursor: "default" }}
+            sx={{
+              fontFamily: monoFontStack,
+              fontSize: "0.9em",
+              cursor: "default",
+            }}
           >
             git diff
           </MuiLink>{" "}
-          on {data.files.length === 1 ? "that file" : "those files"} will say why.
+          on {data.files.length === 1 ? "that file" : "those files"} will say
+          why.
         </Typography>
       </Alert>
     </Collapse>

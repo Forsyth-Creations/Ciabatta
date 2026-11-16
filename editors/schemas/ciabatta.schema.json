@@ -25,10 +25,7 @@
         },
         "containers": {
           "type": "string",
-          "enum": [
-            "docker",
-            "podman"
-          ],
+          "enum": ["docker", "podman"],
           "description": "Container runtime. When unset, ciabatta auto-detects whichever is installed."
         }
       }
@@ -104,9 +101,7 @@
         "env_default": {
           "type": "string",
           "description": "The checked-in template the .env is generated from when it's missing \u2014 conventionally `.env.default`. Required of any workspace whose workflows declare required_env.",
-          "examples": [
-            ".env.default"
-          ]
+          "examples": [".env.default"]
         },
         "env": {
           "$ref": "./common.schema.json#/$defs/envMap",
@@ -118,6 +113,11 @@
           "type": "boolean",
           "default": false,
           "description": "Set on the monorepo root when the root is only an umbrella \u2014 shared `toolchain:` hints and the root .env \u2014 rather than a package of its own."
+        },
+        "offload_dir": {
+          "type": "string",
+          "default": "offloaded",
+          "description": "Where the outputs of a workflow run with `--offload` land, relative to the workspace root. Each job gets its own folder named after its execution number (`offloaded/12/`). Only read on the workspace root."
         }
       }
     },
@@ -138,16 +138,12 @@
           "hint": {
             "type": "string",
             "description": "The command that installs it, printed verbatim when it's missing.",
-            "examples": [
-              "brew install protobuf"
-            ]
+            "examples": ["brew install protobuf"]
           },
           "check": {
             "type": "string",
             "description": "An alternative way to detect the tool when a bare PATH lookup won't do. Run through the shell; a zero exit means present.",
-            "examples": [
-              "protoc --version"
-            ]
+            "examples": ["protoc --version"]
           },
           "description": {
             "type": "string",
@@ -162,9 +158,7 @@
       "additionalProperties": {
         "type": "object",
         "additionalProperties": false,
-        "required": [
-          "url"
-        ],
+        "required": ["url"],
         "properties": {
           "url": {
             "type": "string",
@@ -173,11 +167,7 @@
           "type": {
             "type": "string",
             "description": "Explicit registry type. Inferred from the registry's name when absent.",
-            "examples": [
-              "nexus",
-              "ecr",
-              "docker"
-            ]
+            "examples": ["nexus", "ecr", "docker"]
           },
           "tls_verify": {
             "type": "boolean",
@@ -196,11 +186,7 @@
           "repository": {
             "type": "string",
             "description": "Nexus only: the repository to publish into.",
-            "examples": [
-              "raw-hosted",
-              "npm-hosted",
-              "pypi-hosted"
-            ]
+            "examples": ["raw-hosted", "npm-hosted", "pypi-hosted"]
           },
           "base_path": {
             "type": "string",
@@ -208,11 +194,7 @@
           },
           "format": {
             "type": "string",
-            "enum": [
-              "raw",
-              "npm",
-              "pypi"
-            ],
+            "enum": ["raw", "npm", "pypi"],
             "description": "Nexus only: the repository format, selecting how the push happens \u2014 HTTP PUT, `npm publish`, or `twine upload`."
           }
         }
@@ -243,11 +225,7 @@
       "properties": {
         "provider": {
           "type": "string",
-          "enum": [
-            "claude",
-            "openai",
-            "vllm"
-          ],
+          "enum": ["claude", "openai", "vllm"],
           "description": "Which wire format to speak. `openai` and `vllm` both cover any OpenAI-compatible endpoint (OpenAI, vLLM, Ollama, LM Studio)."
         },
         "endpoint": {
@@ -261,10 +239,7 @@
         "api_key_env": {
           "type": "string",
           "description": "Name of the environment variable holding the API key.",
-          "examples": [
-            "ANTHROPIC_API_KEY",
-            "OPENAI_API_KEY"
-          ]
+          "examples": ["ANTHROPIC_API_KEY", "OPENAI_API_KEY"]
         },
         "tls_verify": {
           "type": "boolean",

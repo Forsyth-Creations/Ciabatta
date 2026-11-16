@@ -49,7 +49,11 @@ export function RoutedEdge({
   interactionWidth,
 }: EdgeProps) {
   const route = (data as { route?: EdgeRoute } | undefined)?.route;
-  const points = routePoints({ x: sourceX, y: sourceY }, { x: targetX, y: targetY }, route);
+  const points = routePoints(
+    { x: sourceX, y: sourceY },
+    { x: targetX, y: targetY },
+    route,
+  );
   const at = labelPoint(points);
   // Drawn from the target end when the route says so (see
   // `EdgeRoute.fromTarget`). The arrowhead moves to the path's start, where
@@ -77,7 +81,11 @@ export function RoutedEdge({
 }
 
 /** The corners an edge turns at, from its source handle to its target's. */
-export function routePoints(source: Point, target: Point, route?: EdgeRoute): Point[] {
+export function routePoints(
+  source: Point,
+  target: Point,
+  route?: EdgeRoute,
+): Point[] {
   if (route?.loop !== undefined) return loop(source, target, route.loop);
 
   if (!route || route.tracks.length === 0) {
@@ -130,7 +138,11 @@ export function roundedPath(points: Point[], radius: number): string {
   let d = `M ${pts[0].x} ${pts[0].y}`;
   for (let i = 1; i < pts.length - 1; i++) {
     const [prev, corner, next] = [pts[i - 1], pts[i], pts[i + 1]];
-    const r = Math.min(radius, length(prev, corner) / 2, length(corner, next) / 2);
+    const r = Math.min(
+      radius,
+      length(prev, corner) / 2,
+      length(corner, next) / 2,
+    );
     const a = towards(corner, prev, r);
     const b = towards(corner, next, r);
     d += ` L ${a.x} ${a.y} Q ${corner.x} ${corner.y} ${b.x} ${b.y}`;
@@ -147,7 +159,8 @@ function simplify(points: Point[]): Point[] {
     if (out.length > 0 && length(out[out.length - 1], point) < 0.01) continue;
     if (out.length >= 2) {
       const [a, b] = [out[out.length - 2], out[out.length - 1]];
-      const cross = (b.x - a.x) * (point.y - b.y) - (b.y - a.y) * (point.x - b.x);
+      const cross =
+        (b.x - a.x) * (point.y - b.y) - (b.y - a.y) * (point.x - b.x);
       const dot = (b.x - a.x) * (point.x - b.x) + (b.y - a.y) * (point.y - b.y);
       if (Math.abs(cross) < 0.01 && dot > 0) out.pop();
     }

@@ -85,7 +85,10 @@ export function ago(at: string | null | undefined, short = false): string {
 }
 
 /** The colour inspect mode paints a step: reused, rebuilt, blocked, or ignored. */
-export function cacheTone(report: CacheReport | null | undefined, theme: Theme): string {
+export function cacheTone(
+  report: CacheReport | null | undefined,
+  theme: Theme,
+): string {
   if (!report) return theme.palette.text.disabled;
   if (wasReused(report)) return theme.palette.success.main;
   if (report.blocked_by.length > 0) return theme.palette.error.main;
@@ -100,11 +103,14 @@ export function cacheLabel(report: CacheReport | null | undefined): string {
     case "fresh":
       return "reused · already up to date";
     case "hit":
-      return report.source === "remote" ? "reused · from remote" : "reused · restored";
+      return report.source === "remote"
+        ? "reused · from remote"
+        : "reused · restored";
     case "uncached":
       return "not cached";
     case "rebuild":
-      if (report.blocked_by.length > 0) return `blocked by ${report.blocked_by.join(", ")}`;
+      if (report.blocked_by.length > 0)
+        return `blocked by ${report.blocked_by.join(", ")}`;
       return rebuildWords(report);
   }
 }
@@ -138,7 +144,13 @@ function rebuildWords(report: CacheReport): string {
  * The cache glyph on a node that was reused. Clickable: it opens the report in
  * a popover, and stops the click there so it doesn't also select the node.
  */
-export function CacheIcon({ report, size = 15 }: { report: CacheReport; size?: number }) {
+export function CacheIcon({
+  report,
+  size = 15,
+}: {
+  report: CacheReport;
+  size?: number;
+}) {
   const [anchor, setAnchor] = useState<HTMLElement | null>(null);
   const Icon = report.source === "remote" ? CloudDoneIcon : CachedIcon;
   const where =
@@ -228,7 +240,11 @@ export function CacheReportView({
         </Box>
         <Box sx={{ minWidth: 0 }}>
           <Typography variant="subtitle2">{headline(report)}</Typography>
-          <Typography variant="caption" color="text.secondary" sx={{ wordBreak: "break-word" }}>
+          <Typography
+            variant="caption"
+            color="text.secondary"
+            sx={{ wordBreak: "break-word" }}
+          >
             <Prose text={report.summary} />
           </Typography>
         </Box>
@@ -238,11 +254,18 @@ export function CacheReportView({
         <EntryFacts
           title="The cached version"
           entry={report.entry}
-          extra={report.saved_ms > 0 ? `saved about ${humanizeMs(report.saved_ms)}` : undefined}
+          extra={
+            report.saved_ms > 0
+              ? `saved about ${humanizeMs(report.saved_ms)}`
+              : undefined
+          }
         />
       )}
       {!reused && report.previous && (
-        <EntryFacts title="Compared against the last build" entry={report.previous} />
+        <EntryFacts
+          title="Compared against the last build"
+          entry={report.previous}
+        />
       )}
 
       {report.stored && (
@@ -270,27 +293,50 @@ export function CacheReportView({
                 component="li"
                 key={file.path}
                 variant="caption"
-                sx={{ display: "list-item", fontFamily: monoFontStack, wordBreak: "break-all" }}
+                sx={{
+                  display: "list-item",
+                  fontFamily: monoFontStack,
+                  wordBreak: "break-all",
+                }}
               >
                 {file.path}{" "}
                 <Box component="span" sx={{ color: "text.secondary" }}>
                   ({file.kind}
-                  {file.kind === "modified" && ` +${file.additions} −${file.deletions}`})
+                  {file.kind === "modified" &&
+                    ` +${file.additions} −${file.deletions}`}
+                  )
                 </Box>
               </Typography>
             ))}
             {movedHidden > 0 && (
-              <Typography component="li" variant="caption" color="text.secondary">
-                <SeeMore hidden={movedHidden} onExpand={() => setAllMoved(true)} />
+              <Typography
+                component="li"
+                variant="caption"
+                color="text.secondary"
+              >
+                <SeeMore
+                  hidden={movedHidden}
+                  onExpand={() => setAllMoved(true)}
+                />
               </Typography>
             )}
             {report.diff.env.map((name) => (
-              <Typography component="li" key={`env:${name}`} variant="caption" sx={{ display: "list-item" }}>
+              <Typography
+                component="li"
+                key={`env:${name}`}
+                variant="caption"
+                sx={{ display: "list-item" }}
+              >
                 variable <code>{name}</code> changed
               </Typography>
             ))}
             {report.diff.upstream.map((step) => (
-              <Typography component="li" key={`up:${step}`} variant="caption" sx={{ display: "list-item" }}>
+              <Typography
+                component="li"
+                key={`up:${step}`}
+                variant="caption"
+                sx={{ display: "list-item" }}
+              >
                 <code>{step}</code> produced different outputs
               </Typography>
             ))}
@@ -306,7 +352,11 @@ export function CacheReportView({
         >
           <Stack spacing={0.75}>
             {report.hints.map((hint) => (
-              <Typography key={hint} variant="caption" sx={{ display: "block" }}>
+              <Typography
+                key={hint}
+                variant="caption"
+                sx={{ display: "block" }}
+              >
                 <Prose text={hint} />
               </Typography>
             ))}
@@ -318,14 +368,19 @@ export function CacheReportView({
         <>
           <Divider />
           <Fact label="key">
-            <Box component="span" sx={{ fontFamily: monoFontStack, wordBreak: "break-all" }}>
+            <Box
+              component="span"
+              sx={{ fontFamily: monoFontStack, wordBreak: "break-all" }}
+            >
               {report.key ?? "none — not keyed"}
             </Box>
           </Fact>
           <Fact label="inputs">
             {report.input_files} file(s), {humanizeBytes(report.input_bytes)}
           </Fact>
-          <Fact label="keys on">{report.env.length > 0 ? report.env.join(", ") : "no variables"}</Fact>
+          <Fact label="keys on">
+            {report.env.length > 0 ? report.env.join(", ") : "no variables"}
+          </Fact>
           {report.upstream.length > 0 && (
             <Fact label="upstream">
               <Stack spacing={0.25}>
@@ -336,7 +391,9 @@ export function CacheReportView({
                     </Box>{" "}
                     <Box
                       component="span"
-                      sx={{ color: up.unaccounted ? "error.main" : "text.secondary" }}
+                      sx={{
+                        color: up.unaccounted ? "error.main" : "text.secondary",
+                      }}
                     >
                       {up.unaccounted
                         ? "— ran without declaring its outputs"
@@ -349,20 +406,38 @@ export function CacheReportView({
               </Stack>
             </Fact>
           )}
-          <Fact label="decided">{new Date(report.decided_at).toLocaleString()}</Fact>
+          <Fact label="decided">
+            {new Date(report.decided_at).toLocaleString()}
+          </Fact>
         </>
       )}
 
       {report.remote && (
-        <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
+        <Stack
+          direction="row"
+          spacing={1}
+          alignItems="center"
+          flexWrap="wrap"
+          useFlexGap
+        >
           <Chip
             size="small"
             variant="outlined"
             color={report.remote.connected ? "success" : "warning"}
-            label={report.remote.connected ? "remote cache connected" : "remote cache unreachable"}
+            label={
+              report.remote.connected
+                ? "remote cache connected"
+                : "remote cache unreachable"
+            }
           />
-          {report.remote.read_only && <Chip size="small" variant="outlined" label="read-only" />}
-          <Typography variant="caption" color="text.secondary" sx={{ fontFamily: monoFontStack }}>
+          {report.remote.read_only && (
+            <Chip size="small" variant="outlined" label="read-only" />
+          )}
+          <Typography
+            variant="caption"
+            color="text.secondary"
+            sx={{ fontFamily: monoFontStack }}
+          >
             {report.remote.url}
           </Typography>
         </Stack>
@@ -399,17 +474,24 @@ function EntryFacts({
 }) {
   return (
     <Box>
-      <Typography variant="caption" color="text.secondary" sx={{ display: "block", mb: 0.25 }}>
+      <Typography
+        variant="caption"
+        color="text.secondary"
+        sx={{ display: "block", mb: 0.25 }}
+      >
         {title}
       </Typography>
       <Fact label="built">
         {ago(entry.created_at)}
         <Box component="span" sx={{ color: "text.secondary" }}>
           {" "}
-          · {new Date(entry.created_at).toLocaleString()} · took {humanizeMs(entry.duration_ms)}
+          · {new Date(entry.created_at).toLocaleString()} · took{" "}
+          {humanizeMs(entry.duration_ms)}
         </Box>
       </Fact>
-      <Fact label="last used">{ago(entry.last_used_at ?? entry.created_at)}</Fact>
+      <Fact label="last used">
+        {ago(entry.last_used_at ?? entry.created_at)}
+      </Fact>
       <Fact label="holds">
         {entry.outputs} file(s), {humanizeBytes(entry.size)}
         {extra && (
@@ -428,7 +510,13 @@ function EntryFacts({
   );
 }
 
-function Fact({ label, children }: { label: string; children: React.ReactNode }) {
+function Fact({
+  label,
+  children,
+}: {
+  label: string;
+  children: React.ReactNode;
+}) {
   return (
     <Stack direction="row" spacing={1} alignItems="baseline">
       <Typography

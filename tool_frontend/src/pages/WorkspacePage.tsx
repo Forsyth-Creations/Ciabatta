@@ -58,7 +58,12 @@ import {
   type WorkflowStep,
   type WorkflowSummary,
 } from "../api/workspace";
-import { ErrorNote, Loading, PageHeader, RequireProject } from "../components/Page";
+import {
+  ErrorNote,
+  Loading,
+  PageHeader,
+  RequireProject,
+} from "../components/Page";
 import { EnvDriftBanner } from "../components/EnvDriftBanner";
 import { WorkflowFlow } from "../components/WorkflowFlow";
 import { EnvPanel, EnvVarChip, StepEnvChips } from "../components/EnvVars";
@@ -89,7 +94,9 @@ export function WorkspacePage() {
           </Button>
         }
       />
-      <RequireProject>{(project) => <Workspace project={project} />}</RequireProject>
+      <RequireProject>
+        {(project) => <Workspace project={project} />}
+      </RequireProject>
     </>
   );
 }
@@ -107,9 +114,12 @@ function Workspace({ project }: { project: string }) {
     return (
       <Alert severity="info">
         <AlertTitle>No sub-workspaces yet</AlertTitle>
-        Run <code style={{ fontFamily: monoFontStack }}>ciabatta init --lib</code> inside a
-        package to opt it in. It writes a <code>[workspace]</code> identity and a starter
-        workflow, and the package shows up here.
+        Run{" "}
+        <code style={{ fontFamily: monoFontStack }}>
+          ciabatta init --lib
+        </code>{" "}
+        inside a package to opt it in. It writes a <code>[workspace]</code>{" "}
+        identity and a starter workflow, and the package shows up here.
       </Alert>
     );
   }
@@ -117,7 +127,13 @@ function Workspace({ project }: { project: string }) {
   return (
     <Stack spacing={3}>
       <EnvDriftBanner project={project} />
-      <Stack direction="row" spacing={2} flexWrap="wrap" useFlexGap alignItems="flex-start">
+      <Stack
+        direction="row"
+        spacing={2}
+        flexWrap="wrap"
+        useFlexGap
+        alignItems="flex-start"
+      >
         <TextField
           size="small"
           placeholder="protoc, Ada, deploy…"
@@ -156,7 +172,8 @@ function Workspace({ project }: { project: string }) {
         </TextField>
         <Box sx={{ flexGrow: 1 }} />
         <Typography variant="caption" color="text.secondary" sx={{ pt: 1 }}>
-          {data.members.length} sub-workspace(s) · {data.workflows.length} workflow name(s)
+          {data.members.length} sub-workspace(s) · {data.workflows.length}{" "}
+          workflow name(s)
           <br />
           <code style={{ fontFamily: monoFontStack }}>{data.root}</code>
         </Typography>
@@ -187,7 +204,9 @@ function Catalogue({
       members
         .map((member) => ({
           member,
-          workflows: member.workflows.filter((w) => workflowMatches(member, w, search)),
+          workflows: member.workflows.filter((w) =>
+            workflowMatches(member, w, search),
+          ),
         }))
         .filter(({ workflows }) => workflows.length > 0),
     [members, search],
@@ -204,8 +223,10 @@ function Catalogue({
       <Alert severity="info">
         <AlertTitle>No workflows yet</AlertTitle>
         These packages have opted in but haven’t declared a workflow. Add one as{" "}
-        <code style={{ fontFamily: monoFontStack }}>.ciabatta/workflows/build.toml</code>, and
-        every package with a workflow of that name joins the same{" "}
+        <code style={{ fontFamily: monoFontStack }}>
+          .ciabatta/workflows/build.toml
+        </code>
+        , and every package with a workflow of that name joins the same{" "}
         <code style={{ fontFamily: monoFontStack }}>ciabatta build</code> graph.
       </Alert>
     );
@@ -216,7 +237,13 @@ function Catalogue({
       {filtered.map(({ member, workflows }) => (
         <Card key={member.name}>
           <CardContent>
-            <Stack direction="row" alignItems="baseline" spacing={1.5} flexWrap="wrap" useFlexGap>
+            <Stack
+              direction="row"
+              alignItems="baseline"
+              spacing={1.5}
+              flexWrap="wrap"
+              useFlexGap
+            >
               <Typography variant="h6" sx={{ fontFamily: monoFontStack }}>
                 {member.name}
               </Typography>
@@ -230,7 +257,11 @@ function Catalogue({
             </Stack>
 
             {member.description && (
-              <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
+              <Typography
+                variant="body2"
+                color="text.secondary"
+                sx={{ mt: 0.5 }}
+              >
                 {member.description}
               </Typography>
             )}
@@ -270,14 +301,25 @@ function LastRunChip({ history }: { history: WorkflowHistory | null }) {
   if (!history) {
     return (
       <Tooltip title="Nothing has recorded a run of this workflow — not on this machine, and not on the remote cache if one is configured. That is an absence of evidence, not evidence it is unused.">
-        <Chip size="small" variant="outlined" label="never run" sx={{ opacity: 0.6 }} />
+        <Chip
+          size="small"
+          variant="outlined"
+          label="never run"
+          sx={{ opacity: 0.6 }}
+        />
       </Tooltip>
     );
   }
 
   const days = history.days_since;
   const when =
-    days === null ? history.last_run_at : days <= 0 ? "today" : days === 1 ? "yesterday" : `${days}d ago`;
+    days === null
+      ? history.last_run_at
+      : days <= 0
+        ? "today"
+        : days === 1
+          ? "yesterday"
+          : `${days}d ago`;
 
   const detail =
     `Last run ${history.last_run_at} (${history.last_outcome}). ` +
@@ -307,7 +349,11 @@ function WorkflowRow({
   onGraph: () => void;
 }) {
   return (
-    <Accordion disableGutters elevation={0} sx={{ "&:before": { display: "none" } }}>
+    <Accordion
+      disableGutters
+      elevation={0}
+      sx={{ "&:before": { display: "none" } }}
+    >
       <AccordionSummary expandIcon={<ExpandMoreIcon />}>
         <Stack
           direction="row"
@@ -320,7 +366,11 @@ function WorkflowRow({
           <Typography sx={{ fontFamily: monoFontStack, fontWeight: 600 }}>
             {workflow.name}
           </Typography>
-          <Typography variant="body2" color="text.secondary" sx={{ flexGrow: 1 }}>
+          <Typography
+            variant="body2"
+            color="text.secondary"
+            sx={{ flexGrow: 1 }}
+          >
             {workflow.description ?? "(no description)"}
           </Typography>
           <Chip size="small" variant="outlined" label={workflow.owner} />
@@ -337,14 +387,19 @@ function WorkflowRow({
           )}
           {workflow.required_env.length > 0 && (
             <Typography variant="caption" color="text.secondary">
-              requires the variables {workflow.required_env.join(", ")} to be set
+              requires the variables {workflow.required_env.join(", ")} to be
+              set
             </Typography>
           )}
           {workflow.steps.map((step) => (
             <StepRow key={step.name} step={step} />
           ))}
           <Box>
-            <Button size="small" startIcon={<AccountTreeIcon />} onClick={onGraph}>
+            <Button
+              size="small"
+              startIcon={<AccountTreeIcon />}
+              onClick={onGraph}
+            >
               Graph “{workflow.name}” across the workspace
             </Button>
           </Box>
@@ -357,7 +412,13 @@ function WorkflowRow({
 function StepRow({ step }: { step: WorkflowStep }) {
   return (
     <Box sx={{ pl: 1, borderLeft: 2, borderColor: "divider" }}>
-      <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
+      <Stack
+        direction="row"
+        spacing={1}
+        alignItems="center"
+        flexWrap="wrap"
+        useFlexGap
+      >
         <Typography variant="body2" sx={{ fontFamily: monoFontStack }}>
           {step.name}
         </Typography>
@@ -391,22 +452,51 @@ function StepBadges({ step }: { step: WorkflowStep }) {
   return (
     <>
       {step.push && (
-        <Tooltip title={step.workflow ? `Publishes the "${step.workflow}" workflow` : "Publishes"}>
-          <Chip size="small" color="primary" icon={<PublishIcon />} label="push" />
+        <Tooltip
+          title={
+            step.workflow
+              ? `Publishes the "${step.workflow}" workflow`
+              : "Publishes"
+          }
+        >
+          <Chip
+            size="small"
+            color="primary"
+            icon={<PublishIcon />}
+            label="push"
+          />
         </Tooltip>
       )}
-      {!step.push && step.kind && <Chip size="small" variant="outlined" label={step.kind} />}
+      {!step.push && step.kind && (
+        <Chip size="small" variant="outlined" label={step.kind} />
+      )}
       {step.background && (
         <Tooltip title={BACKGROUND_TOOLTIP}>
-          <Chip size="small" color="info" variant="outlined" icon={<BoltIcon />} label="background" />
+          <Chip
+            size="small"
+            color="info"
+            variant="outlined"
+            icon={<BoltIcon />}
+            label="background"
+          />
         </Tooltip>
       )}
       {step.timeout && (
         <Tooltip title="Killed past this, and the rest of the graph carries on">
-          <Chip size="small" variant="outlined" label={`timeout ${step.timeout}`} />
+          <Chip
+            size="small"
+            variant="outlined"
+            label={`timeout ${step.timeout}`}
+          />
         </Tooltip>
       )}
-      {step.retries > 0 && <Chip size="small" variant="outlined" label={`${step.retries} retries`} />}
+      {step.retries > 0 && (
+        <Chip
+          size="small"
+          variant="outlined"
+          label={`${step.retries} retries`}
+        />
+      )}
       {step.continue_on_error && (
         <Tooltip title="Its failure skips dependents but doesn't stop the run">
           <Chip size="small" variant="outlined" label="non-blocking" />
@@ -414,11 +504,22 @@ function StepBadges({ step }: { step: WorkflowStep }) {
       )}
       {step.warn_on_error && (
         <Tooltip title="Its failure is reported as a warning: dependents still run and the run still succeeds">
-          <Chip size="small" variant="outlined" color="warning" label="warn on error" />
+          <Chip
+            size="small"
+            variant="outlined"
+            color="warning"
+            label="warn on error"
+          />
         </Tooltip>
       )}
       {step.requires.map((tool) => (
-        <Chip key={tool} size="small" variant="outlined" label={tool} sx={{ opacity: 0.7 }} />
+        <Chip
+          key={tool}
+          size="small"
+          variant="outlined"
+          label={tool}
+          sx={{ opacity: 0.7 }}
+        />
       ))}
       <StepEnvChips env={step.env} />
     </>
@@ -427,7 +528,13 @@ function StepBadges({ step }: { step: WorkflowStep }) {
 
 // ─── Graph ──────────────────────────────────────────────────────────────────
 
-function GraphPanel({ project, workflow }: { project: string; workflow: string }) {
+function GraphPanel({
+  project,
+  workflow,
+}: {
+  project: string;
+  workflow: string;
+}) {
   const navigate = useNavigate();
   const { data, isLoading, error } = useWorkflowGraph(project, workflow);
   // What each stage would reuse. A cache that isn't configured simply yields
@@ -454,14 +561,18 @@ function GraphPanel({ project, workflow }: { project: string; workflow: string }
       return next;
     });
 
-  if (isLoading) return <Loading label={`Compiling the “${workflow}” graph…`} />;
+  if (isLoading)
+    return <Loading label={`Compiling the “${workflow}” graph…`} />;
   if (error) return <ErrorNote error={error} />;
   if (!data) return null;
 
   const launch = () => {
     start.mutate(
       { project, workflows: [], workflow, dry_run: dryRun },
-      { onSuccess: (run) => navigate({ to: "/run/$runId", params: { runId: String(run.id) } }) },
+      {
+        onSuccess: (run) =>
+          navigate({ to: "/run/$runId", params: { runId: String(run.id) } }),
+      },
     );
   };
 
@@ -472,22 +583,37 @@ function GraphPanel({ project, workflow }: { project: string; workflow: string }
   // so drawing one inside a wave states a dependency the engine does not have.
   // They get their own section at the bottom instead, out of the flow they are
   // not part of.
-  const background = data.nodes.filter((node) => node.background && !node.recover);
+  const background = data.nodes.filter(
+    (node) => node.background && !node.recover,
+  );
   const isBackground = new Set(background.map((node) => node.id));
   const planned = new Map((plan?.steps ?? []).map((step) => [step.name, step]));
   const caching = plan?.caching ?? false;
-  const memberPaths = new Map((catalogue?.members ?? []).map((m) => [m.name, m.path]));
+  const memberPaths = new Map(
+    (catalogue?.members ?? []).map((m) => [m.name, m.path]),
+  );
 
   return (
     <Card variant="outlined">
       <CardContent>
-        <Stack direction="row" spacing={2} alignItems="center" flexWrap="wrap" useFlexGap>
+        <Stack
+          direction="row"
+          spacing={2}
+          alignItems="center"
+          flexWrap="wrap"
+          useFlexGap
+        >
           <Typography variant="h6" sx={{ fontFamily: monoFontStack }}>
             {data.workflow}
           </Typography>
-          <Typography variant="body2" color="text.secondary" sx={{ flexGrow: 1 }}>
-            {data.nodes.filter((n) => !n.recover && !n.background).length} step(s) across{" "}
-            {data.units.length} sub-workspace(s), in {data.waves.length} wave(s)
+          <Typography
+            variant="body2"
+            color="text.secondary"
+            sx={{ flexGrow: 1 }}
+          >
+            {data.nodes.filter((n) => !n.recover && !n.background).length}{" "}
+            step(s) across {data.units.length} sub-workspace(s), in{" "}
+            {data.waves.length} wave(s)
             {background.length > 0 && ` · ${background.length} background`}
           </Typography>
           <ToggleButtonGroup
@@ -501,7 +627,12 @@ function GraphPanel({ project, workflow }: { project: string; workflow: string }
             <ToggleButton value="list">List</ToggleButton>
           </ToggleButtonGroup>
           <FormControlLabel
-            control={<Switch checked={dryRun} onChange={(e) => setDryRun(e.target.checked)} />}
+            control={
+              <Switch
+                checked={dryRun}
+                onChange={(e) => setDryRun(e.target.checked)}
+              />
+            }
             label="Dry run"
           />
           <Button
@@ -519,16 +650,20 @@ function GraphPanel({ project, workflow }: { project: string; workflow: string }
         {data.missing_tools.length > 0 && (
           <Alert severity="warning" sx={{ mt: 2 }}>
             <AlertTitle>
-              {data.missing_tools.length} build tool(s) this machine doesn’t have
+              {data.missing_tools.length} build tool(s) this machine doesn’t
+              have
             </AlertTitle>
             <Stack spacing={0.5}>
               {data.missing_tools.map((tool) => (
                 <Typography key={tool.tool} variant="body2">
-                  <strong>{tool.tool}</strong> — needed by {tool.needed_by.join(", ")}
+                  <strong>{tool.tool}</strong> — needed by{" "}
+                  {tool.needed_by.join(", ")}
                   {tool.hint && (
                     <>
                       {" · "}
-                      <code style={{ fontFamily: monoFontStack }}>{tool.hint}</code>
+                      <code style={{ fontFamily: monoFontStack }}>
+                        {tool.hint}
+                      </code>
                     </>
                   )}
                 </Typography>
@@ -540,7 +675,10 @@ function GraphPanel({ project, workflow }: { project: string; workflow: string }
         <Stack spacing={2} sx={{ mt: 2 }}>
           {/* The graph's inputs, before its first wave: everything the steps
               read that isn't produced by another step. */}
-          <EnvPanel report={data.env} title="environment — read before wave 1" />
+          <EnvPanel
+            report={data.env}
+            title="environment — read before wave 1"
+          />
           {caching && plan && <GraphInputsPanel plan={plan} />}
 
           {view === "graph" && (
@@ -556,12 +694,15 @@ function GraphPanel({ project, workflow }: { project: string; workflow: string }
                   node={byId.get(selected)!}
                   env={envFor(data, selected)}
                   planned={planned.get(selected)}
-                  memberPath={memberPaths.get(byId.get(selected)!.workspace ?? "")}
+                  memberPath={memberPaths.get(
+                    byId.get(selected)!.workspace ?? "",
+                  )}
                 />
               ) : (
                 <Typography variant="caption" color="text.secondary">
-                  Click a step for its details — what it waits for, what it reads, and what the
-                  cache would do with it. Dashed red edges are failure branches.
+                  Click a step for its details — what it waits for, what it
+                  reads, and what the cache would do with it. Dashed red edges
+                  are failure branches.
                 </Typography>
               )}
             </>
@@ -569,7 +710,10 @@ function GraphPanel({ project, workflow }: { project: string; workflow: string }
 
           {view === "list" && data.waves.length > 1 && (
             <Stack direction="row" spacing={1} justifyContent="flex-end">
-              <Button size="small" onClick={() => setFolded(new Set(data.waves.map((_, i) => i)))}>
+              <Button
+                size="small"
+                onClick={() => setFolded(new Set(data.waves.map((_, i) => i)))}
+              >
                 Collapse all waves
               </Button>
               <Button size="small" onClick={() => setFolded(new Set())}>
@@ -578,72 +722,83 @@ function GraphPanel({ project, workflow }: { project: string; workflow: string }
             </Stack>
           )}
 
-          {view === "list" && data.waves.map((wave, index) => {
-            const steps = wave.filter((id) => !isBackground.has(id));
-            // A wave that held nothing but background tasks isn't a wave.
-            if (steps.length === 0) return null;
-            const closed = folded.has(index);
-            return (
-              <Box key={index}>
-                {/* Folded, a wave is one line naming its steps — enough to
+          {view === "list" &&
+            data.waves.map((wave, index) => {
+              const steps = wave.filter((id) => !isBackground.has(id));
+              // A wave that held nothing but background tasks isn't a wave.
+              if (steps.length === 0) return null;
+              const closed = folded.has(index);
+              return (
+                <Box key={index}>
+                  {/* Folded, a wave is one line naming its steps — enough to
                     keep your place in a long graph without its cards. */}
-                <Stack
-                  direction="row"
-                  spacing={0.5}
-                  alignItems="center"
-                  role="button"
-                  tabIndex={0}
-                  aria-expanded={!closed}
-                  onClick={() => toggleWave(index)}
-                  onKeyDown={(event) => {
-                    if (event.key === "Enter" || event.key === " ") {
-                      event.preventDefault();
-                      toggleWave(index);
-                    }
-                  }}
-                  sx={{ cursor: "pointer", width: "fit-content", maxWidth: "100%", minWidth: 0 }}
-                >
-                  <ExpandMoreIcon
-                    fontSize="small"
-                    sx={{
-                      color: "text.secondary",
-                      transform: closed ? "rotate(-90deg)" : "none",
-                      transition: "transform 120ms",
+                  <Stack
+                    direction="row"
+                    spacing={0.5}
+                    alignItems="center"
+                    role="button"
+                    tabIndex={0}
+                    aria-expanded={!closed}
+                    onClick={() => toggleWave(index)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter" || event.key === " ") {
+                        event.preventDefault();
+                        toggleWave(index);
+                      }
                     }}
-                  />
-                  <Typography variant="overline" color="text.secondary" sx={{ flexShrink: 0 }}>
-                    wave {index + 1} — runs in parallel
-                    {closed && ` · ${steps.length} step${steps.length === 1 ? "" : "s"}`}
-                  </Typography>
-                  {closed && (
+                    sx={{
+                      cursor: "pointer",
+                      width: "fit-content",
+                      maxWidth: "100%",
+                      minWidth: 0,
+                    }}
+                  >
+                    <ExpandMoreIcon
+                      fontSize="small"
+                      sx={{
+                        color: "text.secondary",
+                        transform: closed ? "rotate(-90deg)" : "none",
+                        transition: "transform 120ms",
+                      }}
+                    />
                     <Typography
-                      variant="caption"
+                      variant="overline"
                       color="text.secondary"
-                      noWrap
-                      sx={{ fontFamily: monoFontStack, minWidth: 0 }}
+                      sx={{ flexShrink: 0 }}
                     >
-                      {steps.join(", ")}
+                      wave {index + 1} — runs in parallel
+                      {closed &&
+                        ` · ${steps.length} step${steps.length === 1 ? "" : "s"}`}
                     </Typography>
-                  )}
-                </Stack>
-                {!closed && (
-                  <Stack spacing={1} sx={{ mt: 0.5 }}>
-                    {steps.map((id) => {
-                      const node = byId.get(id);
-                      return node ? (
-                        <GraphNodeCard
-                          key={id}
-                          node={node}
-                          env={envFor(data, id)}
-                          planned={planned.get(id)}
-                        />
-                      ) : null;
-                    })}
+                    {closed && (
+                      <Typography
+                        variant="caption"
+                        color="text.secondary"
+                        noWrap
+                        sx={{ fontFamily: monoFontStack, minWidth: 0 }}
+                      >
+                        {steps.join(", ")}
+                      </Typography>
+                    )}
                   </Stack>
-                )}
-              </Box>
-            );
-          })}
+                  {!closed && (
+                    <Stack spacing={1} sx={{ mt: 0.5 }}>
+                      {steps.map((id) => {
+                        const node = byId.get(id);
+                        return node ? (
+                          <GraphNodeCard
+                            key={id}
+                            node={node}
+                            env={envFor(data, id)}
+                            planned={planned.get(id)}
+                          />
+                        ) : null;
+                      })}
+                    </Stack>
+                  )}
+                </Box>
+              );
+            })}
 
           {caching && plan && <GraphOutputsPanel plan={plan} />}
 
@@ -658,7 +813,8 @@ function GraphPanel({ project, workflow }: { project: string; workflow: string }
                 >
                   <BoltIcon fontSize="small" color="info" />
                   <Typography variant="overline" color="text.secondary">
-                    background — up before wave 1, nothing waits for them, stopped when the run ends
+                    background — up before wave 1, nothing waits for them,
+                    stopped when the run ends
                   </Typography>
                 </Stack>
               </Tooltip>
@@ -682,7 +838,11 @@ function GraphPanel({ project, workflow }: { project: string; workflow: string }
               </Typography>
               <Stack spacing={1} sx={{ mt: 0.5 }}>
                 {recoveries.map((node) => (
-                  <GraphNodeCard key={node.id} node={node} env={envFor(data, node.id)} />
+                  <GraphNodeCard
+                    key={node.id}
+                    node={node}
+                    env={envFor(data, node.id)}
+                  />
                 ))}
               </Stack>
             </Box>
@@ -736,11 +896,25 @@ function GraphNodeCard({
         borderRadius: 1,
       }}
     >
-      <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
+      <Stack
+        direction="row"
+        spacing={1}
+        alignItems="center"
+        flexWrap="wrap"
+        useFlexGap
+      >
         {node.workspace && (
-          <Chip size="small" color="secondary" label={node.workspace} sx={{ fontWeight: 600 }} />
+          <Chip
+            size="small"
+            color="secondary"
+            label={node.workspace}
+            sx={{ fontWeight: 600 }}
+          />
         )}
-        <Typography variant="body2" sx={{ fontFamily: monoFontStack, fontWeight: 600 }}>
+        <Typography
+          variant="body2"
+          sx={{ fontFamily: monoFontStack, fontWeight: 600 }}
+        >
           {node.id}
         </Typography>
         <StepBadges step={node} />

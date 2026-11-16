@@ -15,7 +15,13 @@ export default defineConfig({
   resolve: {
     // `@ciabatta/graphs` is linked source shared with the other app; one copy
     // of each of these, or react-flow and MUI each see two Reacts/themes.
-    dedupe: ["react", "react-dom", "@mui/material", "@emotion/react", "@xyflow/react"],
+    dedupe: [
+      "react",
+      "react-dom",
+      "@mui/material",
+      "@emotion/react",
+      "@xyflow/react",
+    ],
   },
   build: {
     outDir: "dist",

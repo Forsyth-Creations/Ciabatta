@@ -87,7 +87,9 @@ export function runCommand(state: RunState): string {
 
 /** Quote a term for a shell, only when it needs it. */
 function quote(value: string): string {
-  return /^[\w:.\-/=]+$/.test(value) ? value : `'${value.replace(/'/g, `'\\''`)}'`;
+  return /^[\w:.\-/=]+$/.test(value)
+    ? value
+    : `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
 /**
@@ -104,9 +106,13 @@ function workflowLines(workflow: WorkflowView): Line[] {
     .filter((edge) => edge.kind === "needs")
     .map((edge) => ({ source: edge.from, target: edge.to }));
 
-  const background = workflow.steps.filter((step) => step.background && !step.recover);
+  const background = workflow.steps.filter(
+    (step) => step.background && !step.recover,
+  );
   const recovery = workflow.steps.filter((step) => step.recover);
-  const main = workflow.steps.filter((step) => !step.background && !step.recover);
+  const main = workflow.steps.filter(
+    (step) => !step.background && !step.recover,
+  );
 
   const order = executionOrder(
     main.map((step) => step.name),
@@ -144,12 +150,18 @@ function workflowLines(workflow: WorkflowView): Line[] {
   }
 
   if (sequenced.length > 0) {
-    lines.push({ kind: "heading", text: "the run, in the order the engine takes it" });
+    lines.push({
+      kind: "heading",
+      text: "the run, in the order the engine takes it",
+    });
     sequenced.forEach(emit);
   }
 
   if (recovery.length > 0) {
-    lines.push({ kind: "heading", text: "only if a step fails — its on_error branch" });
+    lines.push({
+      kind: "heading",
+      text: "only if a step fails — its on_error branch",
+    });
     recovery.forEach((step) => {
       if (step.shell || step.action) emit(step);
       else
@@ -225,7 +237,12 @@ export function RecreateDrawer({
         },
       }}
     >
-      <Stack direction="row" alignItems="center" spacing={1} sx={{ p: 2, pb: 1 }}>
+      <Stack
+        direction="row"
+        alignItems="center"
+        spacing={1}
+        sx={{ p: 2, pb: 1 }}
+      >
         <Box sx={{ flexGrow: 1, minWidth: 0 }}>
           <Typography variant="h3">Recreate</Typography>
           <Typography variant="caption" color="text.secondary">
@@ -250,9 +267,9 @@ export function RecreateDrawer({
       <Box sx={{ p: 2, overflowY: "auto" }}>
         <Typography variant="body2" color="text.secondary" sx={{ mb: 1.5 }}>
           Every step in the order the engine takes it, from the directory it
-          runs in. One command does the same thing — <code>ciabatta{" "}
-          {state.run.workflows[0] ?? "build"}</code> is the short way to write
-          it:
+          runs in. One command does the same thing —{" "}
+          <code>ciabatta {state.run.workflows[0] ?? "build"}</code> is the short
+          way to write it:
         </Typography>
         <CommandLine text={runCommand(state)} />
 
@@ -267,7 +284,11 @@ export function RecreateDrawer({
           {state.workflows.map((workflow) => (
             <Box key={workflow.name} sx={{ mb: 3 }}>
               {state.workflows.length > 1 && (
-                <Chip size="small" label={workflow.name} sx={{ mt: 2, mb: 1 }} />
+                <Chip
+                  size="small"
+                  label={workflow.name}
+                  sx={{ mt: 2, mb: 1 }}
+                />
               )}
               {workflowLines(workflow).map((line, index) => (
                 <LineRow key={index} line={line} />
@@ -288,7 +309,13 @@ export function RecreateDrawer({
  * out of a list, without the status glyph or the trailing `# step` comment, is
  * fiddly enough that people retyped it instead.
  */
-function CopyButton({ text, label = "Copy this line" }: { text: string; label?: string }) {
+function CopyButton({
+  text,
+  label = "Copy this line",
+}: {
+  text: string;
+  label?: string;
+}) {
   const [copied, setCopied] = useState(false);
   return (
     <Tooltip title={copied ? "Copied" : label}>
@@ -304,9 +331,17 @@ function CopyButton({ text, label = "Copy this line" }: { text: string; label?: 
             // Clipboard access can be refused; the text is on screen either way.
           }
         }}
-        sx={{ p: 0.25, flexShrink: 0, color: copied ? "success.main" : "text.secondary" }}
+        sx={{
+          p: 0.25,
+          flexShrink: 0,
+          color: copied ? "success.main" : "text.secondary",
+        }}
       >
-        {copied ? <CheckIcon sx={{ fontSize: 15 }} /> : <ContentCopyIcon sx={{ fontSize: 15 }} />}
+        {copied ? (
+          <CheckIcon sx={{ fontSize: 15 }} />
+        ) : (
+          <ContentCopyIcon sx={{ fontSize: 15 }} />
+        )}
       </IconButton>
     </Tooltip>
   );
@@ -316,8 +351,8 @@ function RootLine({ root }: { root: string }) {
   return (
     <>
       <Typography variant="caption" color="text.secondary">
-        Start from the workspace root — every step&apos;s directory is relative to
-        it, not to wherever your shell happens to be.
+        Start from the workspace root — every step&apos;s directory is relative
+        to it, not to wherever your shell happens to be.
       </Typography>
       <CommandLine text={`ROOT=${root}\ncd "$ROOT"`} />
     </>
@@ -411,7 +446,10 @@ function LineRow({ line }: { line: Line }) {
       >
         {line.text}
         {line.step && (
-          <Box component="span" sx={{ color: "text.secondary", fontWeight: 400 }}>
+          <Box
+            component="span"
+            sx={{ color: "text.secondary", fontWeight: 400 }}
+          >
             {"  # "}
             {line.step.name}
           </Box>

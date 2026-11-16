@@ -82,10 +82,19 @@ export const monoFontStack = [
   "monospace",
 ].join(", ");
 
-const bodyFontStack = ["Barlow", "ui-sans-serif", "system-ui", "-apple-system", "sans-serif"].join(
-  ", ",
-);
-const headingFontStack = ["'Barlow Condensed'", "Barlow", "ui-sans-serif", "system-ui"].join(", ");
+const bodyFontStack = [
+  "Barlow",
+  "ui-sans-serif",
+  "system-ui",
+  "-apple-system",
+  "sans-serif",
+].join(", ");
+const headingFontStack = [
+  "'Barlow Condensed'",
+  "Barlow",
+  "ui-sans-serif",
+  "system-ui",
+].join(", ");
 
 const heading = (fontSize: string) => ({
   fontFamily: headingFontStack,
@@ -125,7 +134,11 @@ export function buildTheme(mode: "light" | "dark"): Theme {
       h1: heading("1.85rem"),
       h2: heading("1.3rem"),
       h3: heading("1.05rem"),
-      overline: { fontFamily: headingFontStack, fontWeight: 600, letterSpacing: "0.08em" },
+      overline: {
+        fontFamily: headingFontStack,
+        fontWeight: 600,
+        letterSpacing: "0.08em",
+      },
       button: { textTransform: "none", fontWeight: 600 },
     },
     components: {

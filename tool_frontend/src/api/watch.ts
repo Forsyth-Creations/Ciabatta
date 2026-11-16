@@ -86,9 +86,13 @@ export function useWatchSessions() {
 export function useCreateSession() {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (body: { project: string; command: string; triggers: string[] }) =>
-      api.post<SessionSummary>("/api/watch/sessions", body),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: watchKeys.sessions }),
+    mutationFn: (body: {
+      project: string;
+      command: string;
+      triggers: string[];
+    }) => api.post<SessionSummary>("/api/watch/sessions", body),
+    onSuccess: () =>
+      queryClient.invalidateQueries({ queryKey: watchKeys.sessions }),
   });
 }
 
@@ -96,7 +100,8 @@ export function useStopSession() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (id: number) => api.post(`/api/watch/sessions/${id}/stop`),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: watchKeys.sessions }),
+    onSuccess: () =>
+      queryClient.invalidateQueries({ queryKey: watchKeys.sessions }),
   });
 }
 
@@ -104,7 +109,8 @@ export function useCloseSession() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (id: number) => api.delete(`/api/watch/sessions/${id}`),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: watchKeys.sessions }),
+    onSuccess: () =>
+      queryClient.invalidateQueries({ queryKey: watchKeys.sessions }),
   });
 }
 
@@ -114,12 +120,23 @@ export interface SearchResult {
   capped: boolean;
 }
 
-export function useSearch(id: number, query: string, mode: "any" | "all", regex: boolean) {
+export function useSearch(
+  id: number,
+  query: string,
+  mode: "any" | "all",
+  regex: boolean,
+) {
   return useQuery({
     queryKey: ["watch", "search", id, query, mode, regex],
     queryFn: () => {
-      const params = new URLSearchParams({ q: query, mode, regex: regex ? "true" : "false" });
-      return api.get<SearchResult>(`/api/watch/sessions/${id}/search?${params}`);
+      const params = new URLSearchParams({
+        q: query,
+        mode,
+        regex: regex ? "true" : "false",
+      });
+      return api.get<SearchResult>(
+        `/api/watch/sessions/${id}/search?${params}`,
+      );
     },
     enabled: query.trim().length > 0,
   });

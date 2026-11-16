@@ -79,7 +79,13 @@ export function oneLine(height: number) {
 }
 
 /** A small line under a step's name: its timing, a note, a cache verdict. */
-export function StepLine({ children, mono = true }: { children: ReactNode; mono?: boolean }) {
+export function StepLine({
+  children,
+  mono = true,
+}: {
+  children: ReactNode;
+  mono?: boolean;
+}) {
   return (
     <Box
       sx={{
@@ -122,10 +128,17 @@ export function StepNodeBody({
   // The id is "<workspace>:<step>" (or "<workspace>:<workflow>:<step>"), and
   // repeating the workspace in both lines just wastes the node's width.
   const short =
-    workspace && name.startsWith(`${workspace}:`) ? name.slice(workspace.length + 1) : name;
+    workspace && name.startsWith(`${workspace}:`)
+      ? name.slice(workspace.length + 1)
+      : name;
 
   return (
-    <Stack direction="row" spacing={0.75} alignItems="center" sx={{ minWidth: 0, width: "100%" }}>
+    <Stack
+      direction="row"
+      spacing={0.75}
+      alignItems="center"
+      sx={{ minWidth: 0, width: "100%" }}
+    >
       {order !== null && (
         <Box
           sx={{
@@ -210,7 +223,9 @@ export function stepNodeStyle({
     overflow: "hidden",
     textAlign: "left",
     opacity,
-    boxShadow: picked ? `0 0 0 3px ${theme.palette.secondary.main}55` : undefined,
+    boxShadow: picked
+      ? `0 0 0 3px ${theme.palette.secondary.main}55`
+      : undefined,
     border: `2px ${dashed ? "dashed" : "solid"} ${picked ? theme.palette.secondary.main : border}`,
     fontSize: 12,
     padding: "6px 12px",

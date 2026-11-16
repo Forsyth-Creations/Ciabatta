@@ -28,7 +28,12 @@ import type { Theme } from "@mui/material/styles";
 import type { Node } from "@xyflow/react";
 
 import { api } from "../api/client";
-import { ErrorNote, Loading, PageHeader, RequireProject } from "../components/Page";
+import {
+  ErrorNote,
+  Loading,
+  PageHeader,
+  RequireProject,
+} from "../components/Page";
 import { GraphCanvas, radialLayout, toEdges } from "@ciabatta/graphs";
 import { monoFontStack } from "../theme";
 
@@ -83,7 +88,9 @@ export function AiPage() {
         <Tab label="Jobs" />
       </Tabs>
       <RequireProject>
-        {(project) => (tab === 0 ? <MindMap project={project} /> : <Jobs project={project} />)}
+        {(project) =>
+          tab === 0 ? <MindMap project={project} /> : <Jobs project={project} />
+        }
       </RequireProject>
     </>
   );
@@ -108,7 +115,9 @@ function MindMap({ project }: { project: string }) {
         setGraph(next);
         if (typeof next.seq === "number") setSeq(next.seq);
       } else {
-        setGraph((previous) => (previous ? { ...previous, activity: next.activity } : previous));
+        setGraph((previous) =>
+          previous ? { ...previous, activity: next.activity } : previous,
+        );
       }
       return next;
     },
@@ -122,7 +131,8 @@ function MindMap({ project }: { project: string }) {
   });
 
   const confirmAll = useMutation({
-    mutationFn: (accept: boolean) => api.post("/api/ai/confirm-all", { project, accept }),
+    mutationFn: (accept: boolean) =>
+      api.post("/api/ai/confirm-all", { project, accept }),
     onSuccess: () => setSeq(0),
   });
 
@@ -136,29 +146,45 @@ function MindMap({ project }: { project: string }) {
     },
   });
 
-  const { nodes, edges } = useMemo(() => buildFlowGraph(graph, theme), [graph, theme]);
+  const { nodes, edges } = useMemo(
+    () => buildFlowGraph(graph, theme),
+    [graph, theme],
+  );
 
   if (isLoading && !graph) return <Loading label="Loading the mind map…" />;
   if (error) return <ErrorNote error={error} />;
 
   const nodeCount = graph?.nodes?.length ?? 0;
-  const architectures = graph?.nodes?.filter((n) => n.kind === "architecture") ?? [];
+  const architectures =
+    graph?.nodes?.filter((n) => n.kind === "architecture") ?? [];
   const pending = graph?.pending ?? [];
 
   if (nodeCount === 0) {
     return (
       <Alert severity="info">
-        The map is empty. Run <code style={{ fontFamily: monoFontStack }}>ciabatta ai burn-in</code>{" "}
-        to have the assistant traverse the codebase and build it, or just start asking questions —
-        it learns as it goes.
+        The map is empty. Run{" "}
+        <code style={{ fontFamily: monoFontStack }}>ciabatta ai burn-in</code>{" "}
+        to have the assistant traverse the codebase and build it, or just start
+        asking questions — it learns as it goes.
       </Alert>
     );
   }
 
   return (
     <>
-      <Stack direction="row" spacing={1.5} alignItems="center" sx={{ mb: 1.5 }} flexWrap="wrap" useFlexGap>
-        <Chip size="small" variant="outlined" label={`${architectures.length} architectures`} />
+      <Stack
+        direction="row"
+        spacing={1.5}
+        alignItems="center"
+        sx={{ mb: 1.5 }}
+        flexWrap="wrap"
+        useFlexGap
+      >
+        <Chip
+          size="small"
+          variant="outlined"
+          label={`${architectures.length} architectures`}
+        />
         <Chip
           size="small"
           variant="outlined"
@@ -177,7 +203,11 @@ function MindMap({ project }: { project: string }) {
             <Typography variant="body2" color="text.secondary">
               {pending.length} pending
             </Typography>
-            <Button size="small" startIcon={<CheckIcon />} onClick={() => confirmAll.mutate(true)}>
+            <Button
+              size="small"
+              startIcon={<CheckIcon />}
+              onClick={() => confirmAll.mutate(true)}
+            >
               Accept all
             </Button>
             <Button
@@ -217,14 +247,28 @@ function MindMap({ project }: { project: string }) {
       />
 
       {selected && (
-        <Box sx={{ mt: 2, p: 2, border: 1, borderColor: "divider", borderRadius: 1 }}>
+        <Box
+          sx={{
+            mt: 2,
+            p: 2,
+            border: 1,
+            borderColor: "divider",
+            borderRadius: 1,
+          }}
+        >
           <Stack direction="row" alignItems="center" spacing={1.5}>
             <Chip
               size="small"
               color={selected.kind === "architecture" ? "primary" : "default"}
               label={selected.kind}
             />
-            <Typography sx={{ fontFamily: monoFontStack, flexGrow: 1, wordBreak: "break-all" }}>
+            <Typography
+              sx={{
+                fontFamily: monoFontStack,
+                flexGrow: 1,
+                wordBreak: "break-all",
+              }}
+            >
               {selected.label}
             </Typography>
             <Button
@@ -232,7 +276,8 @@ function MindMap({ project }: { project: string }) {
               color="error"
               onClick={() =>
                 prune.mutate({
-                  kind: selected.kind === "architecture" ? "architecture" : "file",
+                  kind:
+                    selected.kind === "architecture" ? "architecture" : "file",
                   id: selected.label,
                 })
               }
@@ -246,7 +291,13 @@ function MindMap({ project }: { project: string }) {
             </Typography>
           )}
           {selected.tags && selected.tags.length > 0 && (
-            <Stack direction="row" spacing={0.5} sx={{ mt: 1 }} flexWrap="wrap" useFlexGap>
+            <Stack
+              direction="row"
+              spacing={0.5}
+              sx={{ mt: 1 }}
+              flexWrap="wrap"
+              useFlexGap
+            >
               {selected.tags.map((tag) => (
                 <Chip key={tag} size="small" variant="outlined" label={tag} />
               ))}
@@ -263,8 +314,15 @@ function MindMap({ project }: { project: string }) {
           </Typography>
           <Stack spacing={1}>
             {pending.map((proposal) => (
-              <Stack key={proposal.file} direction="row" alignItems="center" spacing={1.5}>
-                <Typography sx={{ fontFamily: monoFontStack, fontSize: 13, flexGrow: 1 }}>
+              <Stack
+                key={proposal.file}
+                direction="row"
+                alignItems="center"
+                spacing={1.5}
+              >
+                <Typography
+                  sx={{ fontFamily: monoFontStack, fontSize: 13, flexGrow: 1 }}
+                >
                   {proposal.file}
                 </Typography>
                 {proposal.tags.map((tag) => (
@@ -272,14 +330,18 @@ function MindMap({ project }: { project: string }) {
                 ))}
                 <Button
                   size="small"
-                  onClick={() => confirm.mutate({ file: proposal.file, accept: true })}
+                  onClick={() =>
+                    confirm.mutate({ file: proposal.file, accept: true })
+                  }
                 >
                   Accept
                 </Button>
                 <Button
                   size="small"
                   color="error"
-                  onClick={() => confirm.mutate({ file: proposal.file, accept: false })}
+                  onClick={() =>
+                    confirm.mutate({ file: proposal.file, accept: false })
+                  }
                 >
                   Reject
                 </Button>
@@ -327,8 +389,12 @@ function buildFlowGraph(graph: BrainGraph | null, theme: Theme) {
     return {
       ...node,
       style: {
-        background: isArch ? theme.palette.primary.main : theme.palette.background.paper,
-        color: isArch ? theme.palette.primary.contrastText : theme.palette.text.primary,
+        background: isArch
+          ? theme.palette.primary.main
+          : theme.palette.background.paper,
+        color: isArch
+          ? theme.palette.primary.contrastText
+          : theme.palette.text.primary,
         border: `1px solid ${isArch ? theme.palette.primary.main : theme.palette.divider}`,
         borderRadius: 8,
         fontSize: isArch ? 13 : 11,
@@ -343,7 +409,9 @@ function buildFlowGraph(graph: BrainGraph | null, theme: Theme) {
 
   return {
     nodes,
-    edges: toEdges(brainEdges, { dashed: (pair) => Boolean(byId.get(pair.to)?.provisional) }),
+    edges: toEdges(brainEdges, {
+      dashed: (pair) => Boolean(byId.get(pair.to)?.provisional),
+    }),
   };
 }
 
@@ -355,7 +423,10 @@ function basename(path: string): string {
 function Jobs({ project }: { project: string }) {
   const { data, isLoading, error } = useQuery({
     queryKey: ["ai", "jobs", project],
-    queryFn: () => api.get<{ jobs: Job[] }>(`/api/ai/jobs?project=${encodeURIComponent(project)}`),
+    queryFn: () =>
+      api.get<{ jobs: Job[] }>(
+        `/api/ai/jobs?project=${encodeURIComponent(project)}`,
+      ),
     refetchInterval: 2_000,
   });
 
@@ -367,8 +438,8 @@ function Jobs({ project }: { project: string }) {
     return (
       <Alert severity="info">
         No background tasks. Ship one with{" "}
-        <code style={{ fontFamily: monoFontStack }}>ciabatta ai ship "…"</code>, or from the Todo
-        page.
+        <code style={{ fontFamily: monoFontStack }}>ciabatta ai ship "…"</code>,
+        or from the Todo page.
       </Alert>
     );
   }
@@ -376,9 +447,16 @@ function Jobs({ project }: { project: string }) {
   return (
     <Stack spacing={1}>
       {jobs.map((job) => (
-        <Box key={job.id} sx={{ p: 1.5, border: 1, borderColor: "divider", borderRadius: 1 }}>
+        <Box
+          key={job.id}
+          sx={{ p: 1.5, border: 1, borderColor: "divider", borderRadius: 1 }}
+        >
           <Stack direction="row" alignItems="center" spacing={1.5}>
-            <Chip size="small" color={jobStatusColor(job.status)} label={job.status} />
+            <Chip
+              size="small"
+              color={jobStatusColor(job.status)}
+              label={job.status}
+            />
             <Typography sx={{ flexGrow: 1 }}>{job.prompt}</Typography>
             <Typography variant="caption" color="text.secondary">
               #{job.id} · {job.source}
@@ -404,7 +482,9 @@ function Jobs({ project }: { project: string }) {
   );
 }
 
-function jobStatusColor(status: string): "success" | "error" | "warning" | "default" {
+function jobStatusColor(
+  status: string,
+): "success" | "error" | "warning" | "default" {
   switch (status) {
     case "done":
     case "succeeded":

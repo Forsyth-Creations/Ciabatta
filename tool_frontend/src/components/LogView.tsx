@@ -122,7 +122,8 @@ export function LogView({
     return found;
   }, [lines, needle]);
   const matched = useMemo(() => new Set(matches), [matches]);
-  const currentLine = matches.length > 0 ? matches[Math.min(current, matches.length - 1)] : -1;
+  const currentLine =
+    matches.length > 0 ? matches[Math.min(current, matches.length - 1)] : -1;
 
   const virtualizer = useVirtualizer({
     count: lines.length,
@@ -137,7 +138,10 @@ export function LogView({
   const atBottom = useCallback(() => {
     const element = scroller.current;
     if (!element) return true;
-    return element.scrollHeight - element.scrollTop - element.clientHeight <= STICK_SLACK;
+    return (
+      element.scrollHeight - element.scrollTop - element.clientHeight <=
+      STICK_SLACK
+    );
   }, []);
 
   const onScroll = useCallback(() => {
@@ -318,7 +322,9 @@ export function LogView({
             <IconButton
               size="small"
               onClick={() => setFull((on) => !on)}
-              aria-label={full ? "Leave full screen" : "Show the output full screen"}
+              aria-label={
+                full ? "Leave full screen" : "Show the output full screen"
+              }
               sx={{ p: 0.5 }}
             >
               {full ? (
@@ -355,8 +361,8 @@ export function LogView({
             color="text.secondary"
             sx={{ display: "block", fontStyle: "italic", mb: 0.5 }}
           >
-            … {dropped.toLocaleString()} earlier line{dropped === 1 ? "" : "s"} dropped to keep the
-            page responsive.
+            … {dropped.toLocaleString()} earlier line{dropped === 1 ? "" : "s"}{" "}
+            dropped to keep the page responsive.
           </Typography>
         )}
 
@@ -369,7 +375,9 @@ export function LogView({
           here, leaving the rows stacked at the top of a container scrolled to
           the bottom: a log pane that was blank until you scrolled back up.
         */}
-        <div style={{ height: virtualizer.getTotalSize(), position: "relative" }}>
+        <div
+          style={{ height: virtualizer.getTotalSize(), position: "relative" }}
+        >
           {items.map((item) => (
             <div
               key={item.key}
@@ -444,7 +452,10 @@ export function LogView({
             {title ?? "Output"}
           </Typography>
           <Tooltip title="Leave full screen (Esc)">
-            <IconButton onClick={() => setFull(false)} aria-label="Leave full screen">
+            <IconButton
+              onClick={() => setFull(false)}
+              aria-label="Leave full screen"
+            >
               <CloseFullscreenIcon />
             </IconButton>
           </Tooltip>

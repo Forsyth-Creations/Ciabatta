@@ -5,25 +5,25 @@
 description: Format, lint and test — everything CI gates on
 owner: Henry Forsyth
 requires:
-- cargo
+  - cargo
 steps:
-- name: format
-  run: cargo fmt --check
-  description: Verify the tree is rustfmt-clean
-- name: lint
-  # `--all-targets --all-features`, not a bare `cargo clippy`: without them the
-  # test and bench targets are never linted, so a lint that CI used to reject
-  # could pass here. They are the same flags the workflow below runs.
-  run: cargo clippy --all-targets --all-features -- -D warnings
-  description: Clippy with warnings denied, across every target and feature
-  timeout: 20m
-  needs:
-  - format
-- name: unit
-  # Release, because the suite is slow enough in debug to matter and because
-  # this is the profile the shipped binary is built with.
-  run: cargo test --release
-  description: The full test suite
-  timeout: 30m
-  needs:
-  - lint
+  - name: format
+    run: cargo fmt --check
+    description: Verify the tree is rustfmt-clean
+  - name: lint
+    # `--all-targets --all-features`, not a bare `cargo clippy`: without them the
+    # test and bench targets are never linted, so a lint that CI used to reject
+    # could pass here. They are the same flags the workflow below runs.
+    run: cargo clippy --all-targets --all-features -- -D warnings
+    description: Clippy with warnings denied, across every target and feature
+    timeout: 20m
+    needs:
+      - format
+  - name: unit
+    # Release, because the suite is slow enough in debug to matter and because
+    # this is the profile the shipped binary is built with.
+    run: cargo test --release
+    description: The full test suite
+    timeout: 30m
+    needs:
+      - lint

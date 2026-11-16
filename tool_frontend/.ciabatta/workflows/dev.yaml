@@ -1,0 +1,12 @@
+# The remote cache admin app with hot reload, at http://localhost:5174. Its API
+# calls are proxied to the remote cache server on 8380 (see vite.config.ts), so
+# the root dev workflow runs one from source.
+
+description: Serve the remote cache admin app with hot reload
+owner: Henry Forsyth
+requires:
+  - yarn
+steps:
+  - name: serve
+    run: yarn dev
+    description: Vite dev server for the admin app, proxied to the cache on 8380

@@ -32,6 +32,7 @@ pub mod activity;
 pub mod auth;
 pub mod builds;
 pub mod client;
+pub mod oven;
 pub mod projects;
 pub mod releases;
 pub mod server;

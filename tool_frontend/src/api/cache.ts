@@ -7,7 +7,8 @@ import type { CachePlan, CacheStatus, FileHash, RemoteStatus } from "./types";
 
 export const cacheKeys = {
   status: (project: string) => ["cache", "status", project] as const,
-  plan: (project: string, target: string | null) => ["cache", "plan", project, target] as const,
+  plan: (project: string, target: string | null) =>
+    ["cache", "plan", project, target] as const,
   remote: (project: string) => ["cache", "remote", project] as const,
 };
 
@@ -26,7 +27,10 @@ export function useCacheStatus(project: string | undefined) {
  * Not cached for long: the whole point is to reflect the working tree as it is
  * right now, and a stale plan is worse than no plan — somebody would act on it.
  */
-export function useCachePlan(project: string | undefined, target: string | null) {
+export function useCachePlan(
+  project: string | undefined,
+  target: string | null,
+) {
   return useQuery({
     queryKey: cacheKeys.plan(project ?? "", target),
     queryFn: () => {
@@ -44,7 +48,8 @@ export function useCachePlan(project: string | undefined, target: string | null)
 export function useRemoteCache(project: string | undefined) {
   return useQuery({
     queryKey: cacheKeys.remote(project ?? ""),
-    queryFn: () => api.get<RemoteStatus>(`/api/cache/remote?project=${project}`),
+    queryFn: () =>
+      api.get<RemoteStatus>(`/api/cache/remote?project=${project}`),
     enabled: Boolean(project),
     refetchInterval: 15_000,
   });
@@ -146,7 +151,6 @@ export function useSaveTargetFiles() {
       /** Cache ids of earlier steps whose outputs it reads (`cache.inputs_from`). */
       inputs_from: string[];
       outputs: string[];
-    }) =>
-      api.post<{ path: string }>("/api/cache/target-files", body),
+    }) => api.post<{ path: string }>("/api/cache/target-files", body),
   });
 }

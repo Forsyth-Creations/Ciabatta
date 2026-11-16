@@ -26,7 +26,13 @@ cache:
   enabled: true
   # packages/graphs is source this app compiles in, so a change there is a
   # change here.
-  inputs:  ["tool_frontend/src/**/*", "tool_frontend/package.json", "packages/graphs/src/**/*", "packages/graphs/package.json"]
+  inputs:
+    [
+      "tool_frontend/src/**/*",
+      "tool_frontend/package.json",
+      "packages/graphs/src/**/*",
+      "packages/graphs/package.json",
+    ]
   outputs: ["tool_frontend/dist/**/*"]
 
 steps:

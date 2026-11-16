@@ -13,7 +13,7 @@ Inside `.ciabatta/ciabatta.yaml` and `.ciabatta/workflows/*.yaml`:
   plain step, a step with `needs:`, a push step, a pull step and a recovery
   node; an empty workflow file offers a whole workflow.
 - **Dependencies that resolve.** A step's `needs:` offers the steps in that
-  file. A workflow's `needs:` offers the *other packages'* workflows —
+  file. A workflow's `needs:` offers the _other packages'_ workflows —
   `proto:generate`, with its description beside it and its owner in the docs
   panel. Two fields spelled the same way that mean different things, which is
   the mistake this exists to prevent. `background:` and `depends_on:` offer the
@@ -51,12 +51,12 @@ binary, field completion still works and nothing complains.
 
 ## Settings
 
-| Setting | Default | |
-| --- | --- | --- |
-| `ciabatta.server.path` | `""` | A specific binary, for a build of your own. Empty uses `PATH`. |
-| `ciabatta.server.enabled` | `true` | Turn the server off and keep only the schema. |
-| `ciabatta.completion.autoTrigger` | `true` | Reopen suggestions after accepting a field name, when there's something to suggest. |
-| `ciabatta.trace.server` | `off` | Log the protocol traffic to the **Ciabatta** output channel. |
+| Setting                           | Default |                                                                                     |
+| --------------------------------- | ------- | ----------------------------------------------------------------------------------- |
+| `ciabatta.server.path`            | `""`    | A specific binary, for a build of your own. Empty uses `PATH`.                      |
+| `ciabatta.server.enabled`         | `true`  | Turn the server off and keep only the schema.                                       |
+| `ciabatta.completion.autoTrigger` | `true`  | Reopen suggestions after accepting a field name, when there's something to suggest. |
+| `ciabatta.trace.server`           | `off`   | Log the protocol traffic to the **Ciabatta** output channel.                        |
 
 **Ciabatta: Restart Language Server** picks up a rebuilt binary without
 reloading the window.

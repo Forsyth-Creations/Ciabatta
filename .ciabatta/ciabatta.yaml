@@ -8,11 +8,11 @@ workspace:
   description: Monorepo orchestration and artifact publishing CLI
   owner: Henry Forsyth
   tags:
-  - rust
-  - cli
-  - tooling
+    - rust
+    - cli
+    - tooling
   requires:
-  - cargo
+    - cargo
 toolchain:
   cargo:
     hint: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
@@ -40,11 +40,11 @@ cache:
   # will be handed a stale result when that file changes.
   enabled: true
   inputs:
-    - "src/**/*"   # source
-    - "Cargo.toml"   # the Rust manifest
-    - "Cargo.lock"   # pinned Rust dependencies
-    - "package.json"   # the Node manifest
-    - "Dockerfile"   # the image definition
+    - "src/**/*" # source
+    - "Cargo.toml" # the Rust manifest
+    - "Cargo.lock" # pinned Rust dependencies
+    - "package.json" # the Node manifest
+    - "Dockerfile" # the image definition
   outputs:
     - "target/release/ciabatta"
   # Never treated as inputs, so a build can't invalidate itself.

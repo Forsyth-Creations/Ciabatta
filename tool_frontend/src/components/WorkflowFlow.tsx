@@ -35,11 +35,19 @@ const LINE = { name: 16, small: 14 } as const;
 const CHROME = 2 * 2 + 6 * 2;
 
 function heightOf(hasWorkspace: boolean, hasPlan: boolean): number {
-  return CHROME + LINE.name + LINE.small + (hasWorkspace ? LINE.small : 0) + (hasPlan ? LINE.small : 0);
+  return (
+    CHROME +
+    LINE.name +
+    LINE.small +
+    (hasWorkspace ? LINE.small : 0) +
+    (hasPlan ? LINE.small : 0)
+  );
 }
 
 /** What a stage's planned cache decision looks like on a node. */
-function planWords(step: PlannedStep | undefined): { text: string; tone: "good" | "run" | "off" } | null {
+function planWords(
+  step: PlannedStep | undefined,
+): { text: string; tone: "good" | "run" | "off" } | null {
   if (!step) return null;
   switch (step.decision.outcome) {
     case "fresh":
@@ -79,8 +87,11 @@ export function WorkflowFlow({
   // it down to match.
   const rows = Math.max(1, ...graph.waves.map((wave) => wave.length));
   const extra =
-    graph.nodes.some((n) => n.background) || graph.nodes.some((n) => n.recover) ? 1 : 0;
-  const canvasHeight = height ?? Math.min(560, Math.max(220, (rows + extra) * 90 + 80));
+    graph.nodes.some((n) => n.background) || graph.nodes.some((n) => n.recover)
+      ? 1
+      : 0;
+  const canvasHeight =
+    height ?? Math.min(560, Math.max(220, (rows + extra) * 90 + 80));
   const theme = useTheme();
 
   const { nodes, edges } = useMemo(() => {
@@ -105,15 +116,34 @@ export function WorkflowFlow({
         const plan = planWords(planned.get(id));
         return {
           label: (
-            <Stack direction="row" spacing={0.75} alignItems="center" sx={{ width: "100%", minWidth: 0 }}>
-              <Box sx={{ minWidth: 0, flexGrow: 1 }} title={node.description ?? node.id}>
+            <Stack
+              direction="row"
+              spacing={0.75}
+              alignItems="center"
+              sx={{ width: "100%", minWidth: 0 }}
+            >
+              <Box
+                sx={{ minWidth: 0, flexGrow: 1 }}
+                title={node.description ?? node.id}
+              >
                 {node.workspace && (
-                  <Box sx={{ ...oneLine(LINE.small), fontSize: 10, opacity: 0.75, fontFamily: monoFontStack }}>
+                  <Box
+                    sx={{
+                      ...oneLine(LINE.small),
+                      fontSize: 10,
+                      opacity: 0.75,
+                      fontFamily: monoFontStack,
+                    }}
+                  >
                     {node.workspace}
                   </Box>
                 )}
-                <Box sx={{ ...oneLine(LINE.name), fontWeight: 600 }}>{short}</Box>
-                <Box sx={{ ...oneLine(LINE.small), fontSize: 10, opacity: 0.7 }}>
+                <Box sx={{ ...oneLine(LINE.name), fontWeight: 600 }}>
+                  {short}
+                </Box>
+                <Box
+                  sx={{ ...oneLine(LINE.small), fontSize: 10, opacity: 0.7 }}
+                >
                   {node.recover
                     ? "on failure only"
                     : node.background
@@ -165,7 +195,9 @@ export function WorkflowFlow({
         align: (id) => {
           const node = byId.get(id);
           const unit = node?.cache_id?.slice(0, node.cache_id.lastIndexOf(":"));
-          return node?.wave_group && unit ? { group: node.wave_group, unit } : undefined;
+          return node?.wave_group && unit
+            ? { group: node.wave_group, unit }
+            : undefined;
         },
       },
     );
@@ -193,7 +225,9 @@ export function WorkflowFlow({
           fontSize: 12,
           padding: "6px 12px",
           border: `2px ${step.recover ? "dashed" : "solid"} ${picked ? theme.palette.secondary.main : border}`,
-          boxShadow: picked ? `0 0 0 3px ${theme.palette.secondary.main}55` : undefined,
+          boxShadow: picked
+            ? `0 0 0 3px ${theme.palette.secondary.main}55`
+            : undefined,
           cursor: "pointer",
         },
       };
@@ -201,7 +235,9 @@ export function WorkflowFlow({
 
     const edges: Edge[] = graph.edges.map((edge, index) => {
       const stroke =
-        edge.kind === "on_error" ? theme.palette.error.main : theme.palette.text.secondary;
+        edge.kind === "on_error"
+          ? theme.palette.error.main
+          : theme.palette.text.secondary;
       return {
         ...ROUTED_EDGE,
         id: `${edge.from}->${edge.to}-${index}`,

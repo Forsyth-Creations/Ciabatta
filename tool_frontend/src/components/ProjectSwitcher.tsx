@@ -53,7 +53,8 @@ export function ProjectSwitcher() {
   const [pendingRemoval, setPendingRemoval] = useState<Project | null>(null);
 
   const forget = useMutation({
-    mutationFn: (id: string) => api.delete<{ ok: boolean }>(`/api/projects/${id}`),
+    mutationFn: (id: string) =>
+      api.delete<{ ok: boolean }>(`/api/projects/${id}`),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: queryKeys.projects });
       setPendingRemoval(null);
@@ -134,13 +135,17 @@ export function ProjectSwitcher() {
         </Select>
       </FormControl>
 
-      <Dialog open={pendingRemoval !== null} onClose={() => setPendingRemoval(null)}>
+      <Dialog
+        open={pendingRemoval !== null}
+        onClose={() => setPendingRemoval(null)}
+      >
         <DialogTitle>Remove {pendingRemoval?.name}?</DialogTitle>
         <DialogContent>
           <DialogContentText>
-            This only takes it out of the switcher. Nothing on disk is touched — not the
-            checkout, not its <code>.ciabatta/</code> directory, not its cache. Running any
-            ciabatta command in {pendingRemoval?.path} will add it back.
+            This only takes it out of the switcher. Nothing on disk is touched —
+            not the checkout, not its <code>.ciabatta/</code> directory, not its
+            cache. Running any ciabatta command in {pendingRemoval?.path} will
+            add it back.
           </DialogContentText>
         </DialogContent>
         <DialogActions>

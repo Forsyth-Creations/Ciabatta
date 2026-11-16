@@ -56,9 +56,13 @@ export function LandingPage() {
         Projects
       </Typography>
       {!isLoading && projects.length === 0 && (
-        <Typography variant="body2" color="text.secondary" sx={{ maxWidth: "70ch" }}>
-          No projects yet. Run any ciabatta command inside a checkout — <code>ciabatta list</code>{" "}
-          will do — and it appears here.
+        <Typography
+          variant="body2"
+          color="text.secondary"
+          sx={{ maxWidth: "70ch" }}
+        >
+          No projects yet. Run any ciabatta command inside a checkout —{" "}
+          <code>ciabatta list</code> will do — and it appears here.
         </Typography>
       )}
       <Grid container spacing={2}>
@@ -72,18 +76,36 @@ export function LandingPage() {
                 variant="outlined"
                 sx={{
                   height: "100%",
-                  borderColor: project.id === projectId ? "primary.main" : undefined,
+                  borderColor:
+                    project.id === projectId ? "primary.main" : undefined,
                 }}
               >
-                <CardActionArea onClick={() => open(project.id)} sx={{ height: "100%" }}>
+                <CardActionArea
+                  onClick={() => open(project.id)}
+                  sx={{ height: "100%" }}
+                >
                   <CardContent>
-                    <Stack direction="row" spacing={1.5} alignItems="center" sx={{ mb: 0.5 }}>
+                    <Stack
+                      direction="row"
+                      spacing={1.5}
+                      alignItems="center"
+                      sx={{ mb: 0.5 }}
+                    >
                       <FolderIcon color="primary" />
-                      <Typography variant="h3" noWrap sx={{ flexGrow: 1, minWidth: 0 }}>
+                      <Typography
+                        variant="h3"
+                        noWrap
+                        sx={{ flexGrow: 1, minWidth: 0 }}
+                      >
                         {project.name}
                       </Typography>
                       {project.id === projectId && (
-                        <Chip size="small" variant="outlined" color="primary" label="selected" />
+                        <Chip
+                          size="small"
+                          variant="outlined"
+                          color="primary"
+                          label="selected"
+                        />
                       )}
                     </Stack>
                     <Typography
@@ -96,8 +118,13 @@ export function LandingPage() {
                       {project.path}
                     </Typography>
                     {watching > 0 && (
-                      <Typography variant="caption" color="success.main" sx={{ display: "block", mt: 1 }}>
-                        {watching} watch session{watching === 1 ? "" : "s"} running
+                      <Typography
+                        variant="caption"
+                        color="success.main"
+                        sx={{ display: "block", mt: 1 }}
+                      >
+                        {watching} watch session{watching === 1 ? "" : "s"}{" "}
+                        running
                       </Typography>
                     )}
                   </CardContent>
@@ -108,8 +135,13 @@ export function LandingPage() {
         })}
       </Grid>
       {running > 0 && (
-        <Typography variant="caption" color="warning.main" sx={{ display: "block", mt: 1.5 }}>
-          {running} run{running === 1 ? "" : "s"} in progress across your projects.
+        <Typography
+          variant="caption"
+          color="warning.main"
+          sx={{ display: "block", mt: 1.5 }}
+        >
+          {running} run{running === 1 ? "" : "s"} in progress across your
+          projects.
         </Typography>
       )}
 
@@ -119,13 +151,22 @@ export function LandingPage() {
         <Typography variant="body2" color="text.secondary">
           New here?
         </Typography>
-        <Button component={Link} to="/docs" size="small" startIcon={<MenuBookIcon />}>
+        <Button
+          component={Link}
+          to="/docs"
+          size="small"
+          startIcon={<MenuBookIcon />}
+        >
           Read the docs
         </Button>
       </Stack>
 
       {health && (
-        <Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: 4 }}>
+        <Typography
+          variant="caption"
+          color="text.secondary"
+          sx={{ display: "block", mt: 4 }}
+        >
           daemon v{health.version} · pid {health.pid} · started{" "}
           {new Date(health.started_at).toLocaleString()}
         </Typography>
@@ -150,10 +191,15 @@ function GlobalTodos() {
         <PublicIcon fontSize="small" color="primary" />
         <Typography variant="h3">Global todo</Typography>
       </Stack>
-      <Typography variant="body2" color="text.secondary" sx={{ mb: 2, maxWidth: "70ch" }}>
-        Tasks that belong to no project, so they stay put whichever one you switch to. Move
-        something here from a project&apos;s list with its globe button, or add it straight
-        from a terminal with <code>ciabatta todo --global</code>.
+      <Typography
+        variant="body2"
+        color="text.secondary"
+        sx={{ mb: 2, maxWidth: "70ch" }}
+      >
+        Tasks that belong to no project, so they stay put whichever one you
+        switch to. Move something here from a project&apos;s list with its globe
+        button, or add it straight from a terminal with{" "}
+        <code>ciabatta todo --global</code>.
       </Typography>
 
       <Divider sx={{ mb: 2 }} />

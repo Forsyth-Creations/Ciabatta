@@ -114,7 +114,10 @@ export interface StepView extends Timed {
 }
 
 /** "3 of 12 files · 4.1 MB of 20 MB", or what the lookup is doing. */
-export function restoringLine(restoring: Restoring, humanize: (n: number) => string): string {
+export function restoringLine(
+  restoring: Restoring,
+  humanize: (n: number) => string,
+): string {
   if (restoring.phase === "checking") return "asking the remote cache…";
   return (
     `downloading ${restoring.files_done} of ${restoring.files_total} file(s) · ` +
@@ -124,7 +127,8 @@ export function restoringLine(restoring: Restoring, humanize: (n: number) => str
 
 /** How far through a download is, 0–100, for a progress bar. */
 export function restoringPercent(restoring: Restoring): number | null {
-  if (restoring.phase !== "downloading" || restoring.bytes_total <= 0) return null;
+  if (restoring.phase !== "downloading" || restoring.bytes_total <= 0)
+    return null;
   return Math.min(100, (restoring.bytes_done / restoring.bytes_total) * 100);
 }
 
@@ -160,7 +164,12 @@ export interface CacheReport {
   /** The last build of this target, on a rebuild — what it was compared to. */
   previous: CacheEntryInfo | null;
   diff: {
-    files: { path: string; kind: "added" | "removed" | "modified"; additions: number; deletions: number }[];
+    files: {
+      path: string;
+      kind: "added" | "removed" | "modified";
+      additions: number;
+      deletions: number;
+    }[];
     files_total: number;
     env: string[];
     upstream: string[];
@@ -169,7 +178,11 @@ export interface CacheReport {
   input_files: number;
   input_bytes: number;
   env: string[];
-  upstream: { step: string; fingerprint: string | null; unaccounted: boolean }[];
+  upstream: {
+    step: string;
+    fingerprint: string | null;
+    unaccounted: boolean;
+  }[];
   /** Needed steps that forced this one to rebuild: they ran without declaring
    *  what they produce. */
   blocked_by: string[];
@@ -244,7 +257,11 @@ export interface TargetDeps {
   outputs_in_inputs?: string[];
   /** Input globs that match no file, with the likely fix — usually the
    *  sub-workspace prefix every cache path needs. */
-  unmatched_inputs?: { glob: string; suggestion?: string | null; reason: string }[];
+  unmatched_inputs?: {
+    glob: string;
+    suggestion?: string | null;
+    reason: string;
+  }[];
 
   cached: boolean;
   why_uncached: string | null;
@@ -395,7 +412,9 @@ export function useRuns(project: string) {
   return useQuery({
     queryKey: runKeys.runsFor(project),
     queryFn: () =>
-      api.get<RunSummary[]>(`/api/run/runs?project=${encodeURIComponent(project)}`),
+      api.get<RunSummary[]>(
+        `/api/run/runs?project=${encodeURIComponent(project)}`,
+      ),
     refetchInterval: 3_000,
   });
 }
@@ -522,7 +541,8 @@ export interface RunTarget {
 export function useStartRun() {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (body: StartRunBody) => api.post<RunSummary>("/api/run/runs", body),
+    mutationFn: (body: StartRunBody) =>
+      api.post<RunSummary>("/api/run/runs", body),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: runKeys.runs }),
   });
 }
@@ -538,7 +558,9 @@ export function useStartRun() {
 export function missingEnvFrom(error: unknown): string[] | null {
   if (!(error instanceof ApiError) || error.status !== 422) return null;
   const missing = error.body?.missing_env;
-  return Array.isArray(missing) && missing.length > 0 ? (missing as string[]) : null;
+  return Array.isArray(missing) && missing.length > 0
+    ? (missing as string[])
+    : null;
 }
 
 /**
@@ -560,8 +582,12 @@ export function useAnswerInput() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (body: { run: number; id: number; value: string }) =>
-      api.post(`/api/run/runs/${body.run}/input`, { id: body.id, value: body.value }),
-    onSettled: () => queryClient.invalidateQueries({ queryKey: ["run", "inputs"] }),
+      api.post(`/api/run/runs/${body.run}/input`, {
+        id: body.id,
+        value: body.value,
+      }),
+    onSettled: () =>
+      queryClient.invalidateQueries({ queryKey: ["run", "inputs"] }),
   });
 }
 
@@ -638,7 +664,9 @@ export function useSetRunSettings() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (ttl_hours: number) =>
-      api.post<{ ttl_hours: number; pruned: number }>("/api/run/settings", { ttl_hours }),
+      api.post<{ ttl_hours: number; pruned: number }>("/api/run/settings", {
+        ttl_hours,
+      }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: runKeys.settings });
       // Shortening the TTL deletes records immediately, so the list is stale

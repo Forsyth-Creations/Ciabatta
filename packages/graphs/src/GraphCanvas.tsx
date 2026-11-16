@@ -188,7 +188,9 @@ export function GraphCanvas({
             // near-white by default — on a dark canvas that turns the minimap
             // into a bright grey slab covering the graph behind it.
             maskColor={
-              theme.palette.mode === "dark" ? "rgba(0, 0, 0, 0.55)" : "rgba(240, 240, 240, 0.6)"
+              theme.palette.mode === "dark"
+                ? "rgba(0, 0, 0, 0.55)"
+                : "rgba(240, 240, 240, 0.6)"
             }
             bgColor={theme.palette.background.default}
             // Explicitly small and see-through. react-flow's default is a fixed
@@ -283,11 +285,22 @@ function KeepInView({ fitKey }: { fitKey?: string | number }) {
       // Whichever edge is out, by how much; the left and top win when the
       // nodes are bigger than the view.
       const dx =
-        bounds.x < left ? left - bounds.x : bounds.x + bounds.width > right ? right - (bounds.x + bounds.width) : 0;
+        bounds.x < left
+          ? left - bounds.x
+          : bounds.x + bounds.width > right
+            ? right - (bounds.x + bounds.width)
+            : 0;
       const dy =
-        bounds.y < top ? top - bounds.y : bounds.y + bounds.height > bottom ? bottom - (bounds.y + bounds.height) : 0;
+        bounds.y < top
+          ? top - bounds.y
+          : bounds.y + bounds.height > bottom
+            ? bottom - (bounds.y + bounds.height)
+            : 0;
       if (dx === 0 && dy === 0) return;
-      void flow.setViewport({ x: x + dx * zoom, y: y + dy * zoom, zoom }, { duration: 250 });
+      void flow.setViewport(
+        { x: x + dx * zoom, y: y + dy * zoom, zoom },
+        { duration: 250 },
+      );
     });
     return () => cancelAnimationFrame(frame);
   }, [fitKey, flow, width, height]);

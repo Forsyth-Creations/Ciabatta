@@ -29,7 +29,10 @@ export default defineConfig({
         main: resolve(root, "index.html"),
         "deploy-env-files": resolve(root, "deploy-env-files.html"),
         "deploy-env-select": resolve(root, "deploy-env-select.html"),
-        "deploy-conditional-steps": resolve(root, "deploy-conditional-steps.html"),
+        "deploy-conditional-steps": resolve(
+          root,
+          "deploy-conditional-steps.html",
+        ),
       },
     },
   },

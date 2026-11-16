@@ -7,7 +7,7 @@
 # out what they do or who owns them.
 workspace:
   name: tool_frontend
-  description: ""          # TODO: one line on what lives here
+  description: "" # TODO: one line on what lives here
   owner: Henry Forsyth
-  tags: []                 # free-form labels, searchable with `ciabatta list -s`
-  requires: []             # tools every workflow here needs on PATH
+  tags: [] # free-form labels, searchable with `ciabatta list -s`
+  requires: [] # tools every workflow here needs on PATH

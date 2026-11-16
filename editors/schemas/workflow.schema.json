@@ -9,7 +9,10 @@
     {
       "label": "workflow",
       "description": "A described, owned workflow with one step.",
-      "body": { "description": "${1:What running this accomplishes}", "steps": [{ "name": "${2:build}", "run": "${3:make}" }] }
+      "body": {
+        "description": "${1:What running this accomplishes}",
+        "steps": [{ "name": "${2:build}", "run": "${3:make}" }]
+      }
     }
   ],
   "properties": {

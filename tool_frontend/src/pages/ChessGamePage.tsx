@@ -40,7 +40,11 @@ import {
   useLobby,
 } from "../api/chess";
 import { ChessBoard } from "../components/ChessBoard";
-import { BOARD_THEMES, type BoardTheme, useBoardTheme } from "../components/ChessPieces";
+import {
+  BOARD_THEMES,
+  type BoardTheme,
+  useBoardTheme,
+} from "../components/ChessPieces";
 import { ErrorNote, Loading } from "../components/Page";
 
 export function ChessGamePage() {
@@ -64,7 +68,9 @@ export function ChessGamePage() {
 function useBoardSize(): number {
   const measure = () => {
     const wide = window.innerWidth >= 1000;
-    const across = wide ? window.innerWidth - 232 - 420 : window.innerWidth - 48;
+    const across = wide
+      ? window.innerWidth - 232 - 420
+      : window.innerWidth - 48;
     const down = window.innerHeight - 200;
     return Math.max(280, Math.min(720, across, wide ? down : 9999));
   };
@@ -117,7 +123,7 @@ function Game({
 
   const you = view.you;
   const playing = view.status === "playing";
-  const running = playing ? view.clock?.running ?? null : null;
+  const running = playing ? (view.clock?.running ?? null) : null;
   useTicker(running !== null);
 
   useEffect(() => {
@@ -127,7 +133,11 @@ function Game({
   // Your own colour at the bottom; the host of a game nobody has joined yet
   // sees it from white's side.
   const base: Color = you ?? "white";
-  const orientation: Color = flipped ? (base === "white" ? "black" : "white") : base;
+  const orientation: Color = flipped
+    ? base === "white"
+      ? "black"
+      : "white"
+    : base;
   const top: Color = orientation === "white" ? "black" : "white";
   const bottom: Color = orientation;
 
@@ -144,7 +154,8 @@ function Game({
     void act({ type: "move", from, to, promotion });
 
   const nameOf = (color: Color) => {
-    if (!view.host_color) return color === base ? view.host_name : "Waiting for an opponent…";
+    if (!view.host_color)
+      return color === base ? view.host_name : "Waiting for an opponent…";
     const hostSide = view.host_color === color;
     return hostSide ? view.host_name : (view.guest_name ?? "Guest");
   };
@@ -156,7 +167,11 @@ function Game({
     return Math.max(0, ms);
   };
 
-  const opponent: Color | null = you ? (you === "white" ? "black" : "white") : null;
+  const opponent: Color | null = you
+    ? you === "white"
+      ? "black"
+      : "white"
+    : null;
   const offered = (key: "draw" | "takeback" | "rematch") => view.offers[key];
   const canMove = playing && !!you && view.turn === you && !view.closed;
   const myAddress = lobby.data?.address;
@@ -174,8 +189,19 @@ function Game({
         act={act}
         toLobby={() => void navigate({ to: "/chess" })}
       />
-      <Stack direction="row" alignItems="center" spacing={2} flexWrap="wrap" useFlexGap>
-        <Button component={Link} to="/chess" size="small" startIcon={<ArrowBackIcon />}>
+      <Stack
+        direction="row"
+        alignItems="center"
+        spacing={2}
+        flexWrap="wrap"
+        useFlexGap
+      >
+        <Button
+          component={Link}
+          to="/chess"
+          size="small"
+          startIcon={<ArrowBackIcon />}
+        >
           Lobby
         </Button>
         <Typography variant="h2">
@@ -183,17 +209,25 @@ function Game({
         </Typography>
         <Chip size="small" label={rulesSummary(view.rules)} />
         {view.role === "guest" && !view.connected && !view.closed && (
-          <Chip size="small" color="warning" label="Reconnecting to the host…" />
+          <Chip
+            size="small"
+            color="warning"
+            label="Reconnecting to the host…"
+          />
         )}
         {view.role === "host" && view.guest_name && !view.connected && (
-          <Chip size="small" color="warning" label={`${view.guest_name} is disconnected`} />
+          <Chip
+            size="small"
+            color="warning"
+            label={`${view.guest_name} is disconnected`}
+          />
         )}
       </Stack>
 
       {view.status === "waiting" && (
         <Alert severity="info">
-          Waiting for someone to join. This game is listed on the chess page of everyone on your
-          network running ciabatta
+          Waiting for someone to join. This game is listed on the chess page of
+          everyone on your network running ciabatta
           {myAddress ? (
             <>
               {" "}
@@ -218,8 +252,12 @@ function Game({
             name={nameOf(top)}
             color={top}
             clock={clockOf(top)}
-            active={running === top || (playing && view.turn === top && !view.clock)}
-            checks={view.rules.variant === "three_check" ? view.checks[top] : null}
+            active={
+              running === top || (playing && view.turn === top && !view.clock)
+            }
+            checks={
+              view.rules.variant === "three_check" ? view.checks[top] : null
+            }
           />
           <ChessBoard
             view={view}
@@ -233,8 +271,13 @@ function Game({
             name={nameOf(bottom)}
             color={bottom}
             clock={clockOf(bottom)}
-            active={running === bottom || (playing && view.turn === bottom && !view.clock)}
-            checks={view.rules.variant === "three_check" ? view.checks[bottom] : null}
+            active={
+              running === bottom ||
+              (playing && view.turn === bottom && !view.clock)
+            }
+            checks={
+              view.rules.variant === "three_check" ? view.checks[bottom] : null
+            }
             you={bottom === you}
           />
         </Stack>
@@ -259,13 +302,15 @@ function Game({
               onDecline={() => void act({ type: "decline_takeback" })}
             />
           )}
-          {view.status === "finished" && opponent && offered("rematch") === opponent && (
-            <Offer
-              text={`${nameOf(opponent)} wants a rematch.`}
-              onAccept={() => void act({ type: "accept_rematch" })}
-              onDecline={() => void act({ type: "decline_rematch" })}
-            />
-          )}
+          {view.status === "finished" &&
+            opponent &&
+            offered("rematch") === opponent && (
+              <Offer
+                text={`${nameOf(opponent)} wants a rematch.`}
+                onAccept={() => void act({ type: "accept_rematch" })}
+                onDecline={() => void act({ type: "decline_rematch" })}
+              />
+            )}
           {you && offered("draw") === you && playing && (
             <Typography variant="body2" color="text.secondary">
               You offered a draw.
@@ -293,7 +338,10 @@ function Game({
 
           <Stack direction="row" flexWrap="wrap" gap={1}>
             {playing && you && view.moves.length < 2 && (
-              <Button variant="outlined" onClick={() => void act({ type: "abort" })}>
+              <Button
+                variant="outlined"
+                onClick={() => void act({ type: "abort" })}
+              >
                 Abort
               </Button>
             )}
@@ -307,40 +355,58 @@ function Game({
                 Resign
               </Button>
             )}
-            {playing && you && view.rules.draw_offers && offered("draw") !== you && (
-              <Button
-                variant="outlined"
-                startIcon={<HandshakeIcon />}
-                onClick={() => void act({ type: "offer_draw" })}
-              >
-                Offer draw
-              </Button>
-            )}
-            {playing && you && view.rules.takebacks && view.moves.length > 0 && offered("takeback") !== you && (
-              <Button
-                variant="outlined"
-                startIcon={<UndoIcon />}
-                onClick={() => void act({ type: "request_takeback" })}
-              >
-                Takeback
-              </Button>
-            )}
-            {view.status === "finished" && you && !view.closed && offered("rematch") !== you && (
-              <Button
-                variant="contained"
-                startIcon={<ReplayIcon />}
-                onClick={() => void act({ type: "offer_rematch" })}
-              >
-                Rematch
-              </Button>
-            )}
+            {playing &&
+              you &&
+              view.rules.draw_offers &&
+              offered("draw") !== you && (
+                <Button
+                  variant="outlined"
+                  startIcon={<HandshakeIcon />}
+                  onClick={() => void act({ type: "offer_draw" })}
+                >
+                  Offer draw
+                </Button>
+              )}
+            {playing &&
+              you &&
+              view.rules.takebacks &&
+              view.moves.length > 0 &&
+              offered("takeback") !== you && (
+                <Button
+                  variant="outlined"
+                  startIcon={<UndoIcon />}
+                  onClick={() => void act({ type: "request_takeback" })}
+                >
+                  Takeback
+                </Button>
+              )}
+            {view.status === "finished" &&
+              you &&
+              !view.closed &&
+              offered("rematch") !== you && (
+                <Button
+                  variant="contained"
+                  startIcon={<ReplayIcon />}
+                  onClick={() => void act({ type: "offer_rematch" })}
+                >
+                  Rematch
+                </Button>
+              )}
             <Tooltip title="Flip the board">
-              <Button variant="text" startIcon={<SwapVertIcon />} onClick={() => setFlipped(!flipped)}>
+              <Button
+                variant="text"
+                startIcon={<SwapVertIcon />}
+                onClick={() => setFlipped(!flipped)}
+              >
                 Flip
               </Button>
             </Tooltip>
             <Button color="inherit" onClick={() => void leave()}>
-              {playing ? "Resign & leave" : view.status === "waiting" ? "Cancel game" : "Leave"}
+              {playing
+                ? "Resign & leave"
+                : view.status === "waiting"
+                  ? "Cancel game"
+                  : "Leave"}
             </Button>
           </Stack>
         </Stack>
@@ -366,8 +432,18 @@ function PlayerBar({
 }) {
   const low = clock !== null && clock < 20_000;
   return (
-    <Stack direction="row" alignItems="center" justifyContent="space-between" spacing={1}>
-      <Stack direction="row" alignItems="center" spacing={1} sx={{ minWidth: 0 }}>
+    <Stack
+      direction="row"
+      alignItems="center"
+      justifyContent="space-between"
+      spacing={1}
+    >
+      <Stack
+        direction="row"
+        alignItems="center"
+        spacing={1}
+        sx={{ minWidth: 0 }}
+      >
         <Box
           sx={{
             width: 14,
@@ -383,7 +459,9 @@ function PlayerBar({
           {name}
         </Typography>
         {you && <Chip size="small" label="You" />}
-        {checks !== null && <Chip size="small" variant="outlined" label={`${checks}/3 checks`} />}
+        {checks !== null && (
+          <Chip size="small" variant="outlined" label={`${checks}/3 checks`} />
+        )}
       </Stack>
       {clock !== null && (
         <Paper
@@ -439,9 +517,17 @@ function GameOverDialog({
   if (!finished || ending === dismissed) return null;
 
   const you = view.you;
-  const opponent: Color | null = you ? (you === "white" ? "black" : "white") : null;
+  const opponent: Color | null = you
+    ? you === "white"
+      ? "black"
+      : "white"
+    : null;
   const winner = view.winner;
-  const loser: Color | null = winner ? (winner === "white" ? "black" : "white") : null;
+  const loser: Color | null = winner
+    ? winner === "white"
+      ? "black"
+      : "white"
+    : null;
   const won = !!you && winner === you;
   const lost = !!you && !!winner && winner !== you;
   const aborted = view.reason === "aborted";
@@ -458,13 +544,29 @@ function GameOverDialog({
 
   let how = view.reason ? REASON_LABEL[view.reason] : "";
   if (loser && view.reason === "resignation") how = `${nameOf(loser)} resigned`;
-  if (loser && view.reason === "timeout") how = `${nameOf(loser)} ran out of time`;
-  if (view.reason === "checkmate" && winner) how = `Checkmate by ${nameOf(winner)}`;
-  if (view.reason === "king_of_the_hill" && winner) how = `${nameOf(winner)}'s king reached the hill`;
-  if (view.reason === "three_checks" && winner) how = `${nameOf(winner)} gave three checks`;
+  if (loser && view.reason === "timeout")
+    how = `${nameOf(loser)} ran out of time`;
+  if (view.reason === "checkmate" && winner)
+    how = `Checkmate by ${nameOf(winner)}`;
+  if (view.reason === "king_of_the_hill" && winner)
+    how = `${nameOf(winner)}'s king reached the hill`;
+  if (view.reason === "three_checks" && winner)
+    how = `${nameOf(winner)} gave three checks`;
 
-  const accent = won ? "success.main" : lost ? "error.main" : aborted ? "text.secondary" : "info.main";
-  const Icon = won ? EmojiEventsIcon : lost ? SentimentDissatisfiedIcon : aborted ? BlockIcon : HandshakeIcon;
+  const accent = won
+    ? "success.main"
+    : lost
+      ? "error.main"
+      : aborted
+        ? "text.secondary"
+        : "info.main";
+  const Icon = won
+    ? EmojiEventsIcon
+    : lost
+      ? SentimentDissatisfiedIcon
+      : aborted
+        ? BlockIcon
+        : HandshakeIcon;
 
   const theyOffered = !!opponent && view.offers.rematch === opponent;
   const youOffered = !!you && view.offers.rematch === you;
@@ -476,13 +578,20 @@ function GameOverDialog({
       onClose={() => setDismissed(ending)}
       maxWidth="sm"
       fullWidth
-      PaperProps={{ sx: { borderTop: 8, borderColor: accent, overflow: "hidden" } }}
+      PaperProps={{
+        sx: { borderTop: 8, borderColor: accent, overflow: "hidden" },
+      }}
     >
       <DialogContent sx={{ textAlign: "center", pt: 5, pb: 3 }}>
         <Icon sx={{ fontSize: 96, color: accent }} />
         <Typography
           variant="h1"
-          sx={{ fontSize: { xs: 44, sm: 64 }, lineHeight: 1.05, mt: 1, color: accent }}
+          sx={{
+            fontSize: { xs: 44, sm: 64 },
+            lineHeight: 1.05,
+            mt: 1,
+            color: accent,
+          }}
         >
           {title}
         </Typography>
@@ -491,14 +600,20 @@ function GameOverDialog({
         </Typography>
         {view.result && !aborted && (
           <Typography
-            sx={{ mt: 2, fontFamily: "monospace", fontSize: 28, fontWeight: 600 }}
+            sx={{
+              mt: 2,
+              fontFamily: "monospace",
+              fontSize: 28,
+              fontWeight: 600,
+            }}
             color="text.secondary"
           >
             {view.result}
           </Typography>
         )}
         <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
-          {nameOf("white")} (white) vs {nameOf("black")} (black) · {view.moves.length} plies
+          {nameOf("white")} (white) vs {nameOf("black")} (black) ·{" "}
+          {view.moves.length} plies
         </Typography>
 
         {theyOffered && (
@@ -508,7 +623,8 @@ function GameOverDialog({
         )}
         {youOffered && (
           <Typography variant="body2" color="text.secondary" sx={{ mt: 3 }}>
-            Rematch offered — waiting for {opponent ? nameOf(opponent) : "your opponent"}…
+            Rematch offered — waiting for{" "}
+            {opponent ? nameOf(opponent) : "your opponent"}…
           </Typography>
         )}
         {view.closed && (
@@ -517,7 +633,9 @@ function GameOverDialog({
           </Alert>
         )}
       </DialogContent>
-      <DialogActions sx={{ justifyContent: "center", gap: 1, pb: 3, flexWrap: "wrap" }}>
+      <DialogActions
+        sx={{ justifyContent: "center", gap: 1, pb: 3, flexWrap: "wrap" }}
+      >
         {canRematch && theyOffered && (
           <>
             <Button
@@ -528,7 +646,10 @@ function GameOverDialog({
             >
               Accept rematch
             </Button>
-            <Button size="large" onClick={() => void act({ type: "decline_rematch" })}>
+            <Button
+              size="large"
+              onClick={() => void act({ type: "decline_rematch" })}
+            >
               Decline
             </Button>
           </>
@@ -544,7 +665,11 @@ function GameOverDialog({
             {youOffered ? "Rematch offered" : "Rematch"}
           </Button>
         )}
-        <Button size="large" variant="outlined" onClick={() => setDismissed(ending)}>
+        <Button
+          size="large"
+          variant="outlined"
+          onClick={() => setDismissed(ending)}
+        >
           View board
         </Button>
         <Button size="large" color="inherit" onClick={toLobby}>
@@ -564,7 +689,13 @@ function ThemePicker({
   onChoose: (id: string) => void;
 }) {
   return (
-    <Stack direction="row" alignItems="center" spacing={1} flexWrap="wrap" useFlexGap>
+    <Stack
+      direction="row"
+      alignItems="center"
+      spacing={1}
+      flexWrap="wrap"
+      useFlexGap
+    >
       <Typography variant="overline" color="text.secondary" sx={{ mr: 0.5 }}>
         Board
       </Typography>
@@ -630,7 +761,13 @@ function StatusPanel({ view }: { view: GameView }) {
   );
 }
 
-function MoveList({ moves, endRef }: { moves: string[]; endRef: React.RefObject<HTMLDivElement> }) {
+function MoveList({
+  moves,
+  endRef,
+}: {
+  moves: string[];
+  endRef: React.RefObject<HTMLDivElement>;
+}) {
   if (moves.length === 0) {
     return (
       <Typography variant="body2" color="text.secondary">

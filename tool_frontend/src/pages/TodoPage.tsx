@@ -7,7 +7,13 @@
  * button moves a task there, and it turns up on the dashboard.
  */
 
-import { Alert, Stack, ToggleButton, ToggleButtonGroup, Typography } from "@mui/material";
+import {
+  Alert,
+  Stack,
+  ToggleButton,
+  ToggleButtonGroup,
+  Typography,
+} from "@mui/material";
 import { Link } from "@tanstack/react-router";
 import { useState } from "react";
 
@@ -18,7 +24,11 @@ import { useProjectContext } from "../state/project";
 type Filter = "all" | "open" | "done";
 
 export function TodoPage() {
-  return <RequireProject>{(projectId) => <Todos projectId={projectId} />}</RequireProject>;
+  return (
+    <RequireProject>
+      {(projectId) => <Todos projectId={projectId} />}
+    </RequireProject>
+  );
 }
 
 function Todos({ projectId }: { projectId: string }) {
@@ -50,7 +60,9 @@ function Todos({ projectId }: { projectId: string }) {
           filter === "all" ? true : filter === "done" ? todo.done : !todo.done
         }
         emptyNote={
-          filter === "all" ? "Nothing on this project's list." : `No ${filter} tasks.`
+          filter === "all"
+            ? "Nothing on this project's list."
+            : `No ${filter} tasks.`
         }
       />
 
@@ -59,8 +71,8 @@ function Todos({ projectId }: { projectId: string }) {
           <Typography variant="body2">
             Something that isn&apos;t about this repo? The globe button makes it{" "}
             <strong>global</strong> — it leaves this list and appears on the{" "}
-            <Link to="/">projects page</Link> (the logo), where it stays whichever project you
-            switch to.
+            <Link to="/">projects page</Link> (the logo), where it stays
+            whichever project you switch to.
           </Typography>
           <Typography variant="caption" color="text.secondary">
             From a terminal: <code>ciabatta todo --global &quot;…&quot;</code>

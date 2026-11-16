@@ -63,7 +63,9 @@ export function EnvPrompt({
               key={name}
               label={name}
               value={values[name] ?? ""}
-              onChange={(e) => setValues((prev) => ({ ...prev, [name]: e.target.value }))}
+              onChange={(e) =>
+                setValues((prev) => ({ ...prev, [name]: e.target.value }))
+              }
               size="small"
               fullWidth
               autoFocus={name === variables[0]}

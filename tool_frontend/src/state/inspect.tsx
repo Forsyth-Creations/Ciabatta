@@ -20,7 +20,9 @@ interface InspectModeValue {
   toggle: () => void;
 }
 
-const InspectModeContext = createContext<InspectModeValue | undefined>(undefined);
+const InspectModeContext = createContext<InspectModeValue | undefined>(
+  undefined,
+);
 
 function stored(): boolean {
   try {
@@ -49,11 +51,18 @@ export function InspectModeProvider({ children }: { children: ReactNode }) {
     [on],
   );
 
-  return <InspectModeContext.Provider value={value}>{children}</InspectModeContext.Provider>;
+  return (
+    <InspectModeContext.Provider value={value}>
+      {children}
+    </InspectModeContext.Provider>
+  );
 }
 
 export function useInspectMode(): InspectModeValue {
   const context = useContext(InspectModeContext);
-  if (!context) throw new Error("useInspectMode must be used inside an InspectModeProvider");
+  if (!context)
+    throw new Error(
+      "useInspectMode must be used inside an InspectModeProvider",
+    );
   return context;
 }

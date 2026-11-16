@@ -13,13 +13,13 @@ owner: Henry Forsyth
 # for download. Build the binary without them and it carries placeholder pages
 # and no extension.
 needs:
-- tool_frontend:build
-- remote-cache-web:build
-- vscode-extension:build
+  - tool_frontend:build
+  - remote-cache-web:build
+  - vscode-extension:build
 requires:
-- cargo
+  - cargo
 steps:
-- name: binary
-  run: cargo build --release
-  description: Compile the ciabatta CLI, embedding the web app and the extension
-  timeout: 30m
+  - name: binary
+    run: cargo build --release
+    description: Compile the ciabatta CLI, embedding the web app and the extension
+    timeout: 30m

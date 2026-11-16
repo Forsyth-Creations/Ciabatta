@@ -8,11 +8,36 @@ const REPO = "https://github.com/forsyth-creations/ciabatta";
 const releaseBase = `${REPO}/releases/download/v${VERSION}`;
 
 const PLATFORMS = [
-  { os: "🐧", label: "Linux · x86_64", file: "ciabatta-linux-x86_64.tar.gz", hint: "static (musl) — runs on any distro" },
-  { os: "🐧", label: "Linux · ARM64", file: "ciabatta-linux-aarch64.tar.gz", hint: "static (musl)" },
-  { os: "🍎", label: "macOS · Apple Silicon", file: "ciabatta-macos-aarch64.tar.gz", hint: "M-series" },
-  { os: "🍎", label: "macOS · Intel", file: "ciabatta-macos-x86_64.tar.gz", hint: "x86_64" },
-  { os: "🪟", label: "Windows · x86_64", file: "ciabatta-windows-x86_64.zip", hint: "unzip, add to PATH" },
+  {
+    os: "🐧",
+    label: "Linux · x86_64",
+    file: "ciabatta-linux-x86_64.tar.gz",
+    hint: "static (musl) — runs on any distro",
+  },
+  {
+    os: "🐧",
+    label: "Linux · ARM64",
+    file: "ciabatta-linux-aarch64.tar.gz",
+    hint: "static (musl)",
+  },
+  {
+    os: "🍎",
+    label: "macOS · Apple Silicon",
+    file: "ciabatta-macos-aarch64.tar.gz",
+    hint: "M-series",
+  },
+  {
+    os: "🍎",
+    label: "macOS · Intel",
+    file: "ciabatta-macos-x86_64.tar.gz",
+    hint: "x86_64",
+  },
+  {
+    os: "🪟",
+    label: "Windows · x86_64",
+    file: "ciabatta-windows-x86_64.zip",
+    hint: "unzip, add to PATH",
+  },
 ];
 
 // The editor extensions, published as release assets alongside the binaries.
@@ -37,10 +62,30 @@ const EDITORS = [
 ];
 
 const INSTALL_TABS = [
-  { id: "quick", label: "Linux / macOS", cmd: "curl -fsSL https://forsyth-creations.github.io/Ciabatta/install.sh | sh", note: "Detects your OS and CPU, then installs the matching prebuilt binary. No Rust toolchain needed. Pin a version with <code>| sh -s -- --version 0.3.0</code>, or list them with <code>--list</code>." },
-  { id: "windows", label: "Windows", cmd: "irm https://forsyth-creations.github.io/Ciabatta/install.ps1 | iex", note: "Run in PowerShell — downloads the binary and adds it to your PATH. Workflows run with Git Bash; if it's missing, the installer offers to fetch it. To pin a version: <code>&amp; ([scriptblock]::Create((irm …install.ps1))) -Version 0.3.0</code>." },
-  { id: "cargo", label: "cargo", cmd: "cargo install ciabatta", note: "From crates.io — needs a Rust toolchain." },
-  { id: "source", label: "source", cmd: `cargo install --git ${REPO}`, note: "Build straight from the main branch." },
+  {
+    id: "quick",
+    label: "Linux / macOS",
+    cmd: "curl -fsSL https://forsyth-creations.github.io/Ciabatta/install.sh | sh",
+    note: "Detects your OS and CPU, then installs the matching prebuilt binary. No Rust toolchain needed. Pin a version with <code>| sh -s -- --version 0.3.0</code>, or list them with <code>--list</code>.",
+  },
+  {
+    id: "windows",
+    label: "Windows",
+    cmd: "irm https://forsyth-creations.github.io/Ciabatta/install.ps1 | iex",
+    note: "Run in PowerShell — downloads the binary and adds it to your PATH. Workflows run with Git Bash; if it's missing, the installer offers to fetch it. To pin a version: <code>&amp; ([scriptblock]::Create((irm …install.ps1))) -Version 0.3.0</code>.",
+  },
+  {
+    id: "cargo",
+    label: "cargo",
+    cmd: "cargo install ciabatta",
+    note: "From crates.io — needs a Rust toolchain.",
+  },
+  {
+    id: "source",
+    label: "source",
+    cmd: `cargo install --git ${REPO}`,
+    note: "Build straight from the main branch.",
+  },
 ];
 
 const REGISTRIES = [
@@ -55,26 +100,77 @@ const REGISTRIES = [
 
 const STAGES = [
   { k: "needs", d: "A step runs once the steps it names have succeeded" },
-  { k: "kind: push", d: "The built-in registry transfer — or your own command" },
-  { k: "kind: pull", d: "The same artifact, the other way; `from` names the push" },
-  { k: "on_error", d: "Route a failure to a recovery node offering a choice of fixes" },
+  {
+    k: "kind: push",
+    d: "The built-in registry transfer — or your own command",
+  },
+  {
+    k: "kind: pull",
+    d: "The same artifact, the other way; `from` names the push",
+  },
+  {
+    k: "on_error",
+    d: "Route a failure to a recovery node offering a choice of fixes",
+  },
 ];
 
 const COMMANDS = [
-  ["ciabatta &lt;WORKFLOW&gt;", "Run that workflow across every package that defines one, in dependency order. Add --gui for a live browser view."],
-  ["ciabatta build test", "Fold several workflows into one graph, so a shared dependency runs once instead of twice."],
-  ["ciabatta dry-run build", "What the cache would reuse and what it would rebuild — and for a rebuild, exactly which files changed."],
-  ["ciabatta deploy --release v1.4.2", "Run a workflow against one release: its release-pull steps fetch exactly that version."],
-  ["ciabatta releases list", "Every published release, locally and on the team's remote cache. <code>push</code> / <code>pull</code> do it by hand."],
-  ["ciabatta remote-cache start", "Run the shared cache your team builds against — with a build feed and a release list on its own page."],
-  ["ciabatta release --filter kind:push", "Run only part of a graph — by kind, tag, package, owner or step name."],
-  ["ciabatta &lt;WORKFLOW&gt; --graph", "Draw the resolved graph and run nothing."],
-  ["ciabatta list", "Every workflow in the monorepo, its owner, and what it needs."],
-  ["ciabatta init --lib", "Opt a package in: a workspace identity plus a starter workflow."],
-  ["ciabatta convert --script PATH", "Turn an existing script into a workflow, tools and variables included."],
-  ["ciabatta configure auto", "Inspect the repo and pick publishing workflows from a checklist."],
-  ["ciabatta tui", "Open the registry browser: inspect registries and explore remote paths."],
-  ["ciabatta analyze", "Map the dependency graph and serve an interactive view."],
+  [
+    "ciabatta &lt;WORKFLOW&gt;",
+    "Run that workflow across every package that defines one, in dependency order. Add --gui for a live browser view.",
+  ],
+  [
+    "ciabatta build test",
+    "Fold several workflows into one graph, so a shared dependency runs once instead of twice.",
+  ],
+  [
+    "ciabatta dry-run build",
+    "What the cache would reuse and what it would rebuild — and for a rebuild, exactly which files changed.",
+  ],
+  [
+    "ciabatta deploy --release v1.4.2",
+    "Run a workflow against one release: its release-pull steps fetch exactly that version.",
+  ],
+  [
+    "ciabatta releases list",
+    "Every published release, locally and on the team's remote cache. <code>push</code> / <code>pull</code> do it by hand.",
+  ],
+  [
+    "ciabatta remote-cache start",
+    "Run the shared cache your team builds against — with a build feed and a release list on its own page.",
+  ],
+  [
+    "ciabatta release --filter kind:push",
+    "Run only part of a graph — by kind, tag, package, owner or step name.",
+  ],
+  [
+    "ciabatta &lt;WORKFLOW&gt; --graph",
+    "Draw the resolved graph and run nothing.",
+  ],
+  [
+    "ciabatta list",
+    "Every workflow in the monorepo, its owner, and what it needs.",
+  ],
+  [
+    "ciabatta init --lib",
+    "Opt a package in: a workspace identity plus a starter workflow.",
+  ],
+  [
+    "ciabatta convert --script PATH",
+    "Turn an existing script into a workflow, tools and variables included.",
+  ],
+  [
+    "ciabatta configure auto",
+    "Inspect the repo and pick publishing workflows from a checklist.",
+  ],
+  [
+    "ciabatta tui",
+    "Open the registry browser: inspect registries and explore remote paths.",
+  ],
+  [
+    "ciabatta analyze",
+    "Map the dependency graph and serve an interactive view.",
+  ],
   ["ciabatta config reference", "Show the full config-format reference."],
 ];
 
@@ -82,7 +178,12 @@ const CI_MATRIX = [
   ["CIABATTA_BRANCH", "CI_COMMIT_BRANCH", "GITHUB_REF_NAME", "GIT_BRANCH"],
   ["CIABATTA_COMMIT", "CI_COMMIT_SHA", "GITHUB_SHA", "GIT_COMMIT"],
   ["CIABATTA_TAG", "CI_COMMIT_TAG", "GITHUB_REF_NAME", "TAG_NAME"],
-  ["CIABATTA_BUILD_NUMBER", "CI_PIPELINE_IID", "GITHUB_RUN_NUMBER", "BUILD_NUMBER"],
+  [
+    "CIABATTA_BUILD_NUMBER",
+    "CI_PIPELINE_IID",
+    "GITHUB_RUN_NUMBER",
+    "BUILD_NUMBER",
+  ],
 ];
 
 // Annotated config example (spans classed for lightweight YAML highlighting).
@@ -190,10 +291,26 @@ const CACHE_HTML = `<span class="c"># packages/web/.ciabatta/workflows/build.yam
     <span class="k">run</span>: <span class="v">npm run build</span>`;
 
 const HOW = [
-  { n: "1", h: "Each package says what it does", p: "A workflow file per name — <code>build.yaml</code>, <code>test.yaml</code>, <code>deploy.yaml</code> — next to the code it builds, with an owner and a description." },
-  { n: "2", h: "One command compiles one graph", p: "<code>ciabatta build</code> folds every package's <code>build</code> into a single DAG and runs it in dependency order, independent branches in parallel." },
-  { n: "3", h: "The cache skips what didn't change", p: "Each step is keyed on the files it reads, the variables it declares, and what its upstream steps produced. Unchanged? Restored, locally or from the team's cache." },
-  { n: "4", h: "Releases ship exactly what was built", p: "A <code>release-push</code> step publishes outputs under a version; <code>ciabatta deploy --release v1.4.2</code> fetches exactly those files, any time later." },
+  {
+    n: "1",
+    h: "Each package says what it does",
+    p: "A workflow file per name — <code>build.yaml</code>, <code>test.yaml</code>, <code>deploy.yaml</code> — next to the code it builds, with an owner and a description.",
+  },
+  {
+    n: "2",
+    h: "One command compiles one graph",
+    p: "<code>ciabatta build</code> folds every package's <code>build</code> into a single DAG and runs it in dependency order, independent branches in parallel.",
+  },
+  {
+    n: "3",
+    h: "The cache skips what didn't change",
+    p: "Each step is keyed on the files it reads, the variables it declares, and what its upstream steps produced. Unchanged? Restored, locally or from the team's cache.",
+  },
+  {
+    n: "4",
+    h: "Releases ship exactly what was built",
+    p: "A <code>release-push</code> step publishes outputs under a version; <code>ciabatta deploy --release v1.4.2</code> fetches exactly those files, any time later.",
+  },
 ];
 
 // Annotated deploy flowchart example.
@@ -250,7 +367,10 @@ const PYTHON = [
     label: "Python 3.9+",
     file: WHEEL,
     hint: "Linux, macOS and Windows",
-    what: "<code>pip install ciabatta --find-links " + SITE + "/python/</code> — or <code>ciabatta python install</code>, which installs the copy built into your binary.",
+    what:
+      "<code>pip install ciabatta --find-links " +
+      SITE +
+      "/python/</code> — or <code>ciabatta python install</code>, which installs the copy built into your binary.",
   },
 ];
 
@@ -468,12 +588,14 @@ function render() {
           <p class="section__sub">A step with <code>kind: push</code> moves an artifact to a registry. It sits on the graph like any other node — so it declares what it <code>needs</code>, it shows up in the dependency report, and it cannot run before the thing it publishes exists.</p>
         </div>
         <div class="pipeline">
-          ${STAGES.map((s) => `
+          ${STAGES.map(
+            (s) => `
             <div class="stagechip">
               <div class="stagechip__k">${s.k}</div>
               <div class="stagechip__d">${s.d}</div>
               <span class="stagechip__arrow">→</span>
-            </div>`).join("")}
+            </div>`,
+          ).join("")}
         </div>
         <div class="grid">
           <div class="fcard"><div class="fcard__icon">🧩</div><h3>Parallel by default</h3><p>Independent branches of the graph run at once, scheduled against their real dependencies rather than a list you wrote by hand.</p></div>
@@ -494,13 +616,15 @@ function render() {
             <table>
               <thead><tr><th>Registry</th><th>Push</th><th>Pull</th><th>How</th></tr></thead>
               <tbody>
-                ${REGISTRIES.map((r) => `
+                ${REGISTRIES.map(
+                  (r) => `
                   <tr>
                     <td>${r.name}${r.tag === "new" ? '<span class="badge-new">NEW</span>' : ""}</td>
                     <td><span class="yes">✓</span></td>
                     <td>${r.pull ? '<span class="yes">✓</span>' : "—"}</td>
                     <td><code>${r.how}</code></td>
-                  </tr>`).join("")}
+                  </tr>`,
+                ).join("")}
               </tbody>
             </table>
           </div>
@@ -666,7 +790,9 @@ function terminalHTML() {
       <div class="term__body">
         <div class="term__prompt"><span class="sigil">$</span> <span class="cmd">ciabatta build</span></div>
         <div class="term__caption"><span class="loaf">🍞</span> 3 packages, one graph, in dependency order</div>
-        ${recipes.map((r, ri) => `
+        ${recipes
+          .map(
+            (r, ri) => `
           <div class="trecipe" data-recipe="${ri}">
             <span class="trecipe__name">${r.name}</span>
             <span class="trecipe__line">
@@ -676,7 +802,9 @@ function terminalHTML() {
               </span>
               <span class="tbar"><span class="tbar__fill"></span></span>
             </span>
-          </div>`).join("")}
+          </div>`,
+          )
+          .join("")}
         <div class="term__done" id="term-done">✓ done · cache: 7 reused, 4 built — about 3m12s not spent</div>
       </div>
     </div>`;
@@ -716,18 +844,24 @@ function playTerminal() {
     }, startDelay);
 
     stages.forEach((stage, si) => {
-      setTimeout(() => {
-        if (si > 0) stages[si - 1].dataset.s = "done";
-        stage.dataset.s = "running";
-        fill.style.width = `${((si + 1) / (stages.length + 1)) * 100}%`;
-      }, startDelay + si * stepMs);
+      setTimeout(
+        () => {
+          if (si > 0) stages[si - 1].dataset.s = "done";
+          stage.dataset.s = "running";
+          fill.style.width = `${((si + 1) / (stages.length + 1)) * 100}%`;
+        },
+        startDelay + si * stepMs,
+      );
     });
 
     setTimeout(() => finish(row), startDelay + stages.length * stepMs);
   });
 
   const total = 200 + (rows.length - 1) * 260 + 4 * 300 + 200;
-  setTimeout(() => document.getElementById("term-done").classList.add("show"), total);
+  setTimeout(
+    () => document.getElementById("term-done").classList.add("show"),
+    total,
+  );
 }
 
 // ── Interactions ─────────────────────────────────────────────────────────────
@@ -740,7 +874,9 @@ function wireInstallTabs() {
       const id = tab.id.replace("tab-", "");
       const entry = INSTALL_TABS.find((t) => t.id === id);
       if (!entry) return;
-      tabs.forEach((t) => t.setAttribute("aria-selected", t === tab ? "true" : "false"));
+      tabs.forEach((t) =>
+        t.setAttribute("aria-selected", t === tab ? "true" : "false"),
+      );
       cmdEl.textContent = entry.cmd;
       noteEl.textContent = entry.note;
     });

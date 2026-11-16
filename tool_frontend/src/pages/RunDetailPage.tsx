@@ -143,7 +143,8 @@ const inputNodeId = (key: string) => `in::${key}`;
 const outputNodeId = (step: string) => `out::${step}`;
 
 /** Whether a node id names a file set rather than a step. */
-const isFileNode = (id: string) => id.startsWith("in::") || id.startsWith("out::");
+const isFileNode = (id: string) =>
+  id.startsWith("in::") || id.startsWith("out::");
 
 /** The step a `writes` node hangs off, or null when the id isn't one. */
 const outputStepOf = (id: string): string | null =>
@@ -177,14 +178,26 @@ type EnvGroup = "required" | "optional" | "undeclared";
 const ENV_GROUPS: EnvGroup[] = ["required", "optional", "undeclared"];
 const envGroupNodeId = (group: EnvGroup) => `envgroup::${group}`;
 const envGroupOf = (id: string): EnvGroup | null =>
-  id.startsWith("envgroup::") ? (id.slice("envgroup::".length) as EnvGroup) : null;
-const envGroupOfVariable = (variable: EnvVar): EnvGroup => envRole(variable) ?? "undeclared";
+  id.startsWith("envgroup::")
+    ? (id.slice("envgroup::".length) as EnvGroup)
+    : null;
+const envGroupOfVariable = (variable: EnvVar): EnvGroup =>
+  envRole(variable) ?? "undeclared";
 
 /** What each group is called on the canvas, and what hovering it explains. */
 const ENV_GROUP_INFO: Record<EnvGroup, { label: string; why: string }> = {
-  required: { label: "required", why: "required_env — the run refuses to start without them" },
-  optional: { label: "optional", why: "env — valued from .env, and allowed to be unset" },
-  undeclared: { label: "undeclared", why: "read by a step, but the workflow file doesn't list them" },
+  required: {
+    label: "required",
+    why: "required_env — the run refuses to start without them",
+  },
+  optional: {
+    label: "optional",
+    why: "env — valued from .env, and allowed to be unset",
+  },
+  undeclared: {
+    label: "undeclared",
+    why: "read by a step, but the workflow file doesn't list them",
+  },
 };
 
 /** The node id a workflow file's stacked steps take, and back. */
@@ -235,7 +248,9 @@ function nodeHeight(
   const stack = stackKeyOf(id);
   if (stack !== null) {
     // As tall as the step on top, plus the strip that opens the others.
-    return nodeHeight(stacks.top.get(stack) ?? "", byName, inspect) + STACK_HEADER;
+    return (
+      nodeHeight(stacks.top.get(stack) ?? "", byName, inspect) + STACK_HEADER
+    );
   }
   const step = byName.get(id);
   if (!step) return DEPENDENCY_HEIGHT;
@@ -259,8 +274,24 @@ const RUN_LAYOUT: DefaultLayouts = {
   lg: [
     { i: "graph", x: 0, y: 0, w: 6, h: rowsFor(500), minW: 3, minH: 6 },
     { i: "logs", x: 6, y: 0, w: 6, h: rowsFor(500), minW: 3, minH: 6 },
-    { i: "details", x: 0, y: rowsFor(500), w: 12, h: rowsFor(160), minW: 3, minH: 3 },
-    { i: "env", x: 0, y: rowsFor(660), w: 12, h: rowsFor(320), minW: 3, minH: 3 },
+    {
+      i: "details",
+      x: 0,
+      y: rowsFor(500),
+      w: 12,
+      h: rowsFor(160),
+      minW: 3,
+      minH: 3,
+    },
+    {
+      i: "env",
+      x: 0,
+      y: rowsFor(660),
+      w: 12,
+      h: rowsFor(320),
+      minW: 3,
+      minH: 3,
+    },
   ],
   md: [
     { i: "graph", x: 0, y: 0, w: 12, h: rowsFor(460), minH: 6 },
@@ -304,7 +335,9 @@ const NO_FOCUS: Focus = { id: null, lit: () => true };
 function timeline(timed: Timed): string | null {
   if (!timed.started_at) return null;
   const started = `started ${clockTime(timed.started_at)}`;
-  return timed.finished_at ? `${started} · finished ${clockTime(timed.finished_at)}` : started;
+  return timed.finished_at
+    ? `${started} · finished ${clockTime(timed.finished_at)}`
+    : started;
 }
 
 /** The header's " · started 14:03:20 · took 2m05s", ticking while it runs. */
@@ -422,14 +455,20 @@ export function RunDetailPage() {
               label={statusLabel(status)}
             />
           </Stack>
-          <Typography variant="caption" color="text.secondary" component="div" noWrap>
+          <Typography
+            variant="caption"
+            color="text.secondary"
+            component="div"
+            noWrap
+          >
             {state.run.workflows.join(", ")}
             {state.dry_run && " · dry run"}
             {timing && <RunClock timing={timing} live={!state.done} />}
             {(state.run.filter ?? []).length > 0 &&
               ` · filtered: ${state.run.filter.join(" ")}`}
             {state.run.env_profile && ` · profile: ${state.run.env_profile}`}
-            {state.run.resumed_from && ` · carries on from ${state.run.resumed_from}`}
+            {state.run.resumed_from &&
+              ` · carries on from ${state.run.resumed_from}`}
           </Typography>
         </Box>
         {workflow && <PhaseStrip workflow={workflow} />}
@@ -539,7 +578,11 @@ export function RunDetailPage() {
         />
       )}
 
-      <RecreateDrawer open={recreating} onClose={() => setRecreating(false)} state={state} />
+      <RecreateDrawer
+        open={recreating}
+        onClose={() => setRecreating(false)}
+        state={state}
+      />
 
       {state.workflows.length > 1 && (
         <Tabs
@@ -548,7 +591,11 @@ export function RunDetailPage() {
             setWorkflowIndex(next);
             setSelectedStep(null);
           }}
-          sx={{ mb: 1.5, minHeight: 36, "& .MuiTab-root": { minHeight: 36, py: 0.5 } }}
+          sx={{
+            mb: 1.5,
+            minHeight: 36,
+            "& .MuiTab-root": { minHeight: 36, py: 0.5 },
+          }}
         >
           {state.workflows.map((r) => (
             <Tab key={r.name} label={r.name} />
@@ -619,7 +666,8 @@ function WorkflowPanel({
   const [chosen, setChosen] = useState<Record<string, string>>({});
 
   const stacks = useMemo(
-    () => (stacked ? workflowStacks(workflow, chosen, selectedStep) : NO_STACKS),
+    () =>
+      stacked ? workflowStacks(workflow, chosen, selectedStep) : NO_STACKS,
     [stacked, workflow, chosen, selectedStep],
   );
   const pickInStack = (stack: string, name: string) => {
@@ -634,7 +682,17 @@ function WorkflowPanel({
 
   const { nodes, edges } = useMemo(
     () =>
-      buildFlow(workflow, theme, showOrder, showEnv, showFiles, focused, inspect, stacks, pickInStack),
+      buildFlow(
+        workflow,
+        theme,
+        showOrder,
+        showEnv,
+        showFiles,
+        focused,
+        inspect,
+        stacks,
+        pickInStack,
+      ),
     // `pickInStack` only closes over setters and `onSelectStep`, which are stable.
     [workflow, theme, showOrder, showEnv, showFiles, focused, inspect, stacks],
   );
@@ -669,7 +727,9 @@ function WorkflowPanel({
           variant="filled"
           sx={{ mb: 2, fontSize: 15, "& .MuiAlert-icon": { fontSize: 28 } }}
         >
-          <AlertTitle sx={{ fontWeight: 700 }}>Version mismatch with the remote cache</AlertTitle>
+          <AlertTitle sx={{ fontWeight: 700 }}>
+            Version mismatch with the remote cache
+          </AlertTitle>
           {warning}
         </Alert>
       ))}
@@ -735,133 +795,146 @@ function WorkflowPanel({
         layouts={layout.layouts}
         onChange={layout.onChange}
         onFit={layout.fit}
-        boxes={[
-          {
-            id: "graph",
-            title: "Graph",
-            body: "fill",
-            actions: (
-              <>
-                {grouped && (
-                  <VariableSearch
-                    variables={drawnVariables}
-                    onPick={(key) => {
-                      setFocused(envNodeId(key));
-                      onSelectStep(null);
-                    }}
-                  />
-                )}
-                <GraphViewMenu>
-                <GraphToggle
-                  label="Environment"
-                  hint="Draw each environment variable as what it is — a dependency, feeding into every step that reads it. Values come from the run's resolved environment."
-                  checked={showEnv}
-                  onChange={(checked) => {
-                    setShowEnv(checked);
-                    // Focusing a node and then hiding it would dim the graph with
-                    // nothing left lit to explain why.
-                    if (
-                      !checked &&
-                      focused !== null &&
-                      (envKeyOf(focused) !== null || envGroupOf(focused) !== null)
-                    )
-                      setFocused(null);
-                  }}
+        boxes={
+          [
+            {
+              id: "graph",
+              title: "Graph",
+              body: "fill",
+              actions: (
+                <>
+                  {grouped && (
+                    <VariableSearch
+                      variables={drawnVariables}
+                      onPick={(key) => {
+                        setFocused(envNodeId(key));
+                        onSelectStep(null);
+                      }}
+                    />
+                  )}
+                  <GraphViewMenu>
+                    <GraphToggle
+                      label="Environment"
+                      hint="Draw each environment variable as what it is — a dependency, feeding into every step that reads it. Values come from the run's resolved environment."
+                      checked={showEnv}
+                      onChange={(checked) => {
+                        setShowEnv(checked);
+                        // Focusing a node and then hiding it would dim the graph with
+                        // nothing left lit to explain why.
+                        if (
+                          !checked &&
+                          focused !== null &&
+                          (envKeyOf(focused) !== null ||
+                            envGroupOf(focused) !== null)
+                        )
+                          setFocused(null);
+                      }}
+                    />
+                    <GraphToggle
+                      label="Files"
+                      hint="Draw the files each target reads and writes as nodes of their own: inputs feeding in from the left, outputs produced on the right. These are the file sets the cache keys on, so this is the graph the caching decision is actually made from."
+                      checked={showFiles}
+                      onChange={(checked) => {
+                        setShowFiles(checked);
+                        if (!checked && focused !== null && isFileNode(focused))
+                          setFocused(null);
+                      }}
+                    />
+                    <GraphToggle
+                      label="Stack"
+                      hint="Draw each workflow file with several steps as one node, its steps stacked like cards. The strip across the top of the stack opens a list to choose the step shown. Off draws every step on its own."
+                      checked={stacked}
+                      onChange={setStacked}
+                    />
+                    <GraphToggle
+                      label="Order"
+                      hint="Number each node with its place in the run's sequence. Recovery steps aren't numbered — they only run if something fails."
+                      checked={showOrder}
+                      onChange={setShowOrder}
+                    />
+                  </GraphViewMenu>
+                </>
+              ),
+              children: (
+                <GraphCanvas
+                  nodes={nodes}
+                  edges={edges}
+                  height="100%"
+                  // Turning the environment column on and off changes the graph's
+                  // extent, so the view has to be re-fitted around it.
+                  fitKey={
+                    `${showEnv ? "env" : ""}${grouped ? "+grouped" : ""}${showFiles ? "+files" : ""}${
+                      stacked ? "+stacked" : ""
+                    }${inspect ? "+inspect" : ""}` || "steps-only"
+                  }
+                  onNodeClick={(_, node) => clickNode(node.id)}
+                  onPaneClick={() => setFocused(null)}
+                  nodeColor={(node) =>
+                    inspect && byNameHas(workflow, node.id)
+                      ? cacheTone(
+                          workflow.steps.find((s) => s.name === node.id)?.cache,
+                          theme,
+                        )
+                      : statusColor(node.data?.status as StepStatus, theme)
+                  }
                 />
-                <GraphToggle
-                  label="Files"
-                  hint="Draw the files each target reads and writes as nodes of their own: inputs feeding in from the left, outputs produced on the right. These are the file sets the cache keys on, so this is the graph the caching decision is actually made from."
-                  checked={showFiles}
-                  onChange={(checked) => {
-                    setShowFiles(checked);
-                    if (!checked && focused !== null && isFileNode(focused)) setFocused(null);
-                  }}
+              ),
+            },
+            {
+              id: "logs",
+              title: step ? `${step.name} logs` : "Workflow logs",
+              body: "fill",
+              actions: step && (
+                <Button size="small" onClick={clearSelection}>
+                  All logs
+                </Button>
+              ),
+              children: (
+                <LogView
+                  // Keyed by what is being shown, so switching steps starts the new
+                  // log at its end rather than inheriting the old one's scroll.
+                  key={step ? step.name : "__workflow__"}
+                  lines={step ? step.logs : workflow.logs}
+                  dropped={
+                    (step ? step.dropped_logs : workflow.dropped_logs) ?? 0
+                  }
+                  fill
+                  title={
+                    step
+                      ? `${step.name} — run #${runId}`
+                      : `${workflow.name} — run #${runId}`
+                  }
                 />
-                <GraphToggle
-                  label="Stack"
-                  hint="Draw each workflow file with several steps as one node, its steps stacked like cards. The strip across the top of the stack opens a list to choose the step shown. Off draws every step on its own."
-                  checked={stacked}
-                  onChange={setStacked}
+              ),
+            },
+            {
+              id: "details",
+              title: step ? step.name : "Details",
+              body: "scroll",
+              // As tall as what was clicked has to say: a hint line when nothing
+              // is, a step's whole story when one is.
+              fit: true,
+              children: (
+                <Inspector
+                  project={project}
+                  workflow={workflow}
+                  step={step ?? null}
+                  focused={focused}
+                  now={now}
+                  inspect={inspect}
+                  onClear={clearSelection}
+                  onFocus={setFocused}
                 />
-                <GraphToggle
-                  label="Order"
-                  hint="Number each node with its place in the run's sequence. Recovery steps aren't numbered — they only run if something fails."
-                  checked={showOrder}
-                  onChange={setShowOrder}
-                />
-                </GraphViewMenu>
-              </>
-            ),
-            children: (
-              <GraphCanvas
-                nodes={nodes}
-                edges={edges}
-                height="100%"
-                // Turning the environment column on and off changes the graph's
-                // extent, so the view has to be re-fitted around it.
-                fitKey={
-                  `${showEnv ? "env" : ""}${grouped ? "+grouped" : ""}${showFiles ? "+files" : ""}${
-                    stacked ? "+stacked" : ""
-                  }${inspect ? "+inspect" : ""}` || "steps-only"
-                }
-                onNodeClick={(_, node) => clickNode(node.id)}
-                onPaneClick={() => setFocused(null)}
-                nodeColor={(node) =>
-                  inspect && byNameHas(workflow, node.id)
-                    ? cacheTone(workflow.steps.find((s) => s.name === node.id)?.cache, theme)
-                    : statusColor(node.data?.status as StepStatus, theme)
-                }
-              />
-            ),
-          },
-          {
-            id: "logs",
-            title: step ? `${step.name} logs` : "Workflow logs",
-            body: "fill",
-            actions: step && (
-              <Button size="small" onClick={clearSelection}>
-                All logs
-              </Button>
-            ),
-            children: (
-              <LogView
-                // Keyed by what is being shown, so switching steps starts the new
-                // log at its end rather than inheriting the old one's scroll.
-                key={step ? step.name : "__workflow__"}
-                lines={step ? step.logs : workflow.logs}
-                dropped={(step ? step.dropped_logs : workflow.dropped_logs) ?? 0}
-                fill
-                title={step ? `${step.name} — run #${runId}` : `${workflow.name} — run #${runId}`}
-              />
-            ),
-          },
-          {
-            id: "details",
-            title: step ? step.name : "Details",
-            body: "scroll",
-            // As tall as what was clicked has to say: a hint line when nothing
-            // is, a step's whole story when one is.
-            fit: true,
-            children: (
-              <Inspector
-                project={project}
-                workflow={workflow}
-                step={step ?? null}
-                focused={focused}
-                now={now}
-                inspect={inspect}
-                onClear={clearSelection}
-                onFocus={setFocused}
-              />
-            ),
-          },
-          {
-            id: "env",
-            title: "Environment",
-            body: "scroll",
-            children: <EnvList report={workflow.env} />,
-          },
-        ] satisfies BoxItem[]}
+              ),
+            },
+            {
+              id: "env",
+              title: "Environment",
+              body: "scroll",
+              children: <EnvList report={workflow.env} />,
+            },
+          ] satisfies BoxItem[]
+        }
       />
     </>
   );
@@ -1009,7 +1082,8 @@ function Inspector({
         key={focused}
         group={envGroupOf(focused)!}
         variables={workflow.env.vars.filter(
-          (v) => v.steps.length > 0 && envGroupOfVariable(v) === envGroupOf(focused),
+          (v) =>
+            v.steps.length > 0 && envGroupOfVariable(v) === envGroupOf(focused),
         )}
         onPick={(key) => onFocus(envNodeId(key))}
         onClear={onClear}
@@ -1024,11 +1098,12 @@ function Inspector({
     <Box sx={{ display: "flex", flexDirection: "column" }}>
       {body ?? (
         <Typography variant="caption" color="text.secondary">
-          Click a step to see its logs, what it waits for and why it ran. Click a
-          variable or a file set to light up the steps that read it — or a group of
-          variables to search it. A stacked node is one workflow file: its top strip
-          picks the step shown.
-          {inspect && " Cache inspect mode is on: each step says what the cache made of it."}
+          Click a step to see its logs, what it waits for and why it ran. Click
+          a variable or a file set to light up the steps that read it — or a
+          group of variables to search it. A stacked node is one workflow file:
+          its top strip picks the step shown.
+          {inspect &&
+            " Cache inspect mode is on: each step says what the cache made of it."}
         </Typography>
       )}
     </Box>
@@ -1058,10 +1133,17 @@ function StepInspector({
   // catalogue. Fails outright on a project that isn't a monorepo, in which
   // case `step.workspace` is null anyway and nothing below tries to show it.
   const { data: catalogue } = useWorkspace(project);
-  const memberPath = catalogue?.members.find((m) => m.name === step.workspace)?.path;
+  const memberPath = catalogue?.members.find(
+    (m) => m.name === step.workspace,
+  )?.path;
   return (
     <Stack spacing={0.75}>
-      <Stack direction="row" spacing={1} alignItems="center" sx={{ minWidth: 0 }}>
+      <Stack
+        direction="row"
+        spacing={1}
+        alignItems="center"
+        sx={{ minWidth: 0 }}
+      >
         <StatusIcon status={step.status} />
         <Typography
           variant="body2"
@@ -1071,7 +1153,12 @@ function StepInspector({
         >
           {step.name}
         </Typography>
-        <Typography variant="caption" color="text.secondary" noWrap sx={{ flexGrow: 1, minWidth: 0 }}>
+        <Typography
+          variant="caption"
+          color="text.secondary"
+          noWrap
+          sx={{ flexGrow: 1, minWidth: 0 }}
+        >
           {upstream.length === 0
             ? "depends on nothing — it can start immediately"
             : `waits for ${upstream.length} step${upstream.length === 1 ? "" : "s"}: ${upstream.join(", ")}`}
@@ -1084,16 +1171,29 @@ function StepInspector({
           relative to the monorepo root, right under its name — the first
           thing you'd want to know before going to fix it. */}
       {step.workspace && (
-        <Stack direction="row" spacing={0.5} alignItems="center" sx={{ minWidth: 0 }}>
-          <FolderOpenIcon sx={{ fontSize: 15, color: "text.secondary", flexShrink: 0 }} />
+        <Stack
+          direction="row"
+          spacing={0.5}
+          alignItems="center"
+          sx={{ minWidth: 0 }}
+        >
+          <FolderOpenIcon
+            sx={{ fontSize: 15, color: "text.secondary", flexShrink: 0 }}
+          />
           <Typography
             variant="body2"
             color="text.secondary"
             noWrap
             sx={{ fontFamily: monoFontStack, fontWeight: 600, minWidth: 0 }}
-            title={memberPath ? `${memberPath} (${step.workspace})` : step.workspace}
+            title={
+              memberPath ? `${memberPath} (${step.workspace})` : step.workspace
+            }
           >
-            {memberPath ? (memberPath === "." ? "./ (the repo root)" : `./${memberPath}`) : step.workspace}
+            {memberPath
+              ? memberPath === "."
+                ? "./ (the repo root)"
+                : `./${memberPath}`
+              : step.workspace}
           </Typography>
         </Stack>
       )}
@@ -1103,7 +1203,11 @@ function StepInspector({
         <Typography
           variant="caption"
           color="text.secondary"
-          sx={{ display: "block", fontFamily: monoFontStack, wordBreak: "break-all" }}
+          sx={{
+            display: "block",
+            fontFamily: monoFontStack,
+            wordBreak: "break-all",
+          }}
         >
           $ {step.action}
         </Typography>
@@ -1111,7 +1215,9 @@ function StepInspector({
       <StepDetails
         step={step}
         now={now}
-        env={workflow.env.vars.filter((variable) => variable.steps.includes(step.name))}
+        env={workflow.env.vars.filter((variable) =>
+          variable.steps.includes(step.name),
+        )}
       />
       {inspect && !step.recover && step.deps?.name && (
         <PickFilesButton
@@ -1146,7 +1252,11 @@ function PickFilesButton({
     <Box>
       <Button
         size="small"
-        variant={unmatched > 0 || step.deps.input_files === 0 ? "contained" : "outlined"}
+        variant={
+          unmatched > 0 || step.deps.input_files === 0
+            ? "contained"
+            : "outlined"
+        }
         color="warning"
         startIcon={<FolderOpenIcon />}
         onClick={() => setOpen(true)}
@@ -1175,10 +1285,13 @@ function PickFilesButton({
  */
 function ProcessingPanel() {
   return (
-    <Alert severity="info" sx={{ py: 0.5, "& .MuiAlert-message": { width: "100%" } }}>
+    <Alert
+      severity="info"
+      sx={{ py: 0.5, "& .MuiAlert-message": { width: "100%" } }}
+    >
       <Typography variant="caption" sx={{ display: "block" }}>
-        Processing — working out whether this step can be reused: hashing its inputs, resolving
-        its Cargo closure, checking its outputs…
+        Processing — working out whether this step can be reused: hashing its
+        inputs, resolving its Cargo closure, checking its outputs…
       </Typography>
       <LinearProgress sx={{ mt: 0.75, borderRadius: 1 }} />
     </Alert>
@@ -1189,9 +1302,15 @@ function ProcessingPanel() {
  *  one line the node has for it. */
 function ProcessingLine() {
   return (
-    <Box component="span" sx={{ display: "flex", alignItems: "center", gap: 0.75, minWidth: 0 }}>
+    <Box
+      component="span"
+      sx={{ display: "flex", alignItems: "center", gap: 0.75, minWidth: 0 }}
+    >
       processing…
-      <LinearProgress color="info" sx={{ flexGrow: 1, height: 3, borderRadius: 1, minWidth: 24 }} />
+      <LinearProgress
+        color="info"
+        sx={{ flexGrow: 1, height: 3, borderRadius: 1, minWidth: 24 }}
+      />
     </Box>
   );
 }
@@ -1205,7 +1324,10 @@ function RestoringPanel({ step }: { step: StepView }) {
   const restoring = step.restoring!;
   const percent = restoringPercent(restoring);
   return (
-    <Alert severity="info" sx={{ py: 0.5, "& .MuiAlert-message": { width: "100%" } }}>
+    <Alert
+      severity="info"
+      sx={{ py: 0.5, "& .MuiAlert-message": { width: "100%" } }}
+    >
       <Typography variant="caption" sx={{ display: "block" }}>
         {restoring.phase === "checking"
           ? `Asking the remote cache at ${restoring.server} whether it has this build…`
@@ -1220,7 +1342,12 @@ function RestoringPanel({ step }: { step: StepView }) {
         <Typography
           variant="caption"
           color="text.secondary"
-          sx={{ display: "block", mt: 0.5, fontFamily: monoFontStack, wordBreak: "break-all" }}
+          sx={{
+            display: "block",
+            mt: 0.5,
+            fontFamily: monoFontStack,
+            wordBreak: "break-all",
+          }}
         >
           {restoring.current}
         </Typography>
@@ -1247,7 +1374,11 @@ function StepCacheSection({
   if (!step.cache) {
     if (!inspect) return null;
     return (
-      <Alert severity="info" icon={<ManageSearchIcon fontSize="small" />} sx={{ py: 0.25 }}>
+      <Alert
+        severity="info"
+        icon={<ManageSearchIcon fontSize="small" />}
+        sx={{ py: 0.25 }}
+      >
         <Typography variant="caption">
           The cache wasn't consulted for this step
           {step.status === "pending"
@@ -1269,14 +1400,24 @@ function StepCacheSection({
         borderRadius: 1,
       }}
     >
-      <Typography variant="overline" color="text.secondary" sx={{ lineHeight: 1.5 }}>
+      <Typography
+        variant="overline"
+        color="text.secondary"
+        sx={{ lineHeight: 1.5 }}
+      >
         Cache
       </Typography>
       <CacheReportView report={step.cache} detailed={inspect} />
       {inspect && step.cache.key && (
         <Box
           id={CACHE_FILES_ANCHOR}
-          sx={{ mt: 1.25, pt: 1, borderTop: 1, borderColor: "divider", scrollMarginTop: 16 }}
+          sx={{
+            mt: 1.25,
+            pt: 1,
+            borderTop: 1,
+            borderColor: "divider",
+            scrollMarginTop: 16,
+          }}
         >
           <CacheKeyFilesView
             project={project}
@@ -1338,38 +1479,75 @@ function InspectSummary({
         bgcolor: (t) => `${t.palette.warning.main}0d`,
       }}
     >
-      <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap sx={{ mb: 1 }}>
+      <Stack
+        direction="row"
+        spacing={1}
+        alignItems="center"
+        flexWrap="wrap"
+        useFlexGap
+        sx={{ mb: 1 }}
+      >
         <ManageSearchIcon fontSize="small" sx={{ color: "warning.main" }} />
         <Typography variant="subtitle2" sx={{ mr: 1 }}>
           Cache inspect
         </Typography>
-        <Chip size="small" color="success" variant="outlined" label={`${reused.length} reused`} />
-        <Chip size="small" color="warning" variant="outlined" label={`${ran.length} ran`} />
+        <Chip
+          size="small"
+          color="success"
+          variant="outlined"
+          label={`${reused.length} reused`}
+        />
+        <Chip
+          size="small"
+          color="warning"
+          variant="outlined"
+          label={`${ran.length} ran`}
+        />
         {uncached.length > 0 && (
-          <Chip size="small" variant="outlined" label={`${uncached.length} not cached`} />
+          <Chip
+            size="small"
+            variant="outlined"
+            label={`${uncached.length} not cached`}
+          />
         )}
         {silent.length > 0 && (
           <Tooltip title="Steps the cache never looked at: not reached yet, skipped by a condition, or caching was off for this run.">
-            <Chip size="small" variant="outlined" label={`${silent.length} not consulted`} />
+            <Chip
+              size="small"
+              variant="outlined"
+              label={`${silent.length} not consulted`}
+            />
           </Tooltip>
         )}
       </Stack>
 
       {steps.length > 0 && silent.length === steps.length && (
-        <Typography variant="caption" color="text.secondary" sx={{ display: "block" }}>
+        <Typography
+          variant="caption"
+          color="text.secondary"
+          sx={{ display: "block" }}
+        >
           The cache wasn't consulted for any step in this run. Dry runs and{" "}
           <code>--authoritative</code> runs bypass it, and a project needs{" "}
-          <code>cache.enabled</code> with <code>cache.inputs</code> before it's used at all.
+          <code>cache.enabled</code> with <code>cache.inputs</code> before it's
+          used at all.
         </Typography>
       )}
 
       {blockers.size > 0 && (
         <Alert severity="error" icon={false} sx={{ py: 0.25, mb: 1 }}>
-          <Typography variant="caption" sx={{ display: "block", fontWeight: 600 }}>
+          <Typography
+            variant="caption"
+            sx={{ display: "block", fontWeight: 600 }}
+          >
             Steps holding others back from their cache
           </Typography>
           {[...blockers].map(([upstream, held]) => (
-            <Typography key={upstream} variant="caption" sx={{ display: "block" }}>
+            <Typography
+              key={upstream}
+              variant="caption"
+              sx={{ display: "block" }}
+            >
               <Box
                 component="button"
                 type="button"
@@ -1379,9 +1557,10 @@ function InspectSummary({
                 {upstream}
               </Box>{" "}
               declares no <code>cache.outputs</code>, so {held.length} step
-              {held.length === 1 ? "" : "s"} after it ({held.join(", ")}) rebuild every run. Give it{" "}
-              <code>cache.outputs</code>, or <code>cache.no_outputs: true</code> if it writes nothing
-              they read.
+              {held.length === 1 ? "" : "s"} after it ({held.join(", ")})
+              rebuild every run. Give it <code>cache.outputs</code>, or{" "}
+              <code>cache.no_outputs: true</code> if it writes nothing they
+              read.
             </Typography>
           ))}
         </Alert>
@@ -1390,11 +1569,25 @@ function InspectSummary({
       {attention.length > 0 && (
         <Stack spacing={0.5}>
           {attention.slice(0, 8).map((s) => (
-            <Stack key={s.name} direction="row" spacing={1} alignItems="baseline">
-              <Box component="button" type="button" onClick={() => onSelect(s.name)} sx={linkButton}>
+            <Stack
+              key={s.name}
+              direction="row"
+              spacing={1}
+              alignItems="baseline"
+            >
+              <Box
+                component="button"
+                type="button"
+                onClick={() => onSelect(s.name)}
+                sx={linkButton}
+              >
                 {s.name}
               </Box>
-              <Typography variant="caption" color="text.secondary" sx={{ minWidth: 0 }}>
+              <Typography
+                variant="caption"
+                color="text.secondary"
+                sx={{ minWidth: 0 }}
+              >
                 {cacheLabel(s.cache)} — <Prose text={s.cache!.hints[0]} />
               </Typography>
             </Stack>
@@ -1460,30 +1653,38 @@ function NodeLabel({
       detail={
         // A step served from the cache is "skipped" to the engine, but that
         // word belongs to steps a condition left out.
-        step.status === "processing"
-          ? <ProcessingLine />
-          : step.restoring
-          ? restoringLine(step.restoring, humanizeBytes)
-          : wasReused(step.cache)
-          ? `from cache${step.finished_at ? ` · ${clockTime(step.finished_at)}` : ""}`
-          : step.carried_from
-          ? `passed in ${step.carried_from}`
-          : step.started_at && step.finished_at
-            ? `${elapsedOf(step, 0)} · ${clockTime(step.finished_at)}`
-            : statusLabel(step.status).toLowerCase()
+        step.status === "processing" ? (
+          <ProcessingLine />
+        ) : step.restoring ? (
+          restoringLine(step.restoring, humanizeBytes)
+        ) : wasReused(step.cache) ? (
+          `from cache${step.finished_at ? ` · ${clockTime(step.finished_at)}` : ""}`
+        ) : step.carried_from ? (
+          `passed in ${step.carried_from}`
+        ) : step.started_at && step.finished_at ? (
+          `${elapsedOf(step, 0)} · ${clockTime(step.finished_at)}`
+        ) : (
+          statusLabel(step.status).toLowerCase()
+        )
       }
       extra={
         <>
           {step.background && (
             <StepLine mono={false}>background · nothing waits for it</StepLine>
           )}
-          {step.after && <StepLine mono={false}>after · runs whichever way the run went</StepLine>}
+          {step.after && (
+            <StepLine mono={false}>
+              after · runs whichever way the run went
+            </StepLine>
+          )}
           {inspect && !step.recover && <InspectLine step={step} />}
         </>
       }
       // The node was served from the cache rather than run: say so where the
       // eye already is, and let a click on it explain.
-      adornment={step.cache && wasReused(step.cache) && <CacheIcon report={step.cache} />}
+      adornment={
+        step.cache && wasReused(step.cache) && <CacheIcon report={step.cache} />
+      }
     />
   );
 }
@@ -1502,7 +1703,10 @@ function InspectLine({ step }: { step: StepView }) {
     >
       {cacheLabel(step.cache)}
       {step.cache?.key && (
-        <Box component="span" sx={{ fontFamily: monoFontStack, fontWeight: 400, opacity: 0.75 }}>
+        <Box
+          component="span"
+          sx={{ fontFamily: monoFontStack, fontWeight: 400, opacity: 0.75 }}
+        >
           {" · "}
           {step.cache.key.slice(0, 8)}
         </Box>
@@ -1581,7 +1785,10 @@ function ToolIcon({
           onClick={onClick}
           sx={
             pressed
-              ? { bgcolor: "action.selected", "&:hover": { bgcolor: "action.focus" } }
+              ? {
+                  bgcolor: "action.selected",
+                  "&:hover": { bgcolor: "action.focus" },
+                }
               : undefined
           }
         >
@@ -1625,8 +1832,9 @@ function StopRunButton({ id }: { id: number }) {
             background tasks this run started are stopped.
           </Typography>
           <Typography variant="body2" color="text.secondary">
-            Whatever has already happened stays happened — a step that wrote files or
-            published an artifact is not undone. The logs remain readable.
+            Whatever has already happened stays happened — a step that wrote
+            files or published an artifact is not undone. The logs remain
+            readable.
           </Typography>
           {stop.error && <ErrorNote error={stop.error} />}
         </DialogContent>
@@ -1636,7 +1844,9 @@ function StopRunButton({ id }: { id: number }) {
             color="error"
             variant="contained"
             disabled={stop.isPending}
-            onClick={() => stop.mutate(id, { onSuccess: () => setAsking(false) })}
+            onClick={() =>
+              stop.mutate(id, { onSuccess: () => setAsking(false) })
+            }
           >
             Stop it
           </Button>
@@ -1648,7 +1858,15 @@ function StopRunButton({ id }: { id: number }) {
 
 /** What a selected step is, beyond its command: where it's from, how it
  *  behaves, and the variables it depends on. */
-function StepDetails({ step, env, now }: { step: StepView; env: EnvVar[]; now: number }) {
+function StepDetails({
+  step,
+  env,
+  now,
+}: {
+  step: StepView;
+  env: EnvVar[];
+  now: number;
+}) {
   const badges: string[] = [];
   const took = elapsedOf(step, now);
   if (took) badges.push(step.finished_at ? `took ${took}` : `running ${took}`);
@@ -1657,9 +1875,11 @@ function StepDetails({ step, env, now }: { step: StepView; env: EnvVar[]; now: n
   else if (step.kind) badges.push(step.kind);
   if (step.background) badges.push("⚡ background");
   else if (step.after) badges.push("↪ after");
-  if (step.carried_from) badges.push(`passed in ${step.carried_from}, not run again`);
+  if (step.carried_from)
+    badges.push(`passed in ${step.carried_from}, not run again`);
   if (step.timeout) badges.push(`timeout ${step.timeout}`);
-  if (step.requires.length > 0) badges.push(`needs ${step.requires.join(", ")}`);
+  if (step.requires.length > 0)
+    badges.push(`needs ${step.requires.join(", ")}`);
 
   // The variables this step reads, with the values the run resolved for them —
   // the step's own `[env]` table is shown separately, since it overrides them.
@@ -1680,8 +1900,16 @@ function StepDetails({ step, env, now }: { step: StepView; env: EnvVar[]; now: n
 
   return (
     <Stack spacing={1}>
-      <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap alignItems="center">
-        {step.workspace && <Chip size="small" color="secondary" label={step.workspace} />}
+      <Stack
+        direction="row"
+        spacing={1}
+        flexWrap="wrap"
+        useFlexGap
+        alignItems="center"
+      >
+        {step.workspace && (
+          <Chip size="small" color="secondary" label={step.workspace} />
+        )}
         {badges.map((badge) => (
           <Chip key={badge} size="small" variant="outlined" label={badge} />
         ))}
@@ -1698,7 +1926,13 @@ function StepDetails({ step, env, now }: { step: StepView; env: EnvVar[]; now: n
       </Stack>
 
       {(reads.length > 0 || own.size > 0) && (
-        <Stack direction="row" spacing={0.75} flexWrap="wrap" useFlexGap alignItems="center">
+        <Stack
+          direction="row"
+          spacing={0.75}
+          flexWrap="wrap"
+          useFlexGap
+          alignItems="center"
+        >
           <Typography variant="caption" color="text.secondary">
             environment
           </Typography>
@@ -1710,13 +1944,22 @@ function StepDetails({ step, env, now }: { step: StepView; env: EnvVar[]; now: n
       )}
 
       {(step.env_files?.length ?? 0) > 0 && (
-        <Stack direction="row" spacing={0.75} flexWrap="wrap" useFlexGap alignItems="baseline">
+        <Stack
+          direction="row"
+          spacing={0.75}
+          flexWrap="wrap"
+          useFlexGap
+          alignItems="baseline"
+        >
           <Tooltip title="The env files this step's workflow names (env_file). The run searches them ahead of every workspace's .env, and every step shares what the search finds.">
             <Typography variant="caption" color="text.secondary">
               env files
             </Typography>
           </Tooltip>
-          <Typography variant="caption" sx={{ fontFamily: monoFontStack, wordBreak: "break-all" }}>
+          <Typography
+            variant="caption"
+            sx={{ fontFamily: monoFontStack, wordBreak: "break-all" }}
+          >
             {step.env_files.join(", ")}
           </Typography>
         </Stack>
@@ -1746,7 +1989,11 @@ function TargetDependencies({ deps }: { deps: TargetDeps }) {
     <Stack spacing={0.5} sx={{ mt: 0.5 }}>
       <DepRow
         label="depends on"
-        value={deps.needs.length > 0 ? deps.needs.join(", ") : "nothing — it can start immediately"}
+        value={
+          deps.needs.length > 0
+            ? deps.needs.join(", ")
+            : "nothing — it can start immediately"
+        }
       />
       <DepRow
         label="reads"
@@ -1760,7 +2007,11 @@ function TargetDependencies({ deps }: { deps: TargetDeps }) {
             </>
           )
         }
-        title={deps.exclude.length > 0 ? `excluding ${deps.exclude.join(", ")}` : undefined}
+        title={
+          deps.exclude.length > 0
+            ? `excluding ${deps.exclude.join(", ")}`
+            : undefined
+        }
       />
       {deps.cargo && deps.cargo.length > 0 && (
         <DepRow
@@ -1787,23 +2038,29 @@ function TargetDependencies({ deps }: { deps: TargetDeps }) {
         value={deps.env.length > 0 ? deps.env.join(", ") : "no variables"}
         title="Variables folded into this target's cache key"
       />
-      {deps.commands.length > 0 && <DepRow label="runs" value={deps.commands.join(" ; ")} mono />}
+      {deps.commands.length > 0 && (
+        <DepRow label="runs" value={deps.commands.join(" ; ")} mono />
+      )}
       {!deps.cached && deps.why_uncached && (
         <DepRow label="not cached" value={deps.why_uncached} />
       )}
-      {deps.cached && deps.undeclared_reads && deps.undeclared_reads.length > 0 && (
-        <Typography variant="caption" color="warning.main">
-          ⚠ rustc reports the last build reading <ShortList items={deps.undeclared_reads} />, outside
-          its cache inputs, so changing {deps.undeclared_reads.length === 1 ? "it" : "them"}{" "}
-          would not invalidate this target.
-        </Typography>
-      )}
+      {deps.cached &&
+        deps.undeclared_reads &&
+        deps.undeclared_reads.length > 0 && (
+          <Typography variant="caption" color="warning.main">
+            ⚠ rustc reports the last build reading{" "}
+            <ShortList items={deps.undeclared_reads} />, outside its cache
+            inputs, so changing{" "}
+            {deps.undeclared_reads.length === 1 ? "it" : "them"} would not
+            invalidate this target.
+          </Typography>
+        )}
       {deps.outputs_in_inputs && deps.outputs_in_inputs.length > 0 && (
         <Typography variant="caption" color="warning.main">
-          ⚠ {deps.outputs_in_inputs.length} file(s) match both its inputs and its outputs, so
-          they are treated as outputs only and left out of the key:{" "}
-          <ShortList items={deps.outputs_in_inputs} />. Narrow cache.inputs, or add them to
-          exclude.
+          ⚠ {deps.outputs_in_inputs.length} file(s) match both its inputs and
+          its outputs, so they are treated as outputs only and left out of the
+          key: <ShortList items={deps.outputs_in_inputs} />. Narrow
+          cache.inputs, or add them to exclude.
         </Typography>
       )}
       {(deps.unmatched_inputs ?? []).map((miss) => (
@@ -1815,7 +2072,8 @@ function TargetDependencies({ deps }: { deps: TargetDeps }) {
         <Typography variant="caption" color="warning.main">
           ⚠ tests {undeclared.join(", ")} in a condition without declaring{" "}
           {undeclared.length === 1 ? "it" : "them"} in cache.env, so changing{" "}
-          {undeclared.length === 1 ? "it" : "them"} would not invalidate this target.
+          {undeclared.length === 1 ? "it" : "them"} would not invalidate this
+          target.
         </Typography>
       )}
     </Stack>
@@ -1843,9 +2101,15 @@ function FocusNote({
   const groups = useMemo(() => inputGroups(workflow), [workflow]);
 
   const key = envKeyOf(focused);
-  const variable = key === null ? null : (workflow.env.vars.find((v) => v.key === key) ?? null);
+  const variable =
+    key === null
+      ? null
+      : (workflow.env.vars.find((v) => v.key === key) ?? null);
   const writer = outputStepOf(focused);
-  const producer = writer === null ? null : (workflow.steps.find((s) => s.name === writer) ?? null);
+  const producer =
+    writer === null
+      ? null
+      : (workflow.steps.find((s) => s.name === writer) ?? null);
   const group = groups.get(focused) ?? null;
 
   // The run's shape can change under a focus — a workflow recompiles, a step
@@ -1860,7 +2124,9 @@ function FocusNote({
 
   const detail = variable
     ? `${variable.purpose ? `${variable.purpose} — ` : ""}${
-        variable.steps.length > 0 ? `read by ${variable.steps.join(", ")}` : "no step reads this"
+        variable.steps.length > 0
+          ? `read by ${variable.steps.join(", ")}`
+          : "no step reads this"
       }${variable.reason ? ` · ${variable.reason}` : ""}`
     : producer
       ? `${producer.deps.output_files} file(s), ${humanizeBytes(
@@ -1871,7 +2137,13 @@ function FocusNote({
         )} — read by ${group!.steps.join(", ")}`;
 
   return (
-    <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
+    <Stack
+      direction="row"
+      spacing={1}
+      alignItems="center"
+      flexWrap="wrap"
+      useFlexGap
+    >
       {variable ? (
         <EnvVarChip variable={variable} />
       ) : (
@@ -1946,7 +2218,9 @@ function litSteps(
 ): Set<string> {
   const key = envKeyOf(id);
   if (key !== null) {
-    return new Set(workflow.env.vars.find((variable) => variable.key === key)?.steps ?? []);
+    return new Set(
+      workflow.env.vars.find((variable) => variable.key === key)?.steps ?? [],
+    );
   }
   const group = envGroupOf(id);
   if (group !== null) {
@@ -2079,7 +2353,10 @@ function buildFlow(
           const reached = isDependencyNode(focused)
             ? litSteps(workflow, focused, groups)
             : dependencyClosure(workflow, focused);
-          return { id: focused, lit: (id: string) => id === focused || reached.has(id) };
+          return {
+            id: focused,
+            lit: (id: string) => id === focused || reached.has(id),
+          };
         })();
   // The same focus, said of what is drawn: a stack is lit when any step in it
   // is, and is the focused node when the focused step is one of its own.
@@ -2091,7 +2368,11 @@ function buildFlow(
   // Every edge between two drawn nodes, once. Edges inside a stack are the
   // file's own order and aren't drawn; two steps of one stack waiting on the
   // same step upstream are one wire.
-  const viewEdges: { from: string; to: string; kind: WorkflowView["edges"][number]["kind"] }[] = [];
+  const viewEdges: {
+    from: string;
+    to: string;
+    kind: WorkflowView["edges"][number]["kind"];
+  }[] = [];
   const seenEdges = new Set<string>();
   for (const edge of workflow.edges) {
     const from = nodeOf(edge.from);
@@ -2109,7 +2390,9 @@ function buildFlow(
     .map((e) => ({ source: e.from, target: e.to }));
 
   // One wire per drawn pair, for the dependency families too.
-  const unique = <T extends { source: string; target: string }>(list: T[]): T[] => {
+  const unique = <T extends { source: string; target: string }>(
+    list: T[],
+  ): T[] => {
     const seen = new Set<string>();
     return list.filter((e) => {
       const key = `${e.source}\u0000${e.target}`;
@@ -2123,7 +2406,9 @@ function buildFlow(
   // A variable nothing reads (a `.env` line no step uses) isn't drawn: it has
   // no edge to justify a node. The panel below the graph still lists it.
   const present = new Set(workflow.steps.map((s) => s.name));
-  const shown = showEnv ? workflow.env.vars.filter((v) => v.steps.length > 0) : [];
+  const shown = showEnv
+    ? workflow.env.vars.filter((v) => v.steps.length > 0)
+    : [];
   // Too many to draw one by one: fold them into their groups. The one being
   // looked at — picked from a group or from the search — still gets a node of
   // its own, so focusing it shows its wires rather than its group's.
@@ -2133,7 +2418,9 @@ function buildFlow(
   const envGroups = new Map<EnvGroup, EnvVar[]>();
   if (grouping) {
     for (const group of ENV_GROUPS) {
-      const members = shown.filter((v) => envGroupOfVariable(v) === group && v.key !== pinned);
+      const members = shown.filter(
+        (v) => envGroupOfVariable(v) === group && v.key !== pinned,
+      );
       if (members.length > 0) envGroups.set(group, members);
     }
   }
@@ -2143,7 +2430,10 @@ function buildFlow(
         // A variable's step list comes from the resolved run, so guard against
         // an edge into a node this view isn't drawing.
         .filter((step) => present.has(step))
-        .map((step) => ({ source: envNodeId(variable.key), target: nodeOf(step) })),
+        .map((step) => ({
+          source: envNodeId(variable.key),
+          target: nodeOf(step),
+        })),
     ),
   );
   const groupEdges = unique(
@@ -2151,18 +2441,26 @@ function buildFlow(
       members
         .flatMap((variable) => variable.steps)
         .filter((step) => present.has(step))
-        .map((step) => ({ source: envGroupNodeId(group), target: nodeOf(step) })),
+        .map((step) => ({
+          source: envGroupNodeId(group),
+          target: nodeOf(step),
+        })),
     ),
   );
 
   const inputs = showFiles ? [...groups.values()] : [];
   const inputEdges = unique(
     inputs.flatMap((group) =>
-      group.steps.map((step) => ({ source: inputNodeId(group.steps[0]), target: nodeOf(step) })),
+      group.steps.map((step) => ({
+        source: inputNodeId(group.steps[0]),
+        target: nodeOf(step),
+      })),
     ),
   );
   const producers = showFiles
-    ? workflow.steps.filter((step) => step.deps?.name && step.deps.outputs.length > 0)
+    ? workflow.steps.filter(
+        (step) => step.deps?.name && step.deps.outputs.length > 0,
+      )
     : [];
   const outputEdges = producers.map((step) => ({
     source: nodeOf(step.name),
@@ -2254,7 +2552,9 @@ function buildFlow(
       align: (id) => {
         const step = byName.get(membersOf(id)[0]);
         const unit = step?.cache_id?.slice(0, step.cache_id.lastIndexOf(":"));
-        return step?.wave_group && unit ? { group: step.wave_group, unit } : undefined;
+        return step?.wave_group && unit
+          ? { group: step.wave_group, unit }
+          : undefined;
       },
     },
   );
@@ -2289,7 +2589,9 @@ function buildFlow(
       inspect &&
       edge.kind === "needs" &&
       membersOf(edge.to).some((to) =>
-        (byName.get(to)?.cache?.blocked_by ?? []).some((from) => upstream.includes(from)),
+        (byName.get(to)?.cache?.blocked_by ?? []).some((from) =>
+          upstream.includes(from),
+        ),
       );
     const stroke = blocking
       ? theme.palette.error.main
@@ -2309,7 +2611,11 @@ function buildFlow(
       source: edge.from,
       target: edge.to,
       data: route(edge.from, edge.to),
-      label: blocking ? "blocks cache" : edge.kind === "needs" ? undefined : edge.kind,
+      label: blocking
+        ? "blocks cache"
+        : edge.kind === "needs"
+          ? undefined
+          : edge.kind,
       // react-flow's label is white-on-white in dark mode; these follow the
       // page instead.
       labelStyle: { fill: theme.palette.text.secondary, fontSize: 10 },
@@ -2362,26 +2668,37 @@ function buildFlow(
 
   for (const variable of variables) {
     const colour = envColour(variable, theme);
-    for (const edge of envEdges.filter((e) => e.source === envNodeId(variable.key))) {
+    for (const edge of envEdges.filter(
+      (e) => e.source === envNodeId(variable.key),
+    )) {
       edges.push(...dependencyEdge(edge.source, edge.target, colour));
     }
   }
   for (const [group, members] of envGroups) {
     const colour = envGroupColour(group, members, theme);
-    for (const edge of groupEdges.filter((e) => e.source === envGroupNodeId(group))) {
+    for (const edge of groupEdges.filter(
+      (e) => e.source === envGroupNodeId(group),
+    )) {
       edges.push(...dependencyEdge(edge.source, edge.target, colour));
     }
   }
   for (const edge of inputEdges) {
-    edges.push(...dependencyEdge(edge.source, edge.target, theme.palette.info.main));
+    edges.push(
+      ...dependencyEdge(edge.source, edge.target, theme.palette.info.main),
+    );
   }
   for (const step of producers) {
     edges.push(
-      ...dependencyEdge(nodeOf(step.name), outputNodeId(step.name), theme.palette.success.main, {
-        // A finished step's outputs are on disk; a running one's are being
-        // written as you watch.
-        animated: step.status === "running",
-      }),
+      ...dependencyEdge(
+        nodeOf(step.name),
+        outputNodeId(step.name),
+        theme.palette.success.main,
+        {
+          // A finished step's outputs are on disk; a running one's are being
+          // written as you watch.
+          animated: step.status === "running",
+        },
+      ),
     );
   }
 
@@ -2424,7 +2741,9 @@ function workflowStacks(
     for (const name of names) stacks.of.set(name, key);
     const top =
       [selected, chosen[key]].find((name) => name && names.includes(name)) ??
-      steps.find((s) => ["running", "processing", "restoring"].includes(s.status))?.name ??
+      steps.find((s) =>
+        ["running", "processing", "restoring"].includes(s.status),
+      )?.name ??
       steps.find((s) => s.status === "failed")?.name ??
       steps.find((s) => s.status === "pending")?.name ??
       names[names.length - 1];
@@ -2438,7 +2757,13 @@ function workflowStacks(
  * step underneath must not hide behind a successful one on top.
  */
 function stackStatus(steps: StepView[], top: StepView): StepStatus {
-  for (const status of ["failed", "running", "processing", "restoring", "stopped"] as StepStatus[]) {
+  for (const status of [
+    "failed",
+    "running",
+    "processing",
+    "restoring",
+    "stopped",
+  ] as StepStatus[]) {
     if (steps.some((s) => s.status === status)) return status;
   }
   return top.status;
@@ -2480,7 +2805,11 @@ function envColour(variable: EnvVar, theme: Theme): string {
 
 /** A group of variables' colour: its members' role, or red if any of them is
  *  a required variable nothing set. */
-function envGroupColour(group: EnvGroup, variables: EnvVar[], theme: Theme): string {
+function envGroupColour(
+  group: EnvGroup,
+  variables: EnvVar[],
+  theme: Theme,
+): string {
   if (variables.some(unsetProblem)) return theme.palette.error.main;
   if (group === "required") return theme.palette.warning.main;
   if (group === "optional") return theme.palette.info.main;
@@ -2525,7 +2854,12 @@ function nodeData(
   const envGroup = envGroupOf(id);
   if (envGroup !== null) {
     return {
-      label: <EnvGroupLabel group={envGroup} variables={view.envGroups.get(envGroup) ?? []} />,
+      label: (
+        <EnvGroupLabel
+          group={envGroup}
+          variables={view.envGroups.get(envGroup) ?? []}
+        />
+      ),
       status: "pending" as StepStatus,
     };
   }
@@ -2601,7 +2935,9 @@ function nodeStyle(
     overflow: "hidden",
     textAlign: "left" as const,
     opacity: focus.lit(id) ? 1 : DIMMED,
-    boxShadow: picked ? `0 0 0 3px ${theme.palette.secondary.main}55` : undefined,
+    boxShadow: picked
+      ? `0 0 0 3px ${theme.palette.secondary.main}55`
+      : undefined,
   };
 
   const stack = stackKeyOf(id);
@@ -2714,8 +3050,13 @@ function nodeStyle(
  * real information: those steps rebuild together. Keyed by the node id the
  * group takes, so focusing one can find its members without regrouping.
  */
-function inputGroups(workflow: WorkflowView): Map<string, { deps: TargetDeps; steps: string[] }> {
-  const byDeclaration = new Map<string, { deps: TargetDeps; steps: string[] }>();
+function inputGroups(
+  workflow: WorkflowView,
+): Map<string, { deps: TargetDeps; steps: string[] }> {
+  const byDeclaration = new Map<
+    string,
+    { deps: TargetDeps; steps: string[] }
+  >();
   for (const step of workflow.steps) {
     const deps = step.deps;
     if (!deps?.name || deps.inputs.length === 0) continue;
@@ -2726,11 +3067,22 @@ function inputGroups(workflow: WorkflowView): Map<string, { deps: TargetDeps; st
   }
   // Re-keyed by node id now that each group's first step — the id it takes —
   // is known. Insertion order is preserved, so the column doesn't reshuffle.
-  return new Map([...byDeclaration.values()].map((group) => [inputNodeId(group.steps[0]), group]));
+  return new Map(
+    [...byDeclaration.values()].map((group) => [
+      inputNodeId(group.steps[0]),
+      group,
+    ]),
+  );
 }
 
 /** A file set on the canvas: what it matches, and what that came to. */
-function FileNodeLabel({ deps, kind }: { deps: TargetDeps; kind: "reads" | "writes" }) {
+function FileNodeLabel({
+  deps,
+  kind,
+}: {
+  deps: TargetDeps;
+  kind: "reads" | "writes";
+}) {
   const patterns = kind === "reads" ? deps.inputs : deps.outputs;
   const count = kind === "reads" ? deps.input_files : deps.output_files;
   const bytes = kind === "reads" ? deps.input_bytes : deps.output_bytes;
@@ -2739,10 +3091,14 @@ function FileNodeLabel({ deps, kind }: { deps: TargetDeps; kind: "reads" | "writ
     <Box sx={{ textAlign: "left", minWidth: 0, flexGrow: 1 }}>
       <Typography
         variant="caption"
-        sx={{ display: "block", color: "text.secondary", ...oneLine(LINE.name) }}
+        sx={{
+          display: "block",
+          color: "text.secondary",
+          ...oneLine(LINE.name),
+        }}
       >
-        {kind === "reads" ? "reads" : "writes"} · {count} file{count === 1 ? "" : "s"} ·{" "}
-        {humanizeBytes(bytes)}
+        {kind === "reads" ? "reads" : "writes"} · {count} file
+        {count === 1 ? "" : "s"} · {humanizeBytes(bytes)}
       </Typography>
       <Typography
         variant="caption"
@@ -2762,16 +3118,17 @@ function FileNodeLabel({ deps, kind }: { deps: TargetDeps; kind: "reads" | "writ
 }
 
 /** What a role is called on a node, and what hovering it explains. */
-const ENV_ROLE: Record<"required" | "optional", { tag: string; why: string }> = {
-  required: {
-    tag: "required",
-    why: "required_env — the run refuses to start without it",
-  },
-  optional: {
-    tag: "optional",
-    why: "env — the workflow uses it; its value comes from .env and may be unset",
-  },
-};
+const ENV_ROLE: Record<"required" | "optional", { tag: string; why: string }> =
+  {
+    required: {
+      tag: "required",
+      why: "required_env — the run refuses to start without it",
+    },
+    optional: {
+      tag: "optional",
+      why: "env — the workflow uses it; its value comes from .env and may be unset",
+    },
+  };
 
 /**
  * A variable on the canvas: its name, and underneath it the value — with a
@@ -2783,20 +3140,25 @@ function EnvNodeLabel({ variable }: { variable: EnvVar }) {
   const role = envRole(variable);
   const colour = envColour(variable, theme);
   const Icon = role === "required" ? RequiredIcon : OptionalIcon;
-  const title = [
-    variable.key,
-    role && ENV_ROLE[role].why,
-    variable.purpose,
-  ]
+  const title = [variable.key, role && ENV_ROLE[role].why, variable.purpose]
     .filter(Boolean)
     .join(" — ");
   return (
-    <Box sx={{ fontFamily: monoFontStack, minWidth: 0, flexGrow: 1 }} title={title}>
-      <Box sx={{ display: "flex", alignItems: "center", gap: 0.5, minWidth: 0 }}>
+    <Box
+      sx={{ fontFamily: monoFontStack, minWidth: 0, flexGrow: 1 }}
+      title={title}
+    >
+      <Box
+        sx={{ display: "flex", alignItems: "center", gap: 0.5, minWidth: 0 }}
+      >
         {role && <Icon sx={{ fontSize: 12, color: colour, flexShrink: 0 }} />}
-        <Box sx={{ ...oneLine(LINE.name), fontWeight: 700, minWidth: 0 }}>{variable.key}</Box>
+        <Box sx={{ ...oneLine(LINE.name), fontWeight: 700, minWidth: 0 }}>
+          {variable.key}
+        </Box>
       </Box>
-      <Box sx={{ display: "flex", alignItems: "baseline", gap: 0.75, minWidth: 0 }}>
+      <Box
+        sx={{ display: "flex", alignItems: "baseline", gap: 0.75, minWidth: 0 }}
+      >
         <Box
           sx={{
             ...oneLine(LINE.name),
@@ -2832,7 +3194,13 @@ function EnvNodeLabel({ variable }: { variable: EnvVar }) {
  * A group of variables on the canvas: how many, of which kind, and the first
  * few names — enough to recognise the group without opening it.
  */
-function EnvGroupLabel({ group, variables }: { group: EnvGroup; variables: EnvVar[] }) {
+function EnvGroupLabel({
+  group,
+  variables,
+}: {
+  group: EnvGroup;
+  variables: EnvVar[];
+}) {
   const theme = useTheme();
   const colour = envGroupColour(group, variables, theme);
   const Icon = group === "required" ? RequiredIcon : OptionalIcon;
@@ -2844,12 +3212,18 @@ function EnvGroupLabel({ group, variables }: { group: EnvGroup; variables: EnvVa
         ENV_GROUP_INFO[group].why
       }. Click to search them.\n\n${variables.map((v) => v.key).join("\n")}`}
     >
-      <Box sx={{ display: "flex", alignItems: "center", gap: 0.5, minWidth: 0 }}>
-        {group !== "undeclared" && <Icon sx={{ fontSize: 12, color: colour, flexShrink: 0 }} />}
+      <Box
+        sx={{ display: "flex", alignItems: "center", gap: 0.5, minWidth: 0 }}
+      >
+        {group !== "undeclared" && (
+          <Icon sx={{ fontSize: 12, color: colour, flexShrink: 0 }} />
+        )}
         <Box sx={{ ...oneLine(LINE.name), fontWeight: 700, minWidth: 0 }}>
           {variables.length} {ENV_GROUP_INFO[group].label}
         </Box>
-        <SearchIcon sx={{ fontSize: 13, ml: "auto", opacity: 0.6, flexShrink: 0 }} />
+        <SearchIcon
+          sx={{ fontSize: 13, ml: "auto", opacity: 0.6, flexShrink: 0 }}
+        />
       </Box>
       <Box sx={{ ...oneLine(LINE.name), opacity: 0.75, minWidth: 0 }}>
         {unset > 0 ? `${unset} unset · ` : ""}
@@ -2885,7 +3259,14 @@ function StackNodeLabel({
   const stop = (event: React.SyntheticEvent) => event.stopPropagation();
   const index = steps.findIndex((s) => s.name === top.name);
   return (
-    <Box sx={{ display: "flex", flexDirection: "column", minWidth: 0, flexGrow: 1 }}>
+    <Box
+      sx={{
+        display: "flex",
+        flexDirection: "column",
+        minWidth: 0,
+        flexGrow: 1,
+      }}
+    >
       <Box
         component="button"
         type="button"
@@ -2919,7 +3300,9 @@ function StackNodeLabel({
         </Box>
         <ArrowDropDownIcon sx={{ fontSize: 16, ml: "auto" }} />
       </Box>
-      <Box sx={{ display: "flex", alignItems: "center", flexGrow: 1, minWidth: 0 }}>
+      <Box
+        sx={{ display: "flex", alignItems: "center", flexGrow: 1, minWidth: 0 }}
+      >
         <NodeLabel step={top} order={order} inspect={inspect} />
       </Box>
       <Menu
@@ -2943,8 +3326,17 @@ function StackNodeLabel({
               onPick(step.name);
             }}
           >
-            <Stack direction="row" spacing={1} alignItems="center" sx={{ minWidth: 0 }}>
-              <Typography variant="caption" color="text.secondary" sx={{ width: 16 }}>
+            <Stack
+              direction="row"
+              spacing={1}
+              alignItems="center"
+              sx={{ minWidth: 0 }}
+            >
+              <Typography
+                variant="caption"
+                color="text.secondary"
+                sx={{ width: 16 }}
+              >
                 {i + 1}
               </Typography>
               <StatusIcon status={step.status} />
@@ -2952,7 +3344,12 @@ function StackNodeLabel({
                 {step.name}
               </Typography>
               {step.description && (
-                <Typography variant="caption" color="text.secondary" noWrap sx={{ maxWidth: 260 }}>
+                <Typography
+                  variant="caption"
+                  color="text.secondary"
+                  noWrap
+                  sx={{ maxWidth: 260 }}
+                >
                   {step.description}
                 </Typography>
               )}
@@ -2978,8 +3375,8 @@ function VariableSearch({
 }) {
   const options = [...variables].sort(
     (a, b) =>
-      ENV_GROUPS.indexOf(envGroupOfVariable(a)) - ENV_GROUPS.indexOf(envGroupOfVariable(b)) ||
-      a.key.localeCompare(b.key),
+      ENV_GROUPS.indexOf(envGroupOfVariable(a)) -
+        ENV_GROUPS.indexOf(envGroupOfVariable(b)) || a.key.localeCompare(b.key),
   );
   return (
     <Autocomplete
@@ -2994,10 +3391,19 @@ function VariableSearch({
       renderOption={(props, v) => (
         <li {...props} key={v.key}>
           <Box sx={{ minWidth: 0 }}>
-            <Typography variant="body2" sx={{ fontFamily: monoFontStack }} noWrap>
+            <Typography
+              variant="body2"
+              sx={{ fontFamily: monoFontStack }}
+              noWrap
+            >
               {v.key}
             </Typography>
-            <Typography variant="caption" color="text.secondary" noWrap component="div">
+            <Typography
+              variant="caption"
+              color="text.secondary"
+              noWrap
+              component="div"
+            >
               {envValueText(v)}
             </Typography>
           </Box>
@@ -3017,7 +3423,11 @@ function VariableSearch({
           }}
         />
       )}
-      sx={{ width: 200, flexShrink: 0, "& .MuiInputBase-root": { py: 0, fontSize: 12 } }}
+      sx={{
+        width: 200,
+        flexShrink: 0,
+        "& .MuiInputBase-root": { py: 0, fontSize: 12 },
+      }}
     />
   );
 }
@@ -3047,11 +3457,21 @@ function EnvGroupNote({
   );
   return (
     <Stack spacing={1} sx={{ py: 0.5 }}>
-      <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
+      <Stack
+        direction="row"
+        spacing={1}
+        alignItems="center"
+        flexWrap="wrap"
+        useFlexGap
+      >
         <Typography variant="body2" sx={{ fontWeight: 600 }}>
           {variables.length} {ENV_GROUP_INFO[group].label} variables
         </Typography>
-        <Typography variant="caption" color="text.secondary" sx={{ flexGrow: 1 }}>
+        <Typography
+          variant="caption"
+          color="text.secondary"
+          sx={{ flexGrow: 1 }}
+        >
           {ENV_GROUP_INFO[group].why}. Click one to draw it on its own.
         </Typography>
         <TextField
@@ -3110,7 +3530,9 @@ function afterColor(status: StepStatus | string, theme: Theme): string {
     : theme.palette.info.main;
 }
 
-function stageColor(status: string): "success" | "error" | "warning" | "default" {
+function stageColor(
+  status: string,
+): "success" | "error" | "warning" | "default" {
   switch (status) {
     case "success":
       return "success";

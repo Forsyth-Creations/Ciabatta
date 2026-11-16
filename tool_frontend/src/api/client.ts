@@ -16,7 +16,9 @@ const TOKEN_STORAGE_KEY = "ciabatta-token";
 
 /** Resolve the API token once, at module load. */
 function resolveToken(): string {
-  const meta = document.querySelector<HTMLMetaElement>('meta[name="ciabatta-token"]');
+  const meta = document.querySelector<HTMLMetaElement>(
+    'meta[name="ciabatta-token"]',
+  );
   if (meta?.content) return meta.content;
 
   // Dev-server fallback: ?token=... wins and is remembered for later reloads.
@@ -77,7 +79,8 @@ async function errorPayload(
   response: Response,
 ): Promise<{ message: string; body: Record<string, unknown> | null }> {
   const text = await response.text().catch(() => "");
-  if (!text) return { message: `${response.status} ${response.statusText}`, body: null };
+  if (!text)
+    return { message: `${response.status} ${response.statusText}`, body: null };
   try {
     const parsed = JSON.parse(text) as Record<string, unknown>;
     return { message: (parsed.error as string) ?? text, body: parsed };
@@ -93,7 +96,9 @@ async function errorPayload(
  * Separate from `request` because that one parses JSON; these routes serve a
  * transcript that must arrive verbatim.
  */
-async function requestText(path: string): Promise<{ text: string; filename: string }> {
+async function requestText(
+  path: string,
+): Promise<{ text: string; filename: string }> {
   const response = await fetch(path, {
     headers: token ? { Authorization: `Bearer ${token}` } : {},
   });
@@ -102,7 +107,8 @@ async function requestText(path: string): Promise<{ text: string; filename: stri
     throw new ApiError(response.status, message, body);
   }
   const disposition = response.headers.get("Content-Disposition") ?? "";
-  const filename = /filename="([^"]+)"/.exec(disposition)?.[1] ?? "download.txt";
+  const filename =
+    /filename="([^"]+)"/.exec(disposition)?.[1] ?? "download.txt";
   return { text: await response.text(), filename };
 }
 
@@ -119,7 +125,9 @@ export const api = {
 
 /** Hand the browser a string as a downloaded file. */
 export function downloadText(filename: string, text: string) {
-  const url = URL.createObjectURL(new Blob([text], { type: "text/plain;charset=utf-8" }));
+  const url = URL.createObjectURL(
+    new Blob([text], { type: "text/plain;charset=utf-8" }),
+  );
   const link = document.createElement("a");
   link.href = url;
   link.download = filename;
@@ -135,7 +143,10 @@ export function downloadText(filename: string, text: string) {
  * `EventSource` can't set request headers, which is why the daemon's auth
  * middleware also accepts `?token=`. It only ever travels over loopback.
  */
-export function streamUrl(path: string, params: Record<string, string> = {}): string {
+export function streamUrl(
+  path: string,
+  params: Record<string, string> = {},
+): string {
   const url = new URL(path, window.location.origin);
   for (const [key, value] of Object.entries(params)) {
     url.searchParams.set(key, value);

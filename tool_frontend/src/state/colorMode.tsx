@@ -23,7 +23,8 @@ const ColorModeContext = createContext<ColorModeValue | undefined>(undefined);
 
 export function useColorMode(): ColorModeValue {
   const context = useContext(ColorModeContext);
-  if (!context) throw new Error("useColorMode must be used inside a ColorModeProvider");
+  if (!context)
+    throw new Error("useColorMode must be used inside a ColorModeProvider");
   return context;
 }
 
@@ -52,6 +53,8 @@ export function ColorModeProvider({
   );
 
   return (
-    <ColorModeContext.Provider value={value}>{children(mode)}</ColorModeContext.Provider>
+    <ColorModeContext.Provider value={value}>
+      {children(mode)}
+    </ColorModeContext.Provider>
   );
 }

@@ -1,0 +1,11 @@
+# The public website with hot reload, at http://localhost:5173 (Vite moves to
+# the next free port if that one is taken).
+
+description: Serve the public website with hot reload
+owner: Henry Forsyth
+requires:
+  - yarn
+steps:
+  - name: serve
+    run: yarn dev
+    description: Vite dev server for the site

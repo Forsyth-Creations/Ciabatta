@@ -68,7 +68,10 @@ export function Builds({ refreshKey }: { refreshKey: number }) {
             gridTemplateColumns: { xs: "1fr", lg: "320px 1fr" },
           }}
         >
-          <ChartCard title="Outcomes" sub={`All ${builds.length} reported builds`}>
+          <ChartCard
+            title="Outcomes"
+            sub={`All ${builds.length} reported builds`}
+          >
             <Outcomes builds={builds} />
           </ChartCard>
           <ChartCard
@@ -80,7 +83,10 @@ export function Builds({ refreshKey }: { refreshKey: number }) {
         </Box>
       </Section>
 
-      <Section title="History" sub="Newest first. Click one to open the flow it ran.">
+      <Section
+        title="History"
+        sub="Newest first. Click one to open the flow it ran."
+      >
         <TableContainer component={Card}>
           <Table size="small">
             <TableHead>
@@ -98,14 +104,20 @@ export function Builds({ refreshKey }: { refreshKey: number }) {
             <TableBody>
               {builds.length === 0 && (
                 <EmptyRow colSpan={8}>
-                  No builds reported yet. Any <Mono>ciabatta</Mono> run in a workspace whose{" "}
-                  <Mono>cache.remote</Mono> points here is recorded when it finishes.
+                  No builds reported yet. Any <Mono>ciabatta</Mono> run in a
+                  workspace whose <Mono>cache.remote</Mono> points here is
+                  recorded when it finishes.
                 </EmptyRow>
               )}
               {builds.map((b) => {
                 const key = `${b.project}/${b.id}`;
-                const ref = [b.branch, b.commit?.slice(0, 8)].filter(Boolean).join(" · ");
-                const who = [b.user, b.host].filter(Boolean).join("@") || b.reported_by || "";
+                const ref = [b.branch, b.commit?.slice(0, 8)]
+                  .filter(Boolean)
+                  .join(" · ");
+                const who =
+                  [b.user, b.host].filter(Boolean).join("@") ||
+                  b.reported_by ||
+                  "";
                 return (
                   <TableRow
                     key={key}
@@ -131,7 +143,11 @@ export function Builds({ refreshKey }: { refreshKey: number }) {
                     <TableCell>
                       {who}
                       {b.ci && (
-                        <Typography component="span" variant="body2" color="text.secondary">
+                        <Typography
+                          component="span"
+                          variant="body2"
+                          color="text.secondary"
+                        >
                           {" "}
                           · {b.ci}
                         </Typography>
@@ -139,11 +155,17 @@ export function Builds({ refreshKey }: { refreshKey: number }) {
                     </TableCell>
                     <TableCell align="right">
                       {b.step_count}{" "}
-                      <Typography component="span" variant="body2" color="text.secondary">
+                      <Typography
+                        component="span"
+                        variant="body2"
+                        color="text.secondary"
+                      >
                         · {b.reused} reused
                       </Typography>
                     </TableCell>
-                    <TableCell align="right">{duration(b.duration_ms)}</TableCell>
+                    <TableCell align="right">
+                      {duration(b.duration_ms)}
+                    </TableCell>
                   </TableRow>
                 );
               })}
@@ -167,14 +189,23 @@ function Outcomes({ builds }: { builds: BuildSummary[] }) {
   // the others are present.
   const order = ["success", "failed", "stopped", "skipped"];
   const color = (o: string) =>
-    o === "success" ? colors.success : o === "failed" ? colors.failed : colors.other;
+    o === "success"
+      ? colors.success
+      : o === "failed"
+        ? colors.failed
+        : colors.other;
   const data = [...tally.entries()]
     .sort((a, b) => {
       const ia = order.indexOf(a[0]);
       const ib = order.indexOf(b[0]);
       return (ia < 0 ? 99 : ia) - (ib < 0 ? 99 : ib);
     })
-    .map(([outcome, value]) => ({ id: outcome, label: outcome, value, color: color(outcome) }));
+    .map(([outcome, value]) => ({
+      id: outcome,
+      label: outcome,
+      value,
+      color: color(outcome),
+    }));
   return (
     <PieChart
       height={220}
@@ -191,7 +222,12 @@ function Outcomes({ builds }: { builds: BuildSummary[] }) {
             `${item.value} (${((item.value * 100) / builds.length).toFixed(0)}%)`,
         },
       ]}
-      sx={{ "& .MuiPieArc-root": { stroke: theme.palette.background.paper, strokeWidth: 2 } }}
+      sx={{
+        "& .MuiPieArc-root": {
+          stroke: theme.palette.background.paper,
+          strokeWidth: 2,
+        },
+      }}
       slotProps={{
         legend: {
           direction: "column",
@@ -219,9 +255,14 @@ function Reuse({ builds }: { builds: BuildSummary[] }) {
       grid={{ horizontal: true }}
       margin={{ top: 40, right: 12, bottom: 12, left: 40 }}
       sx={{
-        "& .MuiChartsAxis-line, & .MuiChartsAxis-tick": { stroke: theme.palette.divider },
+        "& .MuiChartsAxis-line, & .MuiChartsAxis-tick": {
+          stroke: theme.palette.divider,
+        },
         "& .MuiChartsAxis-tickLabel": { fill: theme.palette.text.secondary },
-        "& .MuiChartsGrid-line": { stroke: theme.palette.divider, strokeDasharray: "2 4" },
+        "& .MuiChartsGrid-line": {
+          stroke: theme.palette.divider,
+          strokeDasharray: "2 4",
+        },
       }}
       xAxis={[
         {
@@ -266,7 +307,13 @@ function Reuse({ builds }: { builds: BuildSummary[] }) {
 }
 
 /** A build, opened over the list: its flow up top, its steps below. */
-function BuildDialog({ id, onClose }: { id: string | null; onClose: () => void }) {
+function BuildDialog({
+  id,
+  onClose,
+}: {
+  id: string | null;
+  onClose: () => void;
+}) {
   return (
     <Dialog
       open={id !== null}
@@ -348,7 +395,10 @@ function BuildDetail({ id, onClose }: { id: string; onClose: () => void }) {
     ["took", duration(b.duration_ms)],
     ["steps", `${b.steps.length} · ${stepsReused} reused`],
     ["branch", b.branch && <Mono>{b.branch}</Mono>],
-    ["commit", b.commit && <Mono title={b.commit}>{b.commit.slice(0, 12)}</Mono>],
+    [
+      "commit",
+      b.commit && <Mono title={b.commit}>{b.commit.slice(0, 12)}</Mono>,
+    ],
     ["tag", b.tag && <Mono>{b.tag}</Mono>],
     ["build", b.build_number],
     ["by", [b.user, b.host].filter(Boolean).join("@") || b.reported_by],
@@ -385,7 +435,11 @@ function BuildDetail({ id, onClose }: { id: string; onClose: () => void }) {
           .filter(([, v]) => v)
           .map(([k, v]) => (
             <Typography key={k} variant="body2">
-              <Typography component="span" variant="body2" color="text.secondary">
+              <Typography
+                component="span"
+                variant="body2"
+                color="text.secondary"
+              >
                 {k}
               </Typography>{" "}
               {v}
@@ -393,7 +447,10 @@ function BuildDetail({ id, onClose }: { id: string; onClose: () => void }) {
           ))}
       </Box>
       {b.error && (
-        <Alert severity="error" sx={{ mx: 2.5, mt: 1.5, fontFamily: monoFontStack }}>
+        <Alert
+          severity="error"
+          sx={{ mx: 2.5, mt: 1.5, fontFamily: monoFontStack }}
+        >
           {b.error}
         </Alert>
       )}
@@ -415,7 +472,12 @@ function BuildDetail({ id, onClose }: { id: string; onClose: () => void }) {
         />
       </Box>
       <TableContainer
-        sx={{ flex: "1 1 40%", minHeight: 120, borderTop: 1, borderColor: "divider" }}
+        sx={{
+          flex: "1 1 40%",
+          minHeight: 120,
+          borderTop: 1,
+          borderColor: "divider",
+        }}
       >
         <Table size="small" stickyHeader>
           <TableHead>
@@ -430,10 +492,19 @@ function BuildDetail({ id, onClose }: { id: string; onClose: () => void }) {
           </TableHead>
           <TableBody>
             {b.steps.map((s) => (
-              <TableRow key={s.name} id={stepRowId(s.name)} hover selected={picked === s.name}>
+              <TableRow
+                key={s.name}
+                id={stepRowId(s.name)}
+                hover
+                selected={picked === s.name}
+              >
                 <TableCell>
                   <Mono>{s.name}</Mono>{" "}
-                  <Typography component="span" variant="caption" color="text.secondary">
+                  <Typography
+                    component="span"
+                    variant="caption"
+                    color="text.secondary"
+                  >
                     {s.workspace}
                   </Typography>
                 </TableCell>
@@ -443,14 +514,20 @@ function BuildDetail({ id, onClose }: { id: string; onClose: () => void }) {
                 <TableCell>
                   {s.cache}
                   {s.cache_source && (
-                    <Typography component="span" variant="body2" color="text.secondary">
+                    <Typography
+                      component="span"
+                      variant="body2"
+                      color="text.secondary"
+                    >
                       {" "}
                       · {s.cache_source}
                     </Typography>
                   )}
                 </TableCell>
                 <TableCell>
-                  <Mono title={s.cache_key ?? ""}>{(s.cache_key ?? "").slice(0, 12)}</Mono>
+                  <Mono title={s.cache_key ?? ""}>
+                    {(s.cache_key ?? "").slice(0, 12)}
+                  </Mono>
                 </TableCell>
                 <TableCell align="right">{duration(s.duration_ms)}</TableCell>
                 <TableCell sx={{ color: "text.secondary" }}>
@@ -476,7 +553,11 @@ const stepRowId = (name: string) => `step-row-${name}`;
  */
 function graphStep(s: Step): GraphStep {
   const reused = s.status === "reused";
-  const status = reused ? "success" : s.status === "not run" ? "pending" : s.status;
+  const status = reused
+    ? "success"
+    : s.status === "not run"
+      ? "pending"
+      : s.status;
   return {
     name: s.name,
     workspace: s.workspace,
@@ -484,6 +565,8 @@ function graphStep(s: Step): GraphStep {
     needs: s.needs,
     reused,
     recover: s.kind === "recover",
-    detail: [reused ? "from cache" : s.status, duration(s.duration_ms)].filter(Boolean).join(" · "),
+    detail: [reused ? "from cache" : s.status, duration(s.duration_ms)]
+      .filter(Boolean)
+      .join(" · "),
   };
 }

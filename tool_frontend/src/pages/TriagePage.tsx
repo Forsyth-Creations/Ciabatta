@@ -16,6 +16,10 @@
  *
  * Each line links back into its session's log at the place it was printed,
  * to be read with the lines around it.
+ *
+ * Reached from the Watch page (tick two sessions, press Triage) or from
+ * `ciabatta watch --triage`, rather than from a nav entry of its own: it's a
+ * view over watch sessions, not a separate tool.
  */
 
 import { useEffect, useMemo, useState } from "react";
@@ -38,6 +42,7 @@ import {
   Typography,
 } from "@mui/material";
 import { alpha, styled, useTheme } from "@mui/material/styles";
+import ArrowBackIcon from "@mui/icons-material/ArrowBack";
 import RefreshIcon from "@mui/icons-material/Refresh";
 import SwapHorizIcon from "@mui/icons-material/SwapHoriz";
 import { Link, useNavigate, useSearch } from "@tanstack/react-router";
@@ -66,6 +71,11 @@ export function TriagePage() {
       <PageHeader
         title="Triage"
         description="Compare two watch sessions. Lines are matched by their shape, with timestamps, numbers and ids ignored, so you can see what one log printed that the other didn't."
+        actions={
+          <Button component={Link} to="/watch" startIcon={<ArrowBackIcon />}>
+            Watch sessions
+          </Button>
+        }
       />
       <RequireProject>{() => <Triage />}</RequireProject>
     </>

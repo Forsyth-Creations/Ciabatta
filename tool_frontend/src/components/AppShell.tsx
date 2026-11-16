@@ -40,7 +40,6 @@ import { useTheme } from "@mui/material/styles";
 import AccountTreeIcon from "@mui/icons-material/AccountTree";
 import ArticleIcon from "@mui/icons-material/Article";
 import ChecklistIcon from "@mui/icons-material/Checklist";
-import CompareArrowsIcon from "@mui/icons-material/CompareArrows";
 import DarkModeIcon from "@mui/icons-material/DarkMode";
 import HubIcon from "@mui/icons-material/Hub";
 import InventoryIcon from "@mui/icons-material/Inventory2";
@@ -76,7 +75,6 @@ const NAV_ITEMS = [
   { to: "/readme", label: "README", icon: <ArticleIcon /> },
   { to: "/todo", label: "Todo", icon: <ChecklistIcon /> },
   { to: "/watch", label: "Watch", icon: <MonitorHeartIcon /> },
-  { to: "/triage", label: "Triage", icon: <CompareArrowsIcon /> },
   { to: "/workspace", label: "Workspace", icon: <AccountTreeIcon /> },
   { to: "/run", label: "Run", icon: <RocketLaunchIcon /> },
   { to: "/cache", label: "Cache", icon: <InventoryIcon /> },
@@ -312,5 +310,7 @@ type NavItem = { to: string; label: string; icon: ReactNode };
 function isActive(pathname: string, to: string): boolean {
   // The whole-workspace graph is reached from the Workspace page.
   if (to === "/workspace" && pathname === "/graph") return true;
+  // Triage is reached from the Watch page.
+  if (to === "/watch" && pathname === "/triage") return true;
   return pathname === to || pathname.startsWith(`${to}/`);
 }

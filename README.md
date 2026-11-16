@@ -2214,10 +2214,11 @@ Useful flags:
 ### Triage: what did one log say that the other didn't?
 
 Triage compares any two watch sessions — typically a run that worked and one
-that didn't — and sorts their lines into what only one printed. Open it from the
-**Triage** entry in the web app's sidebar (or **Triage two logs** on the Watch
-page), or with `ciabatta watch --triage 3 4`. With no ids it starts on the two
-newest sessions, the older one as A.
+that didn't — and sorts their lines into what only one printed. On the Watch
+page, tick two sessions and press **Triage**, or run `ciabatta watch --triage 3 4`.
+Either way you land on `/triage?a=3&b=4`, so a comparison can be bookmarked or
+shared. The older session is A. `--triage` with no ids starts on the two newest
+sessions, and the pickers at the top of the page change either side.
 
 A plain diff is useless here: no two runs print byte-identical lines. So triage
 matches lines by their *shape*. Timestamps (ISO, syslog, bare times), dates,

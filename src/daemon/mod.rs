@@ -340,8 +340,10 @@ impl Session {
     /// The web app URL for a page, carrying the project selection so the
     /// browser lands on the checkout the command was run in.
     pub fn page_url(&self, path: &str) -> String {
+        // A path may carry its own query (`/triage?a=1&b=2`).
+        let sep = if path.contains('?') { '&' } else { '?' };
         format!(
-            "{}/{}?project={}",
+            "{}/{}{sep}project={}",
             self.daemon.web_url.trim_end_matches('/'),
             path.trim_start_matches('/'),
             self.project.id

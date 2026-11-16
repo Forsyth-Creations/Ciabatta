@@ -244,7 +244,7 @@ artifacts are published from. For workflows it goes one level further out: the
 | `ciabatta configure auto` | Analyze the project and pick publishing workflows from an interactive checklist (Docker → ECR/Nexus, Rust binaries → crates.io / S3 / Nexus). |
 | `ciabatta tui` (alias `browse`) | Interactive registry browser — inspect registries and walk what has been published. |
 | `ciabatta analyze` | Build the project's dependency graph and open an interactive view. |
-| `ciabatta watch <command>` | Run a command and stream its logs into a live, searchable web view with bookmarks and notification triggers. `--list` to see running sessions, `--attach <ID>` to tail one, `--stop <ID>` to end it. |
+| `ciabatta watch <command>` | Run a command and stream its logs into a live, searchable web view with bookmarks and notification triggers. `--list` to see running sessions, `--attach <ID>` to tail one, `--stop <ID>` to end it, `--triage [A B]` to compare two. |
 | `ciabatta todo [TASK] [--global]` | Task list, scoped to the project you're in — or to the global list with `--global`. With a TASK, adds it and exits; without, opens the todo page. |
 | `ciabatta ai` | AI assistant — chat TUI plus a live architecture mind map. |
 | `ciabatta daemon <status\|stop\|restart\|logs>` | Inspect or control the background daemon. |
@@ -2171,6 +2171,7 @@ ciabatta watch --env-profile staging "npm run dev" # elect a profile first
 ciabatta watch --list            # every session the daemon is running
 ciabatta watch --attach 3        # tail session 3 (Ctrl-C only detaches)
 ciabatta watch --stop 3          # stop session 3
+ciabatta watch --triage 3 4      # compare two sessions' logs
 ```
 
 The command runs through your shell, so pipes, `&&`, and redirects work — quote
@@ -2207,7 +2208,36 @@ Useful flags:
 - `--stop ID` — stop a running session. Ctrl-C on `ciabatta watch` only
   detaches from it; the command keeps running in the daemon.
 - `--max-lines N` — cap the in-memory log buffer (default `200000`).
+- `--triage [A B]` — open triage on two sessions (see below).
 - `--no-open` — don't open the browser automatically.
+
+### Triage: what did one log say that the other didn't?
+
+Triage compares any two watch sessions — typically a run that worked and one
+that didn't — and sorts their lines into what only one printed. Open it from the
+**Triage** entry in the web app's sidebar (or **Triage two logs** on the Watch
+page), or with `ciabatta watch --triage 3 4`. With no ids it starts on the two
+newest sessions, the older one as A.
+
+A plain diff is useless here: no two runs print byte-identical lines. So triage
+matches lines by their *shape*. Timestamps (ISO, syslog, bare times), dates,
+UUIDs, IP addresses, `0x` addresses, hex ids and numbers are masked out, and
+case and whitespace are folded. `12:01:33 GET /user/42 in 35ms` and
+`12:04:10 GET /user/7 in 112ms` count as the same line. Each shape then lands
+in one of five tabs:
+
+| Tab | Means |
+|---|---|
+| **Only in A / Only in B** | One log printed it and the other printed nothing like it. Usually what you're looking for. |
+| **Reworded** | No exact match, but a close one on the other side, paired by fuzzy similarity (word-order-aware) and shown with the differing words highlighted: `connected to primary` vs `connected to replica`. The slider sets how alike a pair must be (default 75%). |
+| **Count changed** | In both, but at least twice as often in one: `retrying upstream` 2× vs 12×. |
+| **Shared** | In both, about as often. This is the noise triage sets aside. |
+
+Every line shows how often it occurred and links to where it was printed, so
+you can open the session's log at that line and read the lines around it. If a
+log has a prefix the built-in masks don't recognise, such as `[worker-3]`, cut it out with
+**Also ignore (regex)**. Sessions that are still running can be compared again
+to pick up newer output.
 
 ## CI variables
 
@@ -2287,7 +2317,8 @@ ciabatta watch make    # reuses the same daemon, opens /watch/<id>
 | `/dashboard` | The selected project at a glance: runs in progress, watch sessions, open todos, the cache, and its README. |
 | `/readme` | The selected project's `README.md`, rendered. |
 | `/todo` | Your personal task list (global, not per-project). |
-| `/watch` | Watch sessions; `/watch/<id>` is one session's live log. |
+| `/watch` | Watch sessions; `/watch/<id>` is one session's live log (`?line=N` opens it at line N). |
+| `/triage` | Compare two watch sessions' logs (`?a=<id>&b=<id>`). |
 | `/run` | Runs; `/run/<id>` is a live graph of one. |
 | `/analyze` | The dependency graph. |
 | `/ai` | The architecture mind map and background assistant jobs. |

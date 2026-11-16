@@ -14,6 +14,7 @@
 
 import {
   Box,
+  Button,
   Card,
   CardContent,
   Chip,
@@ -26,6 +27,7 @@ import DeleteOutlineIcon from "@mui/icons-material/DeleteOutline";
 import StopIcon from "@mui/icons-material/Stop";
 import { styled } from "@mui/material/styles";
 import { Link } from "@tanstack/react-router";
+import CompareArrowsIcon from "@mui/icons-material/CompareArrows";
 
 import { useCloseSession, useStopSession, useWatchSessions } from "../api/watch";
 import { ErrorNote, Loading, PageHeader, RequireProject } from "../components/Page";
@@ -55,6 +57,11 @@ export function WatchPage() {
       <PageHeader
         title="Watch"
         description="Live, searchable output from the commands the daemon is running. Sessions outlive the terminal that started them. Start one from a terminal with ciabatta watch <command>."
+        actions={
+          <Button component={Link} to="/triage" startIcon={<CompareArrowsIcon />} variant="outlined">
+            Triage two logs
+          </Button>
+        }
       />
       <RequireProject>{() => <SessionList />}</RequireProject>
     </>

@@ -351,7 +351,7 @@ pub enum Commands {
             allow_hyphen_values = true,
             // The other three modes act on sessions that already exist, so they
             // have no command of their own to take.
-            required_unless_present_any = ["stop", "attach", "list"]
+            required_unless_present_any = ["stop", "attach", "list", "triage"]
         )]
         command: Vec<String>,
 
@@ -392,6 +392,19 @@ pub enum Commands {
         /// List the sessions the daemon is running and exit.
         #[arg(long, conflicts_with_all = ["COMMAND", "stop", "attach"])]
         list: bool,
+
+        /// Open triage in the browser: compare two sessions' logs to find the
+        /// lines only one of them printed. Name the two sessions, or leave
+        /// them out to pick in the page (it starts on the newest two).
+        ///   ciabatta watch --triage
+        ///   ciabatta watch --triage 3 4
+        #[arg(
+            long,
+            value_name = "ID",
+            num_args = 0..=2,
+            conflicts_with_all = ["COMMAND", "stop", "attach", "list"]
+        )]
+        triage: Option<Vec<u64>>,
 
         /// Elect this env profile first, exactly as a run's `--env-profile`
         /// does: each workspace's `.ciabatta/.env.NAME` is copied into its

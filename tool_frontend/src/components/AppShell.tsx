@@ -40,6 +40,7 @@ import { useTheme } from "@mui/material/styles";
 import AccountTreeIcon from "@mui/icons-material/AccountTree";
 import ArticleIcon from "@mui/icons-material/Article";
 import ChecklistIcon from "@mui/icons-material/Checklist";
+import CompareArrowsIcon from "@mui/icons-material/CompareArrows";
 import DarkModeIcon from "@mui/icons-material/DarkMode";
 import HubIcon from "@mui/icons-material/Hub";
 import InventoryIcon from "@mui/icons-material/Inventory2";
@@ -75,6 +76,7 @@ const NAV_ITEMS = [
   { to: "/readme", label: "README", icon: <ArticleIcon /> },
   { to: "/todo", label: "Todo", icon: <ChecklistIcon /> },
   { to: "/watch", label: "Watch", icon: <MonitorHeartIcon /> },
+  { to: "/triage", label: "Triage", icon: <CompareArrowsIcon /> },
   { to: "/workspace", label: "Workspace", icon: <AccountTreeIcon /> },
   { to: "/run", label: "Run", icon: <RocketLaunchIcon /> },
   { to: "/cache", label: "Cache", icon: <InventoryIcon /> },

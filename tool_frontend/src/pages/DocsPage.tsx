@@ -215,6 +215,7 @@ const ENDPOINTS: EndpointGroup[] = [
       { method: "DELETE", path: "/api/watch/sessions/{id}", note: "Discard the session and its output." },
       { method: "POST", path: "/api/watch/sessions/{id}/bookmarks", note: "Pin a line. /bookmarks/delete removes one." },
       { method: "POST", path: "/api/watch/sessions/{id}/triggers", note: "Watch for a pattern. /triggers/delete removes one." },
+      { method: "GET", path: "/api/watch/triage", note: "Compare two sessions: a, b, threshold (0–1), ignore (regex). Groups lines by shape into only_a, only_b, similar and common." },
     ],
   },
   {
@@ -555,6 +556,7 @@ const COMMANDS: CommandGroup[] = [
           ["--list", "List the sessions the daemon is running."],
           ["--attach ID", "Follow an existing session by id."],
           ["--stop ID", "Actually stop one."],
+          ["--triage [A B]", "Open Triage on two sessions: the lines only one of them printed, matched by shape so timestamps and ids don't count. With no ids, it starts on the newest two."],
           ["--env-profile NAME", "Elect this env profile first, as a run's --env-profile does. Without it the watch uses the active profile, and the env files from the workspace you're in up to the root."],
         ],
       },

@@ -188,7 +188,7 @@ export function useTriage(
   b: number | undefined,
   threshold: number,
   ignore: string,
-  revision: number,
+  revision: number | string,
 ) {
   return useQuery({
     queryKey: ["watch", "triage", a, b, threshold, ignore, revision],

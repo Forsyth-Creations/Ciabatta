@@ -17,6 +17,11 @@
  * Each line links back into its session's log at the place it was printed,
  * to be read with the lines around it.
  *
+ * It's live: while either session is running, the comparison re-runs as new
+ * lines arrive, and any line shape that wasn't there when you started looking
+ * is marked NEW and floated to the top of its tab — so a fresh error in a
+ * running log shows up the moment it's printed.
+ *
  * Reached from the Watch page (tick two sessions, press Triage) or from
  * `ciabatta watch --triage`, rather than from a nav entry of its own: it's a
  * view over watch sessions, not a separate tool.
@@ -30,11 +35,13 @@ import {
   Button,
   Card,
   Chip,
+  FormControlLabel,
   IconButton,
   LinearProgress,
   MenuItem,
   Slider,
   Stack,
+  Switch,
   Tab,
   Tabs,
   TextField,
@@ -64,6 +71,34 @@ const PAGE = 200;
 const SEQ_LINKS = 6;
 
 type TabKey = "only_a" | "only_b" | "similar" | "changed" | "common";
+
+function inTab(g: TriageGroup, tab: TabKey): boolean {
+  if (tab === "changed") return g.kind === "common" && g.count_changed;
+  if (tab === "common") return g.kind === "common" && !g.count_changed;
+  return g.kind === tab;
+}
+
+/** A group's identity across comparisons: its kind and its two shapes. */
+function groupKey(g: TriageGroup): string {
+  return `${g.kind}\u0000${g.a?.template ?? ""}\u0000${g.b?.template ?? ""}`;
+}
+
+function occurrences(g: TriageGroup): number {
+  return (g.a?.count ?? 0) + (g.b?.count ?? 0);
+}
+
+/** What was on screen when you started looking: group → occurrences. */
+function snapshot(groups: TriageGroup[]): Map<string, number> {
+  return new Map(groups.map((g) => [groupKey(g), occurrences(g)]));
+}
+
+interface Row {
+  group: TriageGroup;
+  /** A shape that has appeared since the baseline. */
+  isNew: boolean;
+  /** Occurrences added since the baseline, for a shape that was already there. */
+  grown: number;
+}
 
 export function TriagePage() {
   return (
@@ -106,6 +141,8 @@ function Triage() {
   const [ignoreDraft, setIgnoreDraft] = useState("");
   const ignore = useDebounced(ignoreDraft, 400);
   const [revision, setRevision] = useState(0);
+  const [live, setLive] = useState(true);
+  const [liveRevision, setLiveRevision] = useState("");
   const [tab, setTab] = useState<TabKey>("only_a");
   const [filter, setFilter] = useState("");
   const [shown, setShown] = useState(PAGE);
@@ -123,27 +160,100 @@ function Triage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [list, a, b]);
 
-  const triage = useTriage(a, b, threshold, ignore, revision);
+  const triage = useTriage(a, b, threshold, ignore, `${revision}:${liveRevision}`);
   const report = triage.data;
+  // The report on screen is for the sessions and settings chosen now, not one
+  // kept on screen while the next loads.
+  const current =
+    !!report &&
+    !triage.isPlaceholderData &&
+    report.session_a.id === a &&
+    report.session_b.id === b;
 
-  useEffect(() => setShown(PAGE), [tab, filter, report]);
+  // Live: the session list already polls, and carries each session's line
+  // count, so a change there is the cue to compare again. Nothing is asked of
+  // the daemon while both sessions are quiet, and never while a comparison
+  // is still running.
+  const sessionA = list?.find((s) => s.id === a);
+  const sessionB = list?.find((s) => s.id === b);
+  const running = !!(sessionA?.running || sessionB?.running);
+  useEffect(() => {
+    if (!live || !current || triage.isFetching || !sessionA || !sessionB) return;
+    const stale =
+      sessionA.lines !== report.session_a.lines ||
+      sessionB.lines !== report.session_b.lines ||
+      sessionA.running !== report.session_a.running ||
+      sessionB.running !== report.session_b.running;
+    if (stale) {
+      setLiveRevision(
+        `${sessionA.lines}:${sessionB.lines}:${sessionA.running}:${sessionB.running}`,
+      );
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    live,
+    current,
+    report,
+    triage.isFetching,
+    sessionA?.lines,
+    sessionB?.lines,
+    sessionA?.running,
+    sessionB?.running,
+  ]);
+
+  // The baseline "new" is measured against: the first report for this pair
+  // and these settings, until you mark everything seen.
+  const combo = `${a}:${b}:${threshold}:${ignore}`;
+  const [baseline, setBaseline] = useState<{ combo: string; seen: Map<string, number> } | null>(
+    null,
+  );
+  useEffect(() => {
+    if (current && baseline?.combo !== combo) {
+      setBaseline({ combo, seen: snapshot(report.groups) });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [current, report, combo]);
+  const seen = baseline?.combo === combo ? baseline.seen : null;
+  const markSeen = () => report && setBaseline({ combo, seen: snapshot(report.groups) });
+
+  const annotate = (g: TriageGroup): Row => {
+    const before = seen?.get(groupKey(g));
+    return {
+      group: g,
+      isNew: !!seen && before === undefined,
+      grown: before === undefined ? 0 : Math.max(0, occurrences(g) - before),
+    };
+  };
+
+  // New shapes per tab, for the tab labels.
+  const newCounts = useMemo(() => {
+    const counts: Partial<Record<TabKey, number>> = {};
+    if (!report || !seen) return counts;
+    for (const g of report.groups) {
+      if (seen.has(groupKey(g))) continue;
+      const key: TabKey = g.kind === "common" ? (g.count_changed ? "changed" : "common") : g.kind;
+      counts[key] = (counts[key] ?? 0) + 1;
+    }
+    return counts;
+  }, [report, seen]);
+  const totalNew = Object.values(newCounts).reduce((sum, n) => sum + (n ?? 0), 0);
+
+  useEffect(() => setShown(PAGE), [tab, filter, a, b]);
 
   const groups = useMemo(() => {
     if (!report) return [];
-    const byTab = report.groups.filter((g) =>
-      tab === "changed"
-        ? g.kind === "common" && g.count_changed
-        : tab === "common"
-          ? g.kind === "common" && !g.count_changed
-          : g.kind === tab,
-    );
     const needle = filter.trim().toLowerCase();
-    if (!needle) return byTab;
     const has = (o: Occurrences | null) =>
       !!o &&
       (o.sample.toLowerCase().includes(needle) || o.template.toLowerCase().includes(needle));
-    return byTab.filter((g) => has(g.a) || has(g.b));
-  }, [report, tab, filter]);
+    const rows = report.groups
+      .filter((g) => inTab(g, tab) && (!needle || has(g.a) || has(g.b)))
+      .map(annotate);
+    // New first, then whatever has grown, each keeping the daemon's order.
+    const rank = (r: Row) => (r.isNew ? 0 : r.grown > 0 ? 1 : 2);
+    return rows.sort((x, y) => rank(x) - rank(y));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [report, tab, filter, seen]);
 
   if (sessions.isLoading) return <Loading label="Loading sessions…" />;
   if (sessions.error) return <ErrorNote error={sessions.error} />;
@@ -249,6 +359,24 @@ function Triage() {
             sx={{ flexGrow: 1 }}
             slotProps={{ input: { sx: { fontFamily: monoFontStack } } }}
           />
+          <Tooltip
+            title={
+              running
+                ? "Compare again whenever either session prints something new"
+                : "Both sessions have finished; there's nothing new to wait for"
+            }
+          >
+            <FormControlLabel
+              control={
+                <Switch
+                  checked={live && running}
+                  disabled={!running}
+                  onChange={(e) => setLive(e.target.checked)}
+                />
+              }
+              label="Live"
+            />
+          </Tooltip>
           <Button
             startIcon={<RefreshIcon />}
             onClick={() => setRevision((r) => r + 1)}
@@ -271,9 +399,24 @@ function Triage() {
             A has {summary.lines_a.toLocaleString()} lines in {summary.templates_a.toLocaleString()}{" "}
             shapes; B has {summary.lines_b.toLocaleString()} in{" "}
             {summary.templates_b.toLocaleString()}.
-            {(report.session_a.running || report.session_b.running) &&
-              " A session is still running — compare again to include its newer output."}
+            {running &&
+              (live
+                ? " Live: comparing again as new lines arrive."
+                : " A session is still running. Turn on Live, or compare again, to include its newer output.")}
           </Typography>
+          {totalNew > 0 && (
+            <Alert
+              severity="info"
+              action={
+                <Button color="inherit" size="small" onClick={markSeen}>
+                  Mark all seen
+                </Button>
+              }
+            >
+              {totalNew.toLocaleString()} line {totalNew === 1 ? "shape has" : "shapes have"}{" "}
+              appeared since you started comparing. They're marked NEW at the top of their tabs.
+            </Alert>
+          )}
           {summary.fuzzy_incomplete && (
             <Alert severity="warning">
               These logs are too varied to pair every reworded line in reasonable time, so some
@@ -297,6 +440,15 @@ function Triage() {
                       <span>
                         {t.label}
                         {t.count !== undefined && ` (${t.count.toLocaleString()})`}
+                        {!!newCounts[t.key] && (
+                          <Chip
+                            component="span"
+                            size="small"
+                            color="secondary"
+                            label={`+${newCounts[t.key]} new`}
+                            sx={{ ml: 1, height: 18, fontSize: 11 }}
+                          />
+                        )}
                       </span>
                     </Tooltip>
                   }
@@ -326,8 +478,8 @@ function Triage() {
             </Typography>
           ) : (
             <Stack spacing={1}>
-              {groups.slice(0, shown).map((group, i) => (
-                <GroupRow key={i} group={group} sessionA={a!} sessionB={b!} />
+              {groups.slice(0, shown).map((row) => (
+                <GroupRow key={groupKey(row.group)} row={row} sessionA={a!} sessionB={b!} />
               ))}
               {groups.length > shown && (
                 <Button onClick={() => setShown((n) => n + PAGE)} sx={{ alignSelf: "flex-start" }}>
@@ -412,14 +564,15 @@ const Mono = styled("div")({
 });
 
 function GroupRow({
-  group,
+  row,
   sessionA,
   sessionB,
 }: {
-  group: TriageGroup;
+  row: Row;
   sessionA: number;
   sessionB: number;
 }) {
+  const { group, isNew, grown } = row;
   const theme = useTheme();
   const colorA = theme.palette.warning.main;
   const colorB = theme.palette.info.main;
@@ -442,8 +595,30 @@ function GroupRow({
   const b = group.b;
 
   return (
-    <Card variant="outlined" sx={{ px: 2, py: 1.25 }}>
-      <Stack spacing={1}>
+    <Card
+      variant="outlined"
+      sx={{
+        px: 2,
+        py: 1.25,
+        position: "relative",
+        ...(isNew && {
+          borderColor: theme.palette.secondary.main,
+          bgcolor: alpha(theme.palette.secondary.main, 0.06),
+        }),
+      }}
+    >
+      {(isNew || grown > 0) && (
+        <Box sx={{ position: "absolute", top: 8, right: 12 }}>
+          {isNew ? (
+            <Chip size="small" color="secondary" label="NEW" sx={{ fontWeight: 700 }} />
+          ) : (
+            <Typography variant="caption" color="secondary">
+              +{grown.toLocaleString()} since
+            </Typography>
+          )}
+        </Box>
+      )}
+      <Stack spacing={1} sx={{ pr: isNew || grown > 0 ? 8 : 0 }}>
         {group.kind === "similar" && group.diff && a && b ? (
           <>
             <Typography variant="caption" color="text.secondary">

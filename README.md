@@ -2237,8 +2237,15 @@ in one of five tabs:
 Every line shows how often it occurred and links to where it was printed, so
 you can open the session's log at that line and read the lines around it. If a
 log has a prefix the built-in masks don't recognise, such as `[worker-3]`, cut it out with
-**Also ignore (regex)**. Sessions that are still running can be compared again
-to pick up newer output.
+**Also ignore (regex)**.
+
+Triage works on sessions that are still running. With **Live** on (the default
+while either session is running), the comparison re-runs whenever either
+session prints something, and only then. Any line shape that wasn't there when
+you started is marked **NEW**, moved to the top of its tab and counted on the
+tab, so a fresh error shows up as soon as it's printed. Shapes that are
+already listed show how many times they've occurred since. **Mark all seen**
+resets that starting point.
 
 ## CI variables
 

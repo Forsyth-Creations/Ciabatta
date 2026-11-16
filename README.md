@@ -235,7 +235,7 @@ artifacts are published from. For workflows it goes one level further out: the
 | `ciabatta cache <init\|status\|prune\|clean>`                          | Set up and inspect the build cache. `init [WORKFLOW]` proposes inputs and outputs from what's actually in the directory and writes them into that workflow's file.                                                                                                      |
 | `ciabatta remote-cache <init\|start\|login\|logout\|status\|add-user>` | Run or connect to a shared cache the whole team reads from.                                                                                                                                                                                                             |
 | `ciabatta executor <start\|list\|status\|stop\|remove>`                | Run workflows for other machines (`start`: announce this one, pair it with a remote cache, take offloaded jobs one at a time), and look after the executors the cache manages. See [Offloading](#offloading).                                                           |
-| `ciabatta offload <list\|logs\|fetch\|cancel\|executors>`              | Look after jobs started with `--offload`.                                                                                                                                                                                                                               |
+| `ciabatta offload <list\|logs\|fetch\|cancel>`                         | Look after jobs started with `--offload`.                                                                                                                                                                                                                               |
 | `ciabatta releases <list\|push\|pull>`                                 | Versioned releases: list what's been published, or push and pull one by hand. See [Releases](#releases).                                                                                                                                                                |
 | `ciabatta self update`                                                 | Update this binary from the remote cache that serves it, verified against the SHA-256 it advertises.                                                                                                                                                                    |
 | `ciabatta self lint`                                                   | Compile every workflow in the workspace and list each one that's broken — a file that won't parse, a `needs`/`depends_on`/`on_error` naming something that doesn't exist, a dependency cycle, a push to an undefined registry. Exits non-zero on any (`--json` for CI). |
@@ -279,7 +279,8 @@ ciabatta build` is `ciabatta build --only api`, as long as that package
   everything upstream is already built.
 - `-e, --env KEY=VALUE` — set a variable for every step. Repeatable.
 - `--offload` — run it on an oven executor instead, through the remote cache;
-  `--offload-to NAME` picks the executor. See [Offloading](#offloading).
+  `--offload-to NAME` picks the executor, `--offload-tag TAG` one tagged for
+  the job. See [Offloading](#offloading).
 - `--release VERSION` — the release a `kind: release-pull` step fetches (and a
   push publishes, unless the step names a version). Sets `CIABATTA_RELEASE`.
 - `--viz terminal|tui|gui` — how to show the run. Defaults to `CIABATTA_VIZ`,
@@ -1851,6 +1852,7 @@ ciabatta executor start
 # Anywhere that uses the same remote cache
 ciabatta build --offload
 ciabatta build --offload-to gpu-box -e MODE=release
+ciabatta build --offload-tag cuda,linux
 ```
 
 It goes through [the remote cache](#the-remote-cache), which queues the jobs,
@@ -1869,6 +1871,23 @@ Pairing takes a cache admin and is remembered across restarts.
 
 The page shows whether each executor is _Ready_, _Running job N_ (with a link to
 its log) or _Offline_, and when it was online over the last day, week or month.
+
+### Picking an executor by tag
+
+Open an executor on the page and give it **tags** for what it can do — `gpu`,
+`macos-signing`, `arch=arm64`. Then pick by need rather than by name:
+
+```bash
+ciabatta train --offload-tag gpu              # the first free executor tagged gpu
+ciabatta sign --offload-tag macos,signing     # one tagged with both
+```
+
+`--offload-tag` is repeatable or comma-separated, implies `--offload`, and the
+executor needs every tag given; with `--offload-to` too, that executor must
+have them. Tags are lower-case words without spaces, kept across restarts and
+re-pairing, and setting them takes a cache admin. A job no paired executor
+could take is refused straight away, listing each executor's tags; one whose
+matching executors are offline waits in the queue for them.
 
 | Flag               | What it does                                                                                      |
 | ------------------ | ------------------------------------------------------------------------------------------------- |

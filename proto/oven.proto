@@ -50,6 +50,9 @@ message JobSpec {
   bool force = 14;
   // Run only on the executor of this name; unset takes the first free one.
   optional string executor = 15;
+  // Run only on an executor tagged with every one of these ("gpu",
+  // "macos-signing"). With `executor` too, that executor has to have them.
+  repeated string tags = 16;
 }
 
 // Where a job has got to.
@@ -120,6 +123,14 @@ message ExecutorView {
   string added_at = 8;
   string added_by = 9;
   optional string last_seen = 10;
+  // What it's been tagged with on this cache, sorted: what a job's `tags`
+  // are matched against.
+  repeated string tags = 11;
+}
+
+// An executor's tags, replaced whole: PUT /api/oven/executors/{id}/tags.
+message ExecutorTags {
+  repeated string tags = 1;
 }
 
 // Whether an executor found on the network can be added.

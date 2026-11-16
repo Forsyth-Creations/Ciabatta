@@ -612,6 +612,10 @@ const COMMANDS: CommandGroup[] = [
             "Offload to the executor of this name rather than the first free one.",
           ],
           [
+            "--offload-tag TAG",
+            "Offload to an executor tagged TAG on the cache's Executors page. Repeatable or comma-separated: the executor needs every one.",
+          ],
+          [
             "--start-anyway",
             "Start now, even when the workspace already has as many runs going as workspace.max_concurrent_runs allows. The run takes no slot. Also works with --gui.",
           ],
@@ -811,8 +815,9 @@ const COMMANDS: CommandGroup[] = [
         ],
       },
       {
-        usage: "ciabatta remote-cache <init|start|login|status|add-user>",
-        note: "Run a shared cache for the team, or log this machine in to one. `status` reports when it was last used and saved to, and what is worth fixing. See the remote cache section.",
+        usage:
+          "ciabatta remote-cache <init|start|login|logout|status|add-user>",
+        note: "Run a shared cache for the team, or log this machine in to one (`logout [URL]` forgets the session again, or every session with no URL). `status` reports when it was last used and saved to, and what is worth fixing. See the remote cache section.",
         flags: [
           [
             "init --tls",
@@ -855,8 +860,17 @@ const COMMANDS: CommandGroup[] = [
             "--dir DIR",
             "Keep its identity and pairing here rather than ~/.ciabatta/oven.",
           ],
+          [
+            "--work-dir DIR",
+            "Where repositories and job checkouts go, if not <dir>/work.",
+          ],
           ["--port PORT", "The port it pairs on. Defaults to 8381."],
+          [
+            "--no-mdns",
+            "Don't announce it on the network; add it on the cache by address.",
+          ],
           ["--unpair", "Forget its cache and wait to be paired again."],
+          ["--insecure", "Don't verify the cache's TLS certificate."],
         ],
       },
       {
@@ -3860,6 +3874,16 @@ ciabatta.pause("Flip the maintenance switch, then continue")`}</Pre>
               still shows up in the log.
             </>,
             <>
+              <strong>Ctrl-C stops the whole run.</strong> Because each step has
+              its own process group, the terminal&apos;s Ctrl-C reaches only
+              ciabatta — so ciabatta catches it (and SIGTERM, and the SIGHUP of
+              a closed terminal) and stops the run the way the TUI&apos;s stop
+              key does: every running step&apos;s group is killed, dev servers
+              included, and nothing further starts. A second Ctrl-C while it is
+              unwinding exits at once. Nothing is left holding a port for the
+              next run to trip over.
+            </>,
+            <>
               <strong>Output arrives late, in bursts?</strong> A step&apos;s
               output is a pipe, not a terminal, and some programs buffer a pipe
               in big blocks. Ciabatta sets <C>PYTHONUNBUFFERED=1</C> for Python;
@@ -4522,7 +4546,8 @@ ciabatta executor start
 
 # Anywhere that uses the same remote cache
 ciabatta build --offload
-ciabatta build --offload-to gpu-box -e MODE=release`}</Pre>
+ciabatta build --offload-to gpu-box -e MODE=release
+ciabatta build --offload-tag cuda,linux`}</Pre>
         <P>
           It goes through the <a href="#remote-cache">remote cache</a>, which
           has to be set up first: the cache queues the jobs, hands each one to
@@ -4633,6 +4658,19 @@ ciabatta build --offload-to gpu-box -e MODE=release`}</Pre>
           with it. <C>--offload-to NAME</C> picks the executor; without it the
           first free one takes the job. Executors run one job at a time, so when
           they are all busy, the job waits in the queue.
+        </P>
+        <P>
+          To pick an executor by what it can do rather than by name, tag it:
+          open it on the cache&apos;s <strong>Executors</strong> page and add
+          tags — <C>gpu</C>, <C>macos-signing</C>, <C>arch=arm64</C>, whatever
+          your workflows need (adding them takes a cache admin). Then{" "}
+          <C>--offload-tag gpu</C> sends the job to the first free executor with
+          that tag. Give several, repeated or comma-separated, and it needs all
+          of them; with <C>--offload-to</C> as well, that executor has to have
+          them. Tags are lower-case words without spaces. A job no paired
+          executor could take is refused at once, with the tags each executor
+          has, rather than left in the queue; one whose executors are only
+          offline waits for them.
         </P>
         <Pre>{`$ ciabatta build --offload -e MODE=release
 Offloaded as job 12 — build at 3f9c2a1e04b7 on the first free executor

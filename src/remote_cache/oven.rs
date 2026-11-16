@@ -39,9 +39,9 @@ use serde_json::json;
 use super::server::{ApiError, ApiResult, AppState};
 use crate::oven::{
     Availability, Discovered, ExecutorHistory, ExecutorInfo, ExecutorList, ExecutorState,
-    ExecutorView, Finish, Heartbeat, HeartbeatReply, Job, JobList, JobSpec, JobState, LogBatch,
-    LogPage, OFFLINE_AFTER_SECONDS, OutputFile, POLL_SECONDS, PairRequest, PairWith, Paired, Poll,
-    StatusChange,
+    ExecutorTags, ExecutorView, Finish, Heartbeat, HeartbeatReply, Job, JobList, JobSpec, JobState,
+    LogBatch, LogPage, OFFLINE_AFTER_SECONDS, OutputFile, POLL_SECONDS, PairRequest, PairWith,
+    Paired, Poll, StatusChange,
 };
 
 /// How many jobs are kept, with their logs and outputs. Older ones go when a
@@ -53,6 +53,10 @@ const MAX_LOG_LINES: usize = 200_000;
 
 /// How many online/offline changes are kept per executor; older ones drop off.
 pub const MAX_HISTORY: usize = 200;
+
+/// How many tags an executor can have, and how long each can be.
+const MAX_TAGS: usize = 32;
+const MAX_TAG_CHARS: usize = 40;
 
 /// A running job whose executor has been silent this long is given up on.
 const ABANDONED_AFTER_SECONDS: i64 = 300;
@@ -71,6 +75,20 @@ struct PairedExecutor {
     added_at: String,
     #[serde(default)]
     added_by: String,
+    /// What a person tagged it with here, sorted and lower-case.
+    #[serde(default)]
+    tags: Vec<String>,
+}
+
+impl PairedExecutor {
+    /// Whether it may run `spec`: its name, if the job names one, and every
+    /// tag the job asks for.
+    fn suits(&self, spec: &JobSpec) -> bool {
+        spec.executor
+            .as_deref()
+            .is_none_or(|want| want.eq_ignore_ascii_case(&self.name))
+            && spec.tags.iter().all(|t| self.tags.contains(t))
+    }
 }
 
 /// What an executor last said, which isn't worth writing to disk.
@@ -283,6 +301,7 @@ impl Oven {
                     added_at: e.added_at.clone(),
                     added_by: e.added_by.clone(),
                     last_seen: live.last_seen.map(|at| at.to_rfc3339()),
+                    tags: e.tags.clone(),
                 }
             })
             .collect()
@@ -342,6 +361,13 @@ impl Oven {
     /// with it the old token.
     fn add(&self, info: &ExecutorInfo, address: &str, token: &str, by: &str) -> Result<()> {
         let mut inner = self.inner.lock().unwrap();
+        // Pairing again is a new token, not a new machine: its tags stay.
+        let tags = inner
+            .executors
+            .iter()
+            .find(|e| e.id == info.id)
+            .map(|e| e.tags.clone())
+            .unwrap_or_default();
         inner.executors.retain(|e| e.id != info.id);
         inner.executors.push(PairedExecutor {
             id: info.id.clone(),
@@ -352,9 +378,24 @@ impl Oven {
             platform: info.platform.clone(),
             added_at: crate::cache::store::now(),
             added_by: by.to_string(),
+            tags,
         });
         inner.executors.sort_by(|a, b| a.name.cmp(&b.name));
         self.save_executors(&inner)
+    }
+
+    /// Replace an executor's tags. `false` if it isn't paired. Queued jobs are
+    /// looked at again: one may have just become runnable.
+    fn set_tags(&self, id: &str, tags: Vec<String>) -> Result<bool> {
+        let mut inner = self.inner.lock().unwrap();
+        let Some(executor) = inner.executors.iter_mut().find(|e| e.id == id) else {
+            return Ok(false);
+        };
+        executor.tags = tags;
+        self.save_executors(&inner)?;
+        drop(inner);
+        self.work.notify_waiters();
+        Ok(true)
     }
 
     /// Forget an executor. Its token stops working at once.
@@ -399,6 +440,8 @@ impl Oven {
                     .to_string(),
             );
         }
+        let mut spec = spec;
+        spec.tags = normalize_tags(&spec.tags)?;
         if let Some(name) = &spec.executor
             && !inner
                 .executors
@@ -410,6 +453,11 @@ impl Oven {
                 "No executor is called '{name}'. This cache has: {}.",
                 names.join(", ")
             ));
+        }
+        // Queued for an executor that's offline is fine — it'll be back. For
+        // one that doesn't exist, it would wait for ever.
+        if !inner.executors.iter().any(|e| e.suits(&spec)) {
+            return Err(no_executor_has(&spec, &inner.executors));
         }
         if spec.workflows.is_empty() || spec.commit.len() < 7 || spec.repo.trim().is_empty() {
             return Err("A job needs a repository, a commit and a workflow.".to_string());
@@ -487,17 +535,11 @@ impl Oven {
             // (a restart): give it the same one back rather than a second.
             return inner.jobs.get(&current).cloned();
         }
+        let me = inner.executors.iter().find(|e| e.id == id)?;
         let next = inner
             .jobs
             .values()
-            .find(|j| {
-                j.state() == JobState::Queued
-                    && !j.cancel_requested
-                    && j.spec()
-                        .executor
-                        .as_deref()
-                        .is_none_or(|want| want.eq_ignore_ascii_case(name))
-            })
+            .find(|j| j.state() == JobState::Queued && !j.cancel_requested && me.suits(j.spec()))
             .map(|j| j.id)?;
         let job = inner.jobs.get_mut(&next)?;
         job.set_state(JobState::Running);
@@ -654,6 +696,67 @@ impl Oven {
     }
 }
 
+/// Tags as typed, checked: trimmed, lower-case, deduplicated and sorted. A
+/// tag is a word a person types after `--offload-tag`, so letters, digits and
+/// `-_.:+=/`, and no spaces.
+pub fn normalize_tags(raw: &[String]) -> Result<Vec<String>, String> {
+    let mut tags: Vec<String> = Vec::new();
+    for tag in raw {
+        let tag = tag.trim().to_lowercase();
+        if tag.is_empty() {
+            continue;
+        }
+        if tag.chars().count() > MAX_TAG_CHARS {
+            return Err(format!(
+                "'{tag}' is too long for a tag: at most {MAX_TAG_CHARS} characters."
+            ));
+        }
+        if !tag
+            .chars()
+            .all(|c| c.is_alphanumeric() || "-_.:+=/".contains(c))
+        {
+            return Err(format!(
+                "'{tag}' isn't a tag: use letters, digits and - _ . : + = / (no spaces)."
+            ));
+        }
+        if !tags.contains(&tag) {
+            tags.push(tag);
+        }
+    }
+    if tags.len() > MAX_TAGS {
+        return Err(format!("At most {MAX_TAGS} tags."));
+    }
+    tags.sort();
+    Ok(tags)
+}
+
+/// Why nothing paired here could take `spec`, and what would.
+fn no_executor_has(spec: &JobSpec, executors: &[PairedExecutor]) -> String {
+    let wanted = spec.tags.join(", ");
+    let listed = |e: &PairedExecutor| match e.tags.is_empty() {
+        true => format!("{} (no tags)", e.name),
+        false => format!("{} ({})", e.name, e.tags.join(", ")),
+    };
+    match &spec.executor {
+        Some(name) => {
+            let e = executors
+                .iter()
+                .find(|e| e.name.eq_ignore_ascii_case(name))
+                .map(listed)
+                .unwrap_or_else(|| name.clone());
+            format!(
+                "{e} doesn't have every tag this job needs ({wanted}). Tag it on the cache's \
+                 Executors page, or leave out --offload-to."
+            )
+        }
+        None => format!(
+            "No executor here is tagged with all of: {wanted}. This cache has: {}. Tag one on \
+             the cache's Executors page.",
+            executors.iter().map(listed).collect::<Vec<_>>().join("; ")
+        ),
+    }
+}
+
 fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     let tmp = path.with_extension("tmp");
     std::fs::write(&tmp, bytes).with_context(|| format!("Failed to write {}", tmp.display()))?;
@@ -759,6 +862,10 @@ pub fn routes() -> Router<AppState> {
             axum::routing::delete(remove_executor),
         )
         .route("/api/oven/executors/{id}/history", get(executor_history))
+        .route(
+            "/api/oven/executors/{id}/tags",
+            axum::routing::put(set_executor_tags),
+        )
         .route("/api/oven/executors/{id}/poll", post(poll))
         .route("/api/oven/executors/{id}/heartbeat", post(heartbeat))
         .route("/api/oven/jobs", get(list_jobs).post(submit_job))
@@ -971,6 +1078,34 @@ async fn executor_history(
         .history(&id)
         .map(Json)
         .ok_or_else(|| ApiError::not_found("No executor has that id."))
+}
+
+/// Tag an executor: what `--offload-tag` picks it by. Admins only, like
+/// pairing — a tag decides what code a machine is sent.
+async fn set_executor_tags(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    UrlPath(id): UrlPath<String>,
+    Json(payload): Json<ExecutorTags>,
+) -> ApiResult<Json<ExecutorTags>> {
+    let identity = state.identify_admin(&headers)?;
+    let tags = normalize_tags(&payload.tags).map_err(ApiError::bad_request)?;
+    let found = state
+        .oven
+        .set_tags(&id, tags.clone())
+        .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")))?;
+    if !found {
+        return Err(ApiError::not_found("No executor has that id."));
+    }
+    tracing::info!(
+        "{} tagged the executor {id}: {}",
+        identity.name,
+        match tags.is_empty() {
+            true => "(none)".to_string(),
+            false => tags.join(", "),
+        }
+    );
+    Ok(Json(ExecutorTags { tags }))
 }
 
 async fn remove_executor(
@@ -1280,6 +1415,79 @@ mod tests {
             oven.take("b", "mac").unwrap().executor.as_deref(),
             Some("mac")
         );
+    }
+
+    fn tagged(executor: Option<&str>, tags: &[&str]) -> JobSpec {
+        JobSpec {
+            tags: tags.iter().map(|t| t.to_string()).collect(),
+            ..spec(executor)
+        }
+    }
+
+    #[test]
+    fn a_tagged_job_goes_only_to_an_executor_with_every_tag() {
+        let (_dir, oven) = oven();
+        oven.add(&info("a", "box"), "http://x:1", "t", "admin")
+            .unwrap();
+        oven.add(&info("b", "gpu"), "http://y:1", "u", "admin")
+            .unwrap();
+        oven.set_tags("a", vec!["linux".into()]).unwrap();
+        oven.set_tags("b", vec!["cuda".into(), "linux".into()])
+            .unwrap();
+
+        // Tags are matched as the cache stores them: lower-case.
+        let job = oven.submit(tagged(None, &["CUDA", "linux"]), "me").unwrap();
+        assert_eq!(job.spec().tags, vec!["cuda", "linux"]);
+        assert!(oven.take("a", "box").is_none());
+        assert_eq!(oven.take("b", "gpu").unwrap().id, job.id);
+
+        // Any executor with the tag will do; one without never gets it.
+        let job = oven.submit(tagged(None, &["linux"]), "me").unwrap();
+        assert_eq!(oven.take("a", "box").unwrap().id, job.id);
+    }
+
+    #[test]
+    fn a_job_nothing_could_run_is_refused_with_what_there_is() {
+        let (_dir, oven) = oven();
+        oven.add(&info("a", "box"), "http://x:1", "t", "admin")
+            .unwrap();
+        oven.set_tags("a", vec!["linux".into()]).unwrap();
+        let why = oven.submit(tagged(None, &["cuda"]), "me").unwrap_err();
+        assert!(why.contains("cuda") && why.contains("box (linux)"), "{why}");
+        // Naming an executor and a tag it lacks is refused too.
+        let why = oven
+            .submit(tagged(Some("box"), &["cuda"]), "me")
+            .unwrap_err();
+        assert!(why.contains("box (linux)"), "{why}");
+        assert!(oven.submit(tagged(Some("box"), &["linux"]), "me").is_ok());
+        assert!(oven.submit(tagged(None, &["no spaces"]), "me").is_err());
+    }
+
+    #[test]
+    fn tags_survive_pairing_again_and_a_restart() {
+        let (dir, oven) = oven();
+        oven.add(&info("a", "box"), "http://x:1", "t", "admin")
+            .unwrap();
+        oven.set_tags("a", vec!["gpu".into()]).unwrap();
+        oven.add(&info("a", "box"), "http://x:1", "new", "admin")
+            .unwrap();
+        assert_eq!(oven.executors()[0].tags, vec!["gpu"]);
+        drop(oven);
+        let oven = Oven::open(&dir).unwrap();
+        assert_eq!(oven.executors()[0].tags, vec!["gpu"]);
+        assert!(!oven.set_tags("nobody", vec![]).unwrap());
+    }
+
+    #[test]
+    fn tags_are_tidied() {
+        let tags =
+            |raw: &[&str]| normalize_tags(&raw.iter().map(|t| t.to_string()).collect::<Vec<_>>());
+        assert_eq!(
+            tags(&[" GPU ", "gpu", "", "arch=arm64"]).unwrap(),
+            vec!["arch=arm64", "gpu"]
+        );
+        assert!(tags(&["two words"]).is_err());
+        assert!(tags(&[&"x".repeat(41)]).is_err());
     }
 
     #[test]

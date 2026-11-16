@@ -88,6 +88,8 @@ pub struct Request<'a> {
     pub custom_args: &'a [String],
     pub cwd: &'a Path,
     pub executor: Option<String>,
+    /// Tags the executor must have, from `--offload-tag`.
+    pub tags: Vec<String>,
 }
 
 fn git(dir: &Path, args: &[&str]) -> Result<String> {
@@ -215,9 +217,33 @@ pub async fn run(request: Request<'_>) -> Result<()> {
         args: request.custom_args.to_vec(),
         force: args.force,
         executor: request.executor,
+        tags: request.tags,
     };
 
     let job: Job = remote.client.post_json("/api/oven/jobs", &spec).await?;
+    // A cache from before tags drops a field it doesn't know, and would run
+    // the job on whatever is free. Don't let it.
+    if !spec.tags.is_empty() && job.spec().tags.is_empty() {
+        let _ = remote
+            .client
+            .post_json::<_, Job>(
+                &format!("/api/oven/jobs/{}/cancel", job.id),
+                &serde_json::json!({}),
+            )
+            .await;
+        bail!(
+            "{} doesn't know about executor tags, so it can't pick an executor by --offload-tag \
+             (job {} was cancelled). Update the remote cache, or use --offload-to.",
+            remote.url,
+            job.id
+        );
+    }
+    let target = match (&spec.executor, spec.tags.is_empty()) {
+        (Some(name), true) => name.clone(),
+        (Some(name), false) => format!("{name} [{}]", spec.tags.join(", ")),
+        (None, true) => "the first free executor".to_string(),
+        (None, false) => format!("the first free executor tagged {}", spec.tags.join(", ")),
+    };
     use owo_colors::OwoColorize;
     println!(
         "{} job {} — {} at {} on {}",
@@ -225,9 +251,7 @@ pub async fn run(request: Request<'_>) -> Result<()> {
         job.id.to_string().bold(),
         spec.workflows.join(" "),
         &spec.commit[..12.min(spec.commit.len())],
-        spec.executor
-            .as_deref()
-            .unwrap_or("the first free executor"),
+        target,
     );
     println!(
         "{}",

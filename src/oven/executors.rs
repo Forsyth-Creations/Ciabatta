@@ -113,8 +113,12 @@ pub async fn list(cwd: &Path, all: bool) -> Result<()> {
             .and_then(|h| h.changes.last().and_then(|c| ago(&c.at)))
             .map(|d| format!("for {d}"))
             .unwrap_or_default();
+        let tags = match e.tags.is_empty() {
+            true => String::new(),
+            false => format!("  [{}]", e.tags.join(", ")),
+        };
         println!(
-            "{:<20}  {:<16}  {:<14}  {}  {}",
+            "{:<20}  {:<16}  {:<14}  {}  {}{tags}",
             e.name,
             state_word(e),
             since,
@@ -158,6 +162,9 @@ pub async fn status(cwd: &Path, name: &str) -> Result<()> {
     println!("  id            {}", e.id);
     println!("  address       {}", e.address);
     println!("  platform      {} · ciabatta {}", e.platform, e.version);
+    if !e.tags.is_empty() {
+        println!("  tags          {}", e.tags.join(", "));
+    }
     if let Some(seen) = e.last_seen.as_deref().and_then(ago) {
         println!("  last seen     {seen} ago");
     }

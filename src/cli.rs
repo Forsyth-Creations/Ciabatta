@@ -1148,6 +1148,18 @@ pub struct WorkflowArgs {
     #[arg(long = "offload-to", value_name = "EXECUTOR")]
     pub offload_to: Option<String>,
 
+    /// Offload to an executor tagged with this, as tagged on the cache's
+    /// Executors page. Repeatable, or comma-separated: the executor needs
+    /// every one. Implies --offload; with --offload-to, that executor must
+    /// have them.
+    #[arg(
+        long = "offload-tag",
+        value_name = "TAG",
+        value_delimiter = ',',
+        action = clap::ArgAction::Append
+    )]
+    pub offload_tags: Vec<String>,
+
     /// How many steps may run at once. Steps whose dependencies are met run
     /// side by side; `-j 1` runs them one at a time, as ciabatta used to.
     /// Defaults to `CIABATTA_JOBS`, then to the number of CPUs.

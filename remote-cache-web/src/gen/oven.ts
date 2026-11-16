@@ -81,6 +81,11 @@ export interface JobSpec {
    * Run only on the executor of this name; unset takes the first free one.
    */
   executor?: string | null;
+  /**
+   * Run only on an executor tagged with every one of these ("gpu",
+   * "macos-signing"). With `executor` too, that executor has to have them.
+   */
+  tags: string[];
 }
 
 /**
@@ -159,6 +164,18 @@ export interface ExecutorView {
   added_at: string;
   added_by: string;
   last_seen?: string | null;
+  /**
+   * What it's been tagged with on this cache, sorted: what a job's `tags`
+   * are matched against.
+   */
+  tags: string[];
+}
+
+/**
+ * An executor's tags, replaced whole: PUT /api/oven/executors/{id}/tags.
+ */
+export interface ExecutorTags {
+  tags: string[];
 }
 
 /**

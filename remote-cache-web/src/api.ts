@@ -321,6 +321,7 @@ export type {
   ExecutorHistory,
   ExecutorList,
   ExecutorState,
+  ExecutorTags,
   ExecutorView,
   Job,
   JobList,

@@ -6,6 +6,7 @@ import LinkIcon from "@mui/icons-material/Link";
 import WifiTetheringIcon from "@mui/icons-material/WifiTethering";
 import {
   Alert,
+  Autocomplete,
   Box,
   Button,
   Card,
@@ -38,6 +39,7 @@ import {
   type Discovered,
   type ExecutorHistory,
   type ExecutorList,
+  type ExecutorTags,
   type ExecutorView,
   type Job,
   type JobList,
@@ -161,13 +163,14 @@ export function Executors({ refreshKey }: { refreshKey: number }) {
                 <TableCell>Name</TableCell>
                 <TableCell>Status</TableCell>
                 <TableCell>Platform</TableCell>
+                <TableCell>Tags</TableCell>
                 <TableCell>Added</TableCell>
                 <TableCell />
               </TableRow>
             </TableHead>
             <TableBody>
               {executors.data.executors.length === 0 && (
-                <EmptyRow colSpan={5}>No executors are paired yet.</EmptyRow>
+                <EmptyRow colSpan={6}>No executors are paired yet.</EmptyRow>
               )}
               {executors.data.executors.map((e) => (
                 <TableRow
@@ -184,6 +187,9 @@ export function Executors({ refreshKey }: { refreshKey: number }) {
                   </TableCell>
                   <TableCell sx={{ color: "text.secondary" }}>
                     {e.platform} · {e.version}
+                  </TableCell>
+                  <TableCell>
+                    <TagChips tags={e.tags ?? []} empty="—" />
                   </TableCell>
                   <TableCell sx={{ color: "text.secondary" }}>
                     <When at={e.added_at} />
@@ -352,7 +358,18 @@ export function Executors({ refreshKey }: { refreshKey: number }) {
                     </Mono>
                   </TableCell>
                   <TableCell>
-                    {j.executor ?? j.spec?.executor ?? "any"}
+                    <Box
+                      sx={{
+                        display: "flex",
+                        alignItems: "center",
+                        gap: 0.75,
+                        flexWrap: "wrap",
+                      }}
+                    >
+                      {j.executor ?? j.spec?.executor ?? "any"}
+                      {/* Once it's running, where it ran says enough. */}
+                      {!j.executor && <TagChips tags={j.spec?.tags ?? []} />}
+                    </Box>
                   </TableCell>
                   <TableCell sx={{ color: "text.secondary" }}>
                     {j.requested_by}
@@ -416,8 +433,12 @@ export function Executors({ refreshKey }: { refreshKey: number }) {
             executors.data.executors.find((e) => e.id === inspecting) ?? null
           }
           tick={tick}
+          known={[
+            ...new Set(executors.data.executors.flatMap((e) => e.tags ?? [])),
+          ].sort()}
           onClose={() => setInspecting(null)}
           onJob={setViewing}
+          onTagged={executors.reload}
         />
       )}
 
@@ -603,13 +624,18 @@ function spans(history: ExecutorHistory, start: number, now: number): Span[] {
 function ExecutorDialog({
   executor,
   tick,
+  known,
   onClose,
   onJob,
+  onTagged,
 }: {
   executor: ExecutorView | null;
   tick: number;
+  /** Every tag in use on this cache, to suggest. */
+  known: string[];
   onClose: () => void;
   onJob: (job: number) => void;
+  onTagged: () => void;
 }) {
   const [range, setRange] = useState<Range>("24h");
   const id = executor?.id;
@@ -657,6 +683,7 @@ function ExecutorDialog({
         <Box sx={{ mb: 2 }}>
           <ExecutorStatus executor={executor} onJob={onJob} />
         </Box>
+        <TagEditor executor={executor} known={known} onSaved={onTagged} />
         {history.error && (
           <Alert severity="error" sx={{ mb: 2 }}>
             {history.error}
@@ -881,6 +908,150 @@ function PairDialog({
         </DialogActions>
       </Box>
     </Dialog>
+  );
+}
+
+/** Tags as small chips; `empty` in their place when there are none. */
+function TagChips({ tags, empty }: { tags: string[]; empty?: string }) {
+  if (tags.length === 0)
+    return empty ? (
+      <Typography component="span" color="text.disabled">
+        {empty}
+      </Typography>
+    ) : null;
+  return (
+    <Box sx={{ display: "flex", gap: 0.5, flexWrap: "wrap" }}>
+      {tags.map((t) => (
+        <Chip
+          key={t}
+          size="small"
+          variant="outlined"
+          label={t}
+          sx={{ height: 20, fontFamily: monoFontStack, fontSize: "0.75rem" }}
+        />
+      ))}
+    </Box>
+  );
+}
+
+/** Same rule as the cache's: lower-case, no spaces, no repeats, sorted. */
+function tidy(tags: string[]): string[] {
+  return [
+    ...new Set(
+      tags.flatMap((t) => t.split(/[\s,]+/)).map((t) => t.trim().toLowerCase()),
+    ),
+  ]
+    .filter(Boolean)
+    .sort();
+}
+
+/**
+ * An executor's tags: shown, and edited in place. While editing, the page's
+ * refresh doesn't touch the draft.
+ */
+function TagEditor({
+  executor,
+  known,
+  onSaved,
+}: {
+  executor: ExecutorView;
+  known: string[];
+  onSaved: () => void;
+}) {
+  // A cache from before tags doesn't send them.
+  const tags = executor.tags ?? [];
+  const [draft, setDraft] = useState<string[] | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const save = async () => {
+    if (!draft) return;
+    setSaving(true);
+    try {
+      const body: ExecutorTags = { tags: tidy(draft) };
+      await api<ExecutorTags>(
+        `/api/oven/executors/${encodeURIComponent(executor.id)}/tags`,
+        { method: "PUT", body: JSON.stringify(body) },
+      );
+      setDraft(null);
+      setError(null);
+      onSaved();
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <Box sx={{ mb: 3 }}>
+      <Typography sx={{ fontWeight: 600, mb: 0.5 }}>Tags</Typography>
+      {error && (
+        <Alert severity="error" sx={{ mb: 1 }} onClose={() => setError(null)}>
+          {error}
+        </Alert>
+      )}
+      {draft === null ? (
+        <Box
+          sx={{
+            display: "flex",
+            alignItems: "center",
+            gap: 1.5,
+            flexWrap: "wrap",
+          }}
+        >
+          <TagChips tags={tags} empty="None yet." />
+          <Button size="small" onClick={() => setDraft(tags)}>
+            {tags.length ? "Edit" : "Add tags"}
+          </Button>
+        </Box>
+      ) : (
+        <Box
+          component="form"
+          sx={{
+            display: "flex",
+            alignItems: "flex-start",
+            gap: 1,
+            flexWrap: "wrap",
+          }}
+          onSubmit={(event) => {
+            event.preventDefault();
+            void save();
+          }}
+        >
+          <Autocomplete
+            multiple
+            freeSolo
+            autoSelect
+            size="small"
+            sx={{ flex: 1, minWidth: 260 }}
+            options={known.filter((t) => !draft.includes(t))}
+            value={draft}
+            onChange={(_, value) => setDraft(tidy(value))}
+            renderInput={(params) => (
+              <TextField
+                {...params}
+                autoFocus
+                placeholder={
+                  draft.length ? "" : "gpu, macos-signing, arch=arm64"
+                }
+                helperText="Enter after each. Lower-case, no spaces."
+              />
+            )}
+          />
+          <Button type="submit" variant="contained" disabled={saving}>
+            Save
+          </Button>
+          <Button onClick={() => setDraft(null)} disabled={saving}>
+            Cancel
+          </Button>
+        </Box>
+      )}
+      <Typography variant="caption" color="text.secondary">
+        <Mono>--offload-tag {tags[0] ?? "TAG"}</Mono> sends a job only to an
+        executor with that tag. Give several, and it needs them all.
+      </Typography>
+    </Box>
   );
 }
 

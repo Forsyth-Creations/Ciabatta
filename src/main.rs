@@ -513,13 +513,14 @@ async fn cmd_workflow(
 
     // Somewhere else entirely: the executor compiles the graph and checks the
     // environment itself, against its own checkout and its own variables.
-    if args.offload || args.offload_to.is_some() {
+    if args.offload || args.offload_to.is_some() || !args.offload_tags.is_empty() {
         return oven::offload::run(oven::offload::Request {
             workflows: &workflows,
             args: &args,
             custom_args,
             cwd: &cwd,
             executor: args.offload_to.clone(),
+            tags: args.offload_tags.clone(),
         })
         .await;
     }

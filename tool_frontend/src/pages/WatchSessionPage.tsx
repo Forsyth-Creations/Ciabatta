@@ -42,7 +42,11 @@ import NotificationsActiveIcon from "@mui/icons-material/NotificationsActive";
 import ScheduleIcon from "@mui/icons-material/Schedule";
 import StopIcon from "@mui/icons-material/Stop";
 import VerticalAlignBottomIcon from "@mui/icons-material/VerticalAlignBottom";
-import { Link, useParams } from "@tanstack/react-router";
+import {
+  Link,
+  useParams,
+  useSearch as useRouteSearch,
+} from "@tanstack/react-router";
 import { useMutation } from "@tanstack/react-query";
 import { useVirtualizer } from "@tanstack/react-virtual";
 
@@ -198,15 +202,29 @@ export function WatchSessionPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [search.data]);
 
+  /** Scroll to line `seq` and point it out for a moment. */
+  const pointAt = (seq: number) => {
+    showLine(seq);
+    setFlash(seq);
+    window.setTimeout(() => setFlash((at) => (at === seq ? null : at)), 1600);
+  };
+
   const jumpToBookmark = (mark: Bookmark) => {
     setSidebar(false);
-    showLine(mark.seq);
-    setFlash(mark.seq);
-    window.setTimeout(
-      () => setFlash((seq) => (seq === mark.seq ? null : seq)),
-      1600,
-    );
+    pointAt(mark.seq);
   };
+
+  // `?line=N`, from a triage link: go there once the line has streamed in,
+  // and only once, so following new output afterwards still works.
+  const { line: linkedLine } = useRouteSearch({ from: "/watch/$sessionId" });
+  const landed = useRef<number | null>(null);
+  useEffect(() => {
+    if (linkedLine === undefined || landed.current === linkedLine) return;
+    if (indexOfSeq(rows, linkedLine) === -1) return;
+    landed.current = linkedLine;
+    pointAt(linkedLine);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [linkedLine, rows]);
 
   const addBookmark = useMutation({
     mutationFn: (line: LogLine) =>

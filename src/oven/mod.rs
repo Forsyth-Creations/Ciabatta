@@ -153,8 +153,11 @@ mod tests {
             return;
         }
         let checked_in = std::fs::read_to_string(&path).unwrap_or_default();
+        // Line endings aside: a Windows checkout turns both the .proto and the
+        // .ts into CRLF, and that isn't the file being out of date.
+        let lf = |text: &str| text.replace("\r\n", "\n");
         assert!(
-            checked_in == generated,
+            lf(&checked_in) == lf(generated),
             "remote-cache-web/src/gen/oven.ts is out of date with proto/oven.proto. Run \
              `CIABATTA_REGENERATE=1 cargo test generated_typescript` to update it."
         );

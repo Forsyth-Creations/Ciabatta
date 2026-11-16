@@ -35,6 +35,7 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/watch/sessions", get(list).post(create))
         .route("/api/watch/sessions/{id}", get(detail).delete(close))
+        .route("/api/watch/triage", get(triage))
         .route("/api/watch/sessions/{id}/stream", get(stream))
         .route("/api/watch/sessions/{id}/stop", post(stop))
         .route("/api/watch/sessions/{id}/search", get(search))
@@ -191,6 +192,19 @@ pub struct SearchQuery {
     /// `stdout`, `stderr`, or absent for both.
     #[serde(default)]
     stream: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct TriageQuery {
+    a: u64,
+    b: u64,
+    /// How similar two lines must be to pair as "similar", 0–1.
+    #[serde(default)]
+    threshold: Option<f64>,
+    /// A regex cut out of every line before comparing, for a prefix the
+    /// built-in timestamp and id masks don't recognise.
+    #[serde(default)]
+    ignore: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -447,6 +461,44 @@ async fn search(
     })))
 }
 
+/// Compare two sessions' logs: what they share, what's reworded, and what
+/// only one of them printed. See [`crate::watch::triage`].
+async fn triage(
+    State(state): State<AppState>,
+    Query(query): Query<TriageQuery>,
+) -> RouteResult<Json<Value>> {
+    use crate::watch::triage;
+
+    let a = session(&state, query.a)?;
+    let b = session(&state, query.b)?;
+
+    let mut opts = triage::Options::default();
+    if let Some(t) = query.threshold {
+        if !(0.0..=1.0).contains(&t) {
+            return Err(RouteError::bad_request("threshold must be between 0 and 1"));
+        }
+        opts.threshold = t;
+    }
+    if let Some(pattern) = query.ignore.as_deref().filter(|p| !p.trim().is_empty()) {
+        opts.ignore = Some(regex::Regex::new(pattern).map_err(|e| {
+            RouteError::bad_request(format!("The ignore pattern isn't a valid regex: {e}"))
+        })?);
+    }
+
+    // Copy the lines out first so neither session's output is held up, then
+    // compare off the async runtime: two full buffers take a moment.
+    let (lines_a, lines_b) = (a.state.plain_lines(), b.state.plain_lines());
+    let report = tokio::task::spawn_blocking(move || triage::compare(&lines_a, &lines_b, &opts))
+        .await
+        .map_err(|e| internal(format!("Triage failed: {e}")))?;
+
+    let mut value =
+        serde_json::to_value(report).map_err(|e| internal(format!("Triage failed: {e}")))?;
+    value["session_a"] = a.summary();
+    value["session_b"] = b.summary();
+    Ok(Json(value))
+}
+
 async fn add_bookmark(
     State(state): State<AppState>,
     Path(id): Path<u64>,
@@ -488,6 +540,10 @@ async fn remove_trigger(
 ) -> RouteResult<Json<Value>> {
     session(&state, id)?.state.remove_trigger(payload.id);
     Ok(Json(json!({ "ok": true })))
+}
+
+fn internal(message: String) -> RouteError {
+    RouteError::new(axum::http::StatusCode::INTERNAL_SERVER_ERROR, message)
 }
 
 fn session(state: &AppState, id: u64) -> RouteResult<Arc<Session>> {
@@ -554,6 +610,23 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/api/watch/sessions/9999")
+                    .header(header::AUTHORIZATION, "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn triage_of_unknown_sessions_is_404() {
+        let app = router(test_state());
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/watch/triage?a=9998&b=9999")
                     .header(header::AUTHORIZATION, "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),

@@ -124,3 +124,86 @@ export function useSearch(id: number, query: string, mode: "any" | "all", regex:
     enabled: query.trim().length > 0,
   });
 }
+
+// ─── Triage ──────────────────────────────────────────────────────────────────
+
+export type TriageKind = "only_a" | "only_b" | "similar" | "common";
+
+/** Where one line shape occurs in one log. */
+export interface Occurrences {
+  /** The line with its timestamps, numbers and ids masked. */
+  template: string;
+  count: number;
+  stderr: number;
+  /** The first few hundred line numbers it appears at. */
+  seqs: number[];
+  /** The first occurrence, as printed. */
+  sample: string;
+}
+
+export interface DiffPart {
+  op: "same" | "a" | "b";
+  text: string;
+}
+
+export interface TriageGroup {
+  kind: TriageKind;
+  similarity: number;
+  a: Occurrences | null;
+  b: Occurrences | null;
+  diff?: DiffPart[];
+  count_changed: boolean;
+}
+
+export interface TriageSummary {
+  lines_a: number;
+  lines_b: number;
+  templates_a: number;
+  templates_b: number;
+  only_a: number;
+  only_b: number;
+  only_a_lines: number;
+  only_b_lines: number;
+  similar: number;
+  common: number;
+  count_changed: number;
+  capped: TriageKind[];
+  fuzzy_incomplete: boolean;
+}
+
+export interface TriageReport {
+  summary: TriageSummary;
+  groups: TriageGroup[];
+  session_a: SessionSummary;
+  session_b: SessionSummary;
+}
+
+/**
+ * Compare two sessions. The daemon does the work over both whole buffers;
+ * `revision` lets the page ask again for sessions that are still producing
+ * output, without the query refetching by itself while you read.
+ */
+export function useTriage(
+  a: number | undefined,
+  b: number | undefined,
+  threshold: number,
+  ignore: string,
+  revision: number | string,
+) {
+  return useQuery({
+    queryKey: ["watch", "triage", a, b, threshold, ignore, revision],
+    queryFn: () => {
+      const params = new URLSearchParams({
+        a: String(a),
+        b: String(b),
+        threshold: String(threshold),
+      });
+      if (ignore.trim()) params.set("ignore", ignore);
+      return api.get<TriageReport>(`/api/watch/triage?${params}`);
+    },
+    enabled: a !== undefined && b !== undefined && a !== b,
+    placeholderData: (previous) => previous,
+    staleTime: Infinity,
+    retry: false,
+  });
+}

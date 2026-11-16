@@ -253,6 +253,7 @@ async fn main() -> Result<()> {
             stop,
             attach,
             list,
+            triage,
             env_profile,
         } => {
             cmd_watch(
@@ -264,6 +265,7 @@ async fn main() -> Result<()> {
                 stop,
                 attach,
                 list,
+                triage,
                 env_profile,
             )
             .await?;
@@ -1398,6 +1400,7 @@ async fn cmd_watch(
     stop: Option<u64>,
     attach: Option<u64>,
     list: bool,
+    triage: Option<Vec<u64>>,
     env_profile: Option<String>,
 ) -> Result<()> {
     let session = daemon::connect(port).await?;
@@ -1422,6 +1425,21 @@ async fn cmd_watch(
 
     if list {
         return list_watch_sessions(&client, &session).await;
+    }
+
+    if let Some(ids) = triage {
+        let path = match ids.as_slice() {
+            [a, b] if a == b => bail!("Triage compares two different sessions; both were {a}."),
+            [a, b] => format!("/triage?a={a}&b={b}"),
+            [a] => format!("/triage?a={a}"),
+            _ => "/triage".to_string(),
+        };
+        let url = session.page_url(&path);
+        println!("Triage: {url}");
+        if !no_open {
+            daemon::open_browser(&url);
+        }
+        return Ok(());
     }
 
     // Attaching follows a session the daemon already has, by id.

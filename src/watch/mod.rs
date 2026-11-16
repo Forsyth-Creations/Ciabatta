@@ -21,6 +21,8 @@ use std::sync::Mutex;
 
 use anyhow::{Context, Result};
 use regex::Regex;
+
+pub mod triage;
 use serde::{Deserialize, Serialize};
 
 /// Recent trigger hits kept for the sidebar feed.
@@ -440,6 +442,18 @@ impl WatchState {
         }
 
         out
+    }
+
+    /// Every buffered line as `(seq, stream, text without colour escapes)`, for
+    /// triage. Copied out so the comparison runs without holding the lock that
+    /// incoming output needs.
+    pub fn plain_lines(&self) -> Vec<(u64, Stream, String)> {
+        let inner = self.inner.lock().unwrap();
+        inner
+            .lines
+            .iter()
+            .map(|l| (l.seq, l.stream, strip_ansi(&l.text).into_owned()))
+            .collect()
     }
 
     /// Search the buffer. Thin public wrapper so the daemon routes can reach

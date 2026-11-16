@@ -24,6 +24,7 @@ import { RunBuilderPage } from "./pages/RunBuilderPage";
 import { RunPage } from "./pages/RunPage";
 import { RunDetailPage } from "./pages/RunDetailPage";
 import { TodoPage } from "./pages/TodoPage";
+import { TriagePage } from "./pages/TriagePage";
 import { WatchPage } from "./pages/WatchPage";
 import { WatchSessionPage } from "./pages/WatchSessionPage";
 import { WorkspacePage } from "./pages/WorkspacePage";
@@ -72,10 +73,32 @@ const watchRoute = createRoute({
   component: WatchPage,
 });
 
+/** A positive integer from a search param, or nothing. */
+function idParam(value: unknown): number | undefined {
+  const n = typeof value === "number" ? value : Number(value);
+  return Number.isInteger(n) && n > 0 ? n : undefined;
+}
+
+// `?line=N` opens the log scrolled to line N — where triage links land.
 const watchSessionRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/watch/$sessionId",
   component: WatchSessionPage,
+  validateSearch: (search: Record<string, unknown>): { line?: number } => ({
+    line: idParam(search.line),
+  }),
+});
+
+// Compare two watch sessions. `?a=&b=` picks them, so `ciabatta watch
+// --triage 3 4` can open straight onto a comparison.
+const triageRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/triage",
+  component: TriagePage,
+  validateSearch: (search: Record<string, unknown>): { a?: number; b?: number } => ({
+    a: idParam(search.a),
+    b: idParam(search.b),
+  }),
 });
 
 const workspaceRoute = createRoute({
@@ -156,6 +179,7 @@ const routeTree = rootRoute.addChildren([
   todoRoute,
   watchRoute,
   watchSessionRoute,
+  triageRoute,
   workspaceRoute,
   graphRoute,
   runRoute,

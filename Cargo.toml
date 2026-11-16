@@ -1,6 +1,6 @@
 [package]
 name = "ciabatta"
-version = "0.10.0"
+version = "0.10.1"
 edition = "2024"
 description = "A command line tool for publishing artifacts to various registries"
 license = "MIT"
@@ -16,6 +16,9 @@ categories = ["command-line-utilities", "development-tools"]
 include = [
     "src/**/*",
     "build.rs",
+    # The offloading protocol: build.rs compiles it into the Rust types and the
+    # remote cache web app's TypeScript, so a crate without it doesn't build.
+    "proto/*.proto",
     # The Python library for `ciabatta input`, compiled in for `ciabatta python`.
     "python/ciabatta/*.py",
     "tool_frontend/dist/**/*",

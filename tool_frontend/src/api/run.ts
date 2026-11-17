@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { ApiError, api } from "./client";
-import type { EnvReport } from "./types";
+import type { EnvReport, ExcludedInput } from "./types";
 import { useWorkspace } from "./workspace";
 
 /**
@@ -197,6 +197,11 @@ export interface CacheReport {
   } | null;
   /** What to change so this step can be reused next time. */
   hints: string[];
+  /** Paths its inputs match that a policy left out — the first few; the
+   *  inspector fetches all of them. */
+  excluded_inputs?: ExcludedInput[];
+  /** How many were left out in all. */
+  excluded_total?: number;
 }
 
 /**
@@ -255,6 +260,8 @@ export interface TargetDeps {
   /** Files its inputs match that an output pattern also covers: treated as
    *  outputs only, never part of the key. */
   outputs_in_inputs?: string[];
+  /** Paths its inputs match that a policy leaves out, with the rule. */
+  excluded_inputs?: ExcludedInput[];
   /** Input globs that match no file, with the likely fix — usually the
    *  sub-workspace prefix every cache path needs. */
   unmatched_inputs?: {

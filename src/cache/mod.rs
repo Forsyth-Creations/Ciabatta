@@ -972,9 +972,25 @@ fn matching(
     kept: Option<&HashSet<String>>,
     hash: bool,
 ) -> Result<Vec<FileHash>> {
+    let filter = Filter {
+        rules: vec![(Policy::Exclude, Excluder::new(dir, exclude))],
+        kept,
+    };
     let mut seen: BTreeMap<String, FileHash> = BTreeMap::new();
-    let exclude = Excluder::new(dir, exclude);
+    walk(dir, patterns, &filter, hash, &mut seen, None)?;
+    Ok(seen.into_values().collect())
+}
 
+/// Expand `patterns` under `dir` into `seen`, leaving out what `filter` does —
+/// and, when `skipped` is given, recording each path left out and why.
+fn walk(
+    dir: &Path,
+    patterns: &[String],
+    filter: &Filter<'_>,
+    hash: bool,
+    seen: &mut BTreeMap<String, FileHash>,
+    mut skipped: Option<&mut BTreeMap<String, ExcludedInput>>,
+) -> Result<()> {
     for pattern in patterns {
         let normalized = normalize_glob(pattern);
         // `glob` has no notion of a trailing slash; strip it so `src/` reaches
@@ -1006,21 +1022,45 @@ fn matching(
             .with_context(|| format!("Invalid cache pattern '{pattern}'"))?;
 
         for entry in entries.flatten() {
-            collect_into(dir, &entry, &exclude, kept, hash, &mut seen)?;
+            collect_into(dir, &entry, filter, hash, seen, skipped.as_deref_mut())?;
         }
     }
+    Ok(())
+}
 
-    Ok(seen.into_values().collect())
+/// What a walk leaves out: each rule in order, then — when given — whatever
+/// git would ignore. The order is the order a path is reported against, so
+/// a file both excluded and git-ignored is named for the rule written in the
+/// config.
+struct Filter<'a> {
+    rules: Vec<(Policy, Excluder)>,
+    kept: Option<&'a HashSet<String>>,
+}
+
+impl Filter<'_> {
+    /// Why `rel` is left out — the policy and the rule — or `None` when it
+    /// isn't.
+    fn left_out(&self, rel: &str) -> Option<(Policy, String)> {
+        for (policy, excluder) in &self.rules {
+            if let Some(rule) = excluder.matched(rel) {
+                return Some((*policy, rule.to_string()));
+            }
+        }
+        if self.kept.is_some_and(|kept| !kept.contains(rel)) {
+            return Some((Policy::Gitignore, String::new()));
+        }
+        None
+    }
 }
 
 /// Hash `path` into `seen` — or, when it is a directory, everything beneath it.
 fn collect_into(
     dir: &Path,
     path: &Path,
-    exclude: &Excluder,
-    kept: Option<&HashSet<String>>,
+    filter: &Filter<'_>,
     hash: bool,
     seen: &mut BTreeMap<String, FileHash>,
+    mut skipped: Option<&mut BTreeMap<String, ExcludedInput>>,
 ) -> Result<()> {
     let Ok(rel) = path.strip_prefix(dir) else {
         return Ok(());
@@ -1042,10 +1082,19 @@ fn collect_into(
             dir.display(),
         );
     }
-    if !rel.is_empty() && exclude.matches(&rel) {
-        return Ok(());
-    }
-    if !rel.is_empty() && kept.is_some_and(|kept| !kept.contains(&rel)) {
+    if !rel.is_empty()
+        && let Some((policy, rule)) = filter.left_out(&rel)
+    {
+        if let Some(skipped) = skipped
+            && !is_state_dir(path)
+        {
+            skipped.entry(rel.clone()).or_insert(ExcludedInput {
+                path: rel,
+                dir: path.is_dir(),
+                policy,
+                rule,
+            });
+        }
         return Ok(());
     }
 
@@ -1062,7 +1111,7 @@ fn collect_into(
             .collect();
         children.sort();
         for child in children {
-            collect_into(dir, &child, exclude, kept, hash, seen)?;
+            collect_into(dir, &child, filter, hash, seen, skipped.as_deref_mut())?;
         }
         return Ok(());
     }
@@ -1146,17 +1195,199 @@ impl Excluder {
     /// Whether `rel` (a `/`-separated path relative to `dir`) matches any
     /// pattern.
     fn matches(&self, rel: &str) -> bool {
+        self.matched(rel).is_some()
+    }
+
+    /// The first pattern `rel` matches, as written.
+    fn matched(&self, rel: &str) -> Option<&str> {
         // Match each pattern both as a glob over the relative path and as a
         // bare prefix, so `exclude: [target]` does what everyone expects
         // without anyone having to write `target/**/*`.
-        self.patterns.iter().any(|p| {
-            rel == p.raw
-                || rel.starts_with(&p.prefix)
-                || p.relative.as_ref().is_some_and(|g| g.matches(rel))
-                || p.full
-                    .as_ref()
-                    .is_some_and(|g| g.matches_path(&self.dir.join(rel)))
+        self.patterns
+            .iter()
+            .find(|p| {
+                rel == p.raw
+                    || rel.starts_with(&p.prefix)
+                    || p.relative.as_ref().is_some_and(|g| g.matches(rel))
+                    || p.full
+                        .as_ref()
+                        .is_some_and(|g| g.matches_path(&self.dir.join(rel)))
+            })
+            .map(|p| p.raw.as_str())
+    }
+}
+
+// ─── What the inputs leave out ──────────────────────────────────────────────
+
+/// The policy that kept a path out of a build's inputs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Policy {
+    /// `cache.exclude` names it.
+    Exclude,
+    /// It belongs to another sub-workspace, which keys its own entry on it.
+    Workspace,
+    /// An output pattern covers it, and an output is never an input.
+    Output,
+    /// `cache.gitignore: true`, and git would ignore it.
+    Gitignore,
+}
+
+impl Policy {
+    /// How the policy is named to a person, with the rule that matched.
+    pub fn describe(self, rule: &str) -> String {
+        match self {
+            Policy::Exclude => format!("`cache.exclude: {rule}`"),
+            Policy::Workspace => format!("sub-workspace `{rule}`, which caches its own files"),
+            Policy::Output => format!("output pattern `{rule}`"),
+            Policy::Gitignore => ".gitignore".to_string(),
+        }
+    }
+}
+
+/// A path a build's `inputs` match that is not one of its inputs, and why.
+///
+/// A directory left out is reported once, not file by file: "`node_modules`
+/// — .gitignore" is the answer somebody needs, and the hundred thousand files
+/// under it are not.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExcludedInput {
+    pub path: String,
+    /// Whether it is a directory, and so everything under it is left out.
+    #[serde(default)]
+    pub dir: bool,
+    pub policy: Policy,
+    /// The pattern or sub-workspace that matched; empty for `.gitignore`.
+    #[serde(default)]
+    pub rule: String,
+}
+
+impl CacheConfig {
+    /// Every path the declared `inputs` match that is kept out of them, each
+    /// with the policy responsible — sorted, a directory once rather than its
+    /// whole subtree.
+    ///
+    /// The other half of [`Self::list_inputs`]. Somebody looking at a key
+    /// that's missing a file they expected — a `.env` that `.gitignore`
+    /// covers, a `generated/` an `exclude` swept up — would otherwise have to
+    /// replay every rule in their head to find out why. A path `inputs_from`
+    /// or `cargo` adds back is not reported: it *is* an input.
+    pub fn excluded_inputs(&self, dir: &Path, own: Option<&str>) -> Result<Vec<ExcludedInput>> {
+        if self.inputs.is_empty() {
+            return Ok(Vec::new());
+        }
+        let kept = self.kept_by_gitignore(dir)?;
+        // The same rules, in the same order, as `input_exclude` and
+        // `inputs_matching` apply them.
+        let filter = Filter {
+            rules: vec![
+                (Policy::Exclude, Excluder::new(dir, &self.exclude)),
+                (
+                    Policy::Workspace,
+                    Excluder::new(dir, &nested_workspaces_except(dir, own)),
+                ),
+                (Policy::Output, Excluder::new(dir, &self.outputs)),
+            ],
+            kept: kept.as_ref(),
+        };
+        let mut seen = BTreeMap::new();
+        let mut skipped = BTreeMap::new();
+        walk(
+            dir,
+            &self.inputs,
+            &filter,
+            false,
+            &mut seen,
+            Some(&mut skipped),
+        )?;
+        if skipped.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // What `inputs_from` and `cargo` add back is an input after all.
+        let inputs: HashSet<String> = if self.upstream_outputs.is_empty() && self.cargo.is_none() {
+            HashSet::new()
+        } else {
+            self.list_inputs(dir, own)?
+                .into_iter()
+                .map(|f| f.path)
+                .collect()
+        };
+        // Sorted, so a directory comes before everything under it.
+        let mut excluded: Vec<ExcludedInput> = Vec::new();
+        for (path, item) in skipped {
+            if inputs.contains(&path) {
+                continue;
+            }
+            let under_one = excluded
+                .iter()
+                .rev()
+                .any(|d: &ExcludedInput| d.dir && path.starts_with(&format!("{}/", d.path)));
+            if !under_one {
+                excluded.push(item);
+            }
+        }
+        Ok(excluded)
+    }
+}
+
+/// A short account of what was left out: each policy, how many paths, and the
+/// first few of them — `2 by .gitignore (target/, node_modules/); 1 by
+/// `cache.exclude: dist` (dist/)`.
+pub fn describe_excluded(excluded: &[ExcludedInput]) -> String {
+    const SHOWN: usize = 3;
+    let mut groups: BTreeMap<(Policy, &str), Vec<&ExcludedInput>> = BTreeMap::new();
+    for item in excluded {
+        groups
+            .entry((item.policy, item.rule.as_str()))
+            .or_default()
+            .push(item);
+    }
+    groups
+        .into_iter()
+        .map(|((policy, rule), items)| {
+            let mut named = items
+                .iter()
+                .take(SHOWN)
+                .map(|i| {
+                    if i.dir {
+                        format!("{}/", i.path)
+                    } else {
+                        i.path.clone()
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            if items.len() > SHOWN {
+                named.push_str(&format!(", +{} more", items.len() - SHOWN));
+            }
+            format!("{} by {} ({named})", items.len(), policy.describe(rule))
         })
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+/// Why a step whose inputs resolve to no file at all isn't cached.
+///
+/// A key over no files is a key over the command alone: the first build would
+/// be served back forever, whatever the sources say. So a step like that runs
+/// every time instead, and this says what to fix — with the paths the inputs
+/// did match, when the trouble is that every one of them was then left out.
+pub fn describe_no_inputs(excluded: &[ExcludedInput]) -> String {
+    if excluded.is_empty() {
+        "its `cache.inputs` match no files, so there is nothing to key on (every cache path is \
+         relative to the workspace root)"
+            .to_string()
+    } else if excluded.iter().all(|e| e.policy == Policy::Output) {
+        "every file its `cache.inputs` match is also one of its `cache.outputs`, so there is \
+         nothing left to key on"
+            .to_string()
+    } else {
+        format!(
+            "its `cache.inputs` match no files once exclusions apply, so there is nothing left to \
+             key on — left out: {}",
+            describe_excluded(excluded)
+        )
     }
 }
 
@@ -1508,20 +1739,18 @@ pub fn plan(
     let inputs = target
         .config
         .hash_inputs(&target.dir, target.member.as_deref())?;
-    // Inputs were declared and matched files, but every one of them is an
-    // output. Keying on the empty set that leaves would key identically
-    // forever — the one way dropping outputs from inputs could turn a slow
-    // cache into a wrong one.
-    if inputs.is_empty()
-        && !target
+    // Inputs were declared but resolve to no file: a glob that matches
+    // nothing, or files every one of which an exclusion, an output pattern or
+    // .gitignore then drops. A key over the empty set is a key over the
+    // command alone, identical forever — the first build would be served back
+    // whatever the sources said. Not caching is the only safe answer.
+    if inputs.is_empty() {
+        let excluded = target
             .config
-            .outputs_in_inputs(&target.dir, target.member.as_deref())?
-            .is_empty()
-    {
+            .excluded_inputs(&target.dir, target.member.as_deref())
+            .unwrap_or_default();
         return Ok(Decision::Uncached {
-            reason: "every file its `cache.inputs` match is also one of its `cache.outputs`, \
-                     so there is nothing left to key on"
-                .to_string(),
+            reason: describe_no_inputs(&excluded),
         });
     }
     let key_inputs = KeyInputs {
@@ -2378,6 +2607,147 @@ mod tests {
             }
             other => panic!("expected uncached, got {other:?}"),
         }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    fn zero_input_target(work: &Path, config: CacheConfig) -> Target {
+        Target {
+            name: "build".into(),
+            workspace: ".".into(),
+            dir: work.to_path_buf(),
+            member: None,
+            commands: vec!["make".into()],
+            config: CacheConfig {
+                enabled: Some(true),
+                outputs: vec!["out/app".into()],
+                ..config
+            },
+            upstream: BTreeMap::new(),
+        }
+    }
+
+    /// Inputs that resolve to no file key on the command alone, so the first
+    /// build would be handed back forever. Such a step is not cached — before
+    /// its first build, and after one too.
+    #[test]
+    fn inputs_that_match_no_file_are_not_cached() {
+        let root = scratch("zero_inputs");
+        write(&root, "src/main.rs", "fn main() {}");
+        write(&root, "out/app", "built");
+        let store = store::Store::at(root.join(".store")).unwrap();
+        let target = zero_input_target(
+            &root,
+            CacheConfig {
+                // Written from inside a package that isn't there.
+                inputs: vec!["packages/app/src/**/*.rs".into()],
+                ..Default::default()
+            },
+        );
+        match plan(&target, &BTreeMap::new(), &store).unwrap() {
+            Decision::Uncached { reason } => {
+                assert!(reason.contains("match no files"), "{reason}");
+                assert!(reason.contains("workspace root"), "{reason}");
+            }
+            other => panic!("expected uncached, got {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// When the inputs did match files and a policy took every one, the
+    /// reason names the policy and what it took.
+    #[test]
+    fn inputs_all_left_out_say_which_rule_took_them() {
+        let root = scratch("zero_inputs_ignored");
+        write(&root, ".gitignore", "generated/\n");
+        write(&root, "generated/schema.json", "{}");
+        write(&root, "vendor/lib.c", "int x;");
+        let store = store::Store::at(root.join(".store")).unwrap();
+        let target = zero_input_target(
+            &root,
+            CacheConfig {
+                inputs: vec!["generated/**".into(), "vendor".into()],
+                exclude: vec!["vendor".into()],
+                gitignore: Some(true),
+                ..Default::default()
+            },
+        );
+        match plan(&target, &BTreeMap::new(), &store).unwrap() {
+            Decision::Uncached { reason } => {
+                assert!(reason.contains("once exclusions apply"), "{reason}");
+                assert!(reason.contains("by .gitignore (generated/)"), "{reason}");
+                assert!(
+                    reason.contains("by `cache.exclude: vendor` (vendor/)"),
+                    "{reason}"
+                );
+            }
+            other => panic!("expected uncached, got {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Each path left out is reported once, against the first rule that took
+    /// it, and a directory stands for everything under it.
+    #[test]
+    fn excluded_inputs_name_each_policy_once_per_path() {
+        let root = scratch("excluded_inputs");
+        write(&root, ".gitignore", ".env\nnode_modules/\n");
+        write(&root, ".env", "SECRET=1");
+        write(&root, "src/main.ts", "main()");
+        write(&root, "src/gen/types.ts", "type A = 1");
+        write(&root, "node_modules/a/index.js", "a");
+        write(&root, "node_modules/b/index.js", "b");
+        write(&root, "out/app", "built");
+        let config = CacheConfig {
+            enabled: Some(true),
+            inputs: vec![".".into()],
+            outputs: vec!["out".into()],
+            exclude: vec!["src/gen".into()],
+            gitignore: Some(true),
+            ..Default::default()
+        };
+        let excluded = config.excluded_inputs(&root, None).unwrap();
+        let summary: Vec<(&str, bool, Policy, &str)> = excluded
+            .iter()
+            .map(|e| (e.path.as_str(), e.dir, e.policy, e.rule.as_str()))
+            .collect();
+        assert_eq!(
+            summary,
+            vec![
+                (".env", false, Policy::Gitignore, ""),
+                ("node_modules", true, Policy::Gitignore, ""),
+                ("out", true, Policy::Output, "out"),
+                ("src/gen", true, Policy::Exclude, "src/gen"),
+            ]
+        );
+        // And what is left is exactly the one source file (plus .gitignore).
+        let inputs: Vec<String> = config
+            .list_inputs(&root, None)
+            .unwrap()
+            .into_iter()
+            .map(|f| f.path)
+            .collect();
+        assert_eq!(inputs, vec![".gitignore", "src/main.ts"]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A glob that spells out each file — `src/**/*` — still reports an
+    /// excluded directory once, not every file glob found beneath it.
+    #[test]
+    fn a_glob_reaching_into_an_excluded_directory_reports_it_once() {
+        let root = scratch("excluded_glob");
+        write(&root, "src/main.rs", "fn main() {}");
+        write(&root, "src/gen/a.rs", "");
+        write(&root, "src/gen/deep/b.rs", "");
+        let config = CacheConfig {
+            enabled: Some(true),
+            inputs: vec!["src/**/*".into()],
+            exclude: vec!["src/gen".into()],
+            ..Default::default()
+        };
+        let excluded = config.excluded_inputs(&root, None).unwrap();
+        assert_eq!(excluded.len(), 1, "{excluded:?}");
+        assert_eq!(excluded[0].path, "src/gen");
+        assert!(excluded[0].dir);
         let _ = std::fs::remove_dir_all(&root);
     }
 

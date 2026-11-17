@@ -2227,6 +2227,33 @@ cache:
           existing key.
         </P>
 
+        <SubHeading>What the inputs leave out</SubHeading>
+        <P>
+          Four rules keep a path that <C>inputs</C> matches out of the key:{" "}
+          <C>exclude</C>, an output pattern (an output is never an input),
+          another sub-workspace (it caches its own files), and{" "}
+          <C>gitignore: true</C>. Since 0.10.2 ciabatta says which rule took
+          what. <C>dry-run</C> and <C>ciabatta why</C> print a{" "}
+          <strong>left out</strong> line, such as{" "}
+          <C>
+            1 by .gitignore (generated/); 1 by `cache.exclude: src/vendor`
+            (src/vendor/)
+          </C>
+          . On the <Link to="/run">Run page</Link>, a step&apos;s cache panel
+          lists them, and its files &amp; hashes view has a{" "}
+          <strong>Left out</strong> tab. A directory is named once, not file by
+          file. When a file you expected is missing from a key, that tab shows
+          which rule took it.
+        </P>
+        <P>
+          A step whose inputs resolve to <em>no</em> file is not cached. That
+          happens when a glob matches nothing, or when every file it matches is
+          left out. A key over no files is a key over the command alone, so the
+          first build would be served back forever, whatever the sources said.
+          Before 0.10.2 that is what happened. Now the step runs every time, and
+          its reason says why, with the rules that took its files.
+        </P>
+
         <SubHeading>How long deciding takes</SubHeading>
         <P>
           Before a cached step runs, ciabatta works out its key: it resolves the{" "}

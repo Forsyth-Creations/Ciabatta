@@ -102,6 +102,33 @@ export interface FileHash {
   size: number;
 }
 
+/** The policy that kept a path its inputs match out of a step's key. */
+export type ExclusionPolicy = "exclude" | "workspace" | "output" | "gitignore";
+
+/** A path a step's `cache.inputs` match that is not one of its inputs, and the
+ *  rule responsible. A directory stands for everything under it. */
+export interface ExcludedInput {
+  path: string;
+  dir: boolean;
+  policy: ExclusionPolicy;
+  /** The pattern or sub-workspace that matched; empty for .gitignore. */
+  rule: string;
+}
+
+/** How a person reads the rule that left a path out. */
+export function describeExclusion(e: ExcludedInput): string {
+  switch (e.policy) {
+    case "exclude":
+      return `cache.exclude: ${e.rule}`;
+    case "workspace":
+      return `sub-workspace ${e.rule} (caches its own files)`;
+    case "output":
+      return `output pattern ${e.rule}`;
+    case "gitignore":
+      return ".gitignore";
+  }
+}
+
 /** What ciabatta would do with one stage. */
 export type Decision =
   | { outcome: "fresh"; key: string; outputs: number }

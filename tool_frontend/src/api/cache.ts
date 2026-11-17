@@ -3,7 +3,13 @@
 import { useMutation, useQuery } from "@tanstack/react-query";
 
 import { api } from "./client";
-import type { CachePlan, CacheStatus, FileHash, RemoteStatus } from "./types";
+import type {
+  CachePlan,
+  CacheStatus,
+  ExcludedInput,
+  FileHash,
+  RemoteStatus,
+} from "./types";
 
 export const cacheKeys = {
   status: (project: string) => ["cache", "status", project] as const,
@@ -91,6 +97,9 @@ export interface CacheKeyFiles {
   outputs: FileHash[];
   env: string[];
   upstream: Record<string, string>;
+  /** What the inputs matched but a policy left out. Absent from keys recorded
+   *  by ciabatta before 0.10.2. */
+  excluded?: ExcludedInput[];
 }
 
 /**

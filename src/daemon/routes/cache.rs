@@ -198,6 +198,12 @@ async fn files(
     let store = crate::cache::graph::store_for(&root)?;
     let entry = store.get(&query.key)?;
     let inspection = store.inspection(&query.key);
+    // Only a run's inspection record knows what was left out; a manifest
+    // records what went in. Both are written for the same key.
+    let excluded = inspection
+        .as_ref()
+        .map(|i| i.excluded.clone())
+        .unwrap_or_default();
 
     let (inputs, outputs, stored, target, workspace, env, upstream, at) = match (entry, inspection)
     {
@@ -245,6 +251,7 @@ async fn files(
         "outputs": outputs,
         "env": env,
         "upstream": upstream,
+        "excluded": excluded,
     })))
 }
 

@@ -112,6 +112,11 @@ pub struct TargetDeps {
     /// outputs only, and worth a warning.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub outputs_in_inputs: Vec<String>,
+    /// Paths its inputs match that a policy leaves out — `.gitignore`,
+    /// `exclude`, an output pattern, another sub-workspace — each with the
+    /// rule responsible. See [`crate::cache::CacheConfig::excluded_inputs`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub excluded_inputs: Vec<crate::cache::ExcludedInput>,
     /// Input globs that match no file, each with what is probably wrong.
     ///
     /// "0 files" next to a list of globs that plainly name files reads as the
@@ -149,6 +154,7 @@ pub fn unmatched_inputs(
     cache: &crate::cache::CacheConfig,
     dir: &Path,
     member: Option<&str>,
+    excluded: &[crate::cache::ExcludedInput],
 ) -> Vec<UnmatchedGlob> {
     let listed = |glob: &str| crate::cache::list_matching(dir, &[glob.to_string()], &[]).ok();
     // What the inputs keep once exclusions and .gitignore have had their say.
@@ -166,14 +172,34 @@ pub fn unmatched_inputs(
                 .as_ref()
                 .is_none_or(|kept| alone.iter().any(|f| kept.contains(&f.path)));
             if !contributes {
+                // Name the rules that took them, rather than listing every
+                // rule there is.
+                let took: Vec<crate::cache::ExcludedInput> = excluded
+                    .iter()
+                    .filter(|e| {
+                        alone.iter().any(|f| {
+                            f.path == e.path
+                                || (e.dir && f.path.starts_with(&format!("{}/", e.path)))
+                        })
+                    })
+                    .cloned()
+                    .collect();
                 unmatched.push(UnmatchedGlob {
                     glob: glob.clone(),
                     suggestion: None,
-                    reason: format!(
-                        "matches {} file(s), but every one is left out — by `exclude`, by an \
-                         output pattern, or by .gitignore",
-                        alone.len()
-                    ),
+                    reason: if took.is_empty() {
+                        format!(
+                            "matches {} file(s), but every one is left out — by `exclude`, by \
+                             an output pattern, or by .gitignore",
+                            alone.len()
+                        )
+                    } else {
+                        format!(
+                            "matches {} file(s), but every one is left out: {}",
+                            alone.len(),
+                            crate::cache::describe_excluded(&took)
+                        )
+                    },
                 });
             }
             continue;
@@ -289,6 +315,13 @@ fn one(context: &WorkspaceContext<'_>, root: &Path, step: &RunStep, detail: Deta
         .list_inputs(&dir, member.as_deref())
         .unwrap_or_default();
     let outputs = cache.list_outputs(&dir).unwrap_or_default();
+    let excluded_inputs = cache
+        .excluded_inputs(&dir, member.as_deref())
+        .unwrap_or_default();
+    // On, with inputs declared, but they resolve to no file: not cached, the
+    // same as `plan` decides — see `crate::cache::describe_no_inputs`.
+    let no_inputs = (cache.why_disabled().is_none() && inputs.is_empty())
+        .then(|| crate::cache::describe_no_inputs(&excluded_inputs));
 
     let mut exclude = cache.input_exclude(&dir, member.as_deref());
     let mut inputs_declared = cache.inputs.clone();
@@ -361,14 +394,18 @@ fn one(context: &WorkspaceContext<'_>, root: &Path, step: &RunStep, detail: Deta
         },
         why_uncached: match &cargo_error {
             Some(error) => Some(error.clone()),
-            None => cache.why_disabled().map(str::to_string),
+            None => cache
+                .why_disabled()
+                .map(str::to_string)
+                .or_else(|| no_inputs.clone()),
         },
-        cached: cache.why_disabled().is_none() && cargo_error.is_none(),
+        cached: cache.why_disabled().is_none() && cargo_error.is_none() && no_inputs.is_none(),
         cargo_error,
         outputs_in_inputs: cache
             .outputs_in_inputs(&dir, member.as_deref())
             .unwrap_or_default(),
-        unmatched_inputs: unmatched_inputs(&cache, &dir, member.as_deref()),
+        unmatched_inputs: unmatched_inputs(&cache, &dir, member.as_deref(), &excluded_inputs),
+        excluded_inputs,
     }
 }
 
@@ -680,7 +717,7 @@ mod tests {
             exclude: vec!["packages/api/target".into()],
             ..Default::default()
         };
-        let found = unmatched_inputs(&cache, &dir, Some("packages/api"));
+        let found = unmatched_inputs(&cache, &dir, Some("packages/api"), &[]);
         let globs: Vec<&str> = found.iter().map(|u| u.glob.as_str()).collect();
         assert_eq!(globs, ["src/**", "nowhere/**", "packages/api/target/**"]);
         assert_eq!(found[0].suggestion.as_deref(), Some("packages/api/src/**"));

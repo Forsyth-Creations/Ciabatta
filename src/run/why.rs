@@ -459,6 +459,15 @@ fn render(answer: &Answer, all: bool) -> String {
         ));
     }
 
+    // Not a problem — leaving things out is what `exclude` and `gitignore`
+    // are for — but the first place to look when a file is missing from a key.
+    if deps.cached && !deps.excluded_inputs.is_empty() {
+        out.push_str(&format!(
+            "\n  left out of its inputs: {}\n",
+            crate::cache::describe_excluded(&deps.excluded_inputs)
+        ));
+    }
+
     if deps.cached && !deps.outputs_in_inputs.is_empty() {
         out.push_str(&format!(
             "\n  ⚠ {}\n",

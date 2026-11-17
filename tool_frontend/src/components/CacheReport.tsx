@@ -35,6 +35,7 @@ import { humanizeBytes, humanizeMs } from "../api/cache";
 import type { CacheEntryInfo, CacheReport } from "../api/run";
 import { monoFontStack } from "../theme";
 import { SHORT_LIST_MAX, SeeMore } from "./ShortList";
+import { describeExclusion, type ExcludedInput } from "../api/types";
 
 /**
  * A hint as the daemon wrote it — prose with `backticked` config names — with
@@ -378,6 +379,14 @@ export function CacheReportView({
           <Fact label="inputs">
             {report.input_files} file(s), {humanizeBytes(report.input_bytes)}
           </Fact>
+          {(report.excluded_inputs?.length ?? 0) > 0 && (
+            <Fact label="left out">
+              <ExcludedSummary
+                items={report.excluded_inputs ?? []}
+                total={report.excluded_total ?? 0}
+              />
+            </Fact>
+          )}
           <Fact label="keys on">
             {report.env.length > 0 ? report.env.join(", ") : "no variables"}
           </Fact>
@@ -529,6 +538,47 @@ function Fact({
       <Typography variant="caption" component="div" sx={{ minWidth: 0 }}>
         {children}
       </Typography>
+    </Stack>
+  );
+}
+
+/**
+ * What a step's inputs matched but left out, grouped by the rule that took
+ * each path — the answer to "why isn't that file in my key?".
+ */
+export function ExcludedSummary({
+  items,
+  total,
+}: {
+  items: ExcludedInput[];
+  total: number;
+}) {
+  const groups = new Map<string, ExcludedInput[]>();
+  for (const item of items) {
+    const label = describeExclusion(item);
+    groups.set(label, [...(groups.get(label) ?? []), item]);
+  }
+  return (
+    <Stack spacing={0.25}>
+      {[...groups.entries()].map(([label, paths]) => (
+        <Box key={label} component="span" sx={{ display: "block" }}>
+          <Box component="span" sx={{ color: "text.secondary" }}>
+            by {label}:{" "}
+          </Box>
+          <Box component="span" sx={{ fontFamily: monoFontStack }}>
+            {paths
+              .slice(0, 5)
+              .map((p) => (p.dir ? `${p.path}/` : p.path))
+              .join(", ")}
+            {paths.length > 5 ? `, +${paths.length - 5} more` : ""}
+          </Box>
+        </Box>
+      ))}
+      {total > items.length && (
+        <Box component="span" sx={{ color: "text.secondary" }}>
+          …{total - items.length} more — inspect the step for the full list.
+        </Box>
+      )}
     </Stack>
   );
 }

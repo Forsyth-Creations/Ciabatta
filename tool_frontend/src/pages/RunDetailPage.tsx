@@ -117,6 +117,7 @@ import {
 import {
   CacheIcon,
   CacheReportView,
+  ExcludedSummary,
   Prose,
   cacheLabel,
   cacheTone,
@@ -2063,6 +2064,20 @@ function TargetDependencies({ deps }: { deps: TargetDeps }) {
           cache.inputs, or add them to exclude.
         </Typography>
       )}
+      {deps.cached &&
+        deps.excluded_inputs &&
+        deps.excluded_inputs.length > 0 && (
+          <DepRow
+            label="left out"
+            value={
+              <ExcludedSummary
+                items={deps.excluded_inputs}
+                total={deps.excluded_inputs.length}
+              />
+            }
+            title="Paths its cache.inputs match that a policy keeps out of the key"
+          />
+        )}
       {(deps.unmatched_inputs ?? []).map((miss) => (
         <Typography key={miss.glob} variant="caption" color="warning.main">
           ⚠ input <code>{miss.glob}</code> <Prose text={miss.reason} />.

@@ -164,6 +164,21 @@ pub struct CacheReport {
     /// from the key, and worth fixing in the config.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub outputs_in_inputs: Vec<String>,
+    /// Paths its inputs match that a policy left out, at most
+    /// [`EXCLUDED_IN_REPORT`] of them — the inspector fetches the whole list.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub excluded_inputs: Vec<crate::cache::ExcludedInput>,
+    /// How many paths were left out in all, when more than are listed.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub excluded_total: usize,
+}
+
+/// How many left-out paths a report carries. The report is streamed whole to
+/// every viewer on every change; the full list is a click away.
+const EXCLUDED_IN_REPORT: usize = 50;
+
+fn is_zero(n: &usize) -> bool {
+    *n == 0
 }
 
 /// A cache entry, as much of it as the run view needs.
@@ -701,7 +716,7 @@ impl Session {
             }
         }
 
-        let (inputs, outputs_in_inputs) = blocking(|| {
+        let (inputs, outputs_in_inputs, excluded) = blocking(|| {
             remembered.run(|| {
                 (
                     config.hash_inputs(&dir, member.as_deref()),
@@ -709,6 +724,9 @@ impl Session {
                     // the decision.
                     config
                         .outputs_in_inputs(&dir, member.as_deref())
+                        .unwrap_or_default(),
+                    config
+                        .excluded_inputs(&dir, member.as_deref())
                         .unwrap_or_default(),
                 )
             })
@@ -730,6 +748,7 @@ impl Session {
                 upstream: upstream.clone(),
                 dir: dir.clone(),
                 output_patterns: config.outputs.clone(),
+                excluded: excluded.clone(),
             };
             if let Err(e) = self.store.write_inspection(&inspection) {
                 tracing::debug!("couldn't record what {} was keyed on: {e:#}", step.name);
@@ -801,8 +820,28 @@ impl Session {
                 );
                 report.diff = diff.as_ref().map(DiffSummary::of);
             }
-            Decision::Uncached { .. } => {}
+            Decision::Uncached { .. } => {
+                // Its inputs resolved to no file. Say which rule took the
+                // ones they matched, or that they matched none.
+                report.hints.push(if excluded.is_empty() {
+                    "Its `cache.inputs` match no files. Every cache path is relative to the \
+                     workspace root, so a package's `src/**` is written \
+                     `packages/<name>/src/**`; `ciabatta why <step>` names each glob that \
+                     matches nothing."
+                        .to_string()
+                } else {
+                    format!(
+                        "Everything its `cache.inputs` match is left out — {}. Narrow the rule \
+                         that took a file the build reads, or list that file in `inputs` \
+                         another way.",
+                        crate::cache::describe_excluded(&excluded)
+                    )
+                });
+            }
         }
+        report.excluded_total = excluded.len();
+        report.excluded_inputs = excluded;
+        report.excluded_inputs.truncate(EXCLUDED_IN_REPORT);
         report.outputs_in_inputs = outputs_in_inputs;
         if !report.outputs_in_inputs.is_empty() {
             report.hints.insert(

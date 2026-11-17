@@ -58,6 +58,9 @@ pub struct Planned {
     /// Files its inputs match that an output pattern also covers — see
     /// [`super::CacheConfig::outputs_in_inputs`].
     pub outputs_in_inputs: Vec<String>,
+    /// Paths its inputs match that a policy leaves out, and which policy —
+    /// see [`super::CacheConfig::excluded_inputs`].
+    pub excluded_inputs: Vec<super::ExcludedInput>,
 }
 
 impl Planned {
@@ -94,11 +97,16 @@ impl Plan {
             .sum()
     }
 
-    /// Whether any step is cached at all.
+    /// Whether any step has caching turned on.
+    ///
+    /// Asked of the config, not the decision: a step that turned caching on
+    /// but whose inputs resolve to no file is `Uncached` too, and "caching is
+    /// off, run `cache init`" is the wrong thing to tell somebody who did —
+    /// they need the reason, which is per step.
     pub fn has_caching(&self) -> bool {
         self.steps
             .iter()
-            .any(|s| !matches!(s.decision, Decision::Uncached { .. }))
+            .any(|s| !matches!(s.decision, Decision::Uncached { .. }) || s.target.config.is_on())
     }
 }
 
@@ -265,6 +273,9 @@ fn plan_graph_now(
                 .unwrap_or_default(),
             outputs_in_inputs: config
                 .outputs_in_inputs(&dir, member.as_deref())
+                .unwrap_or_default(),
+            excluded_inputs: config
+                .excluded_inputs(&dir, member.as_deref())
                 .unwrap_or_default(),
         });
     }

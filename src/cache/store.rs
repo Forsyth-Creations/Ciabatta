@@ -152,6 +152,11 @@ pub struct Inspection {
     pub dir: PathBuf,
     #[serde(default)]
     pub output_patterns: Vec<String>,
+    /// What the step's `inputs` matched but a policy left out — `.gitignore`,
+    /// `exclude`, an output pattern, another sub-workspace — so the inspector
+    /// can say why an expected file isn't in the key.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub excluded: Vec<super::ExcludedInput>,
 }
 
 /// A cache store rooted at a directory.

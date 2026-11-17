@@ -29,7 +29,11 @@ import ContentCopyIcon from "@mui/icons-material/ContentCopy";
 import ViewListIcon from "@mui/icons-material/ViewList";
 
 import { humanizeBytes, useCacheKeyFiles } from "../api/cache";
-import type { FileHash } from "../api/types";
+import {
+  describeExclusion,
+  type ExcludedInput,
+  type FileHash,
+} from "../api/types";
 import { monoFontStack } from "../theme";
 import { FileTree } from "./FileTree";
 
@@ -163,6 +167,81 @@ function FileRows({ files, filter }: { files: FileHash[]; filter: string }) {
 }
 
 /**
+ * What the inputs matched but left out, each with the rule that took it. A
+ * file somebody expected in the key is usually here — a `.env` .gitignore
+ * covers, a `generated/` an `exclude` swept up.
+ */
+function ExcludedRows({
+  items,
+  filter,
+}: {
+  items: ExcludedInput[];
+  filter: string;
+}) {
+  const needle = filter.trim().toLowerCase();
+  const shown = needle
+    ? items.filter(
+        (e) =>
+          e.path.toLowerCase().includes(needle) ||
+          describeExclusion(e).toLowerCase().includes(needle),
+      )
+    : items;
+  if (items.length === 0) {
+    return (
+      <Typography variant="caption" color="text.secondary">
+        Nothing its inputs match is left out.
+      </Typography>
+    );
+  }
+  return (
+    <Box sx={{ maxHeight: 300, overflowY: "auto" }}>
+      {shown.slice(0, MAX_ROWS).map((e) => (
+        <Stack
+          key={e.path}
+          direction="row"
+          spacing={1.5}
+          alignItems="baseline"
+          sx={{ py: 0.25, borderBottom: 1, borderColor: "divider" }}
+        >
+          <Typography
+            variant="body2"
+            title={e.path}
+            sx={{
+              fontFamily: monoFontStack,
+              fontSize: 12,
+              flexGrow: 1,
+              minWidth: 0,
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap",
+            }}
+          >
+            {e.dir ? `${e.path}/` : e.path}
+          </Typography>
+          <Typography
+            variant="caption"
+            color="text.secondary"
+            sx={{ flexShrink: 0 }}
+          >
+            {describeExclusion(e)}
+          </Typography>
+        </Stack>
+      ))}
+      {shown.length > MAX_ROWS && (
+        <Typography variant="caption" color="text.secondary">
+          …and {shown.length - MAX_ROWS} more. Filter to narrow the list.
+        </Typography>
+      )}
+      {shown.length === 0 && (
+        <Typography variant="caption" color="text.secondary">
+          Nothing matches “{filter}”.
+        </Typography>
+      )}
+    </Box>
+  );
+}
+
+/**
  * The inputs and outputs behind a step's cache key. `live` while the step may
  * still be writing, so its outputs fill in as it builds.
  */
@@ -176,7 +255,7 @@ export function CacheKeyFilesView({
   live: boolean;
 }) {
   const { data, error, isLoading } = useCacheKeyFiles(project, cacheKey, live);
-  const [tab, setTab] = useState<"inputs" | "outputs">("inputs");
+  const [tab, setTab] = useState<"inputs" | "outputs" | "excluded">("inputs");
   const [filter, setFilter] = useState("");
   const [view, setView] = useState<"tree" | "list">(initialView);
   const chooseView = (next: "tree" | "list") => {
@@ -208,7 +287,9 @@ export function CacheKeyFilesView({
     );
   }
 
-  const files = tab === "inputs" ? data.inputs : data.outputs;
+  const excluded = data.excluded ?? [];
+  const files =
+    tab === "inputs" ? data.inputs : tab === "outputs" ? data.outputs : [];
   const bytes = files.reduce((total, f) => total + f.size, 0);
 
   return (
@@ -259,6 +340,27 @@ export function CacheKeyFilesView({
           {live ? " (refreshing while it builds)" : ""}.
         </Typography>
       )}
+      {excluded.length > 0 && (
+        <Typography
+          variant="caption"
+          color="text.secondary"
+          sx={{ display: "block", mb: 0.5 }}
+        >
+          {excluded.length} path(s) its inputs match are left out by policy (
+          {[...new Set(excluded.map((e) => e.policy))].join(", ")}).{" "}
+          <Box
+            component="span"
+            onClick={() => {
+              chooseView("list");
+              setTab("excluded");
+            }}
+            sx={{ color: "primary.main", cursor: "pointer" }}
+          >
+            See which, and why
+          </Box>
+          .
+        </Typography>
+      )}
       <Stack
         direction="row"
         spacing={1}
@@ -294,6 +396,9 @@ export function CacheKeyFilesView({
           >
             <Tab value="inputs" label={`Inputs (${data.inputs.length})`} />
             <Tab value="outputs" label={`Outputs (${data.outputs.length})`} />
+            {excluded.length > 0 && (
+              <Tab value="excluded" label={`Left out (${excluded.length})`} />
+            )}
           </Tabs>
         )}
         <Box sx={{ flexGrow: 1 }} />
@@ -320,6 +425,8 @@ export function CacheKeyFilesView({
             filter={filter}
             renderHash={(hash) => <HashText value={hash} />}
           />
+        ) : tab === "excluded" ? (
+          <ExcludedRows items={excluded} filter={filter} />
         ) : (
           <FileRows files={files} filter={filter} />
         )}

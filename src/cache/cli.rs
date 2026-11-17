@@ -169,6 +169,18 @@ fn print_step(step: &Planned, show_diff: bool) {
         );
     }
 
+    // What the inputs match but leave out. Not a warning — excluding things
+    // is the point of `exclude` and `gitignore` — but when an expected file
+    // is missing from a key, this is the line that says which rule took it.
+    // An uncached step already names these in its reason.
+    if !step.excluded_inputs.is_empty() && !matches!(step.decision, Decision::Uncached { .. }) {
+        println!(
+            "    {} {}",
+            "left out:".dimmed(),
+            super::describe_excluded(&step.excluded_inputs)
+        );
+    }
+
     let Some(diff) = &step.diff else { return };
 
     println!("    {} {}", "changed:".dimmed(), diff.summary());
@@ -240,6 +252,7 @@ pub fn plan_json(plan: &Plan) -> serde_json::Value {
             "diff": step.diff,
             "undeclared_reads": step.undeclared_reads,
             "outputs_in_inputs": step.outputs_in_inputs,
+            "excluded_inputs": step.excluded_inputs,
         })).collect::<Vec<_>>(),
     })
 }

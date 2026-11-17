@@ -104,9 +104,9 @@ impl Plan {
     /// off, run `cache init`" is the wrong thing to tell somebody who did —
     /// they need the reason, which is per step.
     pub fn has_caching(&self) -> bool {
-        self.steps.iter().any(|s| {
-            !matches!(s.decision, Decision::Uncached { .. }) || s.target.config.is_on()
-        })
+        self.steps
+            .iter()
+            .any(|s| !matches!(s.decision, Decision::Uncached { .. }) || s.target.config.is_on())
     }
 }
 

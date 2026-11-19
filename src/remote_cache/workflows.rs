@@ -75,11 +75,14 @@ pub async fn sync(config: &CiabattaConfig, root: &Path, records: &[Record]) {
         }
     };
 
-    let client = match super::client::Client::new(&remote.url, remote.tls_verify) {
-        Ok(client) => client,
-        Err(_) => return,
-    };
+    // Told to every server the cache is on, and merged back from each, so the
+    // shared history survives whichever of them is down.
+    for (_, client) in super::reach::live(remote).await {
+        sync_with(&client, root, project, records).await;
+    }
+}
 
+async fn sync_with(client: &super::client::Client, root: &Path, project: &str, records: &[Record]) {
     if let Err(e) = client.report_workflows(project, records).await {
         // Debug, not a warning: it costs a shared timestamp, and the build it
         // is attached to already succeeded or failed on its own merits.

@@ -313,12 +313,17 @@ pub async fn report(config: &CiabattaConfig, root: &Path, record: &BuildRecord) 
             None => return,
         },
     };
-    let Ok(client) = super::client::Client::new(&remote.url, remote.tls_verify) else {
-        return;
-    };
-    if let Err(e) = client.report_build(&project, record).await {
-        tracing::debug!("couldn't report this build to the remote cache: {e:#}");
-    }
+    // Every server the cache is on keeps its own feed, so each is told.
+    let live = super::reach::live(remote).await;
+    futures::future::join_all(live.iter().map(|(_, client)| async {
+        if let Err(e) = client.report_build(&project, record).await {
+            tracing::debug!(
+                "couldn't report this build to the remote cache at {}: {e:#}",
+                client.base()
+            );
+        }
+    }))
+    .await;
 }
 
 // ─── The server's side ──────────────────────────────────────────────────────

@@ -144,8 +144,16 @@ impl Registry {
             return Ok(project);
         }
 
+        // An id this server hasn't seen is adopted rather than replaced, when
+        // it looks like one: that is how a backup server comes to know a
+        // project by the same id as the primary that first registered it, so
+        // one `project:` in the config works against every server.
+        let adopted = id
+            .map(str::trim)
+            .filter(|id| plausible_id(id))
+            .map(str::to_string);
         let project = Project {
-            id: uuid::Uuid::new_v4().to_string(),
+            id: adopted.unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
             name: name.to_string(),
             created_at: crate::cache::store::now(),
             created_by: by.map(str::to_string),
@@ -179,6 +187,16 @@ impl Registry {
 fn save(path: &Path, projects: &[Project]) -> Result<()> {
     let body = serde_json::to_string_pretty(projects)?;
     std::fs::write(path, body).with_context(|| format!("Failed to write {}", path.display()))
+}
+
+/// Whether a client-supplied id is fit to name a project: what this server
+/// would mint itself (a UUID), or at least something as safe to put in a URL
+/// path and a storage key — short, and nothing but letters, digits, `-`, `_`.
+fn plausible_id(id: &str) -> bool {
+    (8..=64).contains(&id.len())
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
 #[cfg(test)]
@@ -232,6 +250,27 @@ mod tests {
             "same name must not mean same project — that's a silently shared cache"
         );
         assert_eq!(registry.list().len(), 2);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// How a backup server comes to share the primary's id.
+    #[test]
+    fn an_unknown_id_is_adopted_when_it_looks_like_one() {
+        let dir = scratch("adopt");
+        let registry = Registry::open(&dir).unwrap();
+
+        let id = "0b6c1f0e-5c1a-4d2b-9a59-3f1f2c7d8e90";
+        let adopted = registry.resolve(Some(id), "monorepo", None).unwrap();
+        assert_eq!(adopted.id, id);
+        assert_eq!(registry.resolve(Some(id), "monorepo", None).unwrap().id, id);
+        assert_eq!(registry.list().len(), 1);
+
+        // Nothing that can't safely name a path or a storage key.
+        for bad in ["../../etc", "short", "has space in it", &"x".repeat(65)] {
+            let minted = registry.resolve(Some(bad), "other", None).unwrap();
+            assert_ne!(minted.id, bad);
+        }
 
         let _ = std::fs::remove_dir_all(&dir);
     }

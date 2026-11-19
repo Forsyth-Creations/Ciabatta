@@ -804,6 +804,13 @@ const COMMANDS: CommandGroup[] = [
         note: "What the local cache is holding, and what it has saved.",
       },
       {
+        usage: "ciabatta cache sync",
+        note: "Copy entries between the remote cache and its `cache.remote.backups` until each holds what any of them does — for catching up a server that was down. Read-only servers are only read from.",
+        flags: [
+          ["--dry-run", "Say what would be copied where, and copy nothing."],
+        ],
+      },
+      {
         usage: "ciabatta cache prune | clean",
         note: "Apply a retention policy, or empty the store for this project.",
         flags: [
@@ -4220,6 +4227,81 @@ ciabatta cache init --remote http://cache.example.com:8380`}</Pre>
             </>,
           ]}
         />
+
+        <SubHeading>When the cache can&apos;t be reached</SubHeading>
+        <P>
+          A remote cache that is configured but down is{" "}
+          <strong>a warning, not an error</strong>: the run says so once, in
+          yellow, and carries on with the local cache. It finds out quickly —
+          each server is asked{" "}
+          <strong>twice at most, within two seconds</strong> — and the answer
+          holds for the rest of the run, so nothing later (a step&apos;s lookup
+          or upload, the build report at the end) waits on it again. A server
+          that stops answering mid-run is dropped the same way by the first
+          request that notices. Questions from <C>ciabatta input</C> come up as
+          soon as their step asks them, not after a stalled connection gives up.
+        </P>
+        <Pre>{`warning: the remote cache at http://cache.example.com:8380 isn't reachable (no answer after 2 tries: …)
+warning: building with the local cache only`}</Pre>
+
+        <SubHeading>Backup servers</SubHeading>
+        <P>
+          List more servers under <C>cache.remote.backups</C> and they hold the
+          same cache as the primary. Each is a URL, or a URL with its own{" "}
+          <C>tls_verify</C> and <C>read_only</C>:
+        </P>
+        <Pre>{`cache:
+  remote:
+    url: https://cache.example.com:8380
+    project: 0b6c1f0e-…           # one id, shared by every server
+    backups:
+      - https://cache-dr.example.com:8380
+      - url: https://cache-eu.example.com:8380
+        tls_verify: false`}</Pre>
+        <Bullets
+          items={[
+            <>
+              <strong>Written in parallel.</strong> Every build is uploaded to
+              each server that answers, at the same time, so none of them falls
+              behind while all are up.
+            </>,
+            <>
+              <strong>Read in order.</strong> A lookup asks the primary first,
+              then each backup as written. When the primary is down the run says{" "}
+              <C>using the backup remote cache at …</C> and goes on with the
+              backups alone.
+            </>,
+            <>
+              <strong>Healed on a hit.</strong> An entry found on one server but
+              missing from another that answered is copied up to it after the
+              restore, so the servers converge as people build.
+            </>,
+            <>
+              <strong>One project id everywhere.</strong> A server that has not
+              seen the project yet adopts the id in the config rather than
+              minting its own, so the same <C>project:</C> works against all of
+              them. Every server needs this version or newer for that.
+            </>,
+          ]}
+        />
+        <P>
+          A server that was down misses what was built meanwhile. Catch it up
+          with <C>ciabatta cache sync</C>: each server lists what it holds, and
+          every entry missing from one is copied there from a server that has
+          it. <C>--dry-run</C> says what would be copied. Read-only servers are
+          read from and never written to, and copying doesn&apos;t count as a
+          hit or a use in any server&apos;s stats.
+        </P>
+        <Pre>{`$ ciabatta cache sync
+https://cache.example.com:8380     holds 412 entr(ies)
+https://cache-dr.example.com:8380  holds 377 entr(ies)
+
+copied 35 entr(ies), 1.2 GB → https://cache-dr.example.com:8380`}</Pre>
+        <P>
+          The <Link to="/cache">Remote tab</Link> lists the backups with whether
+          each answers right now, and a step&apos;s cache report says when its
+          run was served by a backup.
+        </P>
 
         <SubHeading>The server&apos;s own page</SubHeading>
         <P>

@@ -411,10 +411,29 @@ async fn remote_status(
         return Ok(Json(json!({ "configured": false })));
     };
 
+    // Each backup's reachability, from the same probe a run uses — so the page
+    // and the run agree, and a server that is down costs this request two
+    // seconds at most.
+    let mut backups = Vec::new();
+    for server in remote.servers().into_iter().filter(|s| s.backup) {
+        let answer = crate::remote_cache::reach::probe(&server.url, server.tls_verify).await;
+        backups.push(json!({
+            "url": server.url,
+            "read_only": server.read_only,
+            "reachable": answer.is_ok(),
+            "error": answer.err(),
+        }));
+    }
+    let backups = serde_json::Value::Array(backups);
+
     let client = crate::remote_cache::client::Client::new(&remote.url, remote.tls_verify)
         .map_err(|e| RouteError::bad_request(format!("{e:#}")))?;
 
-    match client.stats().await {
+    let stats = match crate::remote_cache::reach::probe(&remote.url, remote.tls_verify).await {
+        Ok(_) => client.stats().await,
+        Err(why) => Err(anyhow::anyhow!(why)),
+    };
+    match stats {
         Ok(stats) => Ok(Json(json!({
             "configured": true,
             "url": remote.url,
@@ -422,6 +441,7 @@ async fn remote_status(
             "read_only": remote.read_only,
             "reachable": true,
             "stats": stats,
+            "backups": backups,
         }))),
         // A cache that's down is a fact about the cache, not a failure of this
         // request — the page should render it as "unreachable", not as an error
@@ -433,6 +453,7 @@ async fn remote_status(
             "read_only": remote.read_only,
             "reachable": false,
             "error": format!("{e:#}"),
+            "backups": backups,
         }))),
     }
 }

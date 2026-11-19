@@ -52,8 +52,10 @@ pub struct Session {
     /// moved. Everything behind one of these reruns — see
     /// [`crate::cache::CacheConfig::accounts_for_its_outputs`].
     unaccounted: BTreeSet<String>,
-    /// Remote cache to consult, when this project has one configured.
-    remote: Option<Remote>,
+    /// The remote cache servers this run reached and registered with, in the
+    /// order a lookup tries them: the primary, then `cache.remote.backups` as
+    /// written. Empty when there is no remote, or none could be reached.
+    remotes: Vec<Remote>,
     /// Where restore progress goes, when anyone is listening.
     reporter: Option<Reporter>,
     /// Keys this run reused without asking the remote for them.
@@ -93,6 +95,15 @@ pub struct RemoteStatus {
     /// Why it isn't connected, when it isn't.
     #[serde(default)]
     pub error: Option<String>,
+    /// `url` is one of `cache.remote.backups`, because the primary (and any
+    /// backup before it) couldn't be reached.
+    #[serde(default)]
+    #[serde(skip_serializing_if = "crate::format::is_false")]
+    pub backup: bool,
+    /// The configured servers this run couldn't reach, primary or backup.
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub unreachable: Vec<String>,
 }
 
 /// Everything the cache knew about one step: what it decided, the entry it
@@ -323,6 +334,17 @@ struct Remote {
     read_only: bool,
 }
 
+impl Remote {
+    /// Still worth asking: not found to be down since the run connected.
+    fn live(&self) -> bool {
+        !crate::remote_cache::reach::is_down(self.client.base())
+    }
+
+    fn writable(&self) -> bool {
+        !self.read_only && self.live()
+    }
+}
+
 /// What the cache did over a run.
 #[derive(Debug, Default, Clone)]
 pub struct Stats {
@@ -415,7 +437,7 @@ impl Session {
             produced: Default::default(),
             cache_names: HashMap::new(),
             unaccounted: BTreeSet::new(),
-            remote: None,
+            remotes: Vec::new(),
             reporter: None,
             reused_locally: Vec::new(),
             force: false,
@@ -434,36 +456,36 @@ impl Session {
         self.force = true;
     }
 
-    /// Resolve this project's identity on its configured remote cache, if it
-    /// has one.
+    /// Resolve this project's identity on its configured remote cache servers,
+    /// if it has any.
     ///
     /// Best-effort and done once, up front: a server that's unreachable is
-    /// reported here, at the start of the run, rather than as a surprise on
-    /// every step.
+    /// reported here, at the start of the run, as a warning rather than as a
+    /// surprise on every step. Reachability comes from
+    /// [`crate::remote_cache::reach`] — every server probed at once, twice at
+    /// most, within two seconds — so a cache that is down costs the run no more
+    /// than that, and usually nothing: the version check already asked.
     pub async fn connect_remote(&mut self) {
         let Some(remote) = self.config.cache.as_ref().and_then(|c| c.remote()).cloned() else {
             self.warn_about_ignored_remotes();
             return;
         };
-        let remote = &remote;
+        let servers = remote.servers();
 
         self.remote_status = Some(RemoteStatus {
             url: remote.url.clone(),
             connected: false,
             read_only: remote.read_only,
             error: None,
+            backup: false,
+            unreachable: Vec::new(),
         });
 
-        let client = match Client::new(&remote.url, remote.tls_verify) {
-            Ok(client) => client,
-            Err(e) => {
-                crate::tui::note(format!(
-                    "note: the configured remote cache is unusable ({e:#})"
-                ));
-                self.remote_failed(format!("{e:#}"));
-                return;
-            }
-        };
+        let probes: Vec<(String, bool)> = servers
+            .iter()
+            .map(|s| (s.url.clone(), s.tls_verify))
+            .collect();
+        let answers = crate::remote_cache::reach::probe_all(&probes).await;
 
         let name = remote
             .name
@@ -476,35 +498,87 @@ impl Session {
             })
             .unwrap_or_else(|| "project".to_string());
 
-        match client.register(&name, remote.project.as_deref()).await {
-            Ok(project) => {
-                // The server assigned an id and the config doesn't have it yet.
-                // Write it back so every other checkout resolves to the same
-                // project instead of registering a new one.
-                if remote.project.as_deref() != Some(project.id.as_str())
-                    && let Err(e) = record_project_id(&self.root, &project.id)
-                {
-                    crate::tui::note(format!(
-                        "note: couldn't record the remote cache project id ({e:#}); \
-                         add `project: {}` under cache.remote by hand",
-                        project.id
-                    ));
+        // One id on every server. The configured one when there is one; else
+        // whatever the first server to answer assigns, which the rest adopt.
+        let mut project = remote.project.clone();
+        let mut unreachable = Vec::new();
+        let mut first_error = None;
+        for (server, answer) in servers.iter().zip(answers) {
+            let role = if server.backup { "backup " } else { "" };
+            let registered = match answer {
+                Err(why) => Err(why),
+                Ok(_) => match Client::new(&server.url, server.tls_verify) {
+                    Err(e) => Err(format!("{e:#}")),
+                    Ok(client) => match client.register(&name, project.as_deref()).await {
+                        Ok(found) => Ok((client, found.id)),
+                        Err(e) => Err(format!("{e:#}")),
+                    },
+                },
+            };
+            match registered {
+                Ok((client, id)) => {
+                    if project.is_none() {
+                        project = Some(id.clone());
+                    } else if project.as_deref() != Some(id.as_str()) {
+                        // A server from before backups adopted ids mints its
+                        // own; it works, under a different id, until upgraded.
+                        crate::tui::warn(format!(
+                            "the {role}remote cache at {} knows this project as {id}, not {}; \
+                             upgrade it so every server shares one id",
+                            client.base(),
+                            project.as_deref().unwrap_or_default(),
+                        ));
+                    }
+                    self.remotes.push(Remote {
+                        client,
+                        project: id,
+                        read_only: server.read_only,
+                    });
                 }
-
-                self.remote = Some(Remote {
-                    client,
-                    project: project.id,
-                    read_only: remote.read_only,
-                });
-                if let Some(status) = self.remote_status.as_mut() {
-                    status.connected = true;
+                Err(why) => {
+                    crate::tui::warn(format!(
+                        "the {role}remote cache at {} isn't reachable ({why})",
+                        crate::remote_cache::client::normalize(&server.url)
+                    ));
+                    first_error.get_or_insert(why);
+                    unreachable.push(crate::remote_cache::client::normalize(&server.url));
                 }
             }
-            Err(e) => {
-                crate::tui::note(format!(
-                    "note: the remote cache is unavailable ({e:#}); using the local one"
-                ));
-                self.remote_failed(format!("{e:#}"));
+        }
+
+        // The server assigned an id and the config doesn't have it yet. Write
+        // it back so every other checkout resolves to the same project instead
+        // of registering a new one.
+        if let Some(id) = project.as_deref()
+            && remote.project.is_none()
+            && !self.remotes.is_empty()
+            && let Err(e) = record_project_id(&self.root, id)
+        {
+            crate::tui::note(format!(
+                "note: couldn't record the remote cache project id ({e:#}); \
+                 add `project: {id}` under cache.remote by hand"
+            ));
+        }
+
+        let status = self.remote_status.as_mut().expect("set above");
+        status.unreachable = unreachable;
+        match self.remotes.first() {
+            Some(first) => {
+                status.connected = true;
+                status.backup =
+                    first.client.base() != crate::remote_cache::client::normalize(&remote.url);
+                status.url = first.client.base().to_string();
+                status.read_only = first.read_only;
+                if status.backup {
+                    crate::tui::warn(format!(
+                        "using the backup remote cache at {}",
+                        first.client.base()
+                    ));
+                }
+            }
+            None => {
+                crate::tui::warn("building with the local cache only");
+                self.remote_failed(first_error.unwrap_or_default());
             }
         }
     }
@@ -639,11 +713,11 @@ impl Session {
         // do anything about.
         if reran.is_empty()
             && !self.force
-            && let (Decision::Rebuild { key, reason }, Some(remote)) = (&decision, &self.remote)
+            && let Decision::Rebuild { key, reason } = &decision
             && !matches!(reason, Reason::NoOutputs)
+            && self.remotes.iter().any(Remote::live)
         {
             let key = key.clone();
-            let server = remote.client.base().to_string();
             let send = |progress: Restoring| {
                 if let Some(reporter) = &self.reporter {
                     // Never wait on a viewer: a full channel drops a progress
@@ -657,44 +731,77 @@ impl Session {
                         });
                 }
             };
-            send(Restoring {
-                phase: "checking".to_string(),
-                server: server.clone(),
-                ..Default::default()
-            });
-            // A frame per chunk would be thousands for one large file, and
-            // every frame is the whole run state to every viewer. A file
-            // starting or finishing always goes through; bytes in between at
-            // most a few times a second.
-            let mut last = std::time::Instant::now();
-            let mut last_file: Option<usize> = None;
-            let mut on_progress = |p: crate::remote_cache::client::DownloadProgress<'_>| {
-                let boundary = last_file != Some(p.files_done) || p.current.is_none();
-                if !boundary && last.elapsed() < std::time::Duration::from_millis(250) {
-                    return;
+            // Each server in turn, primary first; the ones that answered "not
+            // here" are noted, so a hit further down can be copied back up to
+            // them and the servers converge on the same entries.
+            let mut restored = None;
+            let mut missed: Vec<usize> = Vec::new();
+            for (index, remote) in self.remotes.iter().enumerate() {
+                if !remote.live() {
+                    continue;
                 }
-                last = std::time::Instant::now();
-                last_file = Some(p.files_done);
+                let server = remote.client.base().to_string();
                 send(Restoring {
-                    phase: "downloading".to_string(),
+                    phase: "checking".to_string(),
                     server: server.clone(),
-                    files_done: p.files_done,
-                    files_total: p.files_total,
-                    bytes_done: p.bytes_done,
-                    bytes_total: p.bytes_total,
-                    current: p.current.map(str::to_string),
+                    ..Default::default()
                 });
-            };
-            if let Some(entry) = crate::remote_cache::client::try_restore(
-                &remote.client,
-                &remote.project,
-                &key,
-                Some(&step.name),
-                &dir,
-                &mut on_progress,
-            )
-            .await
-            {
+                // A frame per chunk would be thousands for one large file, and
+                // every frame is the whole run state to every viewer. A file
+                // starting or finishing always goes through; bytes in between at
+                // most a few times a second.
+                let mut last = std::time::Instant::now();
+                let mut last_file: Option<usize> = None;
+                let mut on_progress = |p: crate::remote_cache::client::DownloadProgress<'_>| {
+                    let boundary = last_file != Some(p.files_done) || p.current.is_none();
+                    if !boundary && last.elapsed() < std::time::Duration::from_millis(250) {
+                        return;
+                    }
+                    last = std::time::Instant::now();
+                    last_file = Some(p.files_done);
+                    send(Restoring {
+                        phase: "downloading".to_string(),
+                        server: server.clone(),
+                        files_done: p.files_done,
+                        files_total: p.files_total,
+                        bytes_done: p.bytes_done,
+                        bytes_total: p.bytes_total,
+                        current: p.current.map(str::to_string),
+                    });
+                };
+                match crate::remote_cache::client::try_restore(
+                    &remote.client,
+                    &remote.project,
+                    &key,
+                    Some(&step.name),
+                    &dir,
+                    &mut on_progress,
+                )
+                .await
+                {
+                    Some(entry) => {
+                        restored = Some(entry);
+                        break;
+                    }
+                    // Asked and missed, rather than gone down while asking.
+                    None if remote.live() => missed.push(index),
+                    None => {}
+                }
+            }
+            if let Some(entry) = restored {
+                // Heal the servers that missed: what was restored is on disk,
+                // exactly as the entry describes it, so it uploads as built.
+                let heal = missed
+                    .iter()
+                    .map(|&i| &self.remotes[i])
+                    .filter(|r| r.writable())
+                    .map(|r| {
+                        crate::remote_cache::client::try_upload(
+                            &r.client, &r.project, &key, &entry, &dir,
+                        )
+                    });
+                futures::future::join_all(heal).await;
+
                 // Mirror it locally so the next run doesn't cross the network,
                 // and so the entry's inputs are there to diff against.
                 //
@@ -1056,21 +1163,18 @@ impl Session {
             }
         };
 
-        let mut uploaded = None;
-        if let Some(remote) = &self.remote
-            && !remote.read_only
-        {
-            uploaded = Some(
-                crate::remote_cache::client::try_upload(
-                    &remote.client,
-                    &remote.project,
-                    &key,
-                    &entry,
-                    &dir,
-                )
-                .await,
-            );
-        }
+        // To every server at once, so the primary and its backups hold the
+        // same entries; landed means it reached at least one of them.
+        let writable: Vec<&Remote> = self.remotes.iter().filter(|r| r.writable()).collect();
+        let uploaded = if writable.is_empty() {
+            None
+        } else {
+            let landed = futures::future::join_all(writable.iter().map(|r| {
+                crate::remote_cache::client::try_upload(&r.client, &r.project, &key, &entry, &dir)
+            }))
+            .await;
+            Some(landed.into_iter().any(|landed| landed))
+        };
         self.stored(
             &step.name,
             StoredInfo {
@@ -1087,7 +1191,7 @@ impl Session {
     fn keep_alive(&mut self, key: &str) {
         // Only worth collecting when there's a server to tell. A step reused
         // twice in one graph is one use as far as retention is concerned.
-        if self.remote.is_some() && !self.reused_locally.iter().any(|k| k == key) {
+        if !self.remotes.is_empty() && !self.reused_locally.iter().any(|k| k == key) {
             self.reused_locally.push(key.to_string());
         }
     }
@@ -1098,15 +1202,12 @@ impl Session {
     /// one request rather than two hundred. Entirely best-effort: the build has
     /// already succeeded, and nothing here is worth reporting to whoever ran it.
     pub async fn finish(&mut self) {
-        let Some(remote) = &self.remote else { return };
         if self.reused_locally.is_empty() {
             return;
         }
-        crate::remote_cache::client::try_touch(
-            &remote.client,
-            &remote.project,
-            &self.reused_locally,
-        )
+        futures::future::join_all(self.remotes.iter().map(|r| {
+            crate::remote_cache::client::try_touch(&r.client, &r.project, &self.reused_locally)
+        }))
         .await;
         self.reused_locally.clear();
     }

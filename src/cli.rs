@@ -711,6 +711,18 @@ pub enum CacheCommand {
         #[arg(long)]
         dry_run: bool,
     },
+
+    /// Copy entries between the remote cache and its backups
+    /// (`cache.remote.backups`) until each holds what any of them does.
+    ///
+    /// Runs keep the servers in step by writing every build to all of them,
+    /// but a server that was down missed what was built meanwhile. This
+    /// catches it up. Read-only servers are read from, never written to.
+    Sync {
+        /// Say what would be copied where, and copy nothing.
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]

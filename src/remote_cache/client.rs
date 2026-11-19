@@ -445,6 +445,38 @@ impl Client {
         parse(response).await.map(Some)
     }
 
+    /// Every key the server holds for `project` — see [`ListedEntry`].
+    pub async fn list_entries(&self, project: &str) -> Result<Vec<ListedEntry>> {
+        #[derive(Deserialize)]
+        struct Listing {
+            #[serde(default)]
+            entries: Vec<ListedEntry>,
+        }
+        let listing: Listing = self
+            .get_json(&format!("/api/projects/{project}/cache"))
+            .await?;
+        Ok(listing.entries)
+    }
+
+    /// Fetch `key`'s manifest to copy it elsewhere: unlike a lookup, the
+    /// server neither counts it as a hit nor treats it as a use.
+    pub async fn fetch_for_sync(&self, project: &str, key: &str) -> Result<Option<Entry>> {
+        let response = self
+            .authed(
+                self.http
+                    .get(self.url(&format!("/api/projects/{project}/cache/{key}")))
+                    .query(&[("sync", "true")]),
+            )
+            .timeout(TIMEOUT)
+            .send()
+            .await
+            .with_context(|| format!("Could not reach the remote cache at {}", self.base))?;
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        parse(response).await.map(Some)
+    }
+
     /// The server this client talks to, as normalized.
     pub fn base(&self) -> &str {
         &self.base
@@ -726,6 +758,18 @@ impl Client {
     }
 }
 
+/// One line of a server's cache listing (`GET /api/projects/{id}/cache`).
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct ListedEntry {
+    pub key: String,
+    #[serde(default)]
+    pub target: String,
+    #[serde(default)]
+    pub size: u64,
+    #[serde(default)]
+    pub created_at: String,
+}
+
 /// What `/api/health` returns.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Health {
@@ -860,6 +904,9 @@ pub async fn try_restore(
     dir: &Path,
     on_progress: &mut (dyn FnMut(DownloadProgress<'_>) + Send),
 ) -> Option<Entry> {
+    if super::reach::is_down(client.base()) {
+        return None;
+    }
     match client.lookup_for(project, key, target).await {
         Ok(Some(entry)) => match client
             .download_with(project, key, &entry, dir, on_progress)
@@ -875,11 +922,21 @@ pub async fn try_restore(
         },
         Ok(None) => None,
         Err(e) => {
-            crate::tui::note(format!(
-                "note: the remote cache is unavailable ({e:#}); building locally"
+            gone(client, &e);
+            crate::tui::warn(format!(
+                "the remote cache at {} stopped answering ({e:#}); carrying on without it",
+                client.base()
             ));
             None
         }
+    }
+}
+
+/// Mark `client`'s server down when `error` says it couldn't be reached, so
+/// the rest of the run stops waiting on it.
+fn gone(client: &Client, error: &anyhow::Error) {
+    if super::reach::unreachable(error) {
+        super::reach::mark_down(client.base(), format!("{error:#}"));
     }
 }
 
@@ -901,7 +958,7 @@ pub struct DownloadProgress<'a> {
 /// that keeps a shared cache useful, and no part of it is worth a line of
 /// output on a build that otherwise succeeded.
 pub async fn try_touch(client: &Client, project: &str, keys: &[String]) {
-    if keys.is_empty() {
+    if keys.is_empty() || super::reach::is_down(client.base()) {
         return;
     }
     if let Err(e) = client.touch(project, keys).await {
@@ -919,11 +976,16 @@ pub async fn try_upload(
     entry: &Entry,
     dir: &Path,
 ) -> bool {
+    if super::reach::is_down(client.base()) {
+        return false;
+    }
     match client.upload(project, key, entry, dir).await {
         Ok(()) => true,
         Err(e) => {
-            crate::tui::note(format!(
-                "note: couldn't publish this build to the remote cache ({e:#})"
+            gone(client, &e);
+            crate::tui::warn(format!(
+                "couldn't publish this build to the remote cache at {} ({e:#})",
+                client.base()
             ));
             false
         }

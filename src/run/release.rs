@@ -224,6 +224,11 @@ pub async fn connect(config: &CiabattaConfig, root: &Path) -> Result<Option<Shar
     let Some(remote) = config.cache.as_ref().and_then(|c| c.remote()).cloned() else {
         return Ok(None);
     };
+    // Fails within the reachability budget rather than a request timeout: a
+    // release that can't be shared should say so promptly, not after a stall.
+    if let Err(why) = crate::remote_cache::reach::probe(&remote.url, remote.tls_verify).await {
+        anyhow::bail!("couldn't reach the remote cache at {} ({why})", remote.url);
+    }
     let client = Client::new(&remote.url, remote.tls_verify)?;
     let name = remote
         .name

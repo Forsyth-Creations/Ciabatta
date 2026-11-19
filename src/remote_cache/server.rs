@@ -305,6 +305,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/builds", get(build_feed))
         .route("/api/projects/{id}/releases", get(list_releases))
         .route("/api/releases", get(all_releases))
+        .route("/api/projects/{id}/cache", get(list_entries))
         .route("/api/projects/{id}/cache/touch", post(touch_entries))
         .route(
             "/api/projects/{id}/cache/{key}",
@@ -895,6 +896,11 @@ struct LookupQuery {
     /// but it is what lets the stats say *which* target keeps missing.
     #[serde(default)]
     target: Option<String>,
+    /// `true` from `ciabatta cache sync` copying an entry to another server:
+    /// not a build wanting it, so neither a hit in the stats nor a use that
+    /// keeps it from expiring.
+    #[serde(default)]
+    sync: bool,
 }
 
 /// Look a key up. A miss is a 404 — that's the whole protocol.
@@ -912,6 +918,9 @@ async fn get_entry(
         // An entry whose artifacts have gone is a miss, not a hit that fails
         // halfway through a download.
         Some(entry) if state.store.has_artifacts(&scoped)? => {
+            if query.sync {
+                return Ok(Json(entry));
+            }
             state.activity.record(super::activity::Traffic {
                 project: &id,
                 kind: super::activity::Kind::Hit,
@@ -924,6 +933,7 @@ async fn get_entry(
             state.store.touch(&scoped)?;
             Ok(Json(entry))
         }
+        _ if query.sync => Err(ApiError::not_found(format!("No cache entry for {key}"))),
         _ => {
             state.activity.record(super::activity::Traffic {
                 project: &id,
@@ -937,6 +947,39 @@ async fn get_entry(
             Err(ApiError::not_found(format!("No cache entry for {key}")))
         }
     }
+}
+
+/// Every key this server holds for a project, with its artifacts complete —
+/// what `ciabatta cache sync` compares across a primary and its backups.
+///
+/// Keys and sizes only: what's in an entry is a lookup away, and a listing
+/// for a busy project is long enough without it. A listing is not a use, so
+/// nothing here is touched or counted.
+async fn list_entries(
+    State(state): State<AppState>,
+    headers: header::HeaderMap,
+    Path(id): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    state.identify(&headers)?;
+    require_project(&state, &id)?;
+
+    let prefix = scoped_key(&id, "");
+    let mut entries = Vec::new();
+    for entry in state.store.list()? {
+        if entry.workspace != id || !state.store.has_artifacts(&entry.key)? {
+            continue;
+        }
+        let Some(key) = entry.key.strip_prefix(&prefix) else {
+            continue;
+        };
+        entries.push(json!({
+            "key": key,
+            "target": entry.target,
+            "size": entry.size,
+            "created_at": entry.created_at,
+        }));
+    }
+    Ok(Json(json!({ "entries": entries })))
 }
 
 #[derive(Deserialize)]
@@ -1997,6 +2040,24 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+
+        // The listing `cache sync` compares servers with names it, under the
+        // key the client used rather than the server's scoped one…
+        let response = router(state.clone())
+            .oneshot(get(&format!("/api/projects/{id}/cache")))
+            .await
+            .unwrap();
+        let listing = json(response).await;
+        assert_eq!(listing["entries"][0]["key"], "abc123");
+        assert_eq!(listing["entries"][0]["size"], payload.len() as u64);
+        // …and fetching it to copy elsewhere is neither a hit nor a miss: the
+        // counts below are the build traffic alone.
+        for key in ["abc123", "nothing-here"] {
+            router(state.clone())
+                .oneshot(get(&format!("/api/projects/{id}/cache/{key}?sync=true")))
+                .await
+                .unwrap();
+        }
 
         // Now the same key is a hit, and the file comes back byte-identical.
         let response = router(state.clone())

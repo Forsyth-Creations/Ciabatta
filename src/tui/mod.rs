@@ -52,6 +52,22 @@ pub fn note(message: impl Into<String>) {
     eprintln!("{message}");
 }
 
+/// Like [`note`], for something that needs attention without being a failure
+/// — a configured remote cache that can't be reached. Prefixed `warning:` and
+/// coloured as one in a terminal; the TUI shows it in the run's log like any
+/// other note.
+pub fn warn(message: impl Into<String>) {
+    use owo_colors::OwoColorize;
+    let message = format!("warning: {}", message.into());
+    if owns_screen()
+        && let Ok(mut notes) = NOTES.lock()
+    {
+        notes.push(message);
+        return;
+    }
+    eprintln!("{}", message.style(crate::color::warn()));
+}
+
 /// The notes waiting to be shown, oldest first.
 fn take_notes() -> Vec<String> {
     NOTES

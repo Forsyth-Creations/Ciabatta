@@ -12,23 +12,29 @@
 //! its own, and a version check that delayed or failed a build would be worse
 //! than none.
 
-use std::time::Duration;
-
-/// How long to wait for the cache to say what version it is. Short: this runs
-/// before every workflow, and a cache that can't answer in this long is one the
-/// cache session will complain about anyway.
-const PROBE: Duration = Duration::from_millis(1500);
-
-/// The warning to open a run with, if `config`'s remote cache is reachable and
-/// runs a different version from this binary.
+/// The warning to open a run with, if any of `config`'s remote cache servers is
+/// reachable and runs a different version from this binary.
+///
+/// The servers are asked together through [`super::reach`], so this costs at
+/// most its two-second budget however many backups there are — and whatever it
+/// learns is what the rest of the run goes on, so an unreachable server is
+/// only waited for once.
 pub async fn mismatch(config: &crate::config::CiabattaConfig) -> Option<String> {
     let remote = config.cache.as_ref()?.remote()?;
-    let client = super::client::Client::new(&remote.url, remote.tls_verify).ok()?;
-    let health = tokio::time::timeout(PROBE, client.health())
-        .await
-        .ok()?
-        .ok()?;
-    describe(env!("CARGO_PKG_VERSION"), &health.version, &remote.url)
+    let servers: Vec<(String, bool)> = remote
+        .servers()
+        .into_iter()
+        .map(|s| (s.url, s.tls_verify))
+        .collect();
+    let answers = super::reach::probe_all(&servers).await;
+    let messages: Vec<String> = servers
+        .iter()
+        .zip(answers)
+        .filter_map(|((url, _), health)| {
+            describe(env!("CARGO_PKG_VERSION"), &health.ok()?.version, url)
+        })
+        .collect();
+    (!messages.is_empty()).then(|| messages.join(" "))
 }
 
 /// The warning for this binary at `ours` against a cache at `theirs`, or `None`

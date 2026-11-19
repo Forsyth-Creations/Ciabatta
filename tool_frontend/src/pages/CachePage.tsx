@@ -491,8 +491,8 @@ function BackupsView({ backups }: { backups: BackupStatus[] }) {
         color="text.secondary"
         sx={{ mt: 1, display: "block" }}
       >
-        A backup that was down misses what was built meanwhile; catch it up with{" "}
-        <code>ciabatta cache sync</code>.
+        The servers keep each other holding the same cache: list them under{" "}
+        <code>peers</code> in each server&apos;s <code>remote-cache.yaml</code>.
       </Typography>
     </Paper>
   );

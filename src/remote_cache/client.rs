@@ -768,6 +768,9 @@ pub struct ListedEntry {
     pub size: u64,
     #[serde(default)]
     pub created_at: String,
+    /// When it was last used there; absent from servers before 0.11.0.
+    #[serde(default)]
+    pub last_used_at: Option<String>,
 }
 
 /// What `/api/health` returns.
@@ -781,6 +784,9 @@ pub struct Health {
     pub auth: String,
     #[serde(default)]
     pub release: Option<Release>,
+    /// The server's own id, so a server can recognise itself in its peers.
+    #[serde(default)]
+    pub instance: Option<String>,
 }
 
 /// What `/api/auth/login` returns.

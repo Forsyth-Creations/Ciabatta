@@ -75,9 +75,9 @@ pub async fn sync(config: &CiabattaConfig, root: &Path, records: &[Record]) {
         }
     };
 
-    // Told to every server the cache is on, and merged back from each, so the
-    // shared history survives whichever of them is down.
-    for (_, client) in super::reach::live(remote).await {
+    // Told to the first server that answers, and merged back from it; the
+    // servers share their histories with their peers.
+    if let Some((_, client)) = super::reach::live(remote).await.into_iter().next() {
         sync_with(&client, root, project, records).await;
     }
 }

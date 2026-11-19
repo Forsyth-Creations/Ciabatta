@@ -36,6 +36,7 @@ import {
   RateGauge,
 } from "../components/charts";
 import { ClearCache } from "../components/ClearCache";
+import { PeersSection } from "../components/Peers";
 import { UpdateServer } from "../components/UpdateServer";
 import {
   ChartCard,
@@ -461,6 +462,8 @@ export function Overview({ refreshKey }: { refreshKey: number }) {
           />
         </Box>
       </Section>
+
+      <PeersSection refreshKey={refreshKey} />
 
       <Section
         title="ciabatta"

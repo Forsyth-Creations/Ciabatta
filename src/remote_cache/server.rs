@@ -69,6 +69,8 @@ pub struct AppState {
     /// Paired executors and the jobs offloaded to them — see
     /// [`super::oven`].
     pub oven: Arc<super::oven::Oven>,
+    /// The other servers this one keeps in step with — see [`super::peers`].
+    pub peers: Arc<super::peers::Peers>,
     pub started_at: String,
     /// Set by an applied upload: the binary to start again from once the
     /// server has finished what it is doing.
@@ -93,6 +95,7 @@ impl AppState {
         let activity = super::activity::Activity::open(&config.server.storage)?;
         let builds = super::builds::Store::open(&config.server.storage)?;
         let oven = super::oven::Oven::open(&config.server.storage)?;
+        let peers = super::peers::Peers::open(&config.server.storage, &config.peers)?;
         let release = config.releases.with_uploads(&config.server.storage).scan();
 
         Ok(AppState {
@@ -103,6 +106,7 @@ impl AppState {
             builds: Arc::new(builds),
             activity: Arc::new(activity),
             oven: Arc::new(oven),
+            peers: Arc::new(peers),
             sessions: Arc::new(Sessions::open(&config.server.storage)),
             release: Arc::new(std::sync::RwLock::new(release)),
             started_at: crate::cache::store::now(),
@@ -315,6 +319,9 @@ pub fn router(state: AppState) -> Router {
             "/api/projects/{id}/cache/{key}/artifact",
             get(get_artifact).put(put_artifact),
         )
+        .route("/api/peers", get(list_peers))
+        .route("/api/peers/nudge", post(peer_nudge))
+        .route("/api/peers/sync", post(peer_sync))
         .route("/api/users", get(list_users).post(create_user))
         .route("/api/users/{name}", delete(revoke_user))
         .route("/api/release", get(get_release))
@@ -493,6 +500,7 @@ async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
         "release": *release,
         "auth": state.config.auth.mode,
         "started_at": state.started_at,
+        "instance": state.peers.instance,
     }))
 }
 
@@ -779,6 +787,7 @@ async fn register_project(
         .projects
         .resolve(payload.id.as_deref(), &payload.name, Some(&identity.name))
         .map_err(ApiError::bad_request)?;
+    state.peers.remember_project(&project.id);
     Ok(Json(project))
 }
 
@@ -799,6 +808,8 @@ async fn forget_project(
             removed += 1;
         }
     }
+    // Removed on purpose, so not pulled back from a peer that still has it.
+    state.peers.forget_project(&id);
 
     // Its run history goes with it. Leaving that behind would mean a project
     // re-registered under a new id inherits nothing, while the old records sit
@@ -863,8 +874,13 @@ async fn clear_cache(
         ));
     }
 
-    let freed: u64 = state.store.list()?.iter().map(|e| e.size).sum();
+    let held = state.store.list()?;
+    let freed: u64 = held.iter().map(|e| e.size).sum();
     let removed = state.store.clear()?;
+    // Cleared on purpose: what the peers still hold isn't pulled back.
+    state
+        .peers
+        .forget_entries(held.iter().map(|e| e.key.as_str()));
     state.activity.record_clear(&identity.name, removed, freed);
     tracing::info!(
         "{} cleared the cache: {removed} entries, {}",
@@ -896,7 +912,7 @@ struct LookupQuery {
     /// but it is what lets the stats say *which* target keeps missing.
     #[serde(default)]
     target: Option<String>,
-    /// `true` from `ciabatta cache sync` copying an entry to another server:
+    /// `true` from a peer server copying an entry to itself:
     /// not a build wanting it, so neither a hit in the stats nor a use that
     /// keeps it from expiring.
     #[serde(default)]
@@ -950,7 +966,7 @@ async fn get_entry(
 }
 
 /// Every key this server holds for a project, with its artifacts complete —
-/// what `ciabatta cache sync` compares across a primary and its backups.
+/// what a peer server compares against its own to see what to pull.
 ///
 /// Keys and sizes only: what's in an entry is a lookup away, and a listing
 /// for a busy project is long enough without it. A listing is not a use, so
@@ -977,6 +993,7 @@ async fn list_entries(
             "target": entry.target,
             "size": entry.size,
             "created_at": entry.created_at,
+            "last_used_at": entry.last_used_at,
         }));
     }
     Ok(Json(json!({ "entries": entries })))
@@ -1095,6 +1112,7 @@ async fn report_build(
         .builds
         .add(&id, &record)
         .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")))?;
+    state.peers.nudge();
     Ok(Json(json!({ "ok": true, "id": record.id })))
 }
 
@@ -1274,6 +1292,8 @@ async fn put_entry(
     }
 
     state.store.write_manifest(&entry)?;
+    state.peers.remember_entry(&scoped);
+    state.peers.nudge();
     state.activity.record(super::activity::Traffic {
         project: &id,
         kind: super::activity::Kind::Upload,
@@ -1339,11 +1359,59 @@ async fn put_artifact(
     })))
 }
 
+// ─── Peers ──────────────────────────────────────────────────────────────────
+
+/// How this server's peers are doing — see [`super::peers`].
+async fn list_peers(
+    State(state): State<AppState>,
+    headers: header::HeaderMap,
+) -> ApiResult<Json<serde_json::Value>> {
+    state.identify(&headers)?;
+    Ok(Json(json!({
+        "instance": state.peers.instance,
+        "sync_every": state.config.server.sync_every,
+        "peers": state.peers.status(),
+    })))
+}
+
+/// A peer saying it has something new: pull from the peers now.
+///
+/// Any identity may nudge — all it does is bring the next pull forward, and a
+/// pull only ever reads.
+async fn peer_nudge(
+    State(state): State<AppState>,
+    headers: header::HeaderMap,
+) -> ApiResult<Json<serde_json::Value>> {
+    state.identify(&headers)?;
+    state.peers.wake();
+    Ok(Json(
+        json!({ "ok": true, "peers": !state.peers.is_empty() }),
+    ))
+}
+
+/// Run a sync with every peer now and say how it went — the admin page's
+/// "Sync now".
+async fn peer_sync(
+    State(state): State<AppState>,
+    headers: header::HeaderMap,
+) -> ApiResult<Json<serde_json::Value>> {
+    state.identify_admin(&headers)?;
+    if state.peers.is_empty() {
+        return Err(ApiError::bad_request(anyhow::anyhow!(
+            "This server has no peers. List the other servers under `peers:` in its config."
+        )));
+    }
+    if super::peers::sync_once(&state).await {
+        state.peers.nudge();
+    }
+    Ok(Json(json!({ "ok": true, "peers": state.peers.status() })))
+}
+
 /// Namespace a cache key by project.
 ///
 /// Two projects with the same inputs would otherwise collide in one flat store
 /// — which is exactly the accidental sharing the project id exists to prevent.
-fn scoped_key(project: &str, key: &str) -> String {
+pub(crate) fn scoped_key(project: &str, key: &str) -> String {
     format!("{project}-{key}")
 }
 
@@ -1673,6 +1741,7 @@ pub async fn serve(config: ServerConfig) -> Result<()> {
     announce(&state, &listen);
     tokio::spawn(sweeper(state.clone(), listen.sweep_every.clone()));
     tokio::spawn(flusher(state.clone()));
+    tokio::spawn(super::peers::replicate(state.clone()));
     tokio::spawn(super::oven::discover(state.oven.clone()));
     tokio::spawn(super::oven::sweeper(state.oven.clone()));
 
@@ -1764,6 +1833,22 @@ fn announce(state: &AppState, listen: &Listen) {
         );
     }
 
+    if state.config.peers.is_empty() {
+        println!("  peers:     none (list the other servers under `peers:` to keep them in step)");
+    } else {
+        let urls: Vec<String> = state
+            .config
+            .peers
+            .iter()
+            .map(|p| super::client::normalize(&p.url))
+            .collect();
+        println!(
+            "  peers:     {} — synced every {}",
+            urls.join(", "),
+            listen.sync_every
+        );
+    }
+
     if matches!(state.config.auth.mode(), Ok(auth::Mode::Open)) && listen.bind != "127.0.0.1" {
         println!();
         println!(
@@ -1822,6 +1907,10 @@ async fn sweeper(state: AppState, every: String) {
                 state
                     .activity
                     .record_eviction(pruned.removed.len(), pruned.freed);
+                // Evicted here on purpose: a peer's copy isn't pulled back.
+                state
+                    .peers
+                    .forget_entries(pruned.removed.iter().map(|(key, _)| key.as_str()));
             }
             Ok(_) => {}
             Err(e) => tracing::warn!("retention sweep failed: {e:#}"),
@@ -2041,7 +2130,7 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
 
-        // The listing `cache sync` compares servers with names it, under the
+        // The listing a peer compares servers with names it, under the
         // key the client used rather than the server's scoped one…
         let response = router(state.clone())
             .oneshot(get(&format!("/api/projects/{id}/cache")))

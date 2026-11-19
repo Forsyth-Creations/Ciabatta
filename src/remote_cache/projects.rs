@@ -167,6 +167,34 @@ impl Registry {
         Ok(project)
     }
 
+    /// Know a project a peer server knows, by its id and name, when this
+    /// server doesn't already. A project it does know keeps its own name:
+    /// renames follow the clients that send them, not a peer's copy, so two
+    /// servers can never take turns renaming each other's.
+    pub fn adopt(&self, id: &str, name: &str) -> Result<bool> {
+        anyhow::ensure!(
+            plausible_id(id),
+            "'{id}' isn't a project id this server can use"
+        );
+        let name = name.trim();
+        anyhow::ensure!(!name.is_empty(), "a project needs a name");
+        let mut guard = self.inner.lock().unwrap();
+        if guard.iter().any(|p| p.id == id) {
+            return Ok(false);
+        }
+        guard.push(Project {
+            id: id.to_string(),
+            name: name.to_string(),
+            created_at: crate::cache::store::now(),
+            created_by: Some("a peer server".to_string()),
+            last_seen_at: None,
+        });
+        let snapshot = guard.clone();
+        drop(guard);
+        save(&self.path, &snapshot)?;
+        Ok(true)
+    }
+
     /// Forget a project. Its cached artifacts are removed separately, by the
     /// caller, so this can't half-delete something.
     pub fn forget(&self, id: &str) -> Result<bool> {

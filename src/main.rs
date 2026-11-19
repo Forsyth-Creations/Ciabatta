@@ -341,12 +341,6 @@ async fn main() -> Result<()> {
             cmd_dry_run(&targets, diff, json, &env, local, config.as_deref()).await?;
         }
 
-        Commands::Cache {
-            subcommand: CacheCommand::Sync { dry_run },
-        } => {
-            cmd_cache_sync(dry_run).await?;
-        }
-
         Commands::Cache { subcommand } => {
             cmd_cache(subcommand)?;
         }
@@ -3803,48 +3797,6 @@ async fn register_quietly(root: &Path, port: Option<u16>) {
 }
 
 /// Dispatch `ciabatta cache …`.
-/// `ciabatta cache sync`: see [`remote_cache::mirror`].
-async fn cmd_cache_sync(dry_run: bool) -> Result<()> {
-    let cwd = env::current_dir().context("Failed to get current directory")?;
-    let root = workspace::find_workspace_root(&cwd)
-        .or_else(|| find_root(&cwd))
-        .unwrap_or_else(|| cwd.clone());
-    let config = load_config(&root)?;
-    let report = remote_cache::mirror::sync(&config, &root, dry_run).await?;
-
-    for (url, why) in &report.skipped {
-        eprintln!(
-            "{}",
-            format!("warning: skipped {url}: {why}").style(color::warn())
-        );
-    }
-    for (url, held) in &report.held {
-        println!("{url}  holds {held} entr(ies)");
-    }
-    println!();
-    let verb = if dry_run { "would copy" } else { "copied" };
-    let mut any = false;
-    for (url, count, bytes) in &report.copied {
-        if *count > 0 {
-            any = true;
-            println!(
-                "{verb} {count} entr(ies), {} → {url}",
-                cache::store::human_size(*bytes)
-            );
-        }
-    }
-    if !any {
-        println!("Every server already holds every entry.");
-    }
-    for (url, key, why) in &report.failed {
-        eprintln!("couldn't copy {key} ({url}): {why}");
-    }
-    if !report.failed.is_empty() {
-        bail!("{} copy(ies) failed", report.failed.len());
-    }
-    Ok(())
-}
-
 fn cmd_cache(subcommand: CacheCommand) -> Result<()> {
     let cwd = env::current_dir().context("Failed to get current directory")?;
     let root = find_root(&cwd).unwrap_or_else(|| cwd.clone());
@@ -4061,9 +4013,6 @@ fn cmd_cache(subcommand: CacheCommand) -> Result<()> {
             println!("Removed {removed} entr(ies).");
             Ok(())
         }
-
-        // Async, so dispatched before `cmd_cache` is reached.
-        CacheCommand::Sync { .. } => unreachable!("handled by cmd_cache_sync"),
 
         CacheCommand::Prune {
             max_age,

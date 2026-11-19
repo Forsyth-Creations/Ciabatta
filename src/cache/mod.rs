@@ -208,9 +208,23 @@ pub struct CacheConfig {
 }
 
 /// How a workspace reaches the shared remote cache, and who it is there.
-#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+#[derive(Debug, Serialize, Clone, PartialEq)]
 pub struct RemoteRef {
     /// Base URL of the remote cache server (`ciabatta remote-cache start`).
+    ///
+    /// In the config this may also be a list of URLs to try in order:
+    ///
+    /// ```yaml
+    /// cache:
+    ///   remote:
+    ///     url:
+    ///       - https://cache.internal:8380
+    ///       - https://cache-dr.internal:8380
+    /// ```
+    ///
+    /// The first is the primary and the rest are read as [`Self::backups`]
+    /// placed ahead of any listed there, each with the primary's
+    /// `tls_verify`.
     pub url: String,
 
     /// The name this project is known by on the server. Defaults to the
@@ -253,8 +267,10 @@ pub struct RemoteRef {
     #[serde(default = "default_true")]
     pub enabled: bool,
 
-    /// More servers holding the same cache, tried when this one can't be
-    /// reached and written to alongside it, so each holds what the others do.
+    /// More servers holding the same cache, tried in order when this one
+    /// can't be reached. A run uses one server at a time; the servers keep
+    /// each other in step themselves (`peers:` in each server's config — see
+    /// [`crate::remote_cache::peers`]).
     ///
     /// ```yaml
     /// cache:
@@ -271,6 +287,65 @@ pub struct RemoteRef {
     #[serde(default)]
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub backups: Vec<BackupRef>,
+}
+
+impl<'de> Deserialize<'de> for RemoteRef {
+    /// Field for field what a derive would do, except that `url` may be a
+    /// list: its first entry is the primary, the rest become backups.
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Urls {
+            One(String),
+            Many(Vec<String>),
+        }
+        #[derive(Deserialize)]
+        struct Raw {
+            url: Urls,
+            #[serde(default)]
+            name: Option<String>,
+            #[serde(default)]
+            project: Option<String>,
+            #[serde(default)]
+            read_only: bool,
+            #[serde(default = "default_true")]
+            tls_verify: bool,
+            #[serde(default = "default_true")]
+            enabled: bool,
+            #[serde(default)]
+            backups: Vec<BackupRef>,
+        }
+        let raw = Raw::deserialize(deserializer)?;
+        let (url, mut backups) = match raw.url {
+            Urls::One(url) => (url, Vec::new()),
+            Urls::Many(urls) => {
+                let mut urls = urls.into_iter();
+                let first = urls.next().ok_or_else(|| {
+                    serde::de::Error::custom(
+                        "`cache.remote.url` is an empty list; give it at least one URL",
+                    )
+                })?;
+                let rest = urls
+                    .map(|url| BackupRef {
+                        url,
+                        tls_verify: raw.tls_verify,
+                        read_only: false,
+                    })
+                    .collect();
+                (first, rest)
+            }
+        };
+        backups.extend(raw.backups);
+        Ok(RemoteRef {
+            url,
+            name: raw.name,
+            project: raw.project,
+            read_only: raw.read_only,
+            tls_verify: raw.tls_verify,
+            enabled: raw.enabled,
+            backups,
+        })
+    }
 }
 
 /// One of [`RemoteRef::backups`]: a URL, or a URL with its own TLS and
@@ -1992,6 +2067,37 @@ mod tests {
         assert!(!servers[0].backup && servers[1].backup && servers[2].backup);
         assert!(servers[1].tls_verify && !servers[2].tls_verify);
         assert!(!servers[1].read_only && servers[2].read_only);
+    }
+
+    #[test]
+    fn a_url_list_is_the_primary_then_backups_ahead_of_the_backups_key() {
+        let config: crate::config::CiabattaConfig = crate::format::from_str(
+            "cache:\n  remote:\n    url:\n      - http://a:8380\n      - http://b:8380\n    \
+             tls_verify: false\n    backups:\n      - http://c:8380\n",
+            crate::format::Format::Yaml,
+        )
+        .unwrap();
+        let remote = config.cache.unwrap().remote.unwrap();
+        assert_eq!(remote.url, "http://a:8380");
+        let servers = remote.servers();
+        let urls: Vec<&str> = servers.iter().map(|s| s.url.as_str()).collect();
+        assert_eq!(urls, ["http://a:8380", "http://b:8380", "http://c:8380"]);
+        // Listed beside the primary, a backup shares its TLS setting.
+        assert!(!servers[1].tls_verify && servers[2].tls_verify);
+
+        let one: crate::config::CiabattaConfig = crate::format::from_str(
+            "cache:\n  remote:\n    url: [http://a:8380]\n",
+            crate::format::Format::Yaml,
+        )
+        .unwrap();
+        let one = one.cache.unwrap().remote.unwrap();
+        assert_eq!((one.url.as_str(), one.backups.len()), ("http://a:8380", 0));
+
+        let empty: Result<crate::config::CiabattaConfig, _> = crate::format::from_str(
+            "cache:\n  remote:\n    url: []\n",
+            crate::format::Format::Yaml,
+        );
+        assert!(empty.is_err());
     }
 
     #[test]

@@ -339,10 +339,6 @@ impl Remote {
     fn live(&self) -> bool {
         !crate::remote_cache::reach::is_down(self.client.base())
     }
-
-    fn writable(&self) -> bool {
-        !self.read_only && self.live()
-    }
 }
 
 /// What the cache did over a run.
@@ -731,12 +727,12 @@ impl Session {
                         });
                 }
             };
-            // Each server in turn, primary first; the ones that answered "not
-            // here" are noted, so a hit further down can be copied back up to
-            // them and the servers converge on the same entries.
+            // The first server that is up, falling over to the next only if it
+            // goes down while being asked. A miss is a miss everywhere: the
+            // servers keep each other in step (`peers:` in their config), so
+            // asking the backups as well would only double every miss.
             let mut restored = None;
-            let mut missed: Vec<usize> = Vec::new();
-            for (index, remote) in self.remotes.iter().enumerate() {
+            for remote in &self.remotes {
                 if !remote.live() {
                     continue;
                 }
@@ -784,24 +780,11 @@ impl Session {
                         break;
                     }
                     // Asked and missed, rather than gone down while asking.
-                    None if remote.live() => missed.push(index),
+                    None if remote.live() => break,
                     None => {}
                 }
             }
             if let Some(entry) = restored {
-                // Heal the servers that missed: what was restored is on disk,
-                // exactly as the entry describes it, so it uploads as built.
-                let heal = missed
-                    .iter()
-                    .map(|&i| &self.remotes[i])
-                    .filter(|r| r.writable())
-                    .map(|r| {
-                        crate::remote_cache::client::try_upload(
-                            &r.client, &r.project, &key, &entry, &dir,
-                        )
-                    });
-                futures::future::join_all(heal).await;
-
                 // Mirror it locally so the next run doesn't cross the network,
                 // and so the entry's inputs are there to diff against.
                 //
@@ -1163,18 +1146,27 @@ impl Session {
             }
         };
 
-        // To every server at once, so the primary and its backups hold the
-        // same entries; landed means it reached at least one of them.
-        let writable: Vec<&Remote> = self.remotes.iter().filter(|r| r.writable()).collect();
-        let uploaded = if writable.is_empty() {
-            None
-        } else {
-            let landed = futures::future::join_all(writable.iter().map(|r| {
-                crate::remote_cache::client::try_upload(&r.client, &r.project, &key, &entry, &dir)
-            }))
+        // To the first server that is up and takes writes; its peers pull it
+        // from there. The next one is tried only if that one went down
+        // mid-upload — a refusal from a server that answered is final.
+        let mut uploaded = None;
+        for remote in self.remotes.iter().filter(|r| !r.read_only) {
+            if !remote.live() {
+                continue;
+            }
+            let landed = crate::remote_cache::client::try_upload(
+                &remote.client,
+                &remote.project,
+                &key,
+                &entry,
+                &dir,
+            )
             .await;
-            Some(landed.into_iter().any(|landed| landed))
-        };
+            uploaded = Some(landed);
+            if landed || remote.live() {
+                break;
+            }
+        }
         self.stored(
             &step.name,
             StoredInfo {
@@ -1205,10 +1197,16 @@ impl Session {
         if self.reused_locally.is_empty() {
             return;
         }
-        futures::future::join_all(self.remotes.iter().map(|r| {
-            crate::remote_cache::client::try_touch(&r.client, &r.project, &self.reused_locally)
-        }))
-        .await;
+        // One server is enough: the servers share last-use times with their
+        // peers, so the others age the same entries from the same moment.
+        if let Some(remote) = self.remotes.iter().find(|r| r.live()) {
+            crate::remote_cache::client::try_touch(
+                &remote.client,
+                &remote.project,
+                &self.reused_locally,
+            )
+            .await;
+        }
         self.reused_locally.clear();
     }
 

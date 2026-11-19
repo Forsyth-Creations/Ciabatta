@@ -143,9 +143,20 @@
       "required": ["url"],
       "properties": {
         "url": {
-          "type": "string",
-          "description": "Base URL of the remote cache server (`ciabatta remote-cache start`).",
-          "format": "uri"
+          "oneOf": [
+            {
+              "type": "string",
+              "description": "Base URL of the remote cache server (`ciabatta remote-cache start`).",
+              "format": "uri"
+            },
+            {
+              "type": "array",
+              "description": "Cache servers to try, in order: the first is the primary, the rest are backups (ahead of any under `backups`) sharing its `tls_verify`.",
+              "minItems": 1,
+              "items": { "type": "string", "format": "uri" }
+            }
+          ],
+          "description": "Base URL of the remote cache server (`ciabatta remote-cache start`), or a list of them to try in order — the first is the primary, the rest backups."
         },
         "name": {
           "type": "string",
@@ -169,6 +180,41 @@
           "type": "boolean",
           "default": true,
           "description": "Turn the remote off without deleting its settings."
+        },
+        "backups": {
+          "type": "array",
+          "description": "More servers holding the same cache: tried in order when the primary can't be reached. A run uses one server at a time; the servers keep each other in step through `peers` in their own remote-cache.yaml.",
+          "items": {
+            "oneOf": [
+              {
+                "type": "string",
+                "description": "The backup server's URL.",
+                "format": "uri"
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["url"],
+                "properties": {
+                  "url": {
+                    "type": "string",
+                    "description": "The backup server's URL.",
+                    "format": "uri"
+                  },
+                  "tls_verify": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Verify this server's TLS certificate."
+                  },
+                  "read_only": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Read from this server but never write to it."
+                  }
+                }
+              }
+            ]
+          }
         }
       }
     },

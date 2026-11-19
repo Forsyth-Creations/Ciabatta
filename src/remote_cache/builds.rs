@@ -313,11 +313,15 @@ pub async fn report(config: &CiabattaConfig, root: &Path, record: &BuildRecord) 
             None => return,
         },
     };
-    let Ok(client) = super::client::Client::new(&remote.url, remote.tls_verify) else {
+    // The first server that answers; the others pull it from there.
+    let Some((_, client)) = super::reach::live(remote).await.into_iter().next() else {
         return;
     };
     if let Err(e) = client.report_build(&project, record).await {
-        tracing::debug!("couldn't report this build to the remote cache: {e:#}");
+        tracing::debug!(
+            "couldn't report this build to the remote cache at {}: {e:#}",
+            client.base()
+        );
     }
 }
 

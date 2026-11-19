@@ -4221,6 +4221,136 @@ ciabatta cache init --remote http://cache.example.com:8380`}</Pre>
           ]}
         />
 
+        <SubHeading>When the cache can&apos;t be reached</SubHeading>
+        <P>
+          A remote cache that is configured but down is{" "}
+          <strong>a warning, not an error</strong>: the run says so once, in
+          yellow, and carries on with the local cache. It finds out quickly —
+          each server is asked{" "}
+          <strong>twice at most, within two seconds</strong> — and the answer
+          holds for the rest of the run, so nothing later (a step&apos;s lookup
+          or upload, the build report at the end) waits on it again. A server
+          that stops answering mid-run is dropped the same way by the first
+          request that notices. Questions from <C>ciabatta input</C> come up as
+          soon as their step asks them, not after a stalled connection gives up.
+        </P>
+        <Pre>{`warning: the remote cache at http://cache.example.com:8380 isn't reachable (no answer after 2 tries: …)
+warning: building with the local cache only`}</Pre>
+
+        <SubHeading>Backup servers</SubHeading>
+        <P>
+          List more servers under <C>cache.remote.backups</C> and a run falls
+          over to them when the primary can&apos;t be reached. Each is a URL, or
+          a URL with its own <C>tls_verify</C> and <C>read_only</C>. Keeping the
+          servers holding the same cache is the servers&apos; job, not the
+          client&apos;s: give each one its <C>peers</C> (below).
+        </P>
+        <Pre>{`cache:
+  remote:
+    url: https://cache.example.com:8380
+    project: 0b6c1f0e-…           # one id, shared by every server
+    backups:
+      - https://cache-dr.example.com:8380
+      - url: https://cache-eu.example.com:8380
+        tls_verify: false`}</Pre>
+        <P>
+          Or give <C>url</C> a list of servers to try, in order. The first is
+          the primary and the rest are its backups, tried ahead of any under{" "}
+          <C>backups</C> and sharing the remote&apos;s <C>tls_verify</C>. Use{" "}
+          <C>backups</C> when one server needs its own settings.
+        </P>
+        <Pre>{`cache:
+  remote:
+    url:
+      - https://cache.example.com:8380
+      - https://cache-dr.example.com:8380
+      - https://cache-eu.example.com:8380
+    project: 0b6c1f0e-…`}</Pre>
+        <Bullets
+          items={[
+            <>
+              <strong>One server at a time.</strong> A run looks up, uploads
+              and reports to the first server that answers, and moves to the
+              next only when that one goes down. When the primary is down the
+              run says <C>using the backup remote cache at …</C>. A miss on the
+              server in use is a miss: the others hold the same entries, so
+              asking them too would only double every miss.
+            </>,
+            <>
+              <strong>One project id everywhere.</strong> A server that has not
+              seen the project yet adopts the id in the config rather than
+              minting its own, so the same <C>project:</C> works against all of
+              them. Every server needs this version or newer for that.
+            </>,
+          ]}
+        />
+
+        <SubHeading>Servers that keep each other in step</SubHeading>
+        <P>
+          Each cache server&apos;s own config (<C>remote-cache.yaml</C>) lists
+          the other servers under <C>peers</C>. A server pulls from each peer
+          what it lacks: <strong>projects</strong>, <strong>cache entries
+          </strong> (artifacts and manifest, checked against the
+          manifest&apos;s hashes), <strong>builds</strong> in the feed, and{" "}
+          <strong>workflow history</strong>. It also carries over a later
+          last-use time, so retention ages an entry the same on every server.
+          It pulls when it starts, every <C>server.sync_every</C> (a minute by
+          default), and straight away when a peer nudges it. A server nudges its
+          peers a couple of seconds after it&apos;s written to, so a build
+          uploaded to one shows up on the others within seconds.
+        </P>
+        <Pre>{`# remote-cache.yaml, the same on every server
+server:
+  sync_every: 1m
+peers:
+  - https://cache.example.com:8380
+  - https://cache-dr.example.com:8380
+  - url: https://cache-eu.example.com:8380
+    username: peer-sync              # a token user on that server
+    password_env: CIABATTA_PEER_TOKEN
+    ca_cert: tls/eu-ca.pem`}</Pre>
+        <Bullets
+          items={[
+            <>
+              <strong>Copy one list everywhere.</strong> Every server has an
+              instance id, and one that finds itself in its <C>peers</C> skips
+              that entry. So the same list, with every server on it, works on all
+              of them.
+            </>,
+            <>
+              <strong>Pull, never push.</strong> A server only reads from its
+              peers, so the user it logs in as (<C>username</C>, with the token
+              in the variable <C>password_env</C> names) can be read-only. Leave
+              both out for a peer whose <C>auth.mode</C> is <C>open</C>. A server
+              that was down catches up by itself once it&apos;s back.
+            </>,
+            <>
+              <strong>Chains converge.</strong> A server that pulled something
+              new nudges its own peers, so servers that don&apos;t all list each
+              other still end up holding the same cache.
+            </>,
+            <>
+              <strong>Removals stay removed, and stay local.</strong> An entry
+              retention evicted, a cleared cache or a forgotten project
+              isn&apos;t pulled back from a peer that still has it, for 30
+              days. Removal isn&apos;t copied, though: clear or forget on each
+              server.
+            </>,
+            <>
+              <strong>Watch it.</strong> <C>GET /api/peers</C> says when each
+              peer last synced, what came over, and why the last attempt failed
+              if it did. The admin page shows the same in its Peers panel, and
+              an admin can <strong>Sync now</strong> there (
+              <C>POST /api/peers/sync</C>).
+            </>,
+          ]}
+        />
+        <P>
+          The <Link to="/cache">Remote tab</Link> lists the backups with whether
+          each answers right now, and a step&apos;s cache report says when its
+          run was served by a backup.
+        </P>
+
         <SubHeading>The server&apos;s own page</SubHeading>
         <P>
           The cache server serves a small admin page at its root — open{" "}

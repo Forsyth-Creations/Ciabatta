@@ -138,6 +138,10 @@ export interface RemoteCacheStatus {
   connected: boolean;
   read_only: boolean;
   error: string | null;
+  /** `url` is a backup, because the primary couldn't be reached. */
+  backup?: boolean;
+  /** Configured servers the run couldn't reach. */
+  unreachable?: string[];
 }
 
 /** A cache entry, as much of it as the run view needs. */

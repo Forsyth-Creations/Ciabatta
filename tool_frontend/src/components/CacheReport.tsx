@@ -435,10 +435,20 @@ export function CacheReportView({
             color={report.remote.connected ? "success" : "warning"}
             label={
               report.remote.connected
-                ? "remote cache connected"
+                ? report.remote.backup
+                  ? "backup remote cache connected"
+                  : "remote cache connected"
                 : "remote cache unreachable"
             }
           />
+          {(report.remote.unreachable?.length ?? 0) > 0 && (
+            <Chip
+              size="small"
+              variant="outlined"
+              color="warning"
+              label={`unreachable: ${report.remote.unreachable?.join(", ")}`}
+            />
+          )}
           {report.remote.read_only && (
             <Chip size="small" variant="outlined" label="read-only" />
           )}

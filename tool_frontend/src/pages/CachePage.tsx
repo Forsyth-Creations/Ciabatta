@@ -56,6 +56,7 @@ import {
 } from "../api/cache";
 import { useWorkspace } from "../api/workspace";
 import type {
+  BackupStatus,
   CachePlan,
   Decision,
   PlannedStep,
@@ -449,6 +450,54 @@ function RemoteTab({ projectId }: { projectId: string }) {
   return <RemoteStatusView status={data} />;
 }
 
+/** `cache.remote.backups`, each with whether it answers right now. */
+function BackupsView({ backups }: { backups: BackupStatus[] }) {
+  if (backups.length === 0) return null;
+  return (
+    <Paper variant="outlined" sx={{ p: 2 }}>
+      <Typography variant="subtitle2" sx={{ mb: 1 }}>
+        Backups — written alongside the primary, read when it is down
+      </Typography>
+      <Stack spacing={0.5}>
+        {backups.map((backup) => (
+          <Stack
+            key={backup.url}
+            direction="row"
+            spacing={1}
+            alignItems="center"
+            flexWrap="wrap"
+            useFlexGap
+          >
+            <Chip
+              size="small"
+              variant="outlined"
+              color={backup.reachable ? "success" : "warning"}
+              label={backup.reachable ? "reachable" : "unreachable"}
+            />
+            {backup.read_only && <Chip size="small" label="read-only" />}
+            <Typography variant="body2" sx={{ fontFamily: "monospace" }}>
+              {backup.url}
+            </Typography>
+            {backup.error && (
+              <Typography variant="caption" color="text.secondary">
+                {backup.error}
+              </Typography>
+            )}
+          </Stack>
+        ))}
+      </Stack>
+      <Typography
+        variant="caption"
+        color="text.secondary"
+        sx={{ mt: 1, display: "block" }}
+      >
+        The servers keep each other holding the same cache: list them under{" "}
+        <code>peers</code> in each server&apos;s <code>remote-cache.yaml</code>.
+      </Typography>
+    </Paper>
+  );
+}
+
 function RemoteStatusView({ status }: { status: RemoteStatus }) {
   if (!status.configured) {
     return (
@@ -461,16 +510,24 @@ function RemoteStatusView({ status }: { status: RemoteStatus }) {
     );
   }
 
+  const backups = <BackupsView backups={status.backups ?? []} />;
+
   if (!status.reachable) {
+    const standIn = status.backups?.find((b) => b.reachable);
     return (
-      <Alert severity="warning" icon={<CloudOffIcon />}>
-        <Typography variant="body2">
-          {status.url} isn't answering. Builds carry on using the local cache.
-        </Typography>
-        <Typography variant="caption" sx={{ display: "block", mt: 1 }}>
-          {status.error}
-        </Typography>
-      </Alert>
+      <Stack spacing={2}>
+        <Alert severity="warning" icon={<CloudOffIcon />}>
+          <Typography variant="body2">
+            {standIn
+              ? `${status.url} isn't answering. Builds use the backup at ${standIn.url} instead.`
+              : `${status.url} isn't answering. Builds carry on using the local cache.`}
+          </Typography>
+          <Typography variant="caption" sx={{ display: "block", mt: 1 }}>
+            {status.error}
+          </Typography>
+        </Alert>
+        {backups}
+      </Stack>
     );
   }
 
@@ -496,6 +553,7 @@ function RemoteStatusView({ status }: { status: RemoteStatus }) {
 
   return (
     <Stack spacing={3}>
+      {backups}
       <Paper variant="outlined" sx={{ p: 2 }}>
         <Stack
           direction="row"

@@ -227,6 +227,10 @@ export interface RemoteRef {
   project: string | null;
   read_only: boolean;
   enabled: boolean;
+  /** `cache.remote.backups`: a URL, or a URL with its own settings. */
+  backups?: (
+    string | { url: string; tls_verify?: boolean; read_only?: boolean }
+  )[];
 }
 
 export interface CacheStatus {
@@ -355,6 +359,14 @@ export interface RemoteStats {
   projects: RemoteProject[];
 }
 
+/** One of `cache.remote.backups`, as the daemon's probe found it. */
+export interface BackupStatus {
+  url: string;
+  read_only: boolean;
+  reachable: boolean;
+  error: string | null;
+}
+
 /** What the daemon knows about this project's remote cache. */
 export type RemoteStatus =
   | { configured: false }
@@ -365,6 +377,7 @@ export type RemoteStatus =
       read_only: boolean;
       reachable: true;
       stats: RemoteStats;
+      backups?: BackupStatus[];
     }
   | {
       configured: true;
@@ -373,4 +386,5 @@ export type RemoteStatus =
       read_only: boolean;
       reachable: false;
       error: string;
+      backups?: BackupStatus[];
     };

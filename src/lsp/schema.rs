@@ -153,6 +153,11 @@ fn remote() -> crate::cache::RemoteRef {
         read_only: true,
         tls_verify: true,
         enabled: true,
+        backups: vec![crate::cache::BackupRef {
+            url: one(),
+            tls_verify: true,
+            read_only: true,
+        }],
     }
 }
 

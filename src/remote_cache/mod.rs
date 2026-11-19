@@ -33,7 +33,9 @@ pub mod auth;
 pub mod builds;
 pub mod client;
 pub mod oven;
+pub mod peers;
 pub mod projects;
+pub mod reach;
 pub mod releases;
 pub mod server;
 pub mod tls;
@@ -102,6 +104,13 @@ pub struct ServerConfig {
     /// should be able to do.
     #[serde(default)]
     pub update: ClearConfig,
+
+    /// The other servers holding this cache. This server pulls from each what
+    /// it lacks — projects, entries, builds, workflow history — every
+    /// `server.sync_every` and whenever one says it has something new. See
+    /// [`peers`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub peers: Vec<peers::Peer>,
 }
 
 /// The guard on "clear all": a password that has to be typed before every
@@ -227,6 +236,11 @@ pub struct Listen {
     #[serde(default = "default_sweep")]
     pub sweep_every: String,
 
+    /// How often to pull from `peers` when none has said it has something new
+    /// (`"1m"`, `"30s"`).
+    #[serde(default = "peers::default_every")]
+    pub sync_every: String,
+
     /// Serve HTTPS instead of HTTP, with this certificate and key.
     ///
     /// Absent means plain HTTP — fine on a trusted network or behind a reverse
@@ -256,6 +270,7 @@ impl Default for Listen {
             port: default_port(),
             storage: default_storage(),
             sweep_every: default_sweep(),
+            sync_every: peers::default_every(),
             tls: None,
         }
     }
@@ -290,6 +305,9 @@ impl ServerConfig {
         config.releases.resolve_relative(base);
         if let Some(tls) = config.server.tls.as_mut() {
             tls.resolve_relative(base);
+        }
+        for peer in &mut config.peers {
+            peer.resolve_relative(base);
         }
         Ok((config, base.to_path_buf()))
     }
@@ -420,6 +438,24 @@ auth:
 #     linux: /srv/ciabatta/ciabatta-linux-x86_64
 #     windows: /srv/ciabatta/ciabatta-windows-x86_64.exe
 #     macos: /srv/ciabatta/ciabatta-macos-aarch64
+
+# ─── Peers ─────────────────────────────────────────────────────────────────────
+# Other servers holding the same cache. This one pulls from each what it lacks —
+# projects, entries, builds, workflow history — every `sync_every` and as soon
+# as one says it was written to. List every server, this one included (it skips
+# itself), and copy the same list to each of them.
+#
+# server:
+#   sync_every: 1m
+# peers:
+#   - https://cache-dr.example.com:8380
+#   - url: https://cache-eu.example.com:8380
+#     # When that server's auth.mode isn't open: a token user there (read-only
+#     # is enough), and the variable on *this* machine holding its token.
+#     username: peer-sync
+#     password_env: CIABATTA_PEER_TOKEN
+#     # ca_cert: tls/eu-ca.pem
+#     # tls_verify: true
 
 # ─── Logging ───────────────────────────────────────────────────────────────────
 # One line as each request arrives and one as its response leaves, so a cache

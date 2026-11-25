@@ -170,7 +170,9 @@ fn plan_graph_now(
         // Nor does the prefetch node: it fills the pull cache, writes nothing
         // to the tree, and counting it as unaccounted would rebuild everything
         // behind it.
-        if step.recover || step.is_prefetch() {
+        // An `assume_role` step is the same: what it makes is credentials,
+        // which must never key or fill a cache entry.
+        if step.recover || step.is_prefetch() || step.is_assume_role() {
             continue;
         }
 

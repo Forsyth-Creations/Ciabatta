@@ -599,6 +599,10 @@ async fn run_dag(
     // They used to run one after another even when nothing connected them,
     // which made a wide graph exactly as slow as a tall one.
     let jobs = ctl.jobs();
+    // Credentials each `assume_role` step took on, by step name, for the
+    // steps that need it. Declared before `in_flight`, whose futures read it.
+    let provided: std::sync::Mutex<HashMap<String, super::assume::Provided>> =
+        std::sync::Mutex::new(HashMap::new());
     let mut in_flight = futures::stream::FuturesUnordered::new();
     // What a running step will need once it finishes — kept beside the futures
     // rather than inside them, because the cache session is borrowed mutably
@@ -696,7 +700,10 @@ async fn run_dag(
                 // the tree. Asking the build cache about it would count it as a
                 // step that can't say what it produced, and rebuild everything
                 // behind it — which is all of the graph.
-                if let Some(session) = cache.as_deref_mut().filter(|_| !step.is_prefetch()) {
+                if let Some(session) = cache
+                    .as_deref_mut()
+                    .filter(|_| !step.is_prefetch() && !step.is_assume_role())
+                {
                     session.report_to(tx.clone(), workflow);
                     let _ = tx
                         .send(ProgressUpdate::StepProcessing {
@@ -825,6 +832,14 @@ async fn run_dag(
                 progressed = true;
 
                 let cancel = ctl.cancel.as_ref();
+                // The run's environment, plus the credentials of the
+                // `assume_role` step this one needs, if it needs one. Only the
+                // action sees them — the cache was asked above, without.
+                let run_env = {
+                    let provided = provided.lock().expect("assume_role credentials lock");
+                    super::assume::env_for(step, step_env, &provided)
+                };
+                let provided = &provided;
                 in_flight.push(async move {
                     let started = std::time::Instant::now();
                     let outcome = run_step_action(
@@ -832,10 +847,11 @@ async fn run_dag(
                         workflow,
                         config,
                         root,
-                        step_env,
+                        &run_env,
                         dry_run,
                         sandbox.as_ref().map(|s| s.dir.as_path()),
                         cancel,
+                        provided,
                         tx,
                     )
                     .await;
@@ -1685,6 +1701,8 @@ async fn run_step_action(
     // The run's stop switch, raced against the action so a step already in
     // flight ends when the button is pressed rather than when it finishes.
     cancel: Option<&std::sync::Arc<crate::runner::Cancel>>,
+    // Where a `kind: assume_role` step leaves the credentials it took on.
+    provided: &std::sync::Mutex<HashMap<String, super::assume::Provided>>,
     tx: &mpsc::Sender<ProgressUpdate>,
 ) -> Result<()> {
     let _ = tx
@@ -1717,6 +1735,25 @@ async fn run_step_action(
             // which is how a project keeps its own publishing script while
             // still being a node on the graph.
             match step.transfer() {
+                _ if step.is_assume_role() => {
+                    let action = super::assume::run(step, workflow, env_vars, dry_run, &mut sink);
+                    let assumed = match limit {
+                        None => action.await,
+                        Some(limit) => match tokio::time::timeout(limit, action).await {
+                            Ok(result) => result,
+                            Err(_) => Err(anyhow::Error::new(TimedOut).context(format!(
+                                "timed out after {} and was killed",
+                                format_duration(limit)
+                            ))),
+                        },
+                    };
+                    assumed.map(|vars| {
+                        provided
+                            .lock()
+                            .expect("assume_role credentials lock")
+                            .insert(step.name.clone(), vars);
+                    })
+                }
                 _ if step.is_prefetch() => {
                     let action = prefetch_node(step, config, root, env_vars, dry_run, &mut sink);
                     match limit {

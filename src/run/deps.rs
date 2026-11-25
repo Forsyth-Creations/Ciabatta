@@ -393,6 +393,9 @@ fn one(context: &WorkspaceContext<'_>, root: &Path, step: &RunStep, detail: Deta
             Vec::new()
         },
         why_uncached: match &cargo_error {
+            _ if step.is_assume_role() => {
+                Some("it takes on credentials, which are never cached".into())
+            }
             Some(error) => Some(error.clone()),
             None => cache
                 .why_disabled()

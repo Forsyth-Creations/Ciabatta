@@ -5209,6 +5209,27 @@ Publishing — a step that moves an artifact (`kind: push` / `kind: pull`)
   that runs instead of the built-in move — which is how a project keeps its own
   publishing script while still being a node on the graph.
 
+  A push into another cloud account needs that account's credentials, and so
+  does a deploy. `kind: assume_role` is a step of its own that takes on an IAM
+  role; the steps that name it in `needs` run with the short-lived credentials
+  (AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY / AWS_SESSION_TOKEN) it got back:
+
+    - name: aws-images
+      kind: assume_role
+      role: arn:aws:iam::${IMAGES_ACCOUNT}:role/Publisher   # ${VAR}s from the env
+      session_duration: 1h                                  # 15m-12h, default 1h
+    - name: publish
+      kind: push
+      needs: [build, aws-images]
+      registry: s3_images
+
+  Only direct dependents see the credentials, a step may need at most one
+  assume_role step, and they are never cached, fingerprinted or logged. When
+  the current credentials are already in the role's account — a CI job that
+  assumed a role before calling ciabatta — the step passes them through, so the
+  same workflow runs whole from one identity or a slice at a time under
+  per-slice roles. It calls the `aws` CLI.
+
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 Steps — the DAG every workflow is
@@ -5871,6 +5892,27 @@ Publishing — a step that moves an artifact (`kind: push` / `kind: pull`)
   A transfer step may also just run a command. Give it `run:` or `script:` and
   that runs instead of the built-in move — which is how a project keeps its own
   publishing script while still being a node on the graph.
+
+  A push into another cloud account needs that account's credentials, and so
+  does a deploy. `kind: assume_role` is a step of its own that takes on an IAM
+  role; the steps that name it in `needs` run with the short-lived credentials
+  (AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY / AWS_SESSION_TOKEN) it got back:
+
+    - name: aws-images
+      kind: assume_role
+      role: arn:aws:iam::${IMAGES_ACCOUNT}:role/Publisher   # ${VAR}s from the env
+      session_duration: 1h                                  # 15m-12h, default 1h
+    - name: publish
+      kind: push
+      needs: [build, aws-images]
+      registry: s3_images
+
+  Only direct dependents see the credentials, a step may need at most one
+  assume_role step, and they are never cached, fingerprinted or logged. When
+  the current credentials are already in the role's account — a CI job that
+  assumed a role before calling ciabatta — the step passes them through, so the
+  same workflow runs whole from one identity or a slice at a time under
+  per-slice roles. It calls the `aws` CLI.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 

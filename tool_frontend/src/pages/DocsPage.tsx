@@ -2888,6 +2888,59 @@ steps:
           .
         </P>
 
+        <SubHeading>Taking on a cloud identity: assume_role</SubHeading>
+        <P>
+          A push into another account needs that account&apos;s credentials, and
+          so does the deploy after it. <C>kind: assume_role</C> is a step of its
+          own that takes on an IAM role. The steps that name it in <C>needs</C>{" "}
+          run with the short-lived credentials it got back (
+          <C>AWS_ACCESS_KEY_ID</C>, <C>AWS_SECRET_ACCESS_KEY</C>,{" "}
+          <C>AWS_SESSION_TOKEN</C>), so a build, a push and a terraform step can
+          each run as the account they touch:
+        </P>
+        <Pre>{`  - name: aws-images
+    kind: assume_role
+    role: arn:aws:iam::\${IMAGES_ACCOUNT}:role/Publisher   # \${VAR}s come from the run's env
+  - name: aws-dev
+    kind: assume_role
+    role: arn:aws:iam::\${DEV_ACCOUNT}:role/Deploy
+    session_duration: 1h                                   # 15m-12h, default 1h
+
+  - name: publish
+    kind: push
+    needs: [build, aws-images]
+    registry: s3_images
+  - name: terraform
+    needs: [publish, aws-dev]
+    run: terraform apply -auto-approve`}</Pre>
+        <Bullets
+          items={[
+            <>
+              <strong>Only direct dependents get the credentials.</strong> The
+              rest of the graph keeps the run&apos;s own, and a step may need at
+              most one <C>assume_role</C> step.
+            </>,
+            <>
+              <strong>Nothing keeps them.</strong> They are never logged, cached
+              or part of a cache key. The step itself is never cached: it runs
+              each time, and it doesn&apos;t make what follows rebuild.
+            </>,
+            <>
+              <strong>Already there means no change.</strong> When the current
+              credentials are already in the role&apos;s account, as in a CI job
+              that assumed a role before calling ciabatta, the step passes them
+              through. The same workflow then runs whole from one identity that
+              hops between accounts, or one <C>--filter</C> slice at a time
+              under a role per slice.
+            </>,
+            <>
+              It calls the <C>aws</C> CLI, so that has to be on the machine
+              running the step. AWS holds a role assumed from an assumed role to
+              one hour, whatever <C>session_duration</C> asks for.
+            </>,
+          ]}
+        />
+
         <SubHeading>Lining waves up: wave_grouping</SubHeading>
         <P>
           Waves come from <C>needs</C>: each step sits one wave after the latest

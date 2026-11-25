@@ -481,7 +481,9 @@ impl Session {
             .iter()
             .map(|s| (s.url.clone(), s.tls_verify))
             .collect();
-        let answers = crate::remote_cache::reach::probe_all(&probes).await;
+        // The clients the probes reached each server with, so registering
+        // reuses their connections instead of looking the name up again.
+        let answers = crate::remote_cache::reach::connect_all(&probes).await;
 
         let name = remote
             .name
@@ -503,12 +505,9 @@ impl Session {
             let role = if server.backup { "backup " } else { "" };
             let registered = match answer {
                 Err(why) => Err(why),
-                Ok(_) => match Client::new(&server.url, server.tls_verify) {
+                Ok(client) => match client.register(&name, project.as_deref()).await {
+                    Ok(found) => Ok((client, found.id)),
                     Err(e) => Err(format!("{e:#}")),
-                    Ok(client) => match client.register(&name, project.as_deref()).await {
-                        Ok(found) => Ok((client, found.id)),
-                        Err(e) => Err(format!("{e:#}")),
-                    },
                 },
             };
             match registered {

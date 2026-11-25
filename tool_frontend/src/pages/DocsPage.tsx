@@ -879,6 +879,10 @@ const COMMANDS: CommandGroup[] = [
           ],
           ["--unpair", "Forget its cache and wait to be paired again."],
           ["--insecure", "Don't verify the cache's TLS certificate."],
+          [
+            "--no-login-env",
+            "Run jobs with its own environment, not its user's login shell's.",
+          ],
         ],
       },
       {
@@ -4244,6 +4248,16 @@ ciabatta cache init --remote http://cache.example.com:8380   # once, for the who
         </P>
         <Pre>{`warning: the remote cache at http://cache.example.com:8380 isn't reachable (no answer after 2 tries: …)
 warning: building with the local cache only`}</Pre>
+        <P>
+          The run keeps the connection that first reached each server and
+          sends what follows over it, so the server&apos;s name is looked up
+          once, not once per request. A flaky DNS resolver that answers some
+          lookups and drops others can no longer let the version check through
+          and then fail the project&apos;s registration a moment later. If you
+          see the version banner followed by a <C>dns error</C>, the name only
+          resolves some of the time: pin it in <C>/etc/hosts</C> or fix the
+          resolver.
+        </P>
 
         <SubHeading>Backup servers</SubHeading>
         <P>
@@ -4785,8 +4799,35 @@ ciabatta build --offload-tag cuda,linux`}</Pre>
               "Forget the cache it was paired with, and wait to be paired again.",
             ],
             ["--insecure", "Don't verify the cache's TLS certificate."],
+            [
+              "--no-login-env",
+              "Run jobs with the executor's own environment instead of its user's login shell's (see below).",
+            ],
           ]}
         />
+
+        <SubHeading>Jobs get the user&apos;s login environment</SubHeading>
+        <P>
+          An executor started by systemd, launchd, cron or <C>nohup</C> never
+          reads <C>~/.profile</C> or <C>~/.bashrc</C>, so tools a person
+          installs for themselves (rustup&apos;s <C>~/.cargo/bin</C>, nvm,
+          pyenv, Homebrew) would be missing from its jobs: <C>cargo: not
+          found</C> on a machine where <C>cargo</C> works in a terminal. So
+          before each job the executor starts its user&apos;s shell as a
+          login, interactive shell (<C>$SHELL -l -i</C>), reads its
+          environment, and runs the job&apos;s git and workflow with it. The
+          job&apos;s log opens with the shell it asked:
+        </P>
+        <Pre>{`▶ environment from /bin/bash (login shell)`}</Pre>
+        <P>
+          It&apos;s asked again for every job, so a tool installed since is
+          found without restarting the executor. A shell that fails or takes
+          more than ten seconds leaves the job with the executor&apos;s own
+          environment, and the log says so. The environment is the user the
+          executor <em>runs as</em>: SSH keys, <C>known_hosts</C> and
+          toolchains all come from that user&apos;s home, which may not be the
+          account you log in with. <C>--no-login-env</C> turns it off.
+        </P>
 
         <SubHeading>The ports it needs</SubHeading>
         <P>

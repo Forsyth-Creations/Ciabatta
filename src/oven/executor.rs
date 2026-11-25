@@ -21,6 +21,7 @@
 //! The pairing is saved in `~/.ciabatta/oven/executor.json`, so a restart
 //! carries on working for the same cache without pairing again.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
@@ -62,6 +63,9 @@ pub struct Options {
     pub tls_verify: bool,
     /// Forget the saved pairing first.
     pub unpair: bool,
+    /// Run jobs with the executor's own environment rather than its user's
+    /// login shell's ([`super::login_env`]).
+    pub no_login_env: bool,
 }
 
 /// What survives a restart.
@@ -878,13 +882,16 @@ async fn execute(
         return failed(message);
     }
 
+    let env = job_env(options, &lines).await;
     let checkout = work_dir.join("jobs").join(job.id.to_string());
     let prepared = {
+        let env = env.clone();
         let lines = lines.clone();
         let spec = job.spec().clone();
         let work_dir = work_dir.to_path_buf();
         let checkout = checkout.clone();
-        tokio::task::spawn_blocking(move || prepare(&spec, &work_dir, &checkout, &lines)).await
+        tokio::task::spawn_blocking(move || prepare(&env, &spec, &work_dir, &checkout, &lines))
+            .await
     };
     match prepared {
         Ok(Ok(())) => {}
@@ -908,7 +915,7 @@ async fn execute(
             .join(" ")
     ));
 
-    let session = match spawn_job(&command, &cwd, job.id, &lines) {
+    let session = match spawn_job(&command, &cwd, &env, job.id, &lines) {
         Ok(session) => session,
         Err(e) => {
             say(format!("✗ {e:#}"));
@@ -1001,6 +1008,7 @@ impl Session {
 fn spawn_job(
     command: &[String],
     cwd: &Path,
+    env: &HashMap<String, String>,
     job: u32,
     lines: &tokio::sync::mpsc::UnboundedSender<String>,
 ) -> Result<Session> {
@@ -1008,6 +1016,7 @@ fn spawn_job(
     let mut cmd = tokio::process::Command::new(&command[0]);
     cmd.args(&command[1..])
         .current_dir(cwd)
+        .envs(env)
         .env(super::JOB_VAR, job.to_string())
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
@@ -1224,6 +1233,7 @@ fn repo_allowed(repo: &str, allow: &[String]) -> bool {
 /// Run git, its output into the job's log. Never asks for a password: there
 /// is nobody here to answer.
 fn git(
+    env: &HashMap<String, String>,
     dir: Option<&Path>,
     args: &[&str],
     lines: &tokio::sync::mpsc::UnboundedSender<String>,
@@ -1234,6 +1244,7 @@ fn git(
     }
     let output = command
         .args(args)
+        .envs(env)
         .env("GIT_TERMINAL_PROMPT", "0")
         .stdin(std::process::Stdio::null())
         .output()
@@ -1250,9 +1261,37 @@ fn git(
     Ok(())
 }
 
+/// The environment to run a job's git and workflow with: its user's login
+/// shell's, laid over the executor's own, so the toolchains their profile puts
+/// on `PATH` are found. Empty — the executor's own as it is — when that's
+/// turned off or the shell couldn't say, which the job's log is told.
+async fn job_env(
+    options: &Options,
+    lines: &tokio::sync::mpsc::UnboundedSender<String>,
+) -> HashMap<String, String> {
+    if options.no_login_env || cfg!(not(unix)) {
+        return HashMap::new();
+    }
+    let loaded = super::login_env::load().await;
+    match loaded.vars {
+        Ok(vars) => {
+            let _ = lines.send(format!("▶ environment from {} (login shell)", loaded.shell));
+            vars
+        }
+        Err(why) => {
+            let _ = lines.send(format!(
+                "  couldn't read the login environment from {} ({why}); using the executor's own",
+                loaded.shell
+            ));
+            HashMap::new()
+        }
+    }
+}
+
 /// The mirror for `repo`, fetched up to date, and the job's commit checked out
 /// from it into `checkout` on the job's branch.
 fn prepare(
+    env: &HashMap<String, String>,
     spec: &super::JobSpec,
     work_dir: &Path,
     checkout: &Path,
@@ -1266,12 +1305,13 @@ fn prepare(
 
     if mirror.join("HEAD").is_file() {
         say(format!("▶ fetching {}", spec.repo));
-        git(Some(&mirror), &["remote", "update", "--prune"], lines)
+        git(env, Some(&mirror), &["remote", "update", "--prune"], lines)
             .with_context(|| format!("couldn't fetch {}", spec.repo))?;
     } else {
         say(format!("▶ cloning {}", spec.repo));
         let target = mirror.to_string_lossy().into_owned();
         git(
+            env,
             None,
             &["clone", "--mirror", "--quiet", &spec.repo, &target],
             lines,
@@ -1281,8 +1321,9 @@ fn prepare(
     // What [`prune_mirrors`] goes by.
     let _ = std::fs::write(mirror.join(".last-used"), crate::cache::store::now());
     let wanted = format!("{}^{{commit}}", spec.commit);
-    if git(Some(&mirror), &["cat-file", "-e", &wanted], lines).is_err() {
+    if git(env, Some(&mirror), &["cat-file", "-e", &wanted], lines).is_err() {
         git(
+            env,
             Some(&mirror),
             &["fetch", "--quiet", "origin", &spec.commit],
             lines,
@@ -1300,6 +1341,7 @@ fn prepare(
     let mirror_path = mirror.to_string_lossy().into_owned();
     let checkout_path = checkout.to_string_lossy().into_owned();
     git(
+        env,
         None,
         &[
             "clone",
@@ -1323,11 +1365,13 @@ fn prepare(
         // On the branch, so the run's CIABATTA_BRANCH — and CIABATTA_PATH — is
         // what it would have been where it was asked for.
         Some(branch) => git(
+            env,
             Some(checkout),
             &["checkout", "--quiet", "-B", branch, &spec.commit],
             lines,
         )?,
         None => git(
+            env,
             Some(checkout),
             &["checkout", "--quiet", "--detach", &spec.commit],
             lines,
@@ -1335,12 +1379,14 @@ fn prepare(
     }
     // A step that reads `origin` gets the real repository, not the mirror.
     git(
+        env,
         Some(checkout),
         &["remote", "set-url", "origin", &spec.repo],
         lines,
     )?;
     if checkout.join(".gitmodules").is_file() {
         git(
+            env,
             Some(checkout),
             &["submodule", "update", "--init", "--recursive", "--quiet"],
             lines,

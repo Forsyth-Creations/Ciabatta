@@ -34,6 +34,7 @@
 
 pub mod executor;
 pub mod executors;
+pub mod login_env;
 pub mod offload;
 
 /// The mDNS service type executors advertise and the cache browses for.

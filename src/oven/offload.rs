@@ -292,10 +292,30 @@ async fn carried(remote: &Remote, request: &Request<'_>) -> Result<Carried> {
     let values = crate::run::prepare_env(&resolved, &ws.root, &base)?.env;
 
     // The group's own names stay behind: the executor gets them from the cache.
+    // Not knowing them is not "there are none": the terminal that used the
+    // group has its values exported, and they'd travel in the job. So a lookup
+    // that fails is retried, and then the submission stops.
     let in_group: Vec<String> = match &secrets {
-        Some(group) => crate::secrets::names(&remote.client, &remote.project, group)
-            .await
-            .unwrap_or_default(),
+        Some(group) => {
+            let mut tries = 0;
+            loop {
+                match crate::secrets::names(&remote.client, &remote.project, group).await {
+                    Ok(names) => break names,
+                    Err(_) if tries < 2 => {
+                        tries += 1;
+                        tokio::time::sleep(std::time::Duration::from_millis(500 * tries)).await;
+                    }
+                    Err(e) => {
+                        return Err(e).with_context(|| {
+                            format!(
+                                "Couldn't list the secrets in group '{group}', so couldn't keep \
+                                 their values out of the job. Nothing was submitted; try again"
+                            )
+                        });
+                    }
+                }
+            }
+        }
         None => Vec::new(),
     };
     let tracked = |file: &str| git(&ws.root, &["ls-files", "--error-unmatch", file]).is_ok();

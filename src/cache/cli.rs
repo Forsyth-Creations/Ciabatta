@@ -51,9 +51,15 @@ impl StepContext for WorkspaceContext<'_> {
         // Two levels, not three: a workflow's own `cache:` was folded into
         // each of its steps when the graph compiled, so `step.cache` already
         // carries it.
-        super::graph::effective(workspace_level.as_ref(), step.cache.as_ref())
+        let mut config = super::graph::effective(workspace_level.as_ref(), step.cache.as_ref())
             .with_step_env(step)
-            .with_home(member.map(|m| m.rel.clone()))
+            .with_home(member.map(|m| m.rel.clone()));
+        // What an `assume_role` step makes is credentials, which must never
+        // key or fill an entry, whatever its workflow's `cache:` says.
+        if step.is_assume_role() {
+            config.enabled = Some(false);
+        }
+        config
     }
 
     fn dir(&self, _step: &RunStep) -> PathBuf {

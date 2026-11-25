@@ -9,6 +9,7 @@
 //! [`crate::daemon::routes::run`].
 
 pub mod askpass;
+pub mod assume;
 pub mod cached;
 pub mod deps;
 pub mod engine;
@@ -324,6 +325,17 @@ pub struct RunStep {
     /// itself wins over what it inherits.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub from: Option<String>,
+    /// For a `kind: assume_role` step: the IAM role to assume, as an ARN.
+    /// `${VAR}` / `${VAR:-default}` are filled in from the run's environment.
+    /// The steps that name this one in `needs` run with its credentials — see
+    /// [`assume`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    /// For a `kind: assume_role` step: how long the assumed session lasts
+    /// (`15m`–`12h`, default `1h`). AWS caps a role assumed from an assumed
+    /// role at one hour, whatever is asked for.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_duration: Option<String>,
     /// Working directory for this step's action, relative to the project root.
     /// Workflow graphs set it to the owning sub-workspace's directory, so its
     /// scripts run where they were written to run. Defaults to the root.
@@ -484,10 +496,17 @@ impl RunStep {
     /// action is the built-in registry move.
     pub fn has_action(&self) -> bool {
         self.is_prefetch()
+            || self.is_assume_role()
             || self.script.is_some()
             || self.run.is_some()
             || self.direction().is_some()
             || self.release_direction().is_some()
+    }
+
+    /// Whether this is a `kind: assume_role` step, which takes on a cloud
+    /// identity for the steps that need it. Never cached.
+    pub fn is_assume_role(&self) -> bool {
+        self.kind.as_deref().is_some_and(assume::is_kind)
     }
 
     /// Whether this is the `prefetch` node `--prefetch` puts at the front of a
@@ -1293,6 +1312,7 @@ pub fn validate_flowchart(steps: &[RunStep], run_name: &str) -> Result<()> {
     }
 
     let is_recover = |name: &str| steps.iter().any(|s| s.name == name && s.recover);
+    assume::validate_needs(steps, run_name)?;
 
     for step in steps {
         // Action / recovery shape.
@@ -1313,6 +1333,8 @@ pub fn validate_flowchart(steps: &[RunStep], run_name: &str) -> Result<()> {
                     );
                 }
             }
+        } else if step.is_assume_role() {
+            assume::validate(step, run_name)?;
         } else if !step.has_action() {
             bail!(
                 "Step '{}' in run '{}' has no `script`, `run`, or `workflow` to execute.",
@@ -1320,6 +1342,8 @@ pub fn validate_flowchart(steps: &[RunStep], run_name: &str) -> Result<()> {
                 run_name
             );
         }
+
+        assume::validate_stray(step, run_name)?;
 
         // `artifacts:` is a pull's list of things to fetch, and replaces the
         // single `publish_path`/`artifact` rather than adding to them.

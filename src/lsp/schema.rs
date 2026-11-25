@@ -186,6 +186,8 @@ fn step() -> crate::run::RunStep {
             artifact: Some(one()),
         }],
         from: Some(one()),
+        role: Some(one()),
+        session_duration: Some(one()),
         cwd: Some(one()),
         workspace: Some(one()),
         // Not a config key since 0.6.4 — a step can't set values, and a

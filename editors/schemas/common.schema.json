@@ -286,6 +286,15 @@
           "body": { "name": "${1:fetch}", "kind": "pull", "from": "${2}" }
         },
         {
+          "label": "assume role step",
+          "description": "Take on an IAM role; the steps that `need` this one run with its credentials.",
+          "body": {
+            "name": "${1:aws}",
+            "kind": "assume_role",
+            "role": "${2:arn:aws:iam::\\${ACCOUNT_ID\\}:role/Deploy}"
+          }
+        },
+        {
           "label": "release push step",
           "description": "Publish build outputs as a versioned release — by default under the git tag on HEAD.",
           "body": {
@@ -365,7 +374,7 @@
         },
         "kind": {
           "type": "string",
-          "description": "The phase this step belongs to. Free-form and cosmetic (it labels the node on the graph) except for `push` and `pull`, which select the built-in registry action, and `release-push` and `release-pull`, which publish or fetch a versioned release (see `release`).",
+          "description": "The phase this step belongs to. Free-form and cosmetic (it labels the node on the graph) except for `push` and `pull`, which select the built-in registry action, and `release-push` and `release-pull`, which publish or fetch a versioned release (see `release`), and `assume_role`, which takes on an IAM role for the steps that need it (see `role`).",
           "examples": [
             "setup",
             "build",
@@ -374,7 +383,8 @@
             "push",
             "pull",
             "release-push",
-            "release-pull"
+            "release-pull",
+            "assume_role"
           ]
         },
         "registry": {
@@ -458,6 +468,15 @@
         "from": {
           "type": "string",
           "description": "For a `kind: pull` step: the push step it mirrors, as `<workflow>:<step>` or a bare `<step>` in this workflow. Its transfer fields are copied in, so push and pull can't drift apart."
+        },
+        "role": {
+          "type": "string",
+          "description": "For a `kind: assume_role` step: the IAM role ARN to assume, e.g. `arn:aws:iam::${ACCOUNT_ID}:role/Deploy` (`${VAR}` / `${VAR:-default}` come from the run's environment). Every step that names this one in `needs` runs with the short-lived credentials; nothing else sees them, and they are never cached. If the current credentials are already in that account, they are passed through unchanged."
+        },
+        "session_duration": {
+          "type": "string",
+          "description": "For a `kind: assume_role` step: how long the assumed session lasts, `15m` to `12h` (default `1h`). AWS caps a role assumed from an assumed role at one hour.",
+          "examples": ["1h", "2h", "30m"]
         },
         "cwd": {
           "type": "string",
@@ -544,6 +563,13 @@
             "required": ["kind"]
           },
           "then": { "required": ["release"] }
+        },
+        {
+          "if": {
+            "properties": { "kind": { "enum": ["assume_role", "assume-role"] } },
+            "required": ["kind"]
+          },
+          "then": { "required": ["role"] }
         }
       ]
     }

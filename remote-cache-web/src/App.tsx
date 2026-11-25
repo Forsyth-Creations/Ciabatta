@@ -27,6 +27,7 @@ import { buildTheme } from "./theme";
 import { useLoad } from "./useLoad";
 import { Builds } from "./views/Builds";
 import { Executors } from "./views/Executors";
+import { JobPage, jobPath, linkedJob } from "./views/JobView";
 import { Login } from "./views/Login";
 import { Overview } from "./views/Overview";
 import { Releases } from "./views/Releases";
@@ -34,7 +35,13 @@ import { Secrets } from "./views/Secrets";
 import { Users } from "./views/Users";
 
 type View =
-  "overview" | "builds" | "executors" | "releases" | "secrets" | "users";
+  | "overview"
+  | "builds"
+  | "executors"
+  | "job"
+  | "releases"
+  | "secrets"
+  | "users";
 
 const VIEWS: { view: View; path: string; label: string }[] = [
   { view: "overview", path: "/", label: "Cache" },
@@ -46,6 +53,7 @@ const VIEWS: { view: View; path: string; label: string }[] = [
 ];
 
 function viewFromPath(): View {
+  if (linkedJob()) return "job";
   const path = location.pathname.replace(/\/+$/, "") || "/";
   return (
     VIEWS.find((v) => v.path !== "/" && path.endsWith(v.path))?.view ??
@@ -84,12 +92,23 @@ export function App() {
   const theme = useMemo(() => buildTheme(mode), [mode]);
 
   const [view, setView] = useState<View>(viewFromPath);
+  // The job page's job, and the step its address opened it on.
+  const [job, setJob] = useState(() => {
+    const linked = linkedJob();
+    // The old dialog's address becomes the page's.
+    if (linked)
+      history.replaceState(null, "", jobPath(linked.job, linked.step));
+    return linked;
+  });
   const [refreshKey, setRefreshKey] = useState(0);
   const [signedIn, setSignedIn] = useState(false);
   const [readAt, setReadAt] = useState<Date | null>(null);
 
   useEffect(() => {
-    const onPop = () => setView(viewFromPath());
+    const onPop = () => {
+      setView(viewFromPath());
+      setJob(linkedJob());
+    };
     window.addEventListener("popstate", onPop);
     return () => window.removeEventListener("popstate", onPop);
   }, []);
@@ -103,8 +122,15 @@ export function App() {
     if (health.data) setReadAt(new Date());
   }, [health.data, refreshKey]);
 
+  const openJob = (id: number) => {
+    history.pushState(null, "", jobPath(id));
+    setJob({ job: id, step: null });
+    setView("job");
+    window.scrollTo(0, 0);
+  };
+
   const go = (next: View) => {
-    const path = VIEWS.find((v) => v.view === next)!.path;
+    const path = VIEWS.find((v) => v.view === next)?.path ?? "/";
     if (location.pathname !== path) history.pushState(null, "", path);
     setView(next);
   };
@@ -163,7 +189,8 @@ export function App() {
             </Typography>
             {ready && (
               <Tabs
-                value={view}
+                // A job's page is part of Executors.
+                value={view === "job" ? "executors" : view}
                 onChange={(_, next: View) => go(next)}
                 variant="scrollable"
                 scrollButtons={false}
@@ -237,7 +264,8 @@ export function App() {
         </Container>
       </AppBar>
 
-      <Container maxWidth="xl" sx={{ pb: 8 }}>
+      {/* A job's page takes the whole width: the graph and log want it. */}
+      <Container maxWidth={view === "job" ? false : "xl"} sx={{ pb: 8 }}>
         {health.error && (
           <Alert severity="error" sx={{ mt: 3 }}>
             {health.error}
@@ -253,7 +281,18 @@ export function App() {
         )}
         {ready && view === "overview" && <Overview refreshKey={refreshKey} />}
         {ready && view === "builds" && <Builds refreshKey={refreshKey} />}
-        {ready && view === "executors" && <Executors refreshKey={refreshKey} />}
+        {ready && view === "executors" && (
+          <Executors refreshKey={refreshKey} onOpenJob={openJob} />
+        )}
+        {ready && view === "job" && job && (
+          <JobPage
+            // A different job is a new page, with its own state.
+            key={job.job}
+            id={job.job}
+            initialStep={job.step}
+            onBack={() => go("executors")}
+          />
+        )}
         {ready && view === "releases" && <Releases refreshKey={refreshKey} />}
         {ready && view === "secrets" && <Secrets refreshKey={refreshKey} />}
         {ready && view === "users" && <Users refreshKey={refreshKey} />}

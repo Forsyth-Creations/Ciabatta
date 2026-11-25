@@ -290,6 +290,7 @@ fn registry() -> crate::config::RegistryConfig {
         repository: Some(one()),
         base_path: Some(one()),
         format: Some(one()),
+        templates: None,
     }
 }
 

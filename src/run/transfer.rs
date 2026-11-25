@@ -352,7 +352,8 @@ fn remote_for_file(file: &Path, root: &Path, base: &str, strip: Option<&str>) ->
 /// the variables (with a pull's commit chosen), and each (local, remote) pair.
 struct Prepared<'a> {
     registry_name: &'a str,
-    registry_config: &'a crate::config::RegistryConfig,
+    /// Filled in from the step's environment where it references any.
+    registry_config: std::borrow::Cow<'a, crate::config::RegistryConfig>,
     local_image: Option<&'a str>,
     env_vars: HashMap<String, String>,
     container_cmd: String,
@@ -365,7 +366,7 @@ impl Prepared<'_> {
             .iter()
             .map(|(local, remote)| RegistryOpOptions {
                 registry_name: self.registry_name,
-                registry_config: self.registry_config,
+                registry_config: &self.registry_config,
                 local_path: local.as_path(),
                 remote_path: remote.as_str(),
                 local_image: self.local_image,
@@ -409,6 +410,14 @@ async fn prepare<'a>(
             }
         )
     })?;
+
+    // `url: s3://files-${DEPLOY_ENV}` means this step's DEPLOY_ENV, which a
+    // `-e` flag or `.env` file may have set without the process seeing it.
+    let filled = match registry_config.for_env(env_vars) {
+        Some(filled) => std::borrow::Cow::Owned(filled),
+        None => std::borrow::Cow::Borrowed(registry_config),
+    };
+    let registry_config: &crate::config::RegistryConfig = &filled;
 
     // A single `publish_path` may reference {CIABATTA_*}; check before doing
     // anything, so an unresolvable path fails the step rather than uploading to
@@ -484,7 +493,7 @@ async fn prepare<'a>(
     };
     Ok(Prepared {
         registry_name,
-        registry_config,
+        registry_config: filled,
         local_image: transfer.local_image,
         env_vars,
         container_cmd,
@@ -573,7 +582,7 @@ pub async fn run(
     // the cache was cleared under it) falls back to an ordinary pull.
     if step.prefetched
         && transfer.direction == Direction::Pull
-        && crate::cache::pulls::cacheable(registry_name, prepared.registry_config)
+        && crate::cache::pulls::cacheable(registry_name, &prepared.registry_config)
     {
         let cached: Option<Vec<_>> = opts
             .iter()
@@ -603,7 +612,7 @@ pub async fn run(
         && let Err(e) = login(&prepared, first, root, sink).await
     {
         let cached = transfer.direction == Direction::Pull
-            && crate::cache::pulls::cacheable(registry_name, prepared.registry_config);
+            && crate::cache::pulls::cacheable(registry_name, &prepared.registry_config);
         if !cached {
             return Err(e);
         }
@@ -690,7 +699,7 @@ pub async fn prefetch(
     sink: &mut crate::registry::LogSink<'_>,
 ) -> Result<usize> {
     let prepared = prepare(step, transfer, config, cwd, env_vars, sink).await?;
-    if !crate::cache::pulls::cacheable(prepared.registry_name, prepared.registry_config) {
+    if !crate::cache::pulls::cacheable(prepared.registry_name, &prepared.registry_config) {
         sink.push(format!(
             "'{}' is an image registry; the container engine keeps its own copy, so there's \
              nothing to fetch",

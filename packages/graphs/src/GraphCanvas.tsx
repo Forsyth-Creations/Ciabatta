@@ -16,7 +16,6 @@ import FullscreenExitIcon from "@mui/icons-material/FullscreenExit";
 import { Box, useTheme } from "@mui/material";
 import {
   Background,
-  useNodesInitialized,
   useReactFlow,
   useStore,
   BackgroundVariant,
@@ -313,7 +312,16 @@ function ViewControl({
   focus: string | null;
   refit: boolean;
 }) {
-  const initialized = useNodesInitialized();
+  // Every node has a measured size — what a fit is worked out from.
+  // (`useNodesInitialized` also waits on handle bounds, which a canvas that
+  // mounts while its page is still laying itself out can be left without.)
+  const initialized = useStore((state) => {
+    if (state.nodeLookup.size === 0) return false;
+    for (const node of state.nodeLookup.values()) {
+      if (!node.measured?.width || !node.measured?.height) return false;
+    }
+    return true;
+  });
   const flow = useReactFlow();
   const width = useStore((state) => state.width);
   const height = useStore((state) => state.height);
@@ -344,19 +352,19 @@ function ViewControl({
 
   // The whole view: on mount, and on entering or leaving full screen — the
   // latter only once the canvas has actually taken its new size, or the fit
-  // is worked out for the old one.
+  // is worked out for the old one. `fitted` records the mode a fit *finished*
+  // for: a canvas still settling (a page laying itself out, data arriving)
+  // resizes mid-fit, which cancels it, and the next size has to try again.
   const sizedAt = useRef<string | null>(null);
   useEffect(() => {
     if (!initialized || width === 0 || height === 0) return;
     const size = `${width}x${height}`;
-    const toggled = fitted.current !== null && fitted.current !== refit;
-    if (fitted.current !== null && !toggled) {
+    if (fitted.current === refit) {
       sizedAt.current = size;
       return;
     }
-    if (toggled && size === sizedAt.current) return;
-    fitted.current = refit;
-    sizedAt.current = size;
+    // Toggled, but the canvas hasn't changed size yet.
+    if (fitted.current !== null && size === sizedAt.current) return;
     let live = true;
     const frame = () => new Promise((done) => requestAnimationFrame(done));
     void (async () => {
@@ -373,7 +381,10 @@ function ViewControl({
         });
         await frame();
       }
-      if (live && focus) bringIntoView(focus);
+      if (!live) return;
+      fitted.current = refit;
+      sizedAt.current = size;
+      if (focus) bringIntoView(focus);
     })();
     return () => {
       live = false;

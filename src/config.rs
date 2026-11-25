@@ -197,6 +197,18 @@ pub struct RegistryConfig {
     /// (`twine upload`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub format: Option<String>,
+    /// `url` and `login_script` as written, before environment references were
+    /// filled in — kept when they had any, so a step can fill them in again
+    /// from its own environment (see [`RegistryConfig::for_env`]).
+    #[serde(skip)]
+    pub templates: Option<RegistryTemplates>,
+}
+
+/// A registry's `url` and `login_script` as the config file wrote them.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RegistryTemplates {
+    pub url: String,
+    pub login_script: Option<String>,
 }
 
 fn default_true() -> bool {
@@ -215,6 +227,32 @@ pub enum NexusFormat {
 }
 
 impl RegistryConfig {
+    /// This registry with its environment references filled in from a step's
+    /// environment — `-e` flags, profiles and `.env` files included — falling
+    /// back to the process's. `None` when it has no references, or they come
+    /// out the same as when the config was loaded.
+    ///
+    /// Loading the config fills them in from the process environment alone, so
+    /// `url: s3://files-${DEPLOY_ENV}` with `-e DEPLOY_ENV=dev` (or on an
+    /// executor, where the flag is all there is) came out as `s3://files-`.
+    pub fn for_env(&self, env: &HashMap<String, String>) -> Option<RegistryConfig> {
+        let templates = self.templates.as_ref()?;
+        let lookup = |name: &str| env.get(name).cloned().or_else(|| std::env::var(name).ok());
+        let url = expand_env_with(&templates.url, lookup);
+        let login_script = templates
+            .login_script
+            .as_deref()
+            .map(|script| expand_env_with(script, lookup));
+        if url == self.url && login_script == self.login_script {
+            return None;
+        }
+        Some(RegistryConfig {
+            url,
+            login_script,
+            ..self.clone()
+        })
+    }
+
     /// The base URL of the target Nexus repository, without a trailing slash.
     ///
     /// If `repository` is set, it's `<url>/repository/<repository>`; otherwise
@@ -321,9 +359,16 @@ pub fn load_config_file(path: &Path) -> Result<CiabattaConfig> {
     // Registries may reference environment variables (with bash-style defaults)
     // so the same config can target different endpoints per environment.
     for reg in config.registries.values_mut() {
+        let written = RegistryTemplates {
+            url: reg.url.clone(),
+            login_script: reg.login_script.clone(),
+        };
         reg.url = expand_env(&reg.url);
         if let Some(script) = reg.login_script.take() {
             reg.login_script = Some(expand_env(&script));
+        }
+        if reg.url != written.url || reg.login_script != written.login_script {
+            reg.templates = Some(written);
         }
     }
 
@@ -343,6 +388,11 @@ pub fn load_config_file(path: &Path) -> Result<CiabattaConfig> {
 /// A bare `{VAR}` with neither a `$` nor a default operator is left untouched, so
 /// ordinary braces in a URL are never clobbered.
 pub fn expand_env(input: &str) -> String {
+    expand_env_with(input, |name| std::env::var(name).ok())
+}
+
+/// [`expand_env`], looking variables up with `lookup`.
+pub fn expand_env_with(input: &str, lookup: impl Fn(&str) -> Option<String>) -> String {
     let re = regex::Regex::new(r"(\$?)\{([A-Za-z_][A-Za-z0-9_]*)(?:(:?-)([^}]*))?\}").unwrap();
     re.replace_all(input, |caps: &regex::Captures| {
         let had_dollar = !caps[1].is_empty();
@@ -355,7 +405,7 @@ pub fn expand_env(input: &str) -> String {
             return caps[0].to_string();
         }
 
-        let value = std::env::var(name).ok();
+        let value = lookup(name);
         match op {
             Some(op) => {
                 let default = caps.get(4).map(|m| m.as_str()).unwrap_or("");
@@ -727,6 +777,39 @@ type = "nexus"
             RegistryKind::Nexus
         );
         assert_eq!(RegistryKind::from("my-ecr"), RegistryKind::Ecr);
+    }
+
+    /// A registry URL naming a variable the process doesn't have — set by a
+    /// `-e` flag, or on an executor — is filled in from the step's environment.
+    #[test]
+    fn registry_is_filled_in_from_the_step_environment() {
+        let dir = std::env::temp_dir().join(format!("ciabatta-reg-env-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("ciabatta.yaml");
+        std::fs::write(
+            &path,
+            "registries:\n  s3_files:\n    url: s3://files-${CIABATTA_TEST_STEP_ONLY}\n    \
+             login_script: login ${CIABATTA_TEST_STEP_ONLY:-none}\n  plain:\n    url: s3://plain\n",
+        )
+        .unwrap();
+        let cfg = load_config_file(&path).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let reg = &cfg.registries["s3_files"];
+        // Loading sees only the process environment.
+        assert_eq!(reg.url, "s3://files-");
+        assert_eq!(reg.login_script.as_deref(), Some("login none"));
+
+        let env = HashMap::from([("CIABATTA_TEST_STEP_ONLY".to_string(), "dev".to_string())]);
+        let filled = reg
+            .for_env(&env)
+            .expect("the step's environment changes it");
+        assert_eq!(filled.url, "s3://files-dev");
+        assert_eq!(filled.login_script.as_deref(), Some("login dev"));
+
+        // Nothing to fill in, or nothing that changes: the loaded registry stands.
+        assert!(cfg.registries["plain"].for_env(&env).is_none());
+        assert!(reg.for_env(&HashMap::new()).is_none());
     }
 }
 

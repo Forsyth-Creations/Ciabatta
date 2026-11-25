@@ -1273,6 +1273,7 @@ mod tests {
                 repository: None,
                 base_path: None,
                 format: None,
+                templates: None,
             },
         );
         let resolved = ResolvedRun {

@@ -45,7 +45,6 @@ import {
   type PairWith,
 } from "../api";
 import { EmptyRow, Mono, Prose, Section, Tag, When } from "../components/ui";
-import { JobDialog, linkedJob } from "./JobView";
 import { ago, duration } from "../format";
 import { monoFontStack } from "../theme";
 import { useLoad } from "../useLoad";
@@ -57,7 +56,14 @@ import { useLoad } from "../useLoad";
  * only while the tab is in view: an executor's state and a running job's log
  * are the point of looking, and both go stale in seconds.
  */
-export function Executors({ refreshKey }: { refreshKey: number }) {
+export function Executors({
+  refreshKey,
+  onOpenJob,
+}: {
+  refreshKey: number;
+  /** Open a job's page. */
+  onOpenJob: (id: number) => void;
+}) {
   const [tick, setTick] = useState(0);
   useEffect(() => {
     const timer = setInterval(() => {
@@ -82,10 +88,6 @@ export function Executors({ refreshKey }: { refreshKey: number }) {
   const [removing, setRemoving] = useState<{ id: string; name: string } | null>(
     null,
   );
-  // A job named in the address bar (`?job=15&step=…`) opens straight away,
-  // so a link to a failure lands on it.
-  const [linked] = useState(linkedJob);
-  const [viewing, setViewing] = useState<number | null>(linked?.job ?? null);
   const [inspecting, setInspecting] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -184,7 +186,7 @@ export function Executors({ refreshKey }: { refreshKey: number }) {
                     <Mono title={e.address}>{e.name}</Mono>
                   </TableCell>
                   <TableCell>
-                    <ExecutorStatus executor={e} onJob={setViewing} />
+                    <ExecutorStatus executor={e} onJob={onOpenJob} />
                   </TableCell>
                   <TableCell sx={{ color: "text.secondary" }}>
                     {e.platform} · {e.version}
@@ -343,7 +345,7 @@ export function Executors({ refreshKey }: { refreshKey: number }) {
                   key={j.id}
                   hover
                   sx={{ cursor: "pointer" }}
-                  onClick={() => setViewing(j.id)}
+                  onClick={() => onOpenJob(j.id)}
                 >
                   <TableCell>
                     <Mono>{j.id}</Mono>
@@ -438,17 +440,8 @@ export function Executors({ refreshKey }: { refreshKey: number }) {
             ...new Set(executors.data.executors.flatMap((e) => e.tags ?? [])),
           ].sort()}
           onClose={() => setInspecting(null)}
-          onJob={setViewing}
+          onJob={onOpenJob}
           onTagged={executors.reload}
-        />
-      )}
-
-      {viewing !== null && (
-        <JobDialog
-          id={viewing}
-          initialStep={viewing === linked?.job ? linked.step : null}
-          onClose={() => setViewing(null)}
-          onError={setActionError}
         />
       )}
     </>

@@ -6,8 +6,9 @@
  * Click a node and the inspector says what that step is, what the cache made
  * of it, what it waits for and what waits for it, and lists the lines in its
  * log that look like the problem; the log narrows to that step. A failed job
- * opens on the step that failed. The URL names the job and the step
- * (`/executors?job=15&step=padua:build-checks:test`), so a failure can be
+ * opens on the step that failed. It's a page of its own, so the graph and the
+ * log have the window; its address names the job and the step
+ * (`/executors/jobs/15?step=padua:build-checks:test`), so a failure can be
  * sent to someone as a link.
  *
  * Everything here comes from what the cache already holds for a job: its log,
@@ -16,6 +17,7 @@
  * lets the log be split by step in the browser.
  */
 import { useEffect, useMemo, useRef, useState } from "react";
+import ArrowBackIcon from "@mui/icons-material/ArrowBack";
 import ErrorOutlineIcon from "@mui/icons-material/ErrorOutline";
 import SearchIcon from "@mui/icons-material/Search";
 import {
@@ -23,10 +25,6 @@ import {
   Box,
   Button,
   Chip,
-  Dialog,
-  DialogActions,
-  DialogContent,
-  DialogTitle,
   FormControlLabel,
   InputAdornment,
   Stack,
@@ -55,23 +53,36 @@ import { graphStep } from "./Builds";
 
 // ─── Deep links ─────────────────────────────────────────────────────────────
 
-/** The job (and step) the address bar names, if any. */
-export function linkedJob(): { job: number; step: string | null } | null {
-  const params = new URLSearchParams(location.search);
-  const job = Number(params.get("job"));
-  if (!Number.isInteger(job) || job <= 0) return null;
-  return { job, step: params.get("step") };
+/** Where a job's page lives, opened on a step. */
+export function jobPath(job: number, step: string | null = null): string {
+  return (
+    `/executors/jobs/${job}` + (step ? `?step=${encodeURIComponent(step)}` : "")
+  );
 }
 
-/** Point the address bar at a job and step, or at neither. */
-function link(job: number | null, step: string | null) {
+/**
+ * The job (and step) the address bar names, if any: `/executors/jobs/15`, or
+ * `/executors?job=15`, the address the job dialog had before it was a page.
+ */
+export function linkedJob(): { job: number; step: string | null } | null {
   const params = new URLSearchParams(location.search);
-  params.delete("job");
-  params.delete("step");
-  if (job !== null) params.set("job", String(job));
-  if (job !== null && step) params.set("step", step);
-  const query = params.toString();
-  const next = location.pathname + (query ? `?${query}` : "");
+  const step = params.get("step");
+  const page = /\/executors\/jobs\/(\d+)\/?$/.exec(location.pathname);
+  if (page) return { job: Number(page[1]), step };
+  const job = Number(params.get("job"));
+  if (
+    /\/executors\/?$/.test(location.pathname) &&
+    Number.isInteger(job) &&
+    job > 0
+  ) {
+    return { job, step };
+  }
+  return null;
+}
+
+/** Keep the address bar on the step being looked at, so it can be shared. */
+function link(job: number, step: string | null) {
+  const next = jobPath(job, step);
   if (next !== location.pathname + location.search) {
     history.replaceState(null, "", next);
   }
@@ -153,7 +164,7 @@ function parse(raw: string, n: number): Line {
   return { n, step: null, body: raw, raw, problem: PROBLEM.test(raw) };
 }
 
-// ─── The dialog ─────────────────────────────────────────────────────────────
+// ─── The page ───────────────────────────────────────────────────────────────
 
 /** Steps a recovery branch the run didn't take would only clutter. */
 function shown(steps: Step[]): Step[] {
@@ -169,16 +180,14 @@ function firstFailure(builds: Build[]): string | null {
   return null;
 }
 
-export function JobDialog({
+export function JobPage({
   id,
   initialStep,
-  onClose,
-  onError,
+  onBack,
 }: {
   id: number;
   initialStep?: string | null;
-  onClose: () => void;
-  onError: (message: string) => void;
+  onBack: () => void;
 }) {
   const [job, setJob] = useState<Job | null>(null);
   const [raw, setRaw] = useState<string[]>([]);
@@ -186,6 +195,7 @@ export function JobDialog({
   const [builds, setBuilds] = useState<Build[]>([]);
   const [selected, setSelected] = useState<string | null>(initialStep ?? null);
   const [folded, setFolded] = useState(rememberedFold);
+  const [error, setError] = useState<string | null>(null);
   // Whether a selection came from a person; until one does, a failure that
   // shows up picks itself.
   const chosen = useRef(Boolean(initialStep));
@@ -196,8 +206,10 @@ export function JobDialog({
     let live = true;
     let timer: ReturnType<typeof setTimeout> | undefined;
     next.current = 0;
+    setJob(null);
     setRaw([]);
     setBuilds([]);
+    setError(null);
     const tick = async () => {
       try {
         const current = await api<Job>(`/api/oven/jobs/${id}`);
@@ -206,6 +218,7 @@ export function JobDialog({
         );
         if (!live) return;
         setJob(current);
+        setError(null);
         if (page.lines.length) {
           next.current = page.next;
           setRaw((old) => [...old, ...page.lines.map(plain)]);
@@ -218,7 +231,10 @@ export function JobDialog({
         if (live) setBuilds(found.builds);
         if (!isDone(current.state)) timer = setTimeout(tick, 1500);
       } catch (e) {
-        if (live) onError((e as Error).message);
+        if (!live) return;
+        setError((e as Error).message);
+        // A blip shouldn't end the following of a running job.
+        timer = setTimeout(tick, 5000);
       }
     };
     void tick();
@@ -226,7 +242,7 @@ export function JobDialog({
       live = false;
       if (timer) clearTimeout(timer);
     };
-  }, [id, onError]);
+  }, [id]);
 
   // A failed job opens on what failed, unless someone has already picked.
   useEffect(() => {
@@ -241,10 +257,6 @@ export function JobDialog({
     chosen.current = true;
     setSelected(name);
   };
-  const close = () => {
-    link(null, null);
-    onClose();
-  };
 
   const lines = useMemo(() => raw.map((l, i) => parse(l, i + 1)), [raw]);
   const allSteps = useMemo(() => builds.flatMap((b) => b.steps), [builds]);
@@ -253,179 +265,47 @@ export function JobDialog({
   const running = job !== null && !isDone(job.state);
 
   return (
-    <Dialog
-      open
-      onClose={close}
-      fullWidth
-      maxWidth="xl"
-      PaperProps={{ sx: { height: "92vh" } }}
-    >
-      <DialogTitle
-        sx={{
-          display: "flex",
-          alignItems: "center",
-          gap: 1.5,
-          flexWrap: "wrap",
-        }}
+    <Stack spacing={2} sx={{ pt: 2 }}>
+      <Stack
+        direction="row"
+        alignItems="center"
+        spacing={1.5}
+        flexWrap="wrap"
+        useFlexGap
       >
-        Job {id}
+        <Button
+          size="small"
+          startIcon={<ArrowBackIcon />}
+          href="/executors"
+          onClick={(e: React.MouseEvent) => {
+            // A plain click stays in the app; a middle- or ctrl-click opens a
+            // tab the browser's way.
+            if (e.metaKey || e.ctrlKey || e.shiftKey) return;
+            e.preventDefault();
+            onBack();
+          }}
+        >
+          Executors
+        </Button>
+        <Typography variant="h5" component="h1" sx={{ fontWeight: 600 }}>
+          Job {id}
+        </Typography>
         {job && <Tag kind={word(job.state)} />}
         {job && (
           <Typography variant="body2" color="text.secondary">
             {job.spec?.workflows.join(" ")} at{" "}
             <Mono>{job.spec?.commit.slice(0, 12)}</Mono>
-            {job.executor ? ` on ${job.executor}` : ""}
+            {job.spec?.branch ? ` on ${job.spec.branch}` : ""}
+            {job.executor ? ` · ran on ${job.executor}` : ""}
             {job.cancel_requested && running ? " · stopping…" : ""}
           </Typography>
         )}
-      </DialogTitle>
-      <DialogContent
-        dividers
-        sx={{
-          display: "flex",
-          flexDirection: "column",
-          overflow: "hidden",
-          gap: 1.5,
-        }}
-      >
-        {job?.message && (
-          <Alert
-            severity={
-              job.state === "JOB_STATE_SUCCEEDED" ? "success" : "warning"
-            }
-          >
-            {job.message}
-          </Alert>
-        )}
-
-        {builds.length > 0 && (
-          <Stack
-            direction="row"
-            alignItems="center"
-            spacing={1}
-            sx={{ flexShrink: 0 }}
-          >
-            <FormControlLabel
-              control={
-                <Switch
-                  size="small"
-                  checked={folded}
-                  onChange={(_, on) => {
-                    setFolded(on);
-                    rememberFold(on);
-                  }}
-                />
-              }
-              label={
-                <Typography variant="body2">
-                  Fold each workflow file into one node
-                </Typography>
-              }
-            />
-            <Typography variant="caption" color="text.secondary">
-              The strip across a folded node picks the step it shows.
-            </Typography>
-          </Stack>
-        )}
-        {builds.map((b) => (
-          <Box key={b.id} sx={{ flexShrink: 0 }}>
-            {builds.length > 1 && (
-              <Typography variant="body2" sx={{ fontWeight: 600, mb: 0.5 }}>
-                <Mono>{b.workflow}</Mono>
-              </Typography>
-            )}
-            <Box
-              sx={{
-                // Room for the inspector and log below on a short window.
-                height:
-                  builds.length > 1
-                    ? "clamp(140px, 24vh, 220px)"
-                    : "clamp(170px, 32vh, 300px)",
-              }}
-            >
-              {/* The same graph the Builds page and the daemon's run page
-                  draw, with the selected step outlined. */}
-              <StepGraph
-                height="100%"
-                onStepClick={(name) => select(name === selected ? null : name)}
-                focus={selected}
-                fold={folded}
-                steps={shown(b.steps).map((s) => ({
-                  ...graphStep(s),
-                  highlight: s.name === selected,
-                  group: workflowOf(s.name),
-                }))}
-              />
-            </Box>
-          </Box>
-        ))}
-        {running && builds.length === 0 && (
-          <Typography variant="body2" color="text.secondary">
-            The flowchart appears once the run has started.
-          </Typography>
-        )}
-
-        <Box
-          sx={{
-            display: "flex",
-            gap: 1.5,
-            flex: "1 1 0",
-            minHeight: 200,
-            flexDirection: { xs: "column", md: "row" },
-          }}
-        >
-          <Box
-            // A new step starts at the top of its own details.
-            key={selected ?? ""}
-            sx={{
-              width: { xs: "100%", md: 380 },
-              flexShrink: 0,
-              overflow: "auto",
-              border: 1,
-              borderColor: "divider",
-              borderRadius: 1,
-              p: 1.5,
-              maxHeight: { xs: 260, md: "none" },
-            }}
-          >
-            {step && build ? (
-              <StepInspector
-                step={step}
-                build={build}
-                lines={lines}
-                onSelect={select}
-                onJump={(n) => jumpTo(n)}
-              />
-            ) : (
-              <Typography variant="body2" color="text.secondary">
-                Click a step to see what it is, what the cache made of it, what
-                it waits for, and its own log.
-                {firstFailure(builds) === null && builds.length > 0
-                  ? " Nothing has failed."
-                  : ""}
-              </Typography>
-            )}
-          </Box>
-          <LogPane
-            lines={lines}
-            step={selected}
-            queued={job?.state === "JOB_STATE_QUEUED"}
-            follow={running}
-          />
-        </Box>
-
-        {job?.outputs && job.outputs.length > 0 && (
-          <Typography variant="body2" color="text.secondary">
-            Sent back {job.outputs.length} output file
-            {job.outputs.length === 1 ? "" : "s"}:{" "}
-            <Mono>{job.outputs.map((o) => o.path).join(", ")}</Mono>
-          </Typography>
-        )}
-      </DialogContent>
-      <DialogActions>
+        <Box sx={{ flex: 1 }} />
         {running && (
           <Button
             color="error"
+            variant="outlined"
+            size="small"
             disabled={job?.cancel_requested}
             onClick={async () => {
               try {
@@ -435,16 +315,144 @@ export function JobDialog({
                   }),
                 );
               } catch (e) {
-                onError((e as Error).message);
+                setError((e as Error).message);
               }
             }}
           >
             Cancel job
           </Button>
         )}
-        <Button onClick={close}>Close</Button>
-      </DialogActions>
-    </Dialog>
+      </Stack>
+
+      {error && (
+        <Alert severity="error" onClose={() => setError(null)}>
+          {error}
+        </Alert>
+      )}
+      {job?.message && (
+        <Alert
+          severity={job.state === "JOB_STATE_SUCCEEDED" ? "success" : "warning"}
+        >
+          {job.message}
+        </Alert>
+      )}
+
+      {builds.length > 0 && (
+        <Stack direction="row" alignItems="center" spacing={1}>
+          <FormControlLabel
+            control={
+              <Switch
+                size="small"
+                checked={folded}
+                onChange={(_, on) => {
+                  setFolded(on);
+                  rememberFold(on);
+                }}
+              />
+            }
+            label={
+              <Typography variant="body2">
+                Fold each workflow file into one node
+              </Typography>
+            }
+          />
+          <Typography variant="caption" color="text.secondary">
+            The strip across a folded node picks the step it shows.
+          </Typography>
+        </Stack>
+      )}
+      {builds.map((b) => (
+        <Box key={b.id}>
+          {builds.length > 1 && (
+            <Typography variant="body2" sx={{ fontWeight: 600, mb: 0.5 }}>
+              <Mono>{b.workflow}</Mono>
+            </Typography>
+          )}
+          {/* The same graph the Builds page and the daemon's run page draw,
+              with the selected step outlined. A page of its own gives it
+              room; the canvas's own control takes it full screen. */}
+          <StepGraph
+            height={
+              builds.length > 1
+                ? "clamp(220px, 34vh, 420px)"
+                : "clamp(280px, 46vh, 620px)"
+            }
+            onStepClick={(name) => select(name === selected ? null : name)}
+            focus={selected}
+            fold={folded}
+            steps={shown(b.steps).map((s) => ({
+              ...graphStep(s),
+              highlight: s.name === selected,
+              group: workflowOf(s.name),
+            }))}
+          />
+        </Box>
+      ))}
+      {running && builds.length === 0 && (
+        <Typography variant="body2" color="text.secondary">
+          The flowchart appears once the run has started.
+        </Typography>
+      )}
+
+      {/* The step and its log, a screen tall: scroll the page down to them
+          and both fill the window, each scrolling on its own. */}
+      <Box
+        sx={{
+          display: "flex",
+          gap: 2,
+          flexDirection: { xs: "column", md: "row" },
+          height: { md: "calc(100vh - 96px)" },
+          minHeight: { md: 480 },
+        }}
+      >
+        <Box
+          // A new step starts at the top of its own details.
+          key={selected ?? ""}
+          sx={{
+            width: { xs: "100%", md: 400 },
+            flexShrink: 0,
+            overflow: "auto",
+            border: 1,
+            borderColor: "divider",
+            borderRadius: 1,
+            p: 1.5,
+            maxHeight: { xs: 360, md: "none" },
+          }}
+        >
+          {step && build ? (
+            <StepInspector
+              step={step}
+              build={build}
+              lines={lines}
+              onSelect={select}
+              onJump={(n) => jumpTo(n)}
+            />
+          ) : (
+            <Typography variant="body2" color="text.secondary">
+              Click a step to see what it is, what the cache made of it, what it
+              waits for, and its own log.
+              {firstFailure(builds) === null && builds.length > 0
+                ? " Nothing has failed."
+                : ""}
+            </Typography>
+          )}
+        </Box>
+        <LogPane
+          lines={lines}
+          step={selected}
+          queued={job?.state === "JOB_STATE_QUEUED"}
+          follow={running}
+        />
+      </Box>
+
+      {job?.outputs && job.outputs.length > 0 && (
+        <Typography variant="body2" color="text.secondary">
+          Sent back {job.outputs.length} output file
+          {job.outputs.length === 1 ? "" : "s"}:{" "}
+          <Mono>{job.outputs.map((o) => o.path).join(", ")}</Mono>
+        </Typography>
+      )}
+    </Stack>
   );
 }
 

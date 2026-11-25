@@ -30,15 +30,18 @@ import { Executors } from "./views/Executors";
 import { Login } from "./views/Login";
 import { Overview } from "./views/Overview";
 import { Releases } from "./views/Releases";
+import { Secrets } from "./views/Secrets";
 import { Users } from "./views/Users";
 
-type View = "overview" | "builds" | "executors" | "releases" | "users";
+type View =
+  "overview" | "builds" | "executors" | "releases" | "secrets" | "users";
 
 const VIEWS: { view: View; path: string; label: string }[] = [
   { view: "overview", path: "/", label: "Cache" },
   { view: "builds", path: "/builds", label: "Builds" },
   { view: "executors", path: "/executors", label: "Executors" },
   { view: "releases", path: "/releases", label: "Releases" },
+  { view: "secrets", path: "/secrets", label: "Secrets" },
   { view: "users", path: "/users", label: "Users" },
 ];
 
@@ -252,6 +255,7 @@ export function App() {
         {ready && view === "builds" && <Builds refreshKey={refreshKey} />}
         {ready && view === "executors" && <Executors refreshKey={refreshKey} />}
         {ready && view === "releases" && <Releases refreshKey={refreshKey} />}
+        {ready && view === "secrets" && <Secrets refreshKey={refreshKey} />}
         {ready && view === "users" && <Users refreshKey={refreshKey} />}
       </Container>
     </ThemeProvider>

@@ -139,6 +139,18 @@ pub enum Commands {
         subcommand: EnvCommand,
     },
 
+    /// Secrets kept by the remote cache, in groups (`dev`, `prod`, …): set them,
+    /// list them, and put a group's into this terminal with `use`.
+    ///
+    /// They live in the remote cache and nowhere else — never in the repo. A
+    /// job offloaded from a terminal with a group in use runs with that group's
+    /// values too: the executor fetches them for itself.
+    #[command(visible_alias = "secret")]
+    Secrets {
+        #[command(subcommand)]
+        subcommand: SecretsCommand,
+    },
+
     /// List what this workspace can do: every sub-workspace, its workflows,
     /// who owns them, and what they need — plus the workflows in the local config.
     ///
@@ -712,6 +724,48 @@ pub enum CacheCommand {
         /// Show what would be evicted without removing anything.
         #[arg(long)]
         dry_run: bool,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum SecretsCommand {
+    /// List the groups and the secrets in each — names only. Values are never
+    /// listed.
+    List {
+        /// Only this group.
+        group: Option<String>,
+    },
+    /// Set a secret in a group, making the group if it's new. The value is
+    /// read from stdin when it's piped, and asked for (not echoed) otherwise —
+    /// pass it as an argument only when shell history doesn't matter.
+    Set {
+        /// The group, e.g. `dev` or `prod`.
+        group: String,
+        /// The secret's name: the variable it becomes, e.g. `TF_VAR_root_password`.
+        name: String,
+        /// The value. Omit it to be asked, or to pipe it in.
+        value: Option<String>,
+    },
+    /// Remove a secret from a group. The group goes with its last secret.
+    #[command(visible_alias = "remove")]
+    Rm { group: String, name: String },
+    /// Put a group's secrets into this terminal's environment.
+    ///
+    /// A program can't change the shell that started it, so this prints the
+    /// group as `export` lines for the shell to run:
+    ///
+    ///     eval "$(ciabatta secrets use dev)"
+    ///
+    /// In GitHub Actions it writes them to `$GITHUB_ENV` instead (masked in
+    /// the log), so every later step has them. Either way `CIABATTA_SECRETS`
+    /// is set to the group, which is how an offloaded job knows to fetch it.
+    Use {
+        group: String,
+        /// The syntax to print: `sh` (bash, zsh, …), `fish`, `powershell`, or
+        /// `github` for `$GITHUB_ENV`. Defaults to `github` inside GitHub
+        /// Actions and `sh` elsewhere.
+        #[arg(long, value_name = "SHELL")]
+        shell: Option<String>,
     },
 }
 

@@ -16,6 +16,7 @@
 //! (`CIABATTA_EXECUTION_NUMBER` in the run): `offloaded/42/target/release/app`.
 //! One folder per execution, so variants of the same commit don't collide.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -196,10 +197,146 @@ fn source(root: &Path) -> Result<Source> {
     })
 }
 
+/// Variables that describe the machine rather than the run: the executor has
+/// its own, and the caller's would only point it at paths it doesn't have.
+const MACHINE_VARS: &[&str] = &[
+    "PATH",
+    "HOME",
+    "USER",
+    "LOGNAME",
+    "SHELL",
+    "PWD",
+    "OLDPWD",
+    "SHLVL",
+    "TMPDIR",
+    "TEMP",
+    "TMP",
+    "TERM",
+    "DISPLAY",
+    "HOSTNAME",
+    "SSH_AUTH_SOCK",
+    "SSH_CONNECTION",
+    "SSH_CLIENT",
+    "SSH_TTY",
+    "_",
+];
+
+/// What a job carries from the caller's environment, beside its `-e` flags.
+#[derive(Debug, Default)]
+struct Carried {
+    profile: Option<String>,
+    secrets: Option<String>,
+    vars: Vec<super::JobVar>,
+}
+
+/// The environment the run would have had here, as far as the executor's
+/// checkout can't reproduce it: the env profile, the secrets group, and the
+/// values of every variable the run depends on that comes from this terminal
+/// or from a file git doesn't have.
+///
+/// Values the clone *will* have — a committed `.ciabatta/.env.dev`, a
+/// workflow's own `env_file` — aren't sent: the executor reads its own copy,
+/// which is the one at the commit. Nor are a secrets group's values: the
+/// executor fetches those from the cache itself, so they never sit in a job.
+async fn carried(remote: &Remote, request: &Request<'_>) -> Result<Carried> {
+    use crate::environment::profiles;
+    use crate::run::envdeps::Origin;
+
+    let args = request.args;
+    let flags = crate::cli::parse_env_flags(&args.env)?;
+    let mut base: HashMap<String, String> = std::env::vars().collect();
+    base.extend(flags.clone());
+
+    // The profile the run would be under: the flag, the terminal's, or the
+    // one an earlier `ciabatta env use` left the `.env` a copy of.
+    let profile = match &args.env_profile {
+        Some(profile) => {
+            profiles::require(&remote.root, profile)?;
+            Some(profile.clone())
+        }
+        None => profiles::active(&base).or_else(|| {
+            profiles::choice(&base, &remote.root)
+                .0
+                .filter(|p| profiles::valid_name(p))
+        }),
+    };
+    if let Some(profile) = &profile {
+        base.insert(profiles::PROFILE_VAR.to_string(), profile.clone());
+    }
+    let secrets = base
+        .get(crate::secrets::GROUP_VAR)
+        .map(|g| g.trim().to_string())
+        .filter(|g| crate::remote_cache::secrets::valid_group(g));
+
+    // The run's dependencies, resolved the way the run itself would.
+    let mut provided: Vec<String> = flags.keys().cloned().collect();
+    provided.extend(crate::cli::parse_custom_args(request.custom_args)?.into_keys());
+    let selection = crate::workspace::graph::Selection {
+        only: args.only.clone(),
+        solo: args.solo,
+        provided,
+        skip_env_check: true,
+    };
+    let (ws, mut graph) =
+        crate::workspace::graph::prepare_many(request.cwd, request.workflows, &selection)?;
+    let filters = crate::run::filter::parse_all(&args.filter)?;
+    graph.steps = crate::run::filter::apply(&graph.steps, &filters)?.0;
+    let config = crate::config::load_config(&ws.root)?;
+    let resolved = crate::run::with_env_levels(
+        crate::workspace::graph::into_run(graph)?,
+        &ws.root,
+        request.cwd,
+        &config.workspace.clone().unwrap_or_default(),
+    );
+    let report = crate::run::envdeps::collect(&resolved, &ws.root, &base, Some(&config));
+    let values = crate::run::prepare_env(&resolved, &ws.root, &base)?.env;
+
+    // The group's own names stay behind: the executor gets them from the cache.
+    let in_group: Vec<String> = match &secrets {
+        Some(group) => crate::secrets::names(&remote.client, &remote.project, group)
+            .await
+            .unwrap_or_default(),
+        None => Vec::new(),
+    };
+    let tracked = |file: &str| git(&ws.root, &["ls-files", "--error-unmatch", file]).is_ok();
+
+    let mut vars = Vec::new();
+    for var in report.vars {
+        let key = &var.key;
+        if flags.contains_key(key)
+            || in_group.contains(key)
+            || MACHINE_VARS.contains(&key.as_str())
+            || key.starts_with("XDG_")
+            || (key.starts_with("CIABATTA_") && !key.starts_with("CIABATTA_FEAT_"))
+        {
+            continue;
+        }
+        let from_here = match var.origin {
+            Origin::Environment => true,
+            Origin::EnvFile | Origin::Default => var.file.as_deref().is_some_and(|f| !tracked(f)),
+            _ => false,
+        };
+        if let (true, Some(value)) = (from_here, values.get(key))
+            && !value.is_empty()
+        {
+            vars.push(super::JobVar {
+                name: key.clone(),
+                value: value.clone(),
+            });
+        }
+    }
+    Ok(Carried {
+        profile,
+        secrets,
+        vars,
+    })
+}
+
 /// `ciabatta <workflow> --offload`: submit, then follow until it ends.
 pub async fn run(request: Request<'_>) -> Result<()> {
     let remote = Remote::discover(request.cwd)?;
     let source = source(&remote.root)?;
+    let carried = carried(&remote, &request).await?;
     let args = request.args;
     let spec = JobSpec {
         project: remote.project.clone(),
@@ -216,8 +353,12 @@ pub async fn run(request: Request<'_>) -> Result<()> {
         env: args.env.clone(),
         args: request.custom_args.to_vec(),
         force: args.force,
-        executor: request.executor,
-        tags: request.tags,
+        executor: request.executor.clone(),
+        tags: request.tags.clone(),
+        env_profile: carried.profile.clone(),
+        secrets: carried.secrets.clone(),
+        var_names: Vec::new(),
+        vars: carried.vars,
     };
 
     let job: Job = remote.client.post_json("/api/oven/jobs", &spec).await?;
@@ -238,6 +379,22 @@ pub async fn run(request: Request<'_>) -> Result<()> {
             job.id
         );
     }
+    // Nor one from before carried variables: the run would go without them.
+    if !spec.vars.is_empty() && job.spec().var_names.is_empty() {
+        let _ = remote
+            .client
+            .post_json::<_, Job>(
+                &format!("/api/oven/jobs/{}/cancel", job.id),
+                &serde_json::json!({}),
+            )
+            .await;
+        bail!(
+            "{} can't carry this terminal's variables to the executor, so the run would go \
+             without them (job {} was cancelled). Update the remote cache.",
+            remote.url,
+            job.id
+        );
+    }
     let target = match (&spec.executor, spec.tags.is_empty()) {
         (Some(name), true) => name.clone(),
         (Some(name), false) => format!("{name} [{}]", spec.tags.join(", ")),
@@ -253,6 +410,23 @@ pub async fn run(request: Request<'_>) -> Result<()> {
         &spec.commit[..12.min(spec.commit.len())],
         target,
     );
+    let mut carrying = Vec::new();
+    if let Some(profile) = &spec.env_profile {
+        carrying.push(format!("env profile {profile}"));
+    }
+    if let Some(group) = &spec.secrets {
+        carrying.push(format!("secrets group {group}"));
+    }
+    if !job.spec().var_names.is_empty() {
+        carrying.push(format!(
+            "{} variable(s) from here: {}",
+            job.spec().var_names.len(),
+            job.spec().var_names.join(", ")
+        ));
+    }
+    if !carrying.is_empty() {
+        println!("  carrying {}", carrying.join(" · "));
+    }
     println!(
         "{}",
         format!(

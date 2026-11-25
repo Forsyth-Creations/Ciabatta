@@ -254,12 +254,18 @@ pub async fn execute(
                 // thing under suspicion: you reach for this flag precisely
                 // when you think it has been serving stale results, and
                 // answering the question with the accused is no answer.
+                // `--force`, or CIABATTA_FORCE in the run's environment — which
+                // an env file can set, so a target that must always build fresh
+                // (prod) says so once, in the file that selects it, rather than
+                // relying on everyone remembering the flag.
+                let forced_by_env = crate::cache::forced_by(env_vars);
+                let force = ctl.force || forced_by_env.is_some();
                 let mut cache = if dry_run || ctl.authoritative {
                     None
                 } else {
                     let mut session = super::cached::Session::open(root, config);
                     if let Some(session) = session.as_mut() {
-                        if ctl.force {
+                        if force {
                             session.force();
                         }
                         session.connect_remote().await;
@@ -267,13 +273,21 @@ pub async fn execute(
                     session
                 };
 
-                if ctl.force && !dry_run && cache.is_some() {
+                if force && !dry_run && cache.is_some() {
+                    let why = match (&forced_by_env, ctl.force) {
+                        (_, true) => "force".to_string(),
+                        (Some(value), false) => {
+                            format!("force ({}={value})", crate::cache::FORCE_VAR)
+                        }
+                        (None, false) => unreachable!("not forced"),
+                    };
                     let _ = tx
                         .send(ProgressUpdate::Log(
                             name.to_string(),
-                            "force: the cache is ignored, so every step runs; what they \
-                             produce is still stored"
-                                .to_string(),
+                            format!(
+                                "{why}: the cache is ignored, so every step runs; what they \
+                                 produce is still stored"
+                            ),
                         ))
                         .await;
                 }

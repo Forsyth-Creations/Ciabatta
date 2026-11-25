@@ -53,6 +53,34 @@ message JobSpec {
   // Run only on an executor tagged with every one of these ("gpu",
   // "macos-signing"). With `executor` too, that executor has to have them.
   repeated string tags = 16;
+  // The env profile the caller's run would have used (`--env-profile`,
+  // CIABATTA_ENV_PROFILE, or the one `ciabatta env use` elected), so the
+  // executor runs under the same one.
+  optional string env_profile = 17;
+  // The secrets group the caller had in use (`ciabatta secrets use <group>`).
+  // The executor fetches its values from the cache for itself.
+  optional string secrets = 18;
+  // The caller's own values for the variables the run depends on that its
+  // checkout can't reproduce: set in their terminal, or in a gitignored
+  // `.env`. Sent on submit only — the cache moves the values out of the spec
+  // and hands them to nobody but the executor running the job.
+  repeated JobVar vars = 19;
+  // The names of those variables, kept on the job for the record.
+  repeated string var_names = 20;
+}
+
+// One variable carried from the caller's environment to the executor's.
+message JobVar {
+  string name = 1;
+  string value = 2;
+}
+
+// What the executor running a job is handed to run it with, and nobody else:
+// the caller's carried variables and the secrets group's values.
+message JobEnv {
+  repeated JobVar vars = 1;
+  // The secrets, by name, from the group the job names.
+  repeated JobVar secrets = 2;
 }
 
 // Where a job has got to.

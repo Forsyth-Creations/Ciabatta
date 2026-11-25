@@ -585,7 +585,7 @@ const COMMANDS: CommandGroup[] = [
           ["--dry-run", "Walk every step, executing none of them."],
           [
             "--force",
-            "Ignore the cache and run every step. Results are still stored, so the next run reuses them.",
+            "Ignore the cache and run every step. Results are still stored, so the next run reuses them. CIABATTA_FORCE=true in the run's environment does the same, and an env file can set it: a .ciabatta/.env.prod that says so makes every prod build a fresh one.",
           ],
           [
             "--from-failed",
@@ -889,6 +889,16 @@ const COMMANDS: CommandGroup[] = [
         usage: "ciabatta executor <list|status|stop|remove> [NAME]",
         note: "The executors the remote cache manages: list what's online and what each is doing, show one's job and when it was last online, cancel the job it's running, or unpair it.",
         flags: [["list --all", "Offline executors too."]],
+      },
+      {
+        usage: "ciabatta secrets <list|set|rm|use>",
+        note: 'The project\'s secrets, kept by the remote cache in groups (dev, prod, …): list their names, set or remove one, or put a group into this terminal with eval "$(ciabatta secrets use dev)". See Secrets.',
+        flags: [
+          [
+            "use --shell SHELL",
+            "sh, fish, powershell, or github ($GITHUB_ENV). Defaults to github inside GitHub Actions.",
+          ],
+        ],
       },
       {
         usage: "ciabatta offload <list|logs|fetch|cancel>",
@@ -4639,6 +4649,75 @@ export PATH="$HOME/.local/bin:$PATH"     # in ~/.bashrc or ~/.zshrc, if it isn't
     ),
   },
   {
+    id: "secrets",
+    group: "Reference",
+    title: "Secrets",
+    body: (
+      <>
+        <P>
+          Secrets are the values a workflow needs that no checkout should hold:
+          API keys, passwords, deploy tokens. The remote cache keeps them for
+          each project, and nothing else does. They come in <em>groups</em>,
+          because the same name usually has a different value per target:{" "}
+          <C>dev</C> and <C>prod</C> each have their own{" "}
+          <C>TF_VAR_root_password</C>. Setting the first secret in a group makes
+          the group.
+        </P>
+        <Pre>{`ciabatta secrets set dev TF_VAR_root_password        # asks for the value, not echoed
+pass show padua/root | ciabatta secrets set prod TF_VAR_root_password
+ciabatta secrets list                                  # names only, never values
+ciabatta secrets rm dev OLD_TOKEN`}</Pre>
+        <P>
+          They can be set on the cache&apos;s <strong>Secrets</strong> page as
+          well. A value can be set or replaced there, never read back.
+        </P>
+
+        <SubHeading>Using a group</SubHeading>
+        <P>
+          <C>ciabatta secrets use GROUP</C> puts a group into the
+          terminal&apos;s environment. A program can&apos;t change the shell
+          that started it, so it prints the group as <C>export</C> lines for the
+          shell to run, and it won&apos;t print them onto a screen:
+        </P>
+        <Pre>{`eval "$(ciabatta secrets use dev)"                         # bash, zsh
+ciabatta secrets use dev --shell fish | source
+ciabatta secrets use dev --shell powershell | Out-String | Invoke-Expression`}</Pre>
+        <P>
+          Every run started from that terminal then finds them as it finds
+          anything else exported there. <C>CIABATTA_SECRETS</C> is set to the
+          group&apos;s name too, which is how a job offloaded from the terminal
+          knows to fetch the same group on its executor (see{" "}
+          <strong>Offload a run to another machine</strong>).
+        </P>
+        <P>
+          In GitHub Actions it writes the group to <C>$GITHUB_ENV</C> instead,
+          so every later step in the job has it, and registers each value with{" "}
+          <C>::add-mask::</C> so the log hides it:
+        </P>
+        <Pre>{`- run: ciabatta env use dev && ciabatta secrets use dev
+- run: ciabatta deploy -e DEPLOY_ENV=dev`}</Pre>
+
+        <SubHeading>Who can read them</SubHeading>
+        <P>
+          Anyone who may read the cache may list the names. Reading values (
+          <C>secrets use</C>) and changing them take write access, which a
+          read-only token, the kind a fork&apos;s CI gets, doesn&apos;t have. An
+          executor gets a group only for a job that names it, and only while it
+          runs that job. On an <C>open</C> cache anyone who can reach it can
+          write, so anyone who can reach it can read the secrets: put it in{" "}
+          <C>token</C> or <C>ldap</C> mode before you trust it with production
+          credentials.
+        </P>
+        <P>
+          The cache stores them in <C>secrets.json</C> in its storage directory,
+          readable by its own user only. They aren&apos;t encrypted at rest,
+          since the key would have to live on the same disk, so treat that
+          directory, and its backups, as you would the secrets themselves.
+        </P>
+      </>
+    ),
+  },
+  {
     id: "releases",
     group: "Reference",
     title: "Releases",
@@ -4895,11 +4974,29 @@ Offloaded as job 12 — build at 3f9c2a1e04b7 on the first free executor
         <P>
           The run checks the commit out on its branch, so <C>CIABATTA_BRANCH</C>
           , <C>CIABATTA_COMMIT</C> and <C>CIABATTA_PATH</C> are what they would
-          have been on your machine. Your local <C>.env</C> is not sent: the run
-          sees the executor&apos;s own environment, the env files committed to
-          the repository, and the <C>-e</C> flags you typed. A step that needs a
-          secret needs it set on the executor.
+          have been on your machine. The environment goes with it too, as far as
+          the commit can&apos;t bring it: the run uses the same env profile (
+          <C>--env-profile</C>, or the one <C>ciabatta env use</C> elected), and
+          every variable it depends on whose value comes from your terminal or
+          from a file git doesn&apos;t have, such as your local <C>.env</C>, is
+          carried over. Variables that describe your machine (<C>PATH</C>,{" "}
+          <C>HOME</C>, …) stay behind, and so do the files the commit has, which
+          the executor reads from its own checkout. The cache keeps the carried
+          values beside the job, hands them to nobody but the executor running
+          it, and deletes them when the job ends. A job&apos;s page shows only
+          their names.
         </P>
+        <P>
+          With a secrets group in use (<C>ciabatta secrets use dev</C>, see{" "}
+          <strong>Secrets</strong>), the job names the group and the executor
+          fetches its values from the cache itself. They never travel in the
+          job, and every line of its log has their values masked before it
+          reaches the cache.
+        </P>
+        <Pre>{`$ eval "$(ciabatta secrets use dev)"
+$ ciabatta deploy --offload-to galileo -e DEPLOY_ENV=dev
+Offloaded as job 31 — deploy at 9b1e0c47aa21 on galileo
+  carrying env profile dev · secrets group dev · 1 variable(s) from here: PADUA_VERSION`}</Pre>
 
         <SubHeading>What comes back</SubHeading>
         <P>

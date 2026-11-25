@@ -656,7 +656,10 @@ impl Cache {
                     &format!("/api/oven/executors/{}/poll", self.id),
                 )
                 .timeout(Duration::from_secs(POLL_SECONDS + 15))
-                .json(&serde_json::json!({})),
+                .json(&super::PollRequest {
+                    version: env!("CARGO_PKG_VERSION").to_string(),
+                    platform: super::platform(),
+                }),
             )
             .await?;
         Ok(polled.job)

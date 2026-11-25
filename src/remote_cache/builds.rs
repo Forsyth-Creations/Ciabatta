@@ -80,6 +80,9 @@ pub struct BuildRecord {
     pub reported_by: Option<String>,
 }
 
+/// The outcome of a record sent while its run is still going.
+pub const RUNNING: &str = "running";
+
 /// One step of a recorded build.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct BuildStep {
@@ -225,18 +228,32 @@ impl Ledger {
     }
 
     /// The flow, in the graph's own order, with what each step did.
-    pub fn steps(mut self, graph: &[crate::run::RunStep]) -> Vec<BuildStep> {
+    pub fn steps(self, graph: &[crate::run::RunStep]) -> Vec<BuildStep> {
+        self.flow(graph, false)
+    }
+
+    /// The flow so far, for a record sent while the run is still going: a
+    /// step that has started and not finished stays `running`.
+    pub fn snapshot(&self, graph: &[crate::run::RunStep]) -> Vec<BuildStep> {
+        self.flow(graph, true)
+    }
+
+    fn flow(&self, graph: &[crate::run::RunStep], live: bool) -> Vec<BuildStep> {
         graph
             .iter()
             .take(MAX_STEPS)
             .map(|node| {
-                let mut step = self.steps.remove(&node.name).unwrap_or_else(|| BuildStep {
-                    name: node.name.clone(),
-                    status: "not run".to_string(),
-                    ..Default::default()
-                });
-                // Still "running" means the run ended around it.
-                if step.status == "running" {
+                let mut step = self
+                    .steps
+                    .get(&node.name)
+                    .cloned()
+                    .unwrap_or_else(|| BuildStep {
+                        name: node.name.clone(),
+                        status: "not run".to_string(),
+                        ..Default::default()
+                    });
+                // Still "running" at the end means the run ended around it.
+                if !live && step.status == "running" {
                     step.status = "not run".to_string();
                 }
                 step.workspace = node.workspace.clone();
@@ -382,8 +399,27 @@ impl Store {
         // field first — so a retry is spotted without parsing the whole feed.
         let raw = std::fs::read_to_string(&path).unwrap_or_default();
         let prefix = format!("{{\"id\":{},", serde_json::to_string(&record.id)?);
-        if raw.lines().any(|line| line.starts_with(&prefix)) {
-            return Ok(());
+        if let Some(line) = raw.lines().find(|line| line.starts_with(&prefix)) {
+            // A run still going sends its record again as it goes; each one
+            // replaces the last until the finished one lands. Once finished,
+            // a repeat — a retry, or a progress report that arrived late — is
+            // dropped.
+            let stored: Option<BuildRecord> = serde_json::from_str(line).ok();
+            if stored.is_none_or(|b| b.outcome != RUNNING) {
+                return Ok(());
+            }
+            let mut existing = read_lines(&path);
+            for kept in existing.iter_mut() {
+                if kept.id == record.id {
+                    *kept = record.clone();
+                }
+            }
+            let body: Vec<String> = existing
+                .iter()
+                .filter_map(|r| serde_json::to_string(r).ok())
+                .collect();
+            return std::fs::write(&path, body.join("\n") + "\n")
+                .with_context(|| format!("Failed to write {}", path.display()));
         }
 
         let line = serde_json::to_string(record).context("Failed to encode a build")?;
@@ -410,8 +446,11 @@ impl Store {
     }
 
     /// A project's builds, newest first, at most `limit` of them.
+    /// Not one still running: the feed is of finished builds, and a run that
+    /// died mid-way would otherwise sit there as "running" for good.
     pub fn list(&self, project: &str, limit: usize) -> Vec<BuildRecord> {
         let mut all = read_lines(&self.path(project));
+        all.retain(|r| r.outcome != RUNNING);
         all.sort_by(|a, b| b.finished_at.cmp(&a.finished_at));
         all.truncate(limit.min(MAX_BUILDS_PER_PROJECT));
         all
@@ -500,6 +539,42 @@ mod tests {
             ],
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn a_running_record_is_replaced_until_it_finishes() {
+        let dir = scratch("live");
+        let store = Store::open(&dir).unwrap();
+        let at = "2026-01-01T00:00:00Z";
+        let with = |outcome: &str, first: &str| {
+            let mut b = BuildRecord {
+                outcome: outcome.to_string(),
+                job: Some(3),
+                ..record("live", at)
+            };
+            b.steps[0].status = first.to_string();
+            b
+        };
+        store.add("p1", &record("done", at)).unwrap();
+        store.add("p1", &with(RUNNING, "running")).unwrap();
+        store.add("p1", &with(RUNNING, "success")).unwrap();
+
+        // The job sees the latest progress; the feed doesn't see it at all.
+        let live = store.for_job("p1", 3);
+        assert_eq!(live.len(), 1);
+        assert_eq!(live[0].steps[0].status, "success");
+        let ids: Vec<String> = store.list("p1", 10).into_iter().map(|r| r.id).collect();
+        assert_eq!(ids, vec!["done"]);
+
+        // Finished, it joins the feed, and progress that arrives late can't
+        // turn it back into a running one.
+        store.add("p1", &with("failed", "failed")).unwrap();
+        store.add("p1", &with(RUNNING, "running")).unwrap();
+        let finished = store.get("p1", "live").unwrap();
+        assert_eq!(finished.outcome, "failed");
+        assert_eq!(finished.steps[0].status, "failed");
+        assert_eq!(store.list("p1", 10).len(), 2);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

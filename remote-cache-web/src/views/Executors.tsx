@@ -1100,14 +1100,12 @@ function JobDialog({
           setLines((old) => [...old, ...page.lines.map(plain)]);
         }
         const over = isDone(current.state);
-        // A run reports its build as it ends, just before the job does —
-        // so once the job is over, its flow is there to draw.
-        if (over) {
-          const found = await api<{ builds: Build[] }>(
-            `/api/oven/jobs/${id}/builds`,
-          );
-          if (live) setBuilds(found.builds);
-        }
+        // The run sends its record as it goes, so the flow is redrawn on
+        // every tick while it runs, and once more when it's over.
+        const found = await api<{ builds: Build[] }>(
+          `/api/oven/jobs/${id}/builds`,
+        );
+        if (live) setBuilds(found.builds);
         if (!over) timer = setTimeout(step, 1500);
       } catch (e) {
         if (live) onError((e as Error).message);
@@ -1197,9 +1195,9 @@ function JobDialog({
             </Box>
           </Box>
         ))}
-        {running && (
+        {running && builds.length === 0 && (
           <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
-            The flowchart is drawn when the run reports it, as it finishes.
+            The flowchart appears once the run has started.
           </Typography>
         )}
         <Box

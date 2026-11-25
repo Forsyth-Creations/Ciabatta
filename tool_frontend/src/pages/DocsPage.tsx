@@ -4929,10 +4929,14 @@ workspace:
           back to it. Cancelling stops it on the executor within a few seconds —
           everything the run started, including anything it left running in the
           background. The cache&apos;s Executors page lists the same jobs, with
-          each one&apos;s live log and a Cancel button. Once a job&apos;s run
-          ends, its page also draws the flowchart of the steps it ran, the same
-          graph the Builds page shows, from the build record the run reported
-          (which now notes the job it ran under).
+          each one&apos;s live log and a Cancel button. A job&apos;s page also
+          draws the flowchart of its run (the same graph the Builds page shows),
+          and it moves as the run does: an offloaded run sends its build record
+          as each step starts and finishes, at most once a second, and the
+          finished record replaces it at the end. A run still going isn&apos;t
+          listed on the Builds page until it ends. The Executors list shows the
+          ciabatta each executor runs, which it reports with every poll for
+          work, so it is right again within a minute of an upgrade.
         </P>
         <Pre>{`ciabatta offload list            # this project's recent jobs (--all for every project's)
 ciabatta offload logs 12         # follow its log, and fetch its outputs when it ends

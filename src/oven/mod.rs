@@ -62,7 +62,7 @@ pub const OFFLINE_AFTER_SECONDS: i64 = 60;
 pub use proto::{
     Availability, Discovered, ExecutorHistory, ExecutorInfo, ExecutorList, ExecutorState,
     ExecutorTags, ExecutorView, Finish, Heartbeat, HeartbeatReply, Job, JobList, JobSpec, JobState,
-    LogBatch, LogPage, OutputFile, PairRequest, PairWith, Paired, Poll, StatusChange,
+    LogBatch, LogPage, OutputFile, PairRequest, PairWith, Paired, Poll, PollRequest, StatusChange,
 };
 
 /// The protocol's types, generated from `proto/oven.proto` by `build.rs`:

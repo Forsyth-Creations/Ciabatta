@@ -537,6 +537,28 @@ pub async fn run_workflow_ctl(
     // the remote cache keeps is made of exactly what the run view was shown.
     let (inner_tx, mut inner_rx) = mpsc::channel::<ProgressUpdate>(256);
     let outer = tx.clone();
+
+    // The record this run will report. Made now so that an offloaded run —
+    // one an executor started, which has a job number — can send it as it
+    // goes, under the same id, and the job's page can draw the flow live.
+    let mut build = crate::remote_cache::builds::describe(&described_vars(root, env_vars));
+    build.workflow = name.to_string();
+    build.started_at = started_at.clone();
+    let live = !dry_run && build.job.is_some();
+    let graph = resolved.steps.clone();
+    let (flow_tx, flow_rx) = tokio::sync::watch::channel(
+        live.then(|| crate::remote_cache::builds::Ledger::default().snapshot(&graph)),
+    );
+    let reporter = live.then(|| {
+        tokio::spawn(report_progress(
+            build.clone(),
+            config.clone(),
+            root.to_path_buf(),
+            started,
+            flow_rx,
+        ))
+    });
+
     let tap = tokio::spawn(async move {
         let mut ledger = crate::remote_cache::builds::Ledger::default();
         // Under `--debug`, the same stream is narrated to the log, and every
@@ -553,6 +575,19 @@ pub async fn run_workflow_ctl(
                         flight.observe(&update);
                     }
                     ledger.observe(&update);
+                    if live
+                        && matches!(
+                            update,
+                            ProgressUpdate::StepStarted { .. }
+                                | ProgressUpdate::StepFinished { .. }
+                                | ProgressUpdate::StepWarned { .. }
+                                | ProgressUpdate::StepCarried { .. }
+                                | ProgressUpdate::StepSkipped { .. }
+                                | ProgressUpdate::StepCache { .. }
+                        )
+                    {
+                        flow_tx.send_replace(Some(ledger.snapshot(&graph)));
+                    }
                     let _ = outer.send(update).await;
                 }
                 _ = beat.tick(), if flight.is_some() => {
@@ -618,6 +653,11 @@ pub async fn run_workflow_ctl(
     };
     drop(inner_tx);
     let ledger = tap.await.unwrap_or_default();
+    // The tap has dropped its sender, so the reporter sends what it has and
+    // ends — before the finished record, which must land last.
+    if let Some(reporter) = reporter {
+        let _ = reporter.await;
+    }
 
     match result {
         Ok(()) => {
@@ -661,25 +701,12 @@ pub async fn run_workflow_ctl(
             ));
         }
 
-        // A run with no CI variables (one started from the web app, or a
-        // terminal without `--local`) still came from some commit: say which.
-        let mut described = env_vars.clone();
-        if !described.contains_key("CIABATTA_COMMIT")
-            && let Ok(git) = crate::git::local_git_vars(root)
-        {
-            for (key, value) in git {
-                described.entry(key).or_insert(value);
-            }
-        }
-        let mut build = crate::remote_cache::builds::describe(&described);
-        build.workflow = name.to_string();
         build.outcome = match outcome {
             crate::run::history::Outcome::Success => "success",
             crate::run::history::Outcome::Stopped => "stopped",
             crate::run::history::Outcome::Failed => "failed",
         }
         .to_string();
-        build.started_at = started_at;
         build.finished_at = chrono::Utc::now().to_rfc3339();
         build.duration_ms = duration_ms;
         build.error = result.as_ref().err().map(|e| format!("{e:#}"));
@@ -688,6 +715,57 @@ pub async fn run_workflow_ctl(
     }
 
     result
+}
+
+/// The run's variables, plus the commit it came from when they don't say:
+/// a run with no CI variables (one started from the web app, or a terminal
+/// without `--local`) still came from some commit.
+fn described_vars(root: &Path, env_vars: &HashMap<String, String>) -> HashMap<String, String> {
+    let mut described = env_vars.clone();
+    if !described.contains_key("CIABATTA_COMMIT")
+        && let Ok(git) = crate::git::local_git_vars(root)
+    {
+        for (key, value) in git {
+            described.entry(key).or_insert(value);
+        }
+    }
+    described
+}
+
+/// Send `build` with the flow so far each time it changes, at most once a
+/// second, until the run's tap lets go of the channel. The cache replaces
+/// the record each time, while it is still `running`.
+async fn report_progress(
+    mut build: crate::remote_cache::builds::BuildRecord,
+    config: CiabattaConfig,
+    root: std::path::PathBuf,
+    started: std::time::Instant,
+    mut flow: tokio::sync::watch::Receiver<Option<Vec<crate::remote_cache::builds::BuildStep>>>,
+) {
+    build.outcome = crate::remote_cache::builds::RUNNING.to_string();
+    loop {
+        let steps = flow.borrow_and_update().clone();
+        if let Some(steps) = steps {
+            build.steps = steps;
+            build.finished_at = chrono::Utc::now().to_rfc3339();
+            build.duration_ms = started.elapsed().as_millis() as u64;
+            crate::remote_cache::builds::report(&config, &root, &build).await;
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        if flow.changed().await.is_err() {
+            // One last look: what changed while this slept.
+            let steps = flow.borrow().clone();
+            if let Some(steps) = steps
+                && steps != build.steps
+            {
+                build.steps = steps;
+                build.finished_at = chrono::Utc::now().to_rfc3339();
+                build.duration_ms = started.elapsed().as_millis() as u64;
+                crate::remote_cache::builds::report(&config, &root, &build).await;
+            }
+            return;
+        }
+    }
 }
 
 /// Note what this run covered, locally and — when one is configured — on the

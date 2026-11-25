@@ -658,7 +658,8 @@ pub enum CacheCommand {
     /// be able to say so.
     Init {
         /// Which workflow to describe. With one workflow here it's optional;
-        /// with several, name the one you mean.
+        /// with several, name the one you mean. Leave it off with `--remote`
+        /// to configure only the remote cache.
         #[arg(name = "WORKFLOW")]
         workflow: Option<String>,
 
@@ -667,8 +668,9 @@ pub enum CacheCommand {
         #[arg(long)]
         enable: bool,
 
-        /// Point this checkout at a remote cache. This one goes in
-        /// `ciabatta.yaml` — it's one server per checkout, not per workflow.
+        /// Point the whole project at a remote cache. This goes in the root
+        /// `ciabatta.yaml` — it's one server for every workflow and every
+        /// sub-workspace, so no workflow needs naming for it.
         #[arg(long, value_name = "URL")]
         remote: Option<String>,
 

@@ -1529,8 +1529,10 @@ A project is known to the server by its **name and an id the server assigns**.
 The id is written back into the workspace config and committed.
 
 The remote is the one piece of cache config that stays in `ciabatta.yaml`: it's
-a single server per checkout, and repeating it in every workflow file would be
-four places to change when the server moves.
+a single server for the whole project, and repeating it in every workflow file
+would be four places to change when the server moves. So `cache init --remote`
+needs no workflow named, and run from inside a package of a monorepo it still
+writes to the root config — the only one whose `cache.remote` is read.
 
 ```yaml
 # .ciabatta/ciabatta.yaml

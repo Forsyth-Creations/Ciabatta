@@ -3808,11 +3808,37 @@ fn cmd_cache(subcommand: CacheCommand) -> Result<()> {
             remote,
             force,
         } => {
+            let workspace_root =
+                workspace::find_workspace_root(&cwd).unwrap_or_else(|| root.clone());
+
+            // The remote cache is one server for the whole project: it lives
+            // in the root config, the only one whose `cache.remote` is read,
+            // whichever package this ran in. A git root above the project with
+            // no config of its own isn't that root.
+            let remote_root = if config::config_path(&workspace_root).is_some() {
+                workspace_root.clone()
+            } else {
+                root.clone()
+            };
+
+            // `--remote` on its own configures just the server; it shouldn't
+            // make anyone pick a workflow it has nothing to do with. `--enable`
+            // is about a workflow's section, so with it this goes on to write
+            // one as well.
+            if let (Some(url), None, false) = (remote.as_deref(), workflow.as_deref(), enable) {
+                let path = cache::cli::write_remote_section(&remote_root, url, force)?;
+                println!("Wrote {}", path.display());
+                println!(
+                    "Every workflow in this project now uses {url}.\n\
+                     The project id is filled in the first time it connects. Commit it.\n\
+                     Describe what a workflow reads with `ciabatta cache init <WORKFLOW>`."
+                );
+                return Ok(());
+            }
+
             let workflow = resolve_cache_workflow(&root, workflow.as_deref())?;
             // Look in this package, but write the patterns relative to the
             // monorepo root — that is what the cache resolves them against.
-            let workspace_root =
-                workspace::find_workspace_root(&cwd).unwrap_or_else(|| root.clone());
             let rel = root
                 .strip_prefix(&workspace_root)
                 .ok()
@@ -3898,16 +3924,12 @@ fn cmd_cache(subcommand: CacheCommand) -> Result<()> {
                 enable
             };
 
-            let written = cache::cli::write_cache_section(
-                &root,
-                &workflow,
-                &proposal,
-                enable,
-                remote.as_deref(),
-                force,
-            )?;
+            let written =
+                cache::cli::write_cache_section(&root, &workflow, &proposal, enable, force)?;
             println!();
-            for path in &written {
+            println!("Wrote {}", written.display());
+            if let Some(url) = remote.as_deref() {
+                let path = cache::cli::write_remote_section(&remote_root, url, force)?;
                 println!("Wrote {}", path.display());
             }
 
@@ -3947,7 +3969,7 @@ fn cmd_cache(subcommand: CacheCommand) -> Result<()> {
             }
             if remote.is_some() {
                 println!(
-                    "The remote's project id is filled in the first time this workspace \
+                    "The remote's project id is filled in the first time this project \
                      connects. Commit it."
                 );
             }

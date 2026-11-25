@@ -622,19 +622,18 @@ pub fn overriding_steps(root: &Path, workflow: &str) -> Vec<(String, bool)> {
 ///
 /// The file definition — what a build reads, writes and depends on — belongs
 /// with the build it describes, so it lands in
-/// `.ciabatta/workflows/<name>.yaml` next to the steps. A `remote:` URL is the
-/// exception: that is one cache server per checkout, not a property of any one
-/// workflow, so it goes into `ciabatta.yaml` instead.
+/// `.ciabatta/workflows/<name>.yaml` next to the steps. The remote cache is not
+/// written here: it is one server for the whole project, not a property of any
+/// one workflow — see [`write_remote_section`].
 ///
-/// Returns the paths written, workflow file first.
+/// Returns the path written.
 pub fn write_cache_section(
     root: &Path,
     workflow: &str,
     proposal: &Proposal,
     enabled: bool,
-    remote: Option<&str>,
     force: bool,
-) -> Result<Vec<PathBuf>> {
+) -> Result<PathBuf> {
     let dir = root
         .join(crate::config::CIABATTA_DIR)
         .join(crate::workspace::WORKFLOWS_DIR);
@@ -683,11 +682,7 @@ pub fn write_cache_section(
     std::fs::write(&path, rendered)
         .with_context(|| format!("Failed to write {}", path.display()))?;
 
-    let mut written = vec![path];
-    if let Some(url) = remote {
-        written.push(write_remote_section(root, url, force)?);
-    }
-    Ok(written)
+    Ok(path)
 }
 
 /// Set the files one target reads and writes, in its workflow's file.
@@ -800,12 +795,16 @@ pub fn save_target_files(
     Ok(relative)
 }
 
-/// Point this checkout at a shared cache server, in `ciabatta.yaml`.
+/// Point the project at a shared cache server, in the root `ciabatta.yaml`.
 ///
 /// Separate from the file definition on purpose: one endpoint serves every
-/// workflow here, and repeating it per workflow would be four places to change
-/// when the server moves.
-fn write_remote_section(root: &Path, url: &str, force: bool) -> Result<PathBuf> {
+/// workflow and every sub-workspace, and repeating it per workflow would be
+/// several places to change when the server moves. `root` is the project root
+/// — the only config whose `cache.remote` is read.
+///
+/// Added to whatever `cache:` section the config already has, so the other
+/// settings there survive. An existing `remote:` is only replaced with `force`.
+pub fn write_remote_section(root: &Path, url: &str, force: bool) -> Result<PathBuf> {
     let path = crate::config::config_path(root).ok_or_else(|| {
         anyhow::anyhow!(
             "No ciabatta config in {}. Run `ciabatta init` first.",
@@ -815,33 +814,46 @@ fn write_remote_section(root: &Path, url: &str, force: bool) -> Result<PathBuf> 
 
     let existing = std::fs::read_to_string(&path)
         .with_context(|| format!("Failed to read {}", path.display()))?;
-
-    if existing.lines().any(|l| l.starts_with("cache:")) && !force {
+    let format = crate::format::Format::of_path(&path);
+    if format != crate::format::Format::Yaml {
         bail!(
-            "{} already has a `cache:` section. Edit it directly, or pass --force \
-             to replace it.",
+            "{} is TOML; add `[cache.remote]` with `url = \"{url}\"` to it by hand.",
             path.display()
         );
     }
 
-    let mut block = String::from("cache:\n  remote:\n");
-    block.push_str(&format!("    url: {url}\n"));
-    block.push_str("    # `project` is filled in by the server the first time this\n");
-    block.push_str("    # checkout connects. Commit it: it's what makes every checkout\n");
-    block.push_str("    # and every CI runner resolve to the same project.\n");
-    let rendered = crate::format::set_top_level(&existing, "cache", &block);
+    let current: CiabattaConfig = crate::format::from_str(&existing, format)
+        .with_context(|| format!("Failed to parse {}", path.display()))?;
+    let base = match current.cache.as_ref().and_then(|c| c.remote()) {
+        Some(remote) if !force => bail!(
+            "{} already points at a remote cache ({}). Edit `cache.remote` directly, or \
+             pass --force to replace it.",
+            path.display(),
+            remote.url
+        ),
+        Some(_) => without_remote(&existing),
+        None => existing.clone(),
+    };
 
-    let parsed: CiabattaConfig =
-        crate::format::from_str(&rendered, crate::format::Format::of_path(&path)).with_context(
-            || {
-                format!(
-                    "Writing the remote cache section would have broken {}, so it was left alone",
-                    path.display()
-                )
-            },
-        )?;
+    let mut entry = String::from("  remote:\n");
+    entry.push_str(&format!("    url: {url}\n"));
+    entry.push_str("    # `project` is filled in by the server the first time this\n");
+    entry.push_str("    # project connects. Commit it: it's what makes every checkout\n");
+    entry.push_str("    # and every CI runner resolve to the same project.\n");
+    let rendered = crate::format::insert_under(&base, "cache", &entry)?;
+
+    let parsed: CiabattaConfig = crate::format::from_str(&rendered, format).with_context(|| {
+        format!(
+            "Writing the remote cache section would have broken {}, so it was left alone",
+            path.display()
+        )
+    })?;
     anyhow::ensure!(
-        parsed.cache.as_ref().and_then(|c| c.remote()).is_some(),
+        parsed
+            .cache
+            .as_ref()
+            .and_then(|c| c.remote())
+            .is_some_and(|r| r.url == url),
         "The generated remote section didn't survive a round trip; {} was left alone",
         path.display()
     );
@@ -849,6 +861,42 @@ fn write_remote_section(root: &Path, url: &str, force: bool) -> Result<PathBuf> 
     std::fs::write(&path, rendered)
         .with_context(|| format!("Failed to write {}", path.display()))?;
     Ok(path)
+}
+
+/// `document` with the `remote:` mapping of its top-level `cache:` removed,
+/// everything else in that section kept.
+fn without_remote(document: &str) -> String {
+    let lines: Vec<&str> = document.lines().collect();
+    let Some(cache) = lines.iter().position(|l| l.trim_end() == "cache:") else {
+        return document.to_string();
+    };
+    let indent_of = |l: &str| l.len() - l.trim_start().len();
+    let significant = |l: &str| !l.trim().is_empty() && !l.trim_start().starts_with('#');
+
+    let Some(start) = lines
+        .iter()
+        .enumerate()
+        .skip(cache + 1)
+        .take_while(|(_, l)| !significant(l) || indent_of(l) > 0)
+        .find(|(_, l)| l.trim_start().starts_with("remote:"))
+        .map(|(i, _)| i)
+    else {
+        return document.to_string();
+    };
+    let own = indent_of(lines[start]);
+    let end = lines
+        .iter()
+        .enumerate()
+        .skip(start + 1)
+        .find(|(_, l)| significant(l) && indent_of(l) <= own)
+        .map(|(i, _)| i)
+        .unwrap_or(lines.len());
+
+    let mut out: Vec<&str> = lines[..start].to_vec();
+    out.extend_from_slice(&lines[end..]);
+    let mut rendered = out.join("\n");
+    rendered.push('\n');
+    rendered
 }
 
 // ─── cache status / prune ───────────────────────────────────────────────────
@@ -1365,13 +1413,7 @@ mod tests {
         write(&dir, "dist/app", "built");
 
         let proposal = propose_under(&dir, None);
-        let written = write_cache_section(&dir, "build", &proposal, true, None, false).unwrap();
-        let path = written[0].clone();
-        assert_eq!(
-            written.len(),
-            1,
-            "no remote asked for, so only the workflow"
-        );
+        let path = write_cache_section(&dir, "build", &proposal, true, false).unwrap();
 
         let rendered = std::fs::read_to_string(&path).unwrap();
         assert!(rendered.contains("# my careful comment"));
@@ -1382,11 +1424,11 @@ mod tests {
         assert!(workflow.cache.unwrap().is_on());
 
         // A second run refuses rather than clobbering what's there…
-        let err = write_cache_section(&dir, "build", &proposal, true, None, false).unwrap_err();
+        let err = write_cache_section(&dir, "build", &proposal, true, false).unwrap_err();
         assert!(err.to_string().contains("already has a `cache:` section"));
 
         // …unless asked to.
-        assert!(write_cache_section(&dir, "build", &proposal, false, None, true).is_ok());
+        assert!(write_cache_section(&dir, "build", &proposal, false, true).is_ok());
         let workflow: crate::workspace::Workflow = crate::format::load(&path).unwrap();
         assert!(!workflow.cache.unwrap().is_on());
         assert_eq!(
@@ -1424,11 +1466,10 @@ mod tests {
         write(&dir, "src/main.rs", "fn main() {}");
         write(&dir, "dist/app", "built");
 
-        let written =
-            write_cache_section(&dir, "build", &propose_under(&dir, None), true, None, false)
-                .expect("a step-level cache: must not block the workflow section");
+        let written = write_cache_section(&dir, "build", &propose_under(&dir, None), true, false)
+            .expect("a step-level cache: must not block the workflow section");
 
-        let workflow: crate::workspace::Workflow = crate::format::load(&written[0]).unwrap();
+        let workflow: crate::workspace::Workflow = crate::format::load(&written).unwrap();
         assert!(workflow.cache.expect("workflow section written").is_on());
         assert!(
             workflow.steps[0].cache.is_some(),
@@ -1448,7 +1489,7 @@ mod tests {
         )
         .unwrap();
 
-        let err = write_cache_section(&dir, "build", &propose_under(&dir, None), true, None, false)
+        let err = write_cache_section(&dir, "build", &propose_under(&dir, None), true, false)
             .unwrap_err();
         assert!(
             err.to_string().contains("No workflow called 'build'"),
@@ -1457,10 +1498,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The remote is one server per checkout, so it lands in `ciabatta.yaml`
-    /// while the file definition stays with the workflow that reads them.
+    /// The remote is one server per project, so it lands in `ciabatta.yaml`
+    /// and never in a workflow — and needs no workflow to be written at all.
     #[test]
-    fn a_remote_goes_to_the_config_and_the_files_to_the_workflow() {
+    fn a_remote_is_written_to_the_config_without_naming_a_workflow() {
         let dir = scratch("remote");
         std::fs::create_dir_all(dir.join(".ciabatta/workflows")).unwrap();
         std::fs::write(
@@ -1468,34 +1509,18 @@ mod tests {
             "workspace:\n  name: api\n",
         )
         .unwrap();
-        std::fs::write(
-            dir.join(".ciabatta/workflows/build.yaml"),
-            "steps:\n  - name: build\n    run: make\n",
-        )
-        .unwrap();
-        write(&dir, "src/main.rs", "fn main() {}");
-        write(&dir, "dist/app", "built");
+        for name in ["build", "test"] {
+            std::fs::write(
+                dir.join(format!(".ciabatta/workflows/{name}.yaml")),
+                "steps:\n  - name: go\n    run: make\n",
+            )
+            .unwrap();
+        }
 
-        let written = write_cache_section(
-            &dir,
-            "build",
-            &propose_under(&dir, None),
-            true,
-            Some("http://c:8380"),
-            false,
-        )
-        .unwrap();
-        assert_eq!(written.len(), 2, "the workflow file and the config");
+        let path = write_remote_section(&dir, "http://c:8380", false).unwrap();
+        assert_eq!(path, dir.join(".ciabatta/ciabatta.yaml"));
 
-        let workflow: crate::workspace::Workflow = crate::format::load(&written[0]).unwrap();
-        let cache = workflow.cache.expect("workflow section written");
-        assert!(cache.inputs.contains(&"src/**/*".to_string()));
-        assert!(
-            cache.remote.is_none(),
-            "the server does not belong to any one workflow"
-        );
-
-        let config: CiabattaConfig = crate::format::load(&written[1]).unwrap();
+        let config: CiabattaConfig = crate::format::load(&path).unwrap();
         let remote = config.cache.and_then(|c| c.remote).expect("remote written");
         assert_eq!(remote.url, "http://c:8380");
         assert!(
@@ -1503,6 +1528,45 @@ mod tests {
             "the id is assigned by the server, not guessed by the client"
         );
         assert!(remote.enabled, "a configured remote defaults to on");
+
+        for name in ["build", "test"] {
+            let workflow =
+                std::fs::read_to_string(dir.join(format!(".ciabatta/workflows/{name}.yaml")))
+                    .unwrap();
+            assert!(!workflow.contains("cache:"), "{name} was left alone");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A config that already has a `cache:` section keeps it; the remote is
+    /// added beside it. Replacing a remote takes --force, and keeps the rest.
+    #[test]
+    fn a_remote_joins_an_existing_cache_section() {
+        let dir = scratch("remote-existing");
+        std::fs::create_dir_all(dir.join(".ciabatta")).unwrap();
+        std::fs::write(
+            dir.join(".ciabatta/ciabatta.yaml"),
+            "workspace:\n  name: api\ncache:\n  enabled: true\n  exclude:\n    - target/**\n",
+        )
+        .unwrap();
+
+        let path = write_remote_section(&dir, "http://a:8380", false).unwrap();
+        let config: CiabattaConfig = crate::format::load(&path).unwrap();
+        let cache = config.cache.expect("cache kept");
+        assert_eq!(cache.enabled, Some(true));
+        assert_eq!(cache.remote.as_ref().unwrap().url, "http://a:8380");
+
+        let err = write_remote_section(&dir, "http://b:8380", false).unwrap_err();
+        assert!(err.to_string().contains("http://a:8380"), "{err}");
+
+        write_remote_section(&dir, "http://b:8380", true).unwrap();
+        let config: CiabattaConfig = crate::format::load(&path).unwrap();
+        let cache = config.cache.expect("cache kept");
+        assert_eq!(cache.enabled, Some(true));
+        assert_eq!(cache.remote.as_ref().unwrap().url, "http://b:8380");
+        let rendered = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(rendered.matches("remote:").count(), 1, "{rendered}");
+        assert!(rendered.contains("target/**"), "{rendered}");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

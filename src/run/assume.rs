@@ -254,7 +254,7 @@ pub async fn run(
         env,
     )
     .await
-    .context("checking which account the current credentials are in")?;
+    .map_err(|e| anyhow::anyhow!("checking which account the current credentials are in: {e:#}"))?;
     if current == account {
         sink.push(format!(
             "already in account {account}; the steps that need this one keep the current \
@@ -286,7 +286,11 @@ pub async fn run(
         env,
     )
     .await
-    .with_context(|| format!("assuming {role}"))?;
+    .map_err(|e| {
+        // A run prints a step's failure as one line — the outermost message —
+        // so the reason AWS gave goes in it, not under it.
+        anyhow::anyhow!("assuming {role}: {e:#}")
+    })?;
 
     let fields: Vec<&str> = out.split_whitespace().collect();
     let [key, secret, token, expires] = fields[..] else {

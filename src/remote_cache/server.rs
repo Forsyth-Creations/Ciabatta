@@ -71,6 +71,8 @@ pub struct AppState {
     pub oven: Arc<super::oven::Oven>,
     /// The other servers this one keeps in step with — see [`super::peers`].
     pub peers: Arc<super::peers::Peers>,
+    /// Each project's secrets, by group — see [`super::secrets`].
+    pub secrets: Arc<super::secrets::Secrets>,
     pub started_at: String,
     /// Set by an applied upload: the binary to start again from once the
     /// server has finished what it is doing.
@@ -96,6 +98,7 @@ impl AppState {
         let builds = super::builds::Store::open(&config.server.storage)?;
         let oven = super::oven::Oven::open(&config.server.storage)?;
         let peers = super::peers::Peers::open(&config.server.storage, &config.peers)?;
+        let secrets = super::secrets::Secrets::open(&config.server.storage)?;
         let release = config.releases.with_uploads(&config.server.storage).scan();
 
         Ok(AppState {
@@ -107,6 +110,7 @@ impl AppState {
             activity: Arc::new(activity),
             oven: Arc::new(oven),
             peers: Arc::new(peers),
+            secrets: Arc::new(secrets),
             sessions: Arc::new(Sessions::open(&config.server.storage)),
             release: Arc::new(std::sync::RwLock::new(release)),
             started_at: crate::cache::store::now(),
@@ -330,6 +334,7 @@ pub fn router(state: AppState) -> Router {
             get(download_release).put(upload_release),
         )
         .merge(super::oven::routes())
+        .merge(super::secrets::routes())
         // The admin app, as the fallback, so no API path can be shadowed by it.
         .fallback(super::web::serve)
         .layer(DefaultBodyLimit::max(MAX_ARTIFACT_BYTES))
@@ -817,6 +822,9 @@ async fn forget_project(
     // longer exists.
     if let Err(e) = state.workflows.forget(&id) {
         tracing::warn!("couldn't forget {id}'s workflow history: {e:#}");
+    }
+    if let Err(e) = state.secrets.forget_project(&id) {
+        tracing::warn!("couldn't forget {id}'s secrets: {e:#}");
     }
     state.activity.forget(&id);
     state.builds.forget(&id);

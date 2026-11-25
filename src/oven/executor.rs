@@ -665,6 +665,27 @@ impl Cache {
         Ok(polled.job)
     }
 
+    /// What job `id` is to be run with: its caller's carried variables and
+    /// its secrets group's values. A cache from before either answers 404,
+    /// which is the same as having none.
+    async fn job_env(&self, id: u32) -> Result<super::JobEnv> {
+        let response = self
+            .request(reqwest::Method::GET, &format!("/api/oven/jobs/{id}/env"))
+            .timeout(Duration::from_secs(30))
+            .send()
+            .await
+            .with_context(|| format!("couldn't reach {}", self.server))?;
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(super::JobEnv::default());
+        }
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        if !status.is_success() {
+            bail!("{status}: {body}");
+        }
+        serde_json::from_str(&body).context("the cache answered with something unexpected")
+    }
+
     async fn heartbeat(&self, job: Option<u32>) -> Result<bool> {
         let answer: HeartbeatReply = self
             .send(
@@ -885,7 +906,52 @@ async fn execute(
         return failed(message);
     }
 
-    let env = job_env(options, &lines).await;
+    let mut env = job_env(options, &lines).await;
+
+    // The caller's environment, as far as the checkout can't reproduce it,
+    // then the secrets group's values over it.
+    let carried = match cache.job_env(job.id).await {
+        Ok(carried) => carried,
+        Err(e) => {
+            let message = format!("couldn't fetch the job's environment from the cache: {e:#}");
+            say(format!("✗ {message}"));
+            return failed(message);
+        }
+    };
+    if !carried.vars.is_empty() {
+        let names: Vec<&str> = carried.vars.iter().map(|v| v.name.as_str()).collect();
+        say(format!(
+            "▶ {} variable(s) carried from {}: {}",
+            names.len(),
+            job.requested_by,
+            names.join(", ")
+        ));
+    }
+    if let Some(group) = &job.spec().secrets {
+        if carried.secrets.is_empty() {
+            say(format!(
+                "  secrets group '{group}' has no secrets on the cache (or the cache is too old to \
+                 hand them out); running without"
+            ));
+        } else {
+            say(format!(
+                "▶ {} secret(s) from group '{group}'",
+                carried.secrets.len()
+            ));
+        }
+        env.insert(crate::secrets::GROUP_VAR.to_string(), group.clone());
+    }
+    // From here every line the run prints has the secrets' values masked
+    // before it reaches the cache's log, which anyone who can read the cache
+    // can read.
+    let lines = mask_secrets(&carried.secrets, lines);
+    let say = |line: String| {
+        let _ = lines.send(line);
+    };
+    for var in carried.vars.into_iter().chain(carried.secrets) {
+        env.insert(var.name, var.value);
+    }
+
     let checkout = work_dir.join("jobs").join(job.id.to_string());
     let prepared = {
         let env = env.clone();
@@ -1411,6 +1477,44 @@ fn own_exe() -> String {
     }
 }
 
+/// `lines`, with every secret's value replaced by `***` on its way through.
+/// Values shorter than four characters aren't masked: they'd blot out half the
+/// log and hide nothing.
+fn mask_secrets(
+    secrets: &[super::JobVar],
+    lines: tokio::sync::mpsc::UnboundedSender<String>,
+) -> tokio::sync::mpsc::UnboundedSender<String> {
+    let mut values: Vec<String> = secrets
+        .iter()
+        .flat_map(|s| s.value.lines().map(str::to_string).collect::<Vec<_>>())
+        .map(|v| v.trim().to_string())
+        .filter(|v| v.chars().count() >= 4)
+        .collect();
+    if values.is_empty() {
+        return lines;
+    }
+    // Longest first, so a secret containing another is masked whole.
+    values.sort_by_key(|v| std::cmp::Reverse(v.len()));
+    values.dedup();
+    let (masked, mut incoming) = tokio::sync::mpsc::unbounded_channel::<String>();
+    tokio::spawn(async move {
+        while let Some(line) = incoming.recv().await {
+            let _ = lines.send(mask_line(&line, &values));
+        }
+    });
+    masked
+}
+
+fn mask_line(line: &str, values: &[String]) -> String {
+    let mut line = line.to_string();
+    for value in values {
+        if line.contains(value.as_str()) {
+            line = line.replace(value.as_str(), "***");
+        }
+    }
+    line
+}
+
 /// The `ciabatta workflow …` command a job runs.
 fn workflow_command(job: &Job) -> Vec<String> {
     let spec = job.spec();
@@ -1432,6 +1536,9 @@ fn workflow_command(job: &Job) -> Vec<String> {
     }
     for var in &spec.env {
         command.extend(["-e".to_string(), var.clone()]);
+    }
+    if let Some(profile) = &spec.env_profile {
+        command.extend(["--env-profile".to_string(), profile.clone()]);
     }
     if spec.force {
         command.push("--force".to_string());
@@ -1557,6 +1664,55 @@ mod tests {
         );
         assert_eq!(shell_quote("it's"), r"'it'\''s'");
         assert_eq!(shell_quote("tag:fast"), "tag:fast");
+    }
+
+    #[test]
+    fn the_callers_env_profile_reaches_the_run() {
+        let job = Job {
+            id: 1,
+            spec: Some(super::super::JobSpec {
+                workflows: vec!["deploy".into()],
+                env: vec!["DEPLOY_ENV=dev".into()],
+                env_profile: Some("dev".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert_eq!(
+            workflow_command(&job)[1..].join(" "),
+            "workflow deploy --viz terminal -e DEPLOY_ENV=dev --env-profile dev"
+        );
+    }
+
+    #[test]
+    fn secrets_are_masked_in_the_log_longest_first() {
+        let values = vec!["hunter2-and-more".to_string(), "hunter2".to_string()];
+        assert_eq!(
+            mask_line("pw=hunter2-and-more, again hunter2", &values),
+            "pw=***, again ***"
+        );
+        assert_eq!(mask_line("nothing here", &values), "nothing here");
+    }
+
+    #[tokio::test]
+    async fn the_masking_channel_masks_what_passes_through() {
+        let (out, mut log) = tokio::sync::mpsc::unbounded_channel();
+        let secrets = vec![
+            super::super::JobVar {
+                name: "TOKEN".into(),
+                value: "s3cr3t-value".into(),
+            },
+            // Too short to be worth masking.
+            super::super::JobVar {
+                name: "N".into(),
+                value: "1".into(),
+            },
+        ];
+        let masked = mask_secrets(&secrets, out);
+        masked.send("token is s3cr3t-value, n is 1".into()).unwrap();
+        drop(masked);
+        assert_eq!(log.recv().await.unwrap(), "token is ***, n is 1");
+        assert!(log.recv().await.is_none());
     }
 
     #[test]

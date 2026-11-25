@@ -21,6 +21,7 @@ mod registry;
 mod remote_cache;
 mod run;
 mod runner;
+mod secrets;
 mod shell;
 mod todo;
 mod tui;
@@ -140,6 +141,7 @@ async fn main() -> Result<()> {
             }
         },
 
+        Commands::Secrets { subcommand } => secrets::command(subcommand).await?,
         Commands::Env { subcommand } => match subcommand {
             EnvCommand::List => cmd_env_list()?,
             EnvCommand::Use { name, dry_run } => cmd_env_use(&name, dry_run)?,

@@ -37,6 +37,7 @@ pub mod peers;
 pub mod projects;
 pub mod reach;
 pub mod releases;
+pub mod secrets;
 pub mod server;
 pub mod tls;
 pub mod users;

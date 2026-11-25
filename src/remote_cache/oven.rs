@@ -39,14 +39,18 @@ use serde_json::json;
 use super::server::{ApiError, ApiResult, AppState};
 use crate::oven::{
     Availability, Discovered, ExecutorHistory, ExecutorInfo, ExecutorList, ExecutorState,
-    ExecutorTags, ExecutorView, Finish, Heartbeat, HeartbeatReply, Job, JobList, JobSpec, JobState,
-    LogBatch, LogPage, OFFLINE_AFTER_SECONDS, OutputFile, POLL_SECONDS, PairRequest, PairWith,
-    Paired, Poll, PollRequest, StatusChange,
+    ExecutorTags, ExecutorView, Finish, Heartbeat, HeartbeatReply, Job, JobEnv, JobList, JobSpec,
+    JobState, JobVar, LogBatch, LogPage, OFFLINE_AFTER_SECONDS, OutputFile, POLL_SECONDS,
+    PairRequest, PairWith, Paired, Poll, PollRequest, StatusChange,
 };
 
 /// How many jobs are kept, with their logs and outputs. Older ones go when a
 /// new one is submitted.
 pub const MAX_JOBS: usize = 200;
+
+/// Beside a job's `job.json`: the variables its caller carried over, until it
+/// ends. Owner-only, and never part of the job as it's listed.
+const CARRIED_FILE: &str = "carried.json";
 
 /// A log longer than this stops growing; the executor is told so once.
 const MAX_LOG_LINES: usize = 200_000;
@@ -250,7 +254,20 @@ impl Oven {
     fn save_job(&self, job: &Job) -> Result<()> {
         let dir = self.job_dir(job.id);
         std::fs::create_dir_all(&dir)?;
-        write_atomic(&dir.join("job.json"), &serde_json::to_vec_pretty(job)?)
+        write_atomic(&dir.join("job.json"), &serde_json::to_vec_pretty(job)?)?;
+        // A job that's over needs its caller's values no longer.
+        if job.state().is_done() {
+            let _ = std::fs::remove_file(dir.join(CARRIED_FILE));
+        }
+        Ok(())
+    }
+
+    /// The variables job `id`'s caller carried over, for its executor.
+    pub fn carried(&self, id: u32) -> Vec<JobVar> {
+        std::fs::read(self.job_dir(id).join(CARRIED_FILE))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .unwrap_or_default()
     }
 
     fn abandon_running(&self, why: &str) {
@@ -442,6 +459,18 @@ impl Oven {
         }
         let mut spec = spec;
         spec.tags = normalize_tags(&spec.tags)?;
+        // The caller's values leave the spec here: the spec is what every
+        // listing shows. They're kept beside the job, for its executor only.
+        let mut carried = std::mem::take(&mut spec.vars);
+        carried.retain(|v| super::secrets::valid_name(&v.name));
+        carried.sort_by(|a, b| a.name.cmp(&b.name));
+        carried.dedup_by(|a, b| a.name == b.name);
+        spec.var_names = carried.iter().map(|v| v.name.clone()).collect();
+        if let Some(group) = &spec.secrets
+            && !super::secrets::valid_group(group)
+        {
+            return Err(format!("'{group}' can't name a secrets group."));
+        }
         if let Some(name) = &spec.executor
             && !inner
                 .executors
@@ -481,6 +510,11 @@ impl Oven {
             log_lines: 0,
         };
         self.save_job(&job).map_err(|e| format!("{e:#}"))?;
+        if !carried.is_empty() {
+            let body = serde_json::to_vec(&carried).map_err(|e| e.to_string())?;
+            super::secrets::write_private(&self.job_dir(id).join(CARRIED_FILE), &body)
+                .map_err(|e| format!("{e:#}"))?;
+        }
         inner.jobs.insert(id, job.clone());
         self.prune(&mut inner);
         drop(inner);
@@ -899,6 +933,7 @@ pub fn routes() -> Router<AppState> {
         .route("/api/oven/jobs/{id}/builds", get(job_builds))
         .route("/api/oven/jobs/{id}/cancel", post(cancel_job))
         .route("/api/oven/jobs/{id}/finish", post(finish_job))
+        .route("/api/oven/jobs/{id}/env", get(job_env))
         .route(
             "/api/oven/jobs/{id}/outputs/{*path}",
             get(get_output).put(put_output),
@@ -1314,6 +1349,34 @@ async fn cancel_job(
     Ok(Json(job))
 }
 
+/// What the executor running job `id` runs it with: the caller's carried
+/// variables, and the values of the secrets group the job names. Nobody else
+/// may ask.
+async fn job_env(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    UrlPath(id): UrlPath<u32>,
+) -> ApiResult<Json<JobEnv>> {
+    executor_for_job(&state, &headers, id)?;
+    let job = state
+        .oven
+        .job(id)
+        .ok_or_else(|| ApiError::not_found(format!("There is no job {id}.")))?;
+    let secrets = match &job.spec().secrets {
+        Some(group) => state
+            .secrets
+            .values(&job.spec().project, group)
+            .into_iter()
+            .map(|(name, value)| JobVar { name, value })
+            .collect(),
+        None => Vec::new(),
+    };
+    Ok(Json(JobEnv {
+        vars: state.oven.carried(id),
+        secrets,
+    }))
+}
+
 async fn finish_job(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1629,6 +1692,50 @@ mod tests {
         assert_eq!(oven.log(job.id, 1).lines, vec!["two three".to_string()]);
         // Ids carry on from where they were.
         assert_eq!(oven.submit(spec(None), "me").unwrap().id, job.id + 1);
+    }
+
+    #[test]
+    fn carried_values_are_kept_off_the_job_and_go_when_it_ends() {
+        let (dir, oven) = oven();
+        oven.add(&info("a", "box"), "http://x:1", "t", "admin")
+            .unwrap();
+        let mut with_vars = spec(None);
+        with_vars.vars = vec![
+            JobVar {
+                name: "TF_VAR_password".into(),
+                value: "hunter2".into(),
+            },
+            JobVar {
+                name: "not a name".into(),
+                value: "dropped".into(),
+            },
+        ];
+        // Whatever a client claims, the names are the cache's to record.
+        with_vars.var_names = vec!["LIES".into()];
+        let job = oven.submit(with_vars, "me").unwrap();
+
+        assert!(job.spec().vars.is_empty());
+        assert_eq!(job.spec().var_names, ["TF_VAR_password"]);
+        let saved = std::fs::read_to_string(
+            dir.join("oven/jobs")
+                .join(job.id.to_string())
+                .join("job.json"),
+        )
+        .unwrap();
+        assert!(!saved.contains("hunter2"), "{saved}");
+        assert_eq!(oven.carried(job.id)[0].value, "hunter2");
+
+        oven.take("a", "box").unwrap();
+        oven.finish(
+            job.id,
+            "a",
+            Finish {
+                state: JobState::Succeeded.into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(oven.carried(job.id).is_empty());
     }
 
     #[test]

@@ -357,6 +357,22 @@ impl Client {
         parse(response).await
     }
 
+    /// `PUT` JSON to an API path, with this client's credential.
+    pub async fn put_json<B: serde::Serialize + ?Sized, T: serde::de::DeserializeOwned>(
+        &self,
+        path: &str,
+        body: &B,
+    ) -> Result<T> {
+        let response = self
+            .authed(self.http.put(self.url(path)))
+            .timeout(TIMEOUT)
+            .json(body)
+            .send()
+            .await
+            .with_context(|| format!("Could not reach the remote cache at {}", self.base))?;
+        parse(response).await
+    }
+
     /// `DELETE` an API path, with this client's credential.
     pub async fn delete_json<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T> {
         let response = self

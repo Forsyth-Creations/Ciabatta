@@ -86,6 +86,48 @@ export interface JobSpec {
    * "macos-signing"). With `executor` too, that executor has to have them.
    */
   tags: string[];
+  /**
+   * The env profile the caller's run would have used (`--env-profile`,
+   * CIABATTA_ENV_PROFILE, or the one `ciabatta env use` elected), so the
+   * executor runs under the same one.
+   */
+  env_profile?: string | null;
+  /**
+   * The secrets group the caller had in use (`ciabatta secrets use <group>`).
+   * The executor fetches its values from the cache for itself.
+   */
+  secrets?: string | null;
+  /**
+   * The caller's own values for the variables the run depends on that its
+   * checkout can't reproduce: set in their terminal, or in a gitignored
+   * `.env`. Sent on submit only — the cache moves the values out of the spec
+   * and hands them to nobody but the executor running the job.
+   */
+  vars: JobVar[];
+  /**
+   * The names of those variables, kept on the job for the record.
+   */
+  var_names: string[];
+}
+
+/**
+ * One variable carried from the caller's environment to the executor's.
+ */
+export interface JobVar {
+  name: string;
+  value: string;
+}
+
+/**
+ * What the executor running a job is handed to run it with, and nobody else:
+ * the caller's carried variables and the secrets group's values.
+ */
+export interface JobEnv {
+  vars: JobVar[];
+  /**
+   * The secrets, by name, from the group the job names.
+   */
+  secrets: JobVar[];
 }
 
 /**

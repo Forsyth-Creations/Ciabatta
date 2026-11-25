@@ -347,3 +347,23 @@ export function isDone(state: JobState): boolean {
     state === "JOB_STATE_CANCELLED"
   );
 }
+
+// ─── Secrets ────────────────────────────────────────────────────────────────
+// Names only: the cache never hands a value to this app.
+
+export interface Project {
+  id: string;
+  name: string;
+  created_at: string;
+}
+
+export interface SecretListing {
+  name: string;
+  updated_at: string;
+  updated_by: string | null;
+}
+
+export interface SecretGroup {
+  name: string;
+  secrets: SecretListing[];
+}

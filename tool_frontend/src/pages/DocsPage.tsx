@@ -585,7 +585,7 @@ const COMMANDS: CommandGroup[] = [
           ["--dry-run", "Walk every step, executing none of them."],
           [
             "--force",
-            "Ignore the cache and run every step. Results are still stored, so the next run reuses them.",
+            "Ignore the cache and run every step. Results are still stored, so the next run reuses them. CIABATTA_FORCE=true in the run's environment does the same, and an env file can set it: a .ciabatta/.env.prod that says so makes every prod build a fresh one.",
           ],
           [
             "--from-failed",

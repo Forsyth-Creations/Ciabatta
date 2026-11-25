@@ -51,6 +51,20 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+/// Set (to anything truthy) in a run's environment, this ignores the cache as
+/// `--force` does: every step runs, and what it produces is still stored. An
+/// env file may set it, which is the point — `.ciabatta/.env.prod` saying
+/// `CIABATTA_FORCE=true` makes every prod build a fresh one, whoever starts it
+/// and wherever it runs.
+pub const FORCE_VAR: &str = "CIABATTA_FORCE";
+
+/// The value of [`FORCE_VAR`], when it's set to something that means "on".
+pub fn forced_by(env: &std::collections::HashMap<String, String>) -> Option<String> {
+    env.get(FORCE_VAR)
+        .filter(|v| crate::environment::truthy(v))
+        .map(|v| v.trim().to_string())
+}
+
 /// The `cache:` section of a workspace's config.
 ///
 /// ```yaml
@@ -2049,6 +2063,17 @@ pub fn plan(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ciabatta_force_in_the_environment_forces() {
+        let env =
+            |v: &str| std::collections::HashMap::from([(FORCE_VAR.to_string(), v.to_string())]);
+        assert_eq!(forced_by(&env("true")).as_deref(), Some("true"));
+        assert_eq!(forced_by(&env("1")).as_deref(), Some("1"));
+        assert!(forced_by(&env("false")).is_none());
+        assert!(forced_by(&env("")).is_none());
+        assert!(forced_by(&std::collections::HashMap::new()).is_none());
+    }
 
     #[test]
     fn backups_read_as_urls_or_full_entries_and_list_after_the_primary() {

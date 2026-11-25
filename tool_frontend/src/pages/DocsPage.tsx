@@ -798,6 +798,14 @@ const COMMANDS: CommandGroup[] = [
       {
         usage: "ciabatta cache init [WORKFLOW]",
         note: "Look at what is actually in the directory and write a `cache:` section into the workflow's file proposing its inputs and outputs — with the paths already rooted correctly.",
+        flags: [
+          [
+            "--remote <URL>",
+            "Point the whole project at a remote cache. It goes in the root `ciabatta.yaml` — one server for every workflow and sub-workspace — so on its own it needs no workflow named, and it works from inside any package. An existing remote is only replaced with --force.",
+          ],
+          ["--enable", "Turn the workflow's section on straight away."],
+          ["--force", "Replace an existing `cache:` section or remote."],
+        ],
       },
       {
         usage: "ciabatta cache status",
@@ -4158,7 +4166,7 @@ ciabatta remote-cache start
 
 # On each developer's machine
 ciabatta remote-cache login http://cache.example.com:8380
-ciabatta cache init --remote http://cache.example.com:8380`}</Pre>
+ciabatta cache init --remote http://cache.example.com:8380   # once, for the whole project`}</Pre>
         <P>
           A project is known to the server by its name{" "}
           <em>and an id the server assigns</em>, and that id is written back

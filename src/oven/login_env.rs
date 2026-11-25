@@ -15,6 +15,10 @@
 //! Best-effort: a shell that is missing, fails, or takes longer than
 //! [`TIMEOUT`] leaves the job with the executor's own environment, and says so.
 
+// Only unix asks a login shell; elsewhere the helpers below go unused (but
+// stay, so the parser's tests run on every platform).
+#![cfg_attr(not(unix), allow(dead_code))]
+
 use std::collections::HashMap;
 use std::time::Duration;
 

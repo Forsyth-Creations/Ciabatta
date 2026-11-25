@@ -41,7 +41,7 @@ use crate::oven::{
     Availability, Discovered, ExecutorHistory, ExecutorInfo, ExecutorList, ExecutorState,
     ExecutorTags, ExecutorView, Finish, Heartbeat, HeartbeatReply, Job, JobList, JobSpec, JobState,
     LogBatch, LogPage, OFFLINE_AFTER_SECONDS, OutputFile, POLL_SECONDS, PairRequest, PairWith,
-    Paired, Poll, StatusChange,
+    Paired, Poll, PollRequest, StatusChange,
 };
 
 /// How many jobs are kept, with their logs and outputs. Older ones go when a
@@ -551,6 +551,31 @@ impl Oven {
         Some(job)
     }
 
+    /// Record what executor `id` says it is now, writing it down only when
+    /// that changed — an executor upgraded since it paired, say.
+    fn describe(&self, id: &str, version: &str, platform: &str) {
+        let version = version.trim();
+        let platform = platform.trim();
+        let mut inner = self.inner.lock().unwrap();
+        let Some(executor) = inner.executors.iter_mut().find(|e| e.id == id) else {
+            return;
+        };
+        let mut changed = false;
+        // An executor from before polls carried this sends nothing: keep
+        // what pairing recorded rather than blanking it.
+        if !version.is_empty() && executor.version != version {
+            executor.version = version.to_string();
+            changed = true;
+        }
+        if !platform.is_empty() && executor.platform != platform {
+            executor.platform = platform.to_string();
+            changed = true;
+        }
+        if changed && let Err(e) = self.save_executors(&inner) {
+            tracing::warn!("couldn't record executor {id}'s version: {e:#}");
+        }
+    }
+
     /// An executor saying it is alive and what it is doing. The answer is
     /// whether to stop the job it named.
     fn heartbeat(&self, id: &str, job: Option<u32>) -> bool {
@@ -871,6 +896,7 @@ pub fn routes() -> Router<AppState> {
         .route("/api/oven/jobs", get(list_jobs).post(submit_job))
         .route("/api/oven/jobs/{id}", get(get_job))
         .route("/api/oven/jobs/{id}/log", get(read_log).post(write_log))
+        .route("/api/oven/jobs/{id}/builds", get(job_builds))
         .route("/api/oven/jobs/{id}/cancel", post(cancel_job))
         .route("/api/oven/jobs/{id}/finish", post(finish_job))
         .route(
@@ -1131,8 +1157,12 @@ async fn poll(
     State(state): State<AppState>,
     headers: HeaderMap,
     UrlPath(id): UrlPath<String>,
+    body: Option<Json<PollRequest>>,
 ) -> ApiResult<Json<Poll>> {
     let name = executor_from(&state, &headers, &id)?;
+    if let Some(Json(about)) = body {
+        state.oven.describe(&id, &about.version, &about.platform);
+    }
     let deadline = tokio::time::Instant::now() + Duration::from_secs(POLL_SECONDS);
     loop {
         // Registered before looking, so a job submitted between the look and
@@ -1219,6 +1249,22 @@ async fn get_job(
         .job(id)
         .map(Json)
         .ok_or_else(|| ApiError::not_found(format!("There is no job {id}.")))
+}
+
+/// The build records job `id`'s run reported, with the flow each ran — what
+/// its page draws. Empty until the run has reported, which it does as it ends.
+async fn job_builds(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    UrlPath(id): UrlPath<u32>,
+) -> ApiResult<Json<serde_json::Value>> {
+    state.identify(&headers)?;
+    let job = state
+        .oven
+        .job(id)
+        .ok_or_else(|| ApiError::not_found(format!("There is no job {id}.")))?;
+    let builds = state.builds.for_job(&job.spec().project, id);
+    Ok(Json(serde_json::json!({ "builds": builds })))
 }
 
 #[derive(Deserialize)]

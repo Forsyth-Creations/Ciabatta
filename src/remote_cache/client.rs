@@ -221,6 +221,10 @@ pub struct Client {
     base: String,
     token: Option<String>,
     http: reqwest::Client,
+    /// What `http` was built with, so [`Client::renewed`] can tell whether its
+    /// connections are still the right ones to keep.
+    tls_verify: bool,
+    ca_cert: Option<std::path::PathBuf>,
 }
 
 impl Client {
@@ -267,6 +271,32 @@ impl Client {
             token,
             base,
             http: builder.build().context("Failed to build the HTTP client")?,
+            tls_verify,
+            ca_cert: ca_cert.map(Path::to_path_buf),
+        })
+    }
+
+    /// This client with whatever session is saved for its server now — for a
+    /// client built a while ago, before a login that may have happened since.
+    ///
+    /// The HTTP client, and with it any open connection, is kept, so asking
+    /// again doesn't look the server's name up again: a flaky resolver that
+    /// answered once can't take the cache away from the rest of the run. Only
+    /// when the TLS setup has changed is it built afresh.
+    pub fn renewed(&self, tls_verify: bool) -> Result<Self> {
+        let credentials = Credentials::load();
+        let ca_cert = credentials.ca_cert(&self.base);
+        if tls_verify != self.tls_verify || ca_cert != self.ca_cert {
+            return Self::build(
+                &self.base,
+                tls_verify,
+                ca_cert.as_deref(),
+                credentials.get(&self.base).map(|c| c.token.clone()),
+            );
+        }
+        Ok(Client {
+            token: credentials.get(&self.base).map(|c| c.token.clone()),
+            ..self.clone()
         })
     }
 

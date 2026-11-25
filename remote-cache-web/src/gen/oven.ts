@@ -296,6 +296,21 @@ export interface Paired {
 }
 
 /**
+ * What an executor sends with each long poll for work: what it is now, so the
+ * cache's record follows an executor that has been upgraded since it paired.
+ */
+export interface PollRequest {
+  /**
+   * The ciabatta it runs ("0.11.2").
+   */
+  version: string;
+  /**
+   * The OS and architecture it runs on ("linux-x86_64").
+   */
+  platform: string;
+}
+
+/**
  * An executor waiting for work: POST /api/oven/executors/{id}/poll.
  */
 export interface Poll {

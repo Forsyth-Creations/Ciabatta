@@ -65,6 +65,10 @@ pub struct BuildRecord {
     pub tag: Option<String>,
     #[serde(default)]
     pub build_number: Option<String>,
+    /// The offloaded job that ran it, when an executor did: how the job's
+    /// page finds the flow it ran.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job: Option<u32>,
     /// The error that ended it, when it failed.
     #[serde(default)]
     pub error: Option<String>,
@@ -75,6 +79,9 @@ pub struct BuildRecord {
     #[serde(default)]
     pub reported_by: Option<String>,
 }
+
+/// The outcome of a record sent while its run is still going.
+pub const RUNNING: &str = "running";
 
 /// One step of a recorded build.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -221,18 +228,32 @@ impl Ledger {
     }
 
     /// The flow, in the graph's own order, with what each step did.
-    pub fn steps(mut self, graph: &[crate::run::RunStep]) -> Vec<BuildStep> {
+    pub fn steps(self, graph: &[crate::run::RunStep]) -> Vec<BuildStep> {
+        self.flow(graph, false)
+    }
+
+    /// The flow so far, for a record sent while the run is still going: a
+    /// step that has started and not finished stays `running`.
+    pub fn snapshot(&self, graph: &[crate::run::RunStep]) -> Vec<BuildStep> {
+        self.flow(graph, true)
+    }
+
+    fn flow(&self, graph: &[crate::run::RunStep], live: bool) -> Vec<BuildStep> {
         graph
             .iter()
             .take(MAX_STEPS)
             .map(|node| {
-                let mut step = self.steps.remove(&node.name).unwrap_or_else(|| BuildStep {
-                    name: node.name.clone(),
-                    status: "not run".to_string(),
-                    ..Default::default()
-                });
-                // Still "running" means the run ended around it.
-                if step.status == "running" {
+                let mut step = self
+                    .steps
+                    .get(&node.name)
+                    .cloned()
+                    .unwrap_or_else(|| BuildStep {
+                        name: node.name.clone(),
+                        status: "not run".to_string(),
+                        ..Default::default()
+                    });
+                // Still "running" at the end means the run ended around it.
+                if !live && step.status == "running" {
                     step.status = "not run".to_string();
                 }
                 step.workspace = node.workspace.clone();
@@ -269,6 +290,11 @@ pub fn describe(env: &HashMap<String, String>) -> BuildRecord {
         commit: get("CIABATTA_COMMIT"),
         tag: get("CIABATTA_TAG"),
         build_number: get("CIABATTA_BUILD_NUMBER"),
+        // Set by the executor on the run's own process, so read from there
+        // too: a run's variables needn't carry it.
+        job: get(crate::oven::JOB_VAR)
+            .or_else(|| std::env::var(crate::oven::JOB_VAR).ok())
+            .and_then(|n| n.trim().parse().ok()),
         ..Default::default()
     }
 }
@@ -373,8 +399,27 @@ impl Store {
         // field first — so a retry is spotted without parsing the whole feed.
         let raw = std::fs::read_to_string(&path).unwrap_or_default();
         let prefix = format!("{{\"id\":{},", serde_json::to_string(&record.id)?);
-        if raw.lines().any(|line| line.starts_with(&prefix)) {
-            return Ok(());
+        if let Some(line) = raw.lines().find(|line| line.starts_with(&prefix)) {
+            // A run still going sends its record again as it goes; each one
+            // replaces the last until the finished one lands. Once finished,
+            // a repeat — a retry, or a progress report that arrived late — is
+            // dropped.
+            let stored: Option<BuildRecord> = serde_json::from_str(line).ok();
+            if stored.is_none_or(|b| b.outcome != RUNNING) {
+                return Ok(());
+            }
+            let mut existing = read_lines(&path);
+            for kept in existing.iter_mut() {
+                if kept.id == record.id {
+                    *kept = record.clone();
+                }
+            }
+            let body: Vec<String> = existing
+                .iter()
+                .filter_map(|r| serde_json::to_string(r).ok())
+                .collect();
+            return std::fs::write(&path, body.join("\n") + "\n")
+                .with_context(|| format!("Failed to write {}", path.display()));
         }
 
         let line = serde_json::to_string(record).context("Failed to encode a build")?;
@@ -401,8 +446,11 @@ impl Store {
     }
 
     /// A project's builds, newest first, at most `limit` of them.
+    /// Not one still running: the feed is of finished builds, and a run that
+    /// died mid-way would otherwise sit there as "running" for good.
     pub fn list(&self, project: &str, limit: usize) -> Vec<BuildRecord> {
         let mut all = read_lines(&self.path(project));
+        all.retain(|r| r.outcome != RUNNING);
         all.sort_by(|a, b| b.finished_at.cmp(&a.finished_at));
         all.truncate(limit.min(MAX_BUILDS_PER_PROJECT));
         all
@@ -413,6 +461,17 @@ impl Store {
         read_lines(&self.path(project))
             .into_iter()
             .find(|r| r.id == id)
+    }
+
+    /// The builds offloaded job `job` reported, oldest first — one per
+    /// workflow it ran.
+    pub fn for_job(&self, project: &str, job: u32) -> Vec<BuildRecord> {
+        let mut found: Vec<BuildRecord> = read_lines(&self.path(project))
+            .into_iter()
+            .filter(|r| r.job == Some(job))
+            .collect();
+        found.sort_by(|a, b| a.started_at.cmp(&b.started_at));
+        found
     }
 
     /// Every project's builds, newest first, for the server-wide feed.
@@ -480,6 +539,72 @@ mod tests {
             ],
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn a_running_record_is_replaced_until_it_finishes() {
+        let dir = scratch("live");
+        let store = Store::open(&dir).unwrap();
+        let at = "2026-01-01T00:00:00Z";
+        let with = |outcome: &str, first: &str| {
+            let mut b = BuildRecord {
+                outcome: outcome.to_string(),
+                job: Some(3),
+                ..record("live", at)
+            };
+            b.steps[0].status = first.to_string();
+            b
+        };
+        store.add("p1", &record("done", at)).unwrap();
+        store.add("p1", &with(RUNNING, "running")).unwrap();
+        store.add("p1", &with(RUNNING, "success")).unwrap();
+
+        // The job sees the latest progress; the feed doesn't see it at all.
+        let live = store.for_job("p1", 3);
+        assert_eq!(live.len(), 1);
+        assert_eq!(live[0].steps[0].status, "success");
+        let ids: Vec<String> = store.list("p1", 10).into_iter().map(|r| r.id).collect();
+        assert_eq!(ids, vec!["done"]);
+
+        // Finished, it joins the feed, and progress that arrives late can't
+        // turn it back into a running one.
+        store.add("p1", &with("failed", "failed")).unwrap();
+        store.add("p1", &with(RUNNING, "running")).unwrap();
+        let finished = store.get("p1", "live").unwrap();
+        assert_eq!(finished.outcome, "failed");
+        assert_eq!(finished.steps[0].status, "failed");
+        assert_eq!(store.list("p1", 10).len(), 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_jobs_builds_are_found_by_its_number() {
+        let dir = scratch("by-job");
+        let store = Store::open(&dir).unwrap();
+        let ran = |id: &str, at: &str, job: Option<u32>| BuildRecord {
+            started_at: at.to_string(),
+            job,
+            ..record(id, at)
+        };
+        store
+            .add("p1", &ran("second", "2026-01-02T00:00:00Z", Some(7)))
+            .unwrap();
+        store
+            .add("p1", &ran("first", "2026-01-01T00:00:00Z", Some(7)))
+            .unwrap();
+        store
+            .add("p1", &ran("other", "2026-01-01T00:00:00Z", Some(8)))
+            .unwrap();
+        store
+            .add("p1", &ran("local", "2026-01-01T00:00:00Z", None))
+            .unwrap();
+
+        let ids: Vec<String> = store.for_job("p1", 7).into_iter().map(|r| r.id).collect();
+        assert_eq!(ids, vec!["first", "second"]);
+        assert!(store.for_job("p1", 9).is_empty());
+        // A record from before the field existed reads as no job at all.
+        assert_eq!(store.get("p1", "local").unwrap().job, None);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

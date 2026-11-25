@@ -13,6 +13,12 @@
 //! be down is skipped without a request. A server that drops out mid-run is
 //! marked down by whichever request found out ([`mark_down`]), so later steps
 //! skip it too.
+//!
+//! The client that got the answer is kept with it, and [`connect`] hands it
+//! on, so the requests after a probe reuse its connection rather than looking
+//! the server's name up again. A resolver that answers some lookups and fails
+//! others would otherwise let the probe through and fail the registration a
+//! moment later — "reachable" and "isn't reachable" in the same run.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -33,7 +39,7 @@ const MEMORY: Duration = Duration::from_secs(5 * 60);
 
 #[derive(Clone)]
 enum Known {
-    Up(Health),
+    Up(Box<(Health, Client)>),
     Down(String),
 }
 
@@ -57,8 +63,25 @@ fn remember(url: &str, known: Known) {
 /// asked recently, otherwise from at most [`ATTEMPTS`] requests inside
 /// [`BUDGET`].
 pub async fn probe(url: &str, tls_verify: bool) -> Result<Health, String> {
+    reached(url, tls_verify).await.map(|(health, _)| health)
+}
+
+/// A client for a server that answers, carrying the session saved for it now
+/// and the connection the probe opened — or why the server couldn't be had.
+pub async fn connect(url: &str, tls_verify: bool) -> Result<Client, String> {
+    let (_, client) = reached(url, tls_verify).await?;
+    client.renewed(tls_verify).map_err(|e| format!("{e:#}"))
+}
+
+/// [`connect`] to several servers at once. Results come back in the order
+/// given.
+pub async fn connect_all(servers: &[(String, bool)]) -> Vec<Result<Client, String>> {
+    futures::future::join_all(servers.iter().map(|(url, tls)| connect(url, *tls))).await
+}
+
+async fn reached(url: &str, tls_verify: bool) -> Result<(Health, Client), String> {
     match remembered(url) {
-        Some(Known::Up(health)) => return Ok(health),
+        Some(Known::Up(up)) => return Ok(*up),
         Some(Known::Down(why)) => return Err(why),
         None => {}
     }
@@ -66,14 +89,14 @@ pub async fn probe(url: &str, tls_verify: bool) -> Result<Health, String> {
     remember(
         url,
         match &result {
-            Ok(health) => Known::Up(health.clone()),
+            Ok(up) => Known::Up(Box::new(up.clone())),
             Err(why) => Known::Down(why.clone()),
         },
     );
     result
 }
 
-async fn ask(url: &str, tls_verify: bool) -> Result<Health, String> {
+async fn ask(url: &str, tls_verify: bool) -> Result<(Health, Client), String> {
     let client = Client::new(url, tls_verify).map_err(|e| format!("{e:#}"))?;
     let deadline = Instant::now() + BUDGET;
     let mut why = String::from("no answer");
@@ -86,7 +109,7 @@ async fn ask(url: &str, tls_verify: bool) -> Result<Health, String> {
             break;
         }
         match tokio::time::timeout(share, client.health()).await {
-            Ok(Ok(health)) => return Ok(health),
+            Ok(Ok(health)) => return Ok((health, client)),
             Ok(Err(e)) => why = format!("{e:#}"),
             Err(_) => why = format!("no answer within {}ms", share.as_millis()),
         }
@@ -116,15 +139,11 @@ pub async fn live(remote: &crate::cache::RemoteRef) -> Vec<(crate::cache::Remote
         .iter()
         .map(|s| (s.url.clone(), s.tls_verify))
         .collect();
-    let answers = probe_all(&pairs).await;
+    let answers = connect_all(&pairs).await;
     servers
         .into_iter()
         .zip(answers)
-        .filter(|(_, answer)| answer.is_ok())
-        .filter_map(|(server, _)| {
-            let client = Client::new(&server.url, server.tls_verify).ok()?;
-            Some((server, client))
-        })
+        .filter_map(|(server, answer)| Some((server, answer.ok()?)))
         .collect()
 }
 
@@ -194,6 +213,53 @@ mod tests {
         assert!(probe(&url, true).await.is_err());
         assert!(again.elapsed() < Duration::from_millis(50));
         assert!(is_down(&url));
+        forget(&url);
+    }
+
+    #[tokio::test]
+    async fn a_connected_client_reuses_the_probes_connection() {
+        // Answers health checks over keep-alive and counts the connections it
+        // is opened. One connection for the probe and the request after it
+        // means the second never needed the name looked up again.
+        use std::io::{BufRead, BufReader, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let opened = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = opened.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                std::thread::spawn(move || {
+                    let mut stream = stream.unwrap();
+                    let mut reader = BufReader::new(stream.try_clone().unwrap());
+                    loop {
+                        let mut line = String::new();
+                        // Skip to the end of the request's headers.
+                        loop {
+                            line.clear();
+                            if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                                return;
+                            }
+                            if line == "\r\n" {
+                                break;
+                            }
+                        }
+                        let body = r#"{"ok":true,"version":"0.0.1"}"#;
+                        let _ = write!(
+                            stream,
+                            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\
+                             content-length: {}\r\n\r\n{body}",
+                            body.len()
+                        );
+                    }
+                });
+            }
+        });
+
+        assert_eq!(probe(&url, true).await.unwrap().version, "0.0.1");
+        let client = connect(&url, true).await.unwrap();
+        assert_eq!(client.health().await.unwrap().version, "0.0.1");
+        assert_eq!(opened.load(std::sync::atomic::Ordering::SeqCst), 1);
         forget(&url);
     }
 

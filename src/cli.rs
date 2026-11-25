@@ -1892,6 +1892,12 @@ pub enum ExecutorCommand {
         /// Forget the cache it was paired with, and wait to be paired again.
         #[arg(long)]
         unpair: bool,
+
+        /// Run jobs with the executor's own environment. By default each job
+        /// gets its user's login-shell environment (`~/.profile`,
+        /// `~/.bashrc`), so tools like rustup's `cargo` are on its PATH.
+        #[arg(long)]
+        no_login_env: bool,
     },
     /// The executors paired with this project's remote cache that are online
     /// now, with what each is doing and for how long.

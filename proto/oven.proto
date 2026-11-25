@@ -222,6 +222,15 @@ message Paired {
   ExecutorInfo executor = 1;
 }
 
+// What an executor sends with each long poll for work: what it is now, so the
+// cache's record follows an executor that has been upgraded since it paired.
+message PollRequest {
+  // The ciabatta it runs ("0.11.2").
+  string version = 1;
+  // The OS and architecture it runs on ("linux-x86_64").
+  string platform = 2;
+}
+
 // An executor waiting for work: POST /api/oven/executors/{id}/poll.
 message Poll {
   // The job it was given, or unset when nothing came up in time.

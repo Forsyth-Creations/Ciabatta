@@ -359,6 +359,7 @@ async fn main() -> Result<()> {
                 no_mdns,
                 insecure,
                 unpair,
+                no_login_env,
             } => {
                 oven::executor::run(oven::executor::Options {
                     name,
@@ -369,6 +370,7 @@ async fn main() -> Result<()> {
                     no_mdns,
                     tls_verify: !insecure,
                     unpair,
+                    no_login_env,
                 })
                 .await?;
             }

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import AutorenewIcon from "@mui/icons-material/Autorenew";
 import CheckCircleIcon from "@mui/icons-material/CheckCircleOutline";
 import CloudOffIcon from "@mui/icons-material/CloudOffOutlined";
@@ -34,23 +34,18 @@ import {
 
 import {
   api,
-  isDone,
   word,
-  type Build,
   type Discovered,
   type ExecutorHistory,
   type ExecutorList,
   type ExecutorTags,
   type ExecutorView,
-  type Job,
   type JobList,
-  type LogPage,
   type Paired,
   type PairWith,
 } from "../api";
-import { StepGraph } from "@ciabatta/graphs";
 import { EmptyRow, Mono, Prose, Section, Tag, When } from "../components/ui";
-import { graphStep } from "./Builds";
+import { JobDialog, linkedJob } from "./JobView";
 import { ago, duration } from "../format";
 import { monoFontStack } from "../theme";
 import { useLoad } from "../useLoad";
@@ -87,7 +82,10 @@ export function Executors({ refreshKey }: { refreshKey: number }) {
   const [removing, setRemoving] = useState<{ id: string; name: string } | null>(
     null,
   );
-  const [viewing, setViewing] = useState<number | null>(null);
+  // A job named in the address bar (`?job=15&step=…`) opens straight away,
+  // so a link to a failure lands on it.
+  const [linked] = useState(linkedJob);
+  const [viewing, setViewing] = useState<number | null>(linked?.job ?? null);
   const [inspecting, setInspecting] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -448,6 +446,7 @@ export function Executors({ refreshKey }: { refreshKey: number }) {
       {viewing !== null && (
         <JobDialog
           id={viewing}
+          initialStep={viewing === linked?.job ? linked.step : null}
           onClose={() => setViewing(null)}
           onError={setActionError}
         />
@@ -1055,208 +1054,5 @@ function TagEditor({
         executor with that tag. Give several, and it needs them all.
       </Typography>
     </Box>
-  );
-}
-
-/** Escape codes out: the log carries the terminal's colours. */
-function plain(line: string): string {
-  // eslint-disable-next-line no-control-regex
-  return line.replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, "");
-}
-
-function JobDialog({
-  id,
-  onClose,
-  onError,
-}: {
-  id: number;
-  onClose: () => void;
-  onError: (message: string) => void;
-}) {
-  const [job, setJob] = useState<Job | null>(null);
-  const [lines, setLines] = useState<string[]>([]);
-  // The records the run reported, one per workflow: the flow it ran.
-  const [builds, setBuilds] = useState<Build[]>([]);
-  const next = useRef(0);
-  const bottom = useRef<HTMLDivElement | null>(null);
-
-  // Follows the log while the job runs; stops once it's over.
-  useEffect(() => {
-    let live = true;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    next.current = 0;
-    setLines([]);
-    setBuilds([]);
-    const step = async () => {
-      try {
-        const current = await api<Job>(`/api/oven/jobs/${id}`);
-        const page = await api<LogPage>(
-          `/api/oven/jobs/${id}/log?from=${next.current}`,
-        );
-        if (!live) return;
-        setJob(current);
-        if (page.lines.length) {
-          next.current = page.next;
-          setLines((old) => [...old, ...page.lines.map(plain)]);
-        }
-        const over = isDone(current.state);
-        // The run sends its record as it goes, so the flow is redrawn on
-        // every tick while it runs, and once more when it's over.
-        const found = await api<{ builds: Build[] }>(
-          `/api/oven/jobs/${id}/builds`,
-        );
-        if (live) setBuilds(found.builds);
-        if (!over) timer = setTimeout(step, 1500);
-      } catch (e) {
-        if (live) onError((e as Error).message);
-      }
-    };
-    void step();
-    return () => {
-      live = false;
-      if (timer) clearTimeout(timer);
-    };
-  }, [id, onError]);
-
-  // Pinned to the newest line — again once the flowchart arrives above it and
-  // shrinks the log's box.
-  useEffect(
-    () => bottom.current?.scrollIntoView({ block: "end" }),
-    [lines.length, builds.length],
-  );
-
-  const running = job !== null && !isDone(job.state);
-
-  return (
-    // A fixed-height column: the flowchart on top, the log filling the rest.
-    // Only the log scrolls, so there is never a second scrollbar around it.
-    <Dialog
-      open
-      onClose={onClose}
-      fullWidth
-      maxWidth="lg"
-      PaperProps={{ sx: { height: "90vh" } }}
-    >
-      <DialogTitle
-        sx={{
-          display: "flex",
-          alignItems: "center",
-          gap: 1.5,
-          flexWrap: "wrap",
-        }}
-      >
-        Job {id}
-        {job && <Tag kind={word(job.state)} />}
-        {job && (
-          <Typography variant="body2" color="text.secondary">
-            {job.spec?.workflows.join(" ")} at{" "}
-            <Mono>{job.spec?.commit.slice(0, 12)}</Mono>
-            {job.executor ? ` on ${job.executor}` : ""}
-            {job.cancel_requested && running ? " · stopping…" : ""}
-          </Typography>
-        )}
-      </DialogTitle>
-      <DialogContent
-        dividers
-        sx={{
-          display: "flex",
-          flexDirection: "column",
-          overflow: "hidden",
-        }}
-      >
-        {job?.message && (
-          <Alert
-            severity={
-              job.state === "JOB_STATE_SUCCEEDED" ? "success" : "warning"
-            }
-            sx={{ mb: 1.5 }}
-          >
-            {job.message}
-          </Alert>
-        )}
-        {builds.map((b) => (
-          <Box key={b.id} sx={{ mb: 1.5 }}>
-            {builds.length > 1 && (
-              <Typography variant="body2" sx={{ fontWeight: 600, mb: 0.5 }}>
-                <Mono>{b.workflow}</Mono>
-              </Typography>
-            )}
-            <Box sx={{ height: builds.length > 1 ? 220 : 300 }}>
-              {/* The same graph the Builds page and the daemon's run page
-                  draw. A recovery branch the run didn't take is left out. */}
-              <StepGraph
-                height="100%"
-                steps={b.steps
-                  .filter(
-                    (s) => !(s.kind === "recover" && s.status === "not run"),
-                  )
-                  .map(graphStep)}
-              />
-            </Box>
-          </Box>
-        ))}
-        {running && builds.length === 0 && (
-          <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
-            The flowchart appears once the run has started.
-          </Typography>
-        )}
-        <Box
-          sx={{
-            fontFamily: monoFontStack,
-            fontSize: "0.8rem",
-            whiteSpace: "pre-wrap",
-            wordBreak: "break-word",
-            bgcolor: "action.hover",
-            borderRadius: 1,
-            p: 1.5,
-            // A zero basis: the log takes whatever the rest leaves, and
-            // nothing above it is squeezed to make room for a long one.
-            flex: "1 1 0",
-            minHeight: 120,
-            overflow: "auto",
-          }}
-        >
-          {lines.length === 0 ? (
-            <Typography variant="body2" color="text.secondary">
-              {job?.state === "JOB_STATE_QUEUED"
-                ? "Waiting for an executor…"
-                : "No output yet."}
-            </Typography>
-          ) : (
-            lines.join("\n")
-          )}
-          <div ref={bottom} />
-        </Box>
-        {job?.outputs && job.outputs.length > 0 && (
-          <Typography variant="body2" color="text.secondary" sx={{ mt: 1.5 }}>
-            Sent back {job.outputs.length} output file
-            {job.outputs.length === 1 ? "" : "s"}:{" "}
-            <Mono>{job.outputs.map((o) => o.path).join(", ")}</Mono>
-          </Typography>
-        )}
-      </DialogContent>
-      <DialogActions>
-        {running && (
-          <Button
-            color="error"
-            disabled={job?.cancel_requested}
-            onClick={async () => {
-              try {
-                setJob(
-                  await api<Job>(`/api/oven/jobs/${id}/cancel`, {
-                    method: "POST",
-                  }),
-                );
-              } catch (e) {
-                onError((e as Error).message);
-              }
-            }}
-          >
-            Cancel job
-          </Button>
-        )}
-        <Button onClick={onClose}>Close</Button>
-      </DialogActions>
-    </Dialog>
   );
 }

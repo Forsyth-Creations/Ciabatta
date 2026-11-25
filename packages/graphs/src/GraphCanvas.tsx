@@ -10,7 +10,9 @@
  * shared positioning strategy. See `layout.ts` for the helpers.
  */
 
-import { useCallback, useEffect, useMemo, useRef } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import FullscreenIcon from "@mui/icons-material/Fullscreen";
+import FullscreenExitIcon from "@mui/icons-material/FullscreenExit";
 import { Box, useTheme } from "@mui/material";
 import {
   Background,
@@ -18,6 +20,7 @@ import {
   useReactFlow,
   useStore,
   BackgroundVariant,
+  ControlButton,
   Controls,
   MiniMap,
   ReactFlow,
@@ -66,6 +69,13 @@ interface GraphCanvasProps {
    * picture around under the cursor.
    */
   keepView?: boolean;
+  /**
+   * A node to keep in sight: when it is off the canvas, or drawn too small to
+   * read, the view pans (and zooms in to a readable size) to centre it. A node
+   * already on screen at a readable size is left where it is, so clicking one
+   * doesn't move the graph under the pointer.
+   */
+  focus?: string | null;
 }
 
 export function GraphCanvas({
@@ -78,8 +88,50 @@ export function GraphCanvas({
   minimap,
   fitKey,
   keepView,
+  focus,
 }: GraphCanvasProps) {
   const theme = useTheme();
+
+  // Full screen: the canvas alone fills the window, so a long run can be read
+  // without squinting. Always as an overlay across the whole page, which needs
+  // no permission; and, where the browser allows it, as true full screen on
+  // top. A browser may refuse that — an iframe without `allow="fullscreen"`,
+  // or a click it doesn't count as the person's — and the overlay still works.
+  // Esc or the button leaves either.
+  const frame = useRef<HTMLDivElement | null>(null);
+  const [full, setFull] = useState(false);
+  useEffect(() => {
+    // Leaving the browser's full screen (its own Esc) leaves ours too.
+    const changed = () => {
+      if (!document.fullscreenElement) setFull(false);
+    };
+    document.addEventListener("fullscreenchange", changed);
+    return () => document.removeEventListener("fullscreenchange", changed);
+  }, []);
+  useEffect(() => {
+    if (!full) return;
+    const esc = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        // Before a dialog around the canvas takes Esc as "close".
+        event.stopPropagation();
+        setFull(false);
+      }
+    };
+    window.addEventListener("keydown", esc, true);
+    return () => window.removeEventListener("keydown", esc, true);
+  }, [full]);
+  const toggleFull = () => {
+    if (full) {
+      setFull(false);
+      if (document.fullscreenElement)
+        void document.exitFullscreen().catch(() => {});
+      return;
+    }
+    setFull(true);
+    frame.current?.requestFullscreen?.().catch(() => {
+      // Refused: the overlay is the full screen.
+    });
+  };
 
   // The size react-flow last measured for each node, carried across rebuilds.
   //
@@ -144,8 +196,18 @@ export function GraphCanvas({
 
   return (
     <Box
+      ref={frame}
       sx={{
-        height,
+        height: full ? "100vh" : height,
+        bgcolor: "background.default",
+        ...(full && {
+          position: "fixed",
+          inset: 0,
+          // Over the page and any dialog it is in; menus opened from a node
+          // are portalled after it, so they still draw on top.
+          zIndex: theme.zIndex.modal,
+          borderRadius: 0,
+        }),
         border: 1,
         borderColor: "divider",
         borderRadius: 1,
@@ -161,10 +223,8 @@ export function GraphCanvas({
         onNodesChange={onNodesChange}
         onNodeClick={onNodeClick}
         onPaneClick={onPaneClick}
-        fitView
-        // Capped, so a two-node graph is drawn at a natural size instead of
-        // blown up to fill the canvas.
-        fitViewOptions={FIT}
+        // No `fitView` here: `ViewControl` fits, then makes the view readable,
+        // in that order. react-flow's own fit raced it.
         // These are views of computed state, not editors: dragging a node
         // around would imply the position means something and survives a
         // refresh, and neither is true.
@@ -175,10 +235,25 @@ export function GraphCanvas({
         minZoom={0.05}
       >
         <Background variant={BackgroundVariant.Dots} gap={18} size={1} />
-        <ReadableFit />
+        <ViewControl focus={focus ?? null} refit={full} />
         {keepView && <KeepInView fitKey={fitKey} />}
-        <Controls showInteractive={false} fitViewOptions={FIT} />
-        {(minimap ?? (typeof height === "number" && height >= 400)) && (
+        <Controls showInteractive={false} fitViewOptions={FIT}>
+          {
+            <ControlButton
+              onClick={toggleFull}
+              title={full ? "Leave full screen (Esc)" : "Full screen"}
+              aria-label={full ? "Leave full screen" : "Full screen"}
+            >
+              {full ? (
+                <FullscreenExitIcon sx={{ fontSize: 16 }} />
+              ) : (
+                <FullscreenIcon sx={{ fontSize: 16 }} />
+              )}
+            </ControlButton>
+          }
+        </Controls>
+        {(full ||
+          (minimap ?? (typeof height === "number" && height >= 400))) && (
           <MiniMap
             pannable
             zoomable
@@ -212,38 +287,107 @@ const FIT = { padding: 0.08, maxZoom: 1.15 };
 const READABLE_ZOOM = 0.6;
 
 /**
- * Open a graph readable rather than complete.
+ * Choose the view, in one fixed order: fit the graph, then hold the zoom at a
+ * readable size, then bring `focus` into sight.
  *
- * Fitting a twelve-column run into half a screen draws every label a few
- * pixels high: you see the graph's shape and none of what it says. So when the
- * fit would go below a readable zoom, this holds the zoom there and anchors the
- * view on the graph's left edge, where the run starts and its inputs come in,
- * instead of on its middle, which cut off both ends. The rest is a pan away,
- * and the fit button still shows the whole thing.
+ * Open a graph readable rather than complete: fitting a twelve-column run into
+ * half a screen draws every label a few pixels high, so when the fit would go
+ * below a readable zoom the zoom is held there and the view anchored on the
+ * graph's left edge, where the run starts. The rest is a pan away, and the fit
+ * button still shows the whole thing.
  *
- * Runs once per mount; `GraphCanvas` re-mounts the flow when the graph's shape
- * changes, which is exactly when the view should be chosen again.
+ * Then the focused node (see `GraphCanvas`'s `focus`): panned to, and zoomed
+ * in to a readable size, when it is off the canvas or too small to read; left
+ * alone when it is already in sight.
+ *
+ * These used to be separate effects racing react-flow's own initial fit, and
+ * whichever ran last won — so on some canvases the graph opened as a smear of
+ * unreadable nodes. Doing the fit here, and awaiting it, takes the race away.
+ * It is chosen again whenever `refit` changes (entering or leaving full
+ * screen), and the focus again whenever it changes.
  */
-function ReadableFit() {
+function ViewControl({
+  focus,
+  refit,
+}: {
+  focus: string | null;
+  refit: boolean;
+}) {
   const initialized = useNodesInitialized();
   const flow = useReactFlow();
+  const width = useStore((state) => state.width);
   const height = useStore((state) => state.height);
-  const done = useRef(false);
+  const fitted = useRef<boolean | null>(null);
 
-  useEffect(() => {
-    if (!initialized || done.current) return;
-    done.current = true;
-    // After react-flow's own fit, which runs on the same signal.
-    requestAnimationFrame(() => {
-      if (flow.getViewport().zoom >= READABLE_ZOOM) return;
-      const bounds = flow.getNodesBounds(flow.getNodes());
-      flow.setViewport({
-        zoom: READABLE_ZOOM,
-        x: 24 - bounds.x * READABLE_ZOOM,
-        y: height / 2 - (bounds.y + bounds.height / 2) * READABLE_ZOOM,
+  const bringIntoView = useCallback(
+    (id: string) => {
+      const node = flow.getNode(id);
+      if (!node) return;
+      const w = node.measured?.width ?? node.width ?? 0;
+      const h = node.measured?.height ?? node.height ?? 0;
+      const { x, y, zoom } = flow.getViewport();
+      const left = node.position.x * zoom + x;
+      const top = node.position.y * zoom + y;
+      const inside =
+        left >= 0 &&
+        top >= 0 &&
+        left + w * zoom <= width &&
+        top + h * zoom <= height;
+      if (inside && zoom >= READABLE_ZOOM) return;
+      void flow.setCenter(node.position.x + w / 2, node.position.y + h / 2, {
+        zoom: Math.max(zoom, READABLE_ZOOM),
+        duration: 300,
       });
-    });
-  }, [initialized, flow, height]);
+    },
+    [flow, width, height],
+  );
+
+  // The whole view: on mount, and on entering or leaving full screen — the
+  // latter only once the canvas has actually taken its new size, or the fit
+  // is worked out for the old one.
+  const sizedAt = useRef<string | null>(null);
+  useEffect(() => {
+    if (!initialized || width === 0 || height === 0) return;
+    const size = `${width}x${height}`;
+    const toggled = fitted.current !== null && fitted.current !== refit;
+    if (fitted.current !== null && !toggled) {
+      sizedAt.current = size;
+      return;
+    }
+    if (toggled && size === sizedAt.current) return;
+    fitted.current = refit;
+    sizedAt.current = size;
+    let live = true;
+    const frame = () => new Promise((done) => requestAnimationFrame(done));
+    void (async () => {
+      await flow.fitView(FIT);
+      // react-flow applies a fit on its next update; read the view after it.
+      await frame();
+      if (!live) return;
+      if (flow.getViewport().zoom < READABLE_ZOOM) {
+        const bounds = flow.getNodesBounds(flow.getNodes());
+        await flow.setViewport({
+          zoom: READABLE_ZOOM,
+          x: 24 - bounds.x * READABLE_ZOOM,
+          y: height / 2 - (bounds.y + bounds.height / 2) * READABLE_ZOOM,
+        });
+        await frame();
+      }
+      if (live && focus) bringIntoView(focus);
+    })();
+    return () => {
+      live = false;
+    };
+    // `focus` is read, not followed: a new focus only pans (below).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialized, flow, width, height, refit]);
+
+  // A new focus once the view is chosen.
+  useEffect(() => {
+    if (fitted.current === null || !focus) return;
+    bringIntoView(focus);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focus]);
 
   return null;
 }

@@ -36,6 +36,7 @@ import {
   api,
   isDone,
   word,
+  type Build,
   type Discovered,
   type ExecutorHistory,
   type ExecutorList,
@@ -47,7 +48,9 @@ import {
   type Paired,
   type PairWith,
 } from "../api";
+import { StepGraph } from "@ciabatta/graphs";
 import { EmptyRow, Mono, Prose, Section, Tag, When } from "../components/ui";
+import { graphStep } from "./Builds";
 import { ago, duration } from "../format";
 import { monoFontStack } from "../theme";
 import { useLoad } from "../useLoad";
@@ -1072,6 +1075,8 @@ function JobDialog({
 }) {
   const [job, setJob] = useState<Job | null>(null);
   const [lines, setLines] = useState<string[]>([]);
+  // The records the run reported, one per workflow: the flow it ran.
+  const [builds, setBuilds] = useState<Build[]>([]);
   const next = useRef(0);
   const bottom = useRef<HTMLDivElement | null>(null);
 
@@ -1081,6 +1086,7 @@ function JobDialog({
     let timer: ReturnType<typeof setTimeout> | undefined;
     next.current = 0;
     setLines([]);
+    setBuilds([]);
     const step = async () => {
       try {
         const current = await api<Job>(`/api/oven/jobs/${id}`);
@@ -1094,6 +1100,14 @@ function JobDialog({
           setLines((old) => [...old, ...page.lines.map(plain)]);
         }
         const over = isDone(current.state);
+        // A run reports its build as it ends, just before the job does —
+        // so once the job is over, its flow is there to draw.
+        if (over) {
+          const found = await api<{ builds: Build[] }>(
+            `/api/oven/jobs/${id}/builds`,
+          );
+          if (live) setBuilds(found.builds);
+        }
         if (!over) timer = setTimeout(step, 1500);
       } catch (e) {
         if (live) onError((e as Error).message);
@@ -1106,15 +1120,25 @@ function JobDialog({
     };
   }, [id, onError]);
 
+  // Pinned to the newest line — again once the flowchart arrives above it and
+  // shrinks the log's box.
   useEffect(
     () => bottom.current?.scrollIntoView({ block: "end" }),
-    [lines.length],
+    [lines.length, builds.length],
   );
 
   const running = job !== null && !isDone(job.state);
 
   return (
-    <Dialog open onClose={onClose} fullWidth maxWidth="lg">
+    // A fixed-height column: the flowchart on top, the log filling the rest.
+    // Only the log scrolls, so there is never a second scrollbar around it.
+    <Dialog
+      open
+      onClose={onClose}
+      fullWidth
+      maxWidth="lg"
+      PaperProps={{ sx: { height: "90vh" } }}
+    >
       <DialogTitle
         sx={{
           display: "flex",
@@ -1134,7 +1158,14 @@ function JobDialog({
           </Typography>
         )}
       </DialogTitle>
-      <DialogContent dividers>
+      <DialogContent
+        dividers
+        sx={{
+          display: "flex",
+          flexDirection: "column",
+          overflow: "hidden",
+        }}
+      >
         {job?.message && (
           <Alert
             severity={
@@ -1145,6 +1176,32 @@ function JobDialog({
             {job.message}
           </Alert>
         )}
+        {builds.map((b) => (
+          <Box key={b.id} sx={{ mb: 1.5 }}>
+            {builds.length > 1 && (
+              <Typography variant="body2" sx={{ fontWeight: 600, mb: 0.5 }}>
+                <Mono>{b.workflow}</Mono>
+              </Typography>
+            )}
+            <Box sx={{ height: builds.length > 1 ? 220 : 300 }}>
+              {/* The same graph the Builds page and the daemon's run page
+                  draw. A recovery branch the run didn't take is left out. */}
+              <StepGraph
+                height="100%"
+                steps={b.steps
+                  .filter(
+                    (s) => !(s.kind === "recover" && s.status === "not run"),
+                  )
+                  .map(graphStep)}
+              />
+            </Box>
+          </Box>
+        ))}
+        {running && (
+          <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
+            The flowchart is drawn when the run reports it, as it finishes.
+          </Typography>
+        )}
         <Box
           sx={{
             fontFamily: monoFontStack,
@@ -1154,7 +1211,10 @@ function JobDialog({
             bgcolor: "action.hover",
             borderRadius: 1,
             p: 1.5,
-            maxHeight: "60vh",
+            // A zero basis: the log takes whatever the rest leaves, and
+            // nothing above it is squeezed to make room for a long one.
+            flex: "1 1 0",
+            minHeight: 120,
             overflow: "auto",
           }}
         >

@@ -551,7 +551,7 @@ const stepRowId = (name: string) => `step-row-${name}`;
  * entered `not run`; the graph's vocabulary is the daemon's, where a reused
  * step succeeded (and is marked as reused) and an unreached one is pending.
  */
-function graphStep(s: Step): GraphStep {
+export function graphStep(s: Step): GraphStep {
   const reused = s.status === "reused";
   const status = reused
     ? "success"

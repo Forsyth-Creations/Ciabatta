@@ -65,6 +65,10 @@ pub struct BuildRecord {
     pub tag: Option<String>,
     #[serde(default)]
     pub build_number: Option<String>,
+    /// The offloaded job that ran it, when an executor did: how the job's
+    /// page finds the flow it ran.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job: Option<u32>,
     /// The error that ended it, when it failed.
     #[serde(default)]
     pub error: Option<String>,
@@ -269,6 +273,11 @@ pub fn describe(env: &HashMap<String, String>) -> BuildRecord {
         commit: get("CIABATTA_COMMIT"),
         tag: get("CIABATTA_TAG"),
         build_number: get("CIABATTA_BUILD_NUMBER"),
+        // Set by the executor on the run's own process, so read from there
+        // too: a run's variables needn't carry it.
+        job: get(crate::oven::JOB_VAR)
+            .or_else(|| std::env::var(crate::oven::JOB_VAR).ok())
+            .and_then(|n| n.trim().parse().ok()),
         ..Default::default()
     }
 }
@@ -415,6 +424,17 @@ impl Store {
             .find(|r| r.id == id)
     }
 
+    /// The builds offloaded job `job` reported, oldest first — one per
+    /// workflow it ran.
+    pub fn for_job(&self, project: &str, job: u32) -> Vec<BuildRecord> {
+        let mut found: Vec<BuildRecord> = read_lines(&self.path(project))
+            .into_iter()
+            .filter(|r| r.job == Some(job))
+            .collect();
+        found.sort_by(|a, b| a.started_at.cmp(&b.started_at));
+        found
+    }
+
     /// Every project's builds, newest first, for the server-wide feed.
     pub fn feed(&self, projects: &[String], limit: usize) -> Vec<(String, BuildRecord)> {
         let mut all: Vec<(String, BuildRecord)> = projects
@@ -480,6 +500,36 @@ mod tests {
             ],
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn a_jobs_builds_are_found_by_its_number() {
+        let dir = scratch("by-job");
+        let store = Store::open(&dir).unwrap();
+        let ran = |id: &str, at: &str, job: Option<u32>| BuildRecord {
+            started_at: at.to_string(),
+            job,
+            ..record(id, at)
+        };
+        store
+            .add("p1", &ran("second", "2026-01-02T00:00:00Z", Some(7)))
+            .unwrap();
+        store
+            .add("p1", &ran("first", "2026-01-01T00:00:00Z", Some(7)))
+            .unwrap();
+        store
+            .add("p1", &ran("other", "2026-01-01T00:00:00Z", Some(8)))
+            .unwrap();
+        store
+            .add("p1", &ran("local", "2026-01-01T00:00:00Z", None))
+            .unwrap();
+
+        let ids: Vec<String> = store.for_job("p1", 7).into_iter().map(|r| r.id).collect();
+        assert_eq!(ids, vec!["first", "second"]);
+        assert!(store.for_job("p1", 9).is_empty());
+        // A record from before the field existed reads as no job at all.
+        assert_eq!(store.get("p1", "local").unwrap().job, None);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

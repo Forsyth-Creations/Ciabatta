@@ -871,6 +871,7 @@ pub fn routes() -> Router<AppState> {
         .route("/api/oven/jobs", get(list_jobs).post(submit_job))
         .route("/api/oven/jobs/{id}", get(get_job))
         .route("/api/oven/jobs/{id}/log", get(read_log).post(write_log))
+        .route("/api/oven/jobs/{id}/builds", get(job_builds))
         .route("/api/oven/jobs/{id}/cancel", post(cancel_job))
         .route("/api/oven/jobs/{id}/finish", post(finish_job))
         .route(
@@ -1219,6 +1220,22 @@ async fn get_job(
         .job(id)
         .map(Json)
         .ok_or_else(|| ApiError::not_found(format!("There is no job {id}.")))
+}
+
+/// The build records job `id`'s run reported, with the flow each ran — what
+/// its page draws. Empty until the run has reported, which it does as it ends.
+async fn job_builds(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    UrlPath(id): UrlPath<u32>,
+) -> ApiResult<Json<serde_json::Value>> {
+    state.identify(&headers)?;
+    let job = state
+        .oven
+        .job(id)
+        .ok_or_else(|| ApiError::not_found(format!("There is no job {id}.")))?;
+    let builds = state.builds.for_job(&job.spec().project, id);
+    Ok(Json(serde_json::json!({ "builds": builds })))
 }
 
 #[derive(Deserialize)]

@@ -8,7 +8,12 @@
 //!
 //! 1. Long-poll the cache for a job.
 //! 2. Fetch the repository into a mirror kept between jobs, and check out the
-//!    job's commit on its branch in a directory of its own.
+//!    job's commit on its branch in the repository's warm checkout: one kept
+//!    between jobs, reset to the commit but with its git-ignored files
+//!    (`target/`, `node_modules/`) left in place, so a build picks up where
+//!    the last one stopped. Two failed jobs in a row and the next starts from
+//!    a fresh clone, in case the leftovers are why. (`--fresh-checkouts`: a
+//!    new clone every job, deleted after.)
 //! 3. Run `ciabatta workflow …` there, sending every line of output to the
 //!    cache, and a heartbeat every few seconds — which is also how it learns
 //!    that somebody cancelled the job.
@@ -66,6 +71,9 @@ pub struct Options {
     /// Run jobs with the executor's own environment rather than its user's
     /// login shell's ([`super::login_env`]).
     pub no_login_env: bool,
+    /// Clone every job afresh and delete it after, rather than keeping a warm
+    /// checkout per repository.
+    pub fresh_checkouts: bool,
 }
 
 /// What survives a restart.
@@ -952,21 +960,35 @@ async fn execute(
         env.insert(var.name, var.value);
     }
 
-    let checkout = work_dir.join("jobs").join(job.id.to_string());
+    let warm = !options.fresh_checkouts;
+    let checkout = match warm {
+        true => checkout_for(work_dir, &job.spec().repo),
+        false => work_dir.join("jobs").join(job.id.to_string()),
+    };
+    if warm && failure_streak(&checkout) == FAILURES_BEFORE_FRESH {
+        say(format!(
+            "▶ the last {FAILURES_BEFORE_FRESH} jobs here failed: starting from a fresh clone, in \
+             case something the last runs left behind is why"
+        ));
+        wipe_checkout(&checkout);
+    }
     let prepared = {
         let env = env.clone();
         let lines = lines.clone();
         let spec = job.spec().clone();
         let work_dir = work_dir.to_path_buf();
         let checkout = checkout.clone();
-        tokio::task::spawn_blocking(move || prepare(&env, &spec, &work_dir, &checkout, &lines))
-            .await
+        tokio::task::spawn_blocking(move || {
+            prepare(&env, &spec, &work_dir, &checkout, warm, &lines)
+        })
+        .await
     };
     match prepared {
         Ok(Ok(())) => {}
         Ok(Err(e)) => {
             say(format!("✗ {e:#}"));
-            cleanup(work_dir, &checkout, &job.spec().repo, None, &lines);
+            // A checkout that couldn't even be prepared isn't worth keeping.
+            cleanup(work_dir, &checkout, &job.spec().repo, None, false, &lines);
             return failed(format!("{e:#}"));
         }
         Err(e) => return failed(format!("{e}")),
@@ -974,6 +996,13 @@ async fn execute(
 
     let root = checkout.join(&job.spec().root);
     let cwd = root.join(&job.spec().cwd);
+    // A warm checkout still has the last job's outputs, and only what this
+    // run writes or restores may go back as this job's.
+    if warm && let Ok(stale) = collect_outputs(&cwd, job) {
+        for file in stale {
+            let _ = std::fs::remove_file(root.join(file));
+        }
+    }
     let command = workflow_command(job);
     say(format!(
         "▶ {}",
@@ -988,7 +1017,7 @@ async fn execute(
         Ok(session) => session,
         Err(e) => {
             say(format!("✗ {e:#}"));
-            cleanup(work_dir, &checkout, &job.spec().repo, None, &lines);
+            cleanup(work_dir, &checkout, &job.spec().repo, None, warm, &lines);
             return failed(format!("{e:#}"));
         }
     };
@@ -1039,7 +1068,22 @@ async fn execute(
         }
     }
 
-    cleanup(work_dir, &checkout, &job.spec().repo, Some(leader), &lines);
+    if warm {
+        // Cancelled says nothing about the checkout either way.
+        match state {
+            JobState::Succeeded => record_failures(&checkout, 0),
+            JobState::Failed => record_failures(&checkout, failure_streak(&checkout) + 1),
+            _ => {}
+        }
+    }
+    cleanup(
+        work_dir,
+        &checkout,
+        &job.spec().repo,
+        Some(leader),
+        warm,
+        &lines,
+    );
     drop(lines);
     Finish {
         state: state.into(),
@@ -1217,14 +1261,22 @@ async fn stop_session(sid: u32, grace: Duration) {
 /// Mirrors not used for this long are deleted.
 const MIRROR_KEPT_FOR: Duration = Duration::from_secs(30 * 24 * 3600);
 
+/// Failed jobs in a row after which the next starts from a fresh clone.
+/// Exactly this many, not at least: when the fresh run fails too, it's the
+/// code, and cloning again on every failure after would only make the fix
+/// slower to try.
+const FAILURES_BEFORE_FRESH: u32 = 2;
+
 /// After every job, however it ended: nothing of it left running, its
-/// checkout gone, its mirror tidied, and mirrors nobody has used in a month
-/// removed — so an executor that runs for months doesn't fill its disk.
+/// checkout gone (or, kept warm, unlocked for the next), its mirror tidied,
+/// and mirrors nobody has used in a month removed with their checkouts — so
+/// an executor that runs for months doesn't fill its disk.
 fn cleanup(
     work_dir: &Path,
     checkout: &Path,
     repo: &str,
     session: Option<u32>,
+    keep: bool,
     lines: &tokio::sync::mpsc::UnboundedSender<String>,
 ) {
     let say = |line: String| {
@@ -1243,10 +1295,23 @@ fn cleanup(
     }
     #[cfg(not(unix))]
     let _ = session;
-    if let Err(e) = std::fs::remove_dir_all(checkout)
-        && e.kind() != std::io::ErrorKind::NotFound
-    {
-        say(format!("  couldn't remove {}: {e}", checkout.display()));
+    if keep {
+        // A run stopped mid-git leaves its lock, which would fail the next
+        // job's reset.
+        let _ = std::fs::remove_file(checkout.join(".git").join("index.lock"));
+        let _ = std::process::Command::new("git")
+            .arg("-C")
+            .arg(checkout)
+            .args(["gc", "--auto", "--quiet"])
+            .stdin(std::process::Stdio::null())
+            .output();
+    } else {
+        if let Err(e) = std::fs::remove_dir_all(checkout)
+            && e.kind() != std::io::ErrorKind::NotFound
+        {
+            say(format!("  couldn't remove {}: {e}", checkout.display()));
+        }
+        forget_store(checkout);
     }
     let mirror = mirror_for(work_dir, repo);
     if mirror.is_dir() {
@@ -1260,10 +1325,60 @@ fn cleanup(
     prune_mirrors(work_dir, &mirror);
 }
 
+/// The 16 hex digits `repo`'s mirror and checkout are named by.
+fn repo_key(repo: &str) -> String {
+    crate::cache::hash_bytes(repo.as_bytes())[..16].to_string()
+}
+
 /// Where `repo`'s mirror lives.
 fn mirror_for(work_dir: &Path, repo: &str) -> PathBuf {
-    let key = &crate::cache::hash_bytes(repo.as_bytes())[..16];
-    work_dir.join("repos").join(format!("{key}.git"))
+    work_dir
+        .join("repos")
+        .join(format!("{}.git", repo_key(repo)))
+}
+
+/// Where `repo`'s warm checkout lives.
+fn checkout_for(work_dir: &Path, repo: &str) -> PathBuf {
+    work_dir.join("checkouts").join(repo_key(repo))
+}
+
+/// The file a warm checkout's run of failed jobs is counted in: beside it,
+/// so wiping the checkout doesn't reset the count.
+fn streak_file(checkout: &Path) -> PathBuf {
+    let mut name = checkout.file_name().unwrap_or_default().to_os_string();
+    name.push(".failures");
+    checkout.with_file_name(name)
+}
+
+/// How many jobs in a row have failed in this checkout.
+fn failure_streak(checkout: &Path) -> u32 {
+    std::fs::read_to_string(streak_file(checkout))
+        .ok()
+        .and_then(|text| text.trim().parse().ok())
+        .unwrap_or(0)
+}
+
+fn record_failures(checkout: &Path, count: u32) {
+    let file = streak_file(checkout);
+    let _ = match count {
+        0 => std::fs::remove_file(file),
+        n => std::fs::write(file, n.to_string()),
+    };
+}
+
+/// A warm checkout gone, and the local step cache that was keyed on its path
+/// with it: the next job starts as one on a brand-new executor would.
+fn wipe_checkout(checkout: &Path) {
+    let _ = std::fs::remove_dir_all(checkout);
+    forget_store(checkout);
+}
+
+/// The local cache store a checkout's runs wrote (keyed on its path), which
+/// nothing will read once the checkout is gone.
+fn forget_store(checkout: &Path) {
+    if let Ok(dir) = crate::cache::store::project_dir(checkout) {
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }
 
 /// Delete mirrors unused for [`MIRROR_KEPT_FOR`], except `keep`.
@@ -1281,6 +1396,11 @@ fn prune_mirrors(work_dir: &Path, keep: &Path) {
             .and_then(|m| m.modified());
         if used.is_ok_and(|at| at.elapsed().is_ok_and(|age| age > MIRROR_KEPT_FOR)) {
             let _ = std::fs::remove_dir_all(&path);
+            if let Some(key) = path.file_stem() {
+                let checkout = work_dir.join("checkouts").join(key);
+                wipe_checkout(&checkout);
+                record_failures(&checkout, 0);
+            }
         }
     }
 }
@@ -1364,6 +1484,7 @@ fn prepare(
     spec: &super::JobSpec,
     work_dir: &Path,
     checkout: &Path,
+    warm: bool,
     lines: &tokio::sync::mpsc::UnboundedSender<String>,
 ) -> Result<()> {
     let say = |line: String| {
@@ -1405,46 +1526,46 @@ fn prepare(
         })?;
     }
 
-    let _ = std::fs::remove_dir_all(checkout);
-    std::fs::create_dir_all(checkout.parent().unwrap_or(work_dir))?;
     let mirror_path = mirror.to_string_lossy().into_owned();
-    let checkout_path = checkout.to_string_lossy().into_owned();
-    git(
-        env,
-        None,
-        &[
-            "clone",
-            "--quiet",
-            "--shared",
-            "--no-checkout",
-            &mirror_path,
-            &checkout_path,
-        ],
-        lines,
-    )?;
-    say(format!(
-        "▶ checking out {}{}",
+    let at = format!(
+        "{}{}",
         &spec.commit[..spec.commit.len().min(12)],
         spec.branch
             .as_deref()
             .map(|b| format!(" on {b}"))
             .unwrap_or_default()
-    ));
-    match &spec.branch {
-        // On the branch, so the run's CIABATTA_BRANCH — and CIABATTA_PATH — is
-        // what it would have been where it was asked for.
-        Some(branch) => git(
-            env,
-            Some(checkout),
-            &["checkout", "--quiet", "-B", branch, &spec.commit],
-            lines,
-        )?,
-        None => git(
-            env,
-            Some(checkout),
-            &["checkout", "--quiet", "--detach", &spec.commit],
-            lines,
-        )?,
+    );
+    let reused = warm
+        && checkout.join(".git").is_dir()
+        && match reset_warm(env, spec, &mirror_path, checkout, lines) {
+            Ok(()) => {
+                say(format!(
+                    "▶ reusing the warm checkout at {at} (git-ignored files kept)"
+                ));
+                true
+            }
+            Err(e) => {
+                say(format!(
+                    "  couldn't reuse the warm checkout ({e:#}); cloning it afresh"
+                ));
+                false
+            }
+        };
+    if !reused {
+        let _ = std::fs::remove_dir_all(checkout);
+        std::fs::create_dir_all(checkout.parent().unwrap_or(work_dir))?;
+        let checkout_path = checkout.to_string_lossy().into_owned();
+        // A throwaway checkout borrows the mirror's objects. A warm one has
+        // its own (hard-linked, so as cheap): it outlives the mirror's
+        // `gc`, which may drop a commit it still points at.
+        let mut clone = vec!["clone", "--quiet", "--no-checkout"];
+        if !warm {
+            clone.push("--shared");
+        }
+        clone.extend([mirror_path.as_str(), checkout_path.as_str()]);
+        git(env, None, &clone, lines)?;
+        say(format!("▶ checking out {at}"));
+        switch_to(env, spec, checkout, lines)?;
     }
     // A step that reads `origin` gets the real repository, not the mirror.
     git(
@@ -1457,11 +1578,105 @@ fn prepare(
         git(
             env,
             Some(checkout),
-            &["submodule", "update", "--init", "--recursive", "--quiet"],
+            &["submodule", "sync", "--recursive", "--quiet"],
+            lines,
+        )?;
+        git(
+            env,
+            Some(checkout),
+            &[
+                "submodule",
+                "update",
+                "--init",
+                "--recursive",
+                "--force",
+                "--quiet",
+            ],
+            lines,
+        )?;
+        if reused {
+            git(
+                env,
+                Some(checkout),
+                &[
+                    "submodule",
+                    "foreach",
+                    "--recursive",
+                    "--quiet",
+                    "git clean -ffdq",
+                ],
+                lines,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// Check out the job's commit — on its branch, so the run's CIABATTA_BRANCH,
+/// and CIABATTA_PATH, are what they'd have been where it was asked for —
+/// throwing away any change to a tracked file.
+fn switch_to(
+    env: &HashMap<String, String>,
+    spec: &super::JobSpec,
+    checkout: &Path,
+    lines: &tokio::sync::mpsc::UnboundedSender<String>,
+) -> Result<()> {
+    match &spec.branch {
+        Some(branch) => git(
+            env,
+            Some(checkout),
+            &["checkout", "--quiet", "--force", "-B", branch, &spec.commit],
+            lines,
+        ),
+        None => git(
+            env,
+            Some(checkout),
+            &["checkout", "--quiet", "--force", "--detach", &spec.commit],
+            lines,
+        ),
+    }
+}
+
+/// Bring a warm checkout to the job's commit as a fresh clone would have it,
+/// except for what git ignores: tracked files reset, untracked ones removed,
+/// `target/` and `node_modules/` left where they are.
+fn reset_warm(
+    env: &HashMap<String, String>,
+    spec: &super::JobSpec,
+    mirror: &str,
+    checkout: &Path,
+    lines: &tokio::sync::mpsc::UnboundedSender<String>,
+) -> Result<()> {
+    // The last job pointed `origin` at the real repository.
+    git(
+        env,
+        Some(checkout),
+        &["remote", "set-url", "origin", mirror],
+        lines,
+    )?;
+    git(
+        env,
+        Some(checkout),
+        &["fetch", "--quiet", "--prune", "--force", "origin"],
+        lines,
+    )?;
+    let wanted = format!("{}^{{commit}}", spec.commit);
+    if git(env, Some(checkout), &["cat-file", "-e", &wanted], lines).is_err() {
+        git(
+            env,
+            Some(checkout),
+            &["fetch", "--quiet", "origin", &spec.commit],
             lines,
         )?;
     }
-    Ok(())
+    switch_to(env, spec, checkout, lines)?;
+    git(
+        env,
+        Some(checkout),
+        &["reset", "--quiet", "--hard", &spec.commit],
+        lines,
+    )?;
+    git(env, Some(checkout), &["clean", "-ffdq"], lines)
 }
 
 /// The ciabatta binary to run jobs with: this one — or, when this one has been
@@ -1718,5 +1933,175 @@ mod tests {
     #[test]
     fn segments_are_percent_encoded() {
         assert_eq!(url_encode("my file#1.txt"), "my%20file%231.txt");
+    }
+
+    fn scratch(name: &str) -> PathBuf {
+        // Not canonicalized: on Windows that's a `\\?\` path, which git can't
+        // write to.
+        let dir = std::env::temp_dir().join(format!("ciab_oven_{name}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn sh_git(dir: &Path, args: &[&str]) -> String {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args([
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "commit.gpgsign=false",
+            ])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    /// A bare "remote" with a commit on main, and the commit's id.
+    fn upstream(base: &Path) -> (String, PathBuf) {
+        let src = base.join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        sh_git(&src, &["init", "--quiet", "-b", "main"]);
+        std::fs::write(src.join(".gitignore"), "target/\n").unwrap();
+        std::fs::write(src.join("lib.rs"), "one").unwrap();
+        sh_git(&src, &["add", "."]);
+        sh_git(&src, &["commit", "--quiet", "-m", "one"]);
+        let bare = base.join("remote.git");
+        let bare_s = bare.to_string_lossy().into_owned();
+        sh_git(base, &["clone", "--quiet", "--bare", "src", &bare_s]);
+        sh_git(&src, &["remote", "add", "origin", &bare_s]);
+        (bare_s, src)
+    }
+
+    fn commit(src: &Path, body: &str) -> String {
+        std::fs::write(src.join("lib.rs"), body).unwrap();
+        sh_git(src, &["commit", "--quiet", "-am", body]);
+        sh_git(src, &["push", "--quiet", "origin", "main"]);
+        sh_git(src, &["rev-parse", "HEAD"])
+    }
+
+    fn spec(repo: &str, commit: &str) -> super::super::JobSpec {
+        super::super::JobSpec {
+            repo: repo.to_string(),
+            commit: commit.to_string(),
+            branch: Some("main".into()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_warm_checkout_keeps_ignored_files_and_nothing_else() {
+        let base = scratch("warm");
+        let (repo, src) = upstream(&base);
+        let first = sh_git(&src, &["rev-parse", "HEAD"]);
+        let work = base.join("work");
+        let checkout = checkout_for(&work, &repo);
+        let (lines, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let env = HashMap::new();
+        prepare(&env, &spec(&repo, &first), &work, &checkout, true, &lines).unwrap();
+
+        // What a job leaves: a build dir, a stray file, an edit.
+        std::fs::create_dir_all(checkout.join("target")).unwrap();
+        std::fs::write(checkout.join("target/built"), "x").unwrap();
+        std::fs::write(checkout.join("stray.txt"), "x").unwrap();
+        std::fs::write(checkout.join("lib.rs"), "edited").unwrap();
+
+        let second = commit(&src, "two");
+        prepare(&env, &spec(&repo, &second), &work, &checkout, true, &lines).unwrap();
+        assert!(
+            checkout.join("target/built").is_file(),
+            "ignored files stay"
+        );
+        assert!(!checkout.join("stray.txt").exists(), "untracked files go");
+        assert_eq!(
+            std::fs::read_to_string(checkout.join("lib.rs")).unwrap(),
+            "two"
+        );
+        assert_eq!(sh_git(&checkout, &["rev-parse", "HEAD"]), second);
+        assert_eq!(sh_git(&checkout, &["branch", "--show-current"]), "main");
+        assert_eq!(sh_git(&checkout, &["remote", "get-url", "origin"]), repo);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_broken_warm_checkout_is_cloned_again() {
+        let base = scratch("broken");
+        let (repo, src) = upstream(&base);
+        let head = sh_git(&src, &["rev-parse", "HEAD"]);
+        let work = base.join("work");
+        let checkout = checkout_for(&work, &repo);
+        let (lines, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let env = HashMap::new();
+        prepare(&env, &spec(&repo, &head), &work, &checkout, true, &lines).unwrap();
+        std::fs::remove_file(checkout.join(".git/HEAD")).unwrap();
+        prepare(&env, &spec(&repo, &head), &work, &checkout, true, &lines).unwrap();
+        assert_eq!(sh_git(&checkout, &["rev-parse", "HEAD"]), head);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_fresh_checkout_is_removed_after_its_job() {
+        let base = scratch("fresh");
+        let (repo, src) = upstream(&base);
+        let head = sh_git(&src, &["rev-parse", "HEAD"]);
+        let work = base.join("work");
+        let checkout = work.join("jobs").join("7");
+        let (lines, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let env = HashMap::new();
+        prepare(&env, &spec(&repo, &head), &work, &checkout, false, &lines).unwrap();
+        assert!(checkout.join("lib.rs").is_file());
+        cleanup(&work, &checkout, &repo, None, false, &lines);
+        assert!(!checkout.exists());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn failures_in_a_row_are_counted_beside_the_checkout() {
+        let base = scratch("streak");
+        let checkout = base.join("checkouts").join("abc");
+        std::fs::create_dir_all(&checkout).unwrap();
+        assert_eq!(failure_streak(&checkout), 0);
+        record_failures(&checkout, failure_streak(&checkout) + 1);
+        record_failures(&checkout, failure_streak(&checkout) + 1);
+        assert_eq!(failure_streak(&checkout), FAILURES_BEFORE_FRESH);
+        // Wiping the checkout doesn't reset the count: only a success does.
+        wipe_checkout(&checkout);
+        assert!(!checkout.exists());
+        assert_eq!(failure_streak(&checkout), FAILURES_BEFORE_FRESH);
+        record_failures(&checkout, 0);
+        assert_eq!(failure_streak(&checkout), 0);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_pruned_mirror_takes_its_checkout_with_it() {
+        let base = scratch("prune");
+        let old = base.join("repos").join("0123456789abcdef.git");
+        std::fs::create_dir_all(&old).unwrap();
+        let month_ago = std::time::SystemTime::now() - MIRROR_KEPT_FOR - Duration::from_secs(60);
+        let last = old.join(".last-used");
+        std::fs::write(&last, "").unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&last)
+            .unwrap()
+            .set_modified(month_ago)
+            .unwrap();
+        let checkout = base.join("checkouts").join("0123456789abcdef");
+        std::fs::create_dir_all(checkout.join("target")).unwrap();
+        prune_mirrors(&base, &base.join("repos").join("other.git"));
+        assert!(!old.exists());
+        assert!(!checkout.exists());
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

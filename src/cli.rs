@@ -1952,6 +1952,14 @@ pub enum ExecutorCommand {
         /// `~/.bashrc`), so tools like rustup's `cargo` are on its PATH.
         #[arg(long)]
         no_login_env: bool,
+
+        /// Clone every job afresh and delete it afterwards. By default each
+        /// repository keeps one warm checkout between jobs: it's reset to the
+        /// job's commit, but git-ignored files (`target/`, `node_modules/`)
+        /// and the local step cache are kept, so builds pick up where the
+        /// last job left off.
+        #[arg(long)]
+        fresh_checkouts: bool,
     },
     /// The executors paired with this project's remote cache that are online
     /// now, with what each is doing and for how long.

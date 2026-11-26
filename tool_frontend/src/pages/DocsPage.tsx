@@ -883,6 +883,10 @@ const COMMANDS: CommandGroup[] = [
             "--no-login-env",
             "Run jobs with its own environment, not its user's login shell's.",
           ],
+          [
+            "--fresh-checkouts",
+            "Clone every job afresh and delete it after, instead of keeping a warm checkout per repository.",
+          ],
         ],
       },
       {
@@ -4933,6 +4937,10 @@ ciabatta build --offload-tag cuda,linux`}</Pre>
               "--no-login-env",
               "Run jobs with the executor's own environment instead of its user's login shell's (see below).",
             ],
+            [
+              "--fresh-checkouts",
+              "Clone every job afresh and delete it when it ends, rather than keeping a warm checkout per repository (see Warm checkouts below). Slower, but no job ever sees what another left behind.",
+            ],
           ]}
         />
 
@@ -5101,11 +5109,39 @@ ciabatta executor stop gpu-box   # cancel the job it's running
 ciabatta executor remove gpu-box # unpair it from the cache`}</Pre>
         <P>
           After every job, however it ended, the executor cleans up: it stops
-          anything still running, deletes the checkout, and tidies its copy of
-          the repository. Repositories nobody has offloaded for 30 days are
-          deleted. The cache keeps the last 200 jobs, with their logs and
+          anything still running and tidies its copy of the repository.
+          Repositories nobody has offloaded for 30 days are deleted, with their
+          warm checkouts. The cache keeps the last 200 jobs, with their logs and
           outputs; a job whose executor goes silent for five minutes is marked
           failed.
+        </P>
+
+        <SubHeading>Warm checkouts</SubHeading>
+        <P>
+          An executor keeps one checkout per repository between jobs, in{" "}
+          <C>&lt;work dir&gt;/checkouts/</C>, so a build picks up where the last
+          one stopped instead of starting cold. Before each job it brings that
+          checkout to the job&apos;s commit as a fresh clone would have it:
+          tracked files are reset and untracked files are removed. Files git{" "}
+          <em>ignores</em> are kept, which means <C>target/</C>,{" "}
+          <C>node_modules/</C>, and the like. Because the checkout stays at one
+          path, ciabatta&apos;s local step cache on the executor is the same
+          from job to job too, so a step whose inputs haven&apos;t changed is a
+          cache hit there. The files a job&apos;s steps declare as outputs are
+          deleted before it runs, so whatever comes back is what this job built
+          or restored. The log says which kind of checkout a job got:
+        </P>
+        <Pre>{`▶ reusing the warm checkout at 3f2a9c1d04be on main (git-ignored files kept)`}</Pre>
+        <P>
+          Leftovers can also be why a build fails. So when two jobs in a row
+          fail in a repository&apos;s checkout, the next one deletes it and its
+          local step cache and starts from a fresh clone. If that one fails
+          too, the code is at fault rather than the leftovers, so it isn&apos;t
+          wiped again until a job there succeeds. A cancelled job doesn&apos;t
+          count either way. A checkout that can&apos;t be reset (a corrupt{" "}
+          <C>.git</C>, say) is cloned again on the spot. To get the old
+          behaviour, a new clone for every job deleted when it ends, start the
+          executor with <C>--fresh-checkouts</C>.
         </P>
 
         <Alert severity="warning" sx={{ my: 2, maxWidth: "78ch" }}>

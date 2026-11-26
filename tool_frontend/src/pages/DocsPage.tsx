@@ -5127,9 +5127,13 @@ ciabatta executor remove gpu-box # unpair it from the cache`}</Pre>
           <C>node_modules/</C>, and the like. Because the checkout stays at one
           path, ciabatta&apos;s local step cache on the executor is the same
           from job to job too, so a step whose inputs haven&apos;t changed is a
-          cache hit there. The files a job&apos;s steps declare as outputs are
-          deleted before it runs, so whatever comes back is what this job built
-          or restored. The log says which kind of checkout a job got:
+          cache hit there. Nothing a step declares as an output is deleted
+          before a run, so a lockfile listed under <C>outputs</C> is still
+          there for <C>yarn install --immutable</C>. When a job fails, what it
+          sends back is limited to its own outputs: tracked files, and files
+          written during the job. An earlier job&apos;s build that a failed
+          step never got to replace stays on the executor. The log says which
+          kind of checkout a job got:
         </P>
         <Pre>{`▶ reusing the warm checkout at 3f2a9c1d04be on main (git-ignored files kept)`}</Pre>
         <P>

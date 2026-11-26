@@ -362,6 +362,7 @@ async fn main() -> Result<()> {
                 insecure,
                 unpair,
                 no_login_env,
+                fresh_checkouts,
             } => {
                 oven::executor::run(oven::executor::Options {
                     name,
@@ -373,6 +374,7 @@ async fn main() -> Result<()> {
                     tls_verify: !insecure,
                     unpair,
                     no_login_env,
+                    fresh_checkouts,
                 })
                 .await?;
             }

@@ -996,13 +996,11 @@ async fn execute(
 
     let root = checkout.join(&job.spec().root);
     let cwd = root.join(&job.spec().cwd);
-    // A warm checkout still has the last job's outputs, and only what this
-    // run writes or restores may go back as this job's.
-    if warm && let Ok(stale) = collect_outputs(&cwd, job) {
-        for file in stale {
-            let _ = std::fs::remove_file(root.join(file));
-        }
-    }
+    // Nothing is deleted here: a declared output can be a tracked file (a
+    // lockfile) or a tree (node_modules) the run needs. What a failed run in
+    // a warm checkout may send back is sorted out after it, by
+    // [`current_outputs`].
+    let started = std::time::SystemTime::now();
     let command = workflow_command(job);
     say(format!(
         "▶ {}",
@@ -1046,7 +1044,12 @@ async fn execute(
     let ciabatta_path = ciabatta_path(&root, &job.spec().env);
     let mut outputs = Vec::new();
     if state != JobState::Cancelled {
-        match collect_outputs(&cwd, job) {
+        let collected =
+            collect_outputs(&cwd, job).map(|files| match warm && state == JobState::Failed {
+                true => current_outputs(&root, files, started),
+                false => files,
+            });
+        match collected {
             Ok(files) if files.is_empty() => say(
                 "No outputs to send back: only files a step declares under `cache: outputs:` are \
                  returned."
@@ -1789,6 +1792,37 @@ fn ciabatta_path(root: &Path, env: &[String]) -> Option<String> {
     crate::derive_ciabatta_path(&vars)
 }
 
+/// Of a failed job's outputs in a warm checkout, the ones that are this
+/// job's: tracked files, which the reset put at the job's commit, and files
+/// written since it started. The rest are an earlier job's, left where a step
+/// that didn't get to run would have rewritten them. (A job that succeeded
+/// ran or restored every step, so all of its outputs are current.)
+fn current_outputs(root: &Path, files: Vec<String>, started: std::time::SystemTime) -> Vec<String> {
+    let tracked: std::collections::HashSet<String> = std::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["ls-files", "-z"])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .map(|out| {
+            String::from_utf8_lossy(&out.stdout)
+                .split('\0')
+                .filter(|f| !f.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    files
+        .into_iter()
+        .filter(|file| {
+            tracked.contains(file)
+                || std::fs::metadata(root.join(file))
+                    .and_then(|m| m.modified())
+                    .is_ok_and(|at| at >= started)
+        })
+        .collect()
+}
+
 /// Every file the job's steps declare as cache outputs that exists now,
 /// relative to the workspace root.
 fn collect_outputs(cwd: &Path, job: &Job) -> Result<Vec<String>> {
@@ -2030,6 +2064,41 @@ mod tests {
         assert_eq!(sh_git(&checkout, &["rev-parse", "HEAD"]), second);
         assert_eq!(sh_git(&checkout, &["branch", "--show-current"]), "main");
         assert_eq!(sh_git(&checkout, &["remote", "get-url", "origin"]), repo);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_failed_warm_job_sends_back_only_what_is_its_own() {
+        let base = scratch("current");
+        let (repo, src) = upstream(&base);
+        let head = sh_git(&src, &["rev-parse", "HEAD"]);
+        let work = base.join("work");
+        let checkout = checkout_for(&work, &repo);
+        let (lines, _rx) = tokio::sync::mpsc::unbounded_channel();
+        prepare(
+            &HashMap::new(),
+            &spec(&repo, &head),
+            &work,
+            &checkout,
+            true,
+            &lines,
+        )
+        .unwrap();
+        std::fs::create_dir_all(checkout.join("target")).unwrap();
+        std::fs::write(checkout.join("target/old"), "earlier job").unwrap();
+        let started = std::time::SystemTime::now() + Duration::from_secs(1);
+        std::thread::sleep(Duration::from_millis(1100));
+        std::fs::write(checkout.join("target/new"), "this job").unwrap();
+        let files = vec![
+            "lib.rs".to_string(),
+            "target/new".to_string(),
+            "target/old".to_string(),
+        ];
+        // The tracked file (a lockfile, say) and the new one; not the old.
+        assert_eq!(
+            current_outputs(&checkout, files, started),
+            vec!["lib.rs".to_string(), "target/new".to_string()]
+        );
         let _ = std::fs::remove_dir_all(&base);
     }
 

@@ -1936,10 +1936,12 @@ mod tests {
     }
 
     fn scratch(name: &str) -> PathBuf {
+        // Not canonicalized: on Windows that's a `\\?\` path, which git can't
+        // write to.
         let dir = std::env::temp_dir().join(format!("ciab_oven_{name}_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        dir.canonicalize().unwrap()
+        dir
     }
 
     fn sh_git(dir: &Path, args: &[&str]) -> String {

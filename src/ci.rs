@@ -53,23 +53,51 @@ pub fn resolve_ci_vars(system: &CiSystem) -> (HashMap<String, String>, Vec<Resol
     let mappings = ci_mappings(system);
     for (ciabatta_key, source_keys) in &mappings {
         for source_key in source_keys {
-            if let Ok(value) = env::var(source_key)
-                && !value.is_empty()
-            {
-                resolved.push(ResolvedVar {
-                    ciabatta_name: ciabatta_key.clone(),
-                    source_name: source_key.clone(),
-                    value: value.clone(),
-                });
-                vars.insert(ciabatta_key.clone(), value);
-                break; // use first match
+            let value = match env::var(source_key) {
+                Ok(value) if !value.is_empty() => value,
+                _ => continue,
+            };
+
+            if !is_valid_ci_value(system, ciabatta_key, source_key, &value) {
+                continue;
             }
+
+            resolved.push(ResolvedVar {
+                ciabatta_name: ciabatta_key.clone(),
+                source_name: source_key.clone(),
+                value: value.clone(),
+            });
+            vars.insert(ciabatta_key.clone(), value);
+            break; // use first match
         }
     }
 
     (vars, resolved)
 }
 
+fn is_valid_ci_value(system: &CiSystem, ciabatta_key: &str, source_key: &str, value: &str) -> bool {
+    if ciabatta_key != "CIABATTA_TAG" {
+        return true;
+    }
+
+    match system {
+        CiSystem::Github => match source_key {
+            "GITHUB_REF_NAME" => env::var("GITHUB_REF_TYPE").as_deref() == Ok("tag"),
+            "GITHUB_REF" => value.starts_with("refs/tags/"),
+            _ => true,
+        },
+        CiSystem::AzureDevOps => match source_key {
+            "BUILD_SOURCEBRANCH" => value.starts_with("refs/tags/"),
+            "BUILD_SOURCEBRANCHNAME" => env::var("BUILD_SOURCEBRANCH")
+                .map(|ref_name| ref_name.starts_with("refs/tags/"))
+                .unwrap_or(false),
+            _ => true,
+        },
+        _ => true,
+    }
+}
+
+#[derive(Debug)]
 pub struct ResolvedVar {
     pub ciabatta_name: String,
     pub source_name: String,
@@ -103,7 +131,10 @@ fn ci_mappings(system: &CiSystem) -> Vec<(String, Vec<String>)> {
                 vec!["GITHUB_HEAD_REF".into(), "GITHUB_REF_NAME".into()],
             ),
             (commit_key, vec!["GITHUB_SHA".into()]),
-            (tag_key, vec!["GITHUB_REF_NAME".into()]), // only meaningful when triggered by tag
+            (
+                tag_key,
+                vec!["GITHUB_REF_NAME".into(), "GITHUB_REF".into()],
+            ),
             (build_key, vec!["GITHUB_RUN_NUMBER".into()]),
         ],
         CiSystem::Jenkins => vec![
@@ -130,7 +161,7 @@ fn ci_mappings(system: &CiSystem) -> Vec<(String, Vec<String>)> {
                 vec!["BUILD_SOURCEBRANCH".into(), "BUILD_SOURCEBRANCHNAME".into()],
             ),
             (commit_key, vec!["BUILD_SOURCEVERSION".into()]),
-            (tag_key, vec!["BUILD_SOURCEBRANCH".into()]), // refs/tags/...
+            (tag_key, vec!["BUILD_SOURCEBRANCH".into(), "BUILD_SOURCEBRANCHNAME".into()]),
             (
                 build_key,
                 vec!["BUILD_BUILDNUMBER".into(), "BUILD_BUILDID".into()],
@@ -161,5 +192,88 @@ fn ci_mappings(system: &CiSystem) -> Vec<(String, Vec<String>)> {
                 vec!["CI_BUILD_NUMBER".into(), "BUILD_NUMBER".into()],
             ),
         ],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Mutex;
+
+    use super::{CiSystem, resolve_ci_vars};
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn set_var(key: &str, value: &str) {
+        unsafe { std::env::set_var(key, value) }
+    }
+
+    fn restore_var(key: &str, old: Option<String>) {
+        unsafe {
+            match old {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+        }
+    }
+
+    fn with_env_vars<T>(vars: &[(&str, &str)], test: impl FnOnce() -> T) -> T {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let previous = vars
+            .iter()
+            .map(|(key, _)| (*key, std::env::var(key).ok()))
+            .collect::<Vec<_>>();
+
+        for (key, value) in vars {
+            set_var(key, value);
+        }
+
+        struct Guard<'a>(Vec<(&'a str, Option<String>)>);
+        impl Drop for Guard<'_> {
+            fn drop(&mut self) {
+                for (key, old) in &self.0 {
+                    restore_var(key, old.clone());
+                }
+            }
+        }
+
+        let _cleanup = Guard(previous);
+        test()
+    }
+
+    #[test]
+    fn github_branch_does_not_set_tag() {
+        with_env_vars(
+            &[
+                ("GITHUB_HEAD_REF", "feature/test"),
+                ("GITHUB_REF_NAME", "feature/test"),
+                ("GITHUB_REF_TYPE", "branch"),
+                ("GITHUB_REF", "refs/heads/feature/test"),
+                ("GITHUB_SHA", "abc123"),
+                ("GITHUB_RUN_NUMBER", "42"),
+            ],
+            || {
+                let (vars, resolved) = resolve_ci_vars(&CiSystem::Github);
+                assert!(resolved.iter().all(|r| r.ciabatta_name != "CIABATTA_TAG"));
+                assert!(!vars.contains_key("CIABATTA_TAG"));
+            },
+        );
+    }
+
+    #[test]
+    fn github_tag_sets_tag_only_when_ref_type_is_tag() {
+        with_env_vars(
+            &[
+                ("GITHUB_REF_NAME", "v1.2.3"),
+                ("GITHUB_REF_TYPE", "tag"),
+                ("GITHUB_REF", "refs/tags/v1.2.3"),
+                ("GITHUB_SHA", "def456"),
+                ("GITHUB_RUN_NUMBER", "99"),
+            ],
+            || {
+                let (vars, resolved) = resolve_ci_vars(&CiSystem::Github);
+                assert!(resolved.iter().any(|r| r.ciabatta_name == "CIABATTA_TAG"));
+                assert_eq!(vars.get("CIABATTA_TAG"), Some(&"v1.2.3".to_string()));
+            },
+        );
     }
 }
